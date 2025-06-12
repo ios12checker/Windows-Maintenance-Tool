@@ -47,6 +47,7 @@ echo      === UTILITIES ^& EXTRAS ===
 echo  [20] Show installed drivers
 echo  [21] Windows Update Repair Tool
 echo  [22] Generate Full System Report
+echo  [23] Route Print
 
 echo  [14] === EXIT ===
 echo.
@@ -774,4 +775,13 @@ echo - System_Info_2025-06-08.txt
 echo - Network_Info_2025-06-08.txt
 echo - Driver_List_2025-06-08.txt
 pause
+
+:choice22
+cls
+echo ===============================================
+echo      Printing Network Routes...
+echo ===============================================
+route print
+pause
+
 goto menu
