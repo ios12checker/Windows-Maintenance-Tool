@@ -1,49 +1,45 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v2.9.6-green)
+![Version](https://img.shields.io/badge/version-v2.9.7-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 A powerful, all-in-one Windows maintenance toolkit built entirely in Batch.  
-Designed for power users, sysadmins, and curious tinkerers – now smarter, safer, and fully offline-compatible.
+Designed for power users, sysadmins, and curious tinkerers – now safer, smarter, and fully offline-compatible.
 
 ---
 
 ## 📸 Screenshot
-
-![3917ac484c3a7820324d7610c85587be](https://github.com/user-attachments/assets/cc2a0fb7-6621-4fbf-8e2b-f5e4c06e7123)
-
-
+![8d964ca61b63b8c0234132d84f21f043](https://github.com/user-attachments/assets/4082067c-5f3f-491f-bea2-4257617e1c58)
 
 ---
 
 ## ✅ Features
 
 - Run essential repair tools: `SFC`, `DISM`, `CHKDSK`
-- Windows Update via `winget` (interactive selection added in v2.9.5)
-- View and upgrade individual packages instead of forced `--all`
-- Network diagnostics: `ipconfig`, `route print`, `nslookup`
-- DNS configuration (Google, Cloudflare, or custom)
-- Clean temp files, logs, and browser cache
-- Save detailed reports to Desktop:
+- Windows Update repair and cache reset (`choice21`)
+- **New:** Interactive `winget` upgrade selection (manual or full)
+- **New:** Routing Table Viewer (live or save to Desktop)
+- Generate detailed reports:
   - System Info
   - Network Info
   - Driver List
-- Registry tools:
-  - Safe cleanup & backup
-  - Corruption scan
+- Full compatibility with OneDrive-synced Desktops
+- Clean browser cache, temp files, logs
+- Safe Registry cleanup (no third-party EXEs)
+- Network troubleshooting tools (flush DNS, IP config, adapter reset)
 - Fully menu-driven interface with clean output
-- No third-party dependencies required
+- No external tools or dependencies
 
 ---
 
 ## ⚙️ Installation
 
 1. Download the `.bat` file.
-2. **Right-click → Run as Administrator** (auto-elevation supported).
-3. Follow the interactive menu.
+2. **Right-click → Run as Administrator** (auto-elevation included).
+3. Use the interactive menu to choose an action.
 
-> ⚠️ Script output may appear in your system language (e.g. English, Danish, etc). This is normal.
+> ⚠️ Output may appear in your system language (e.g. English, Danish, etc). This is expected behavior.
 
 ---
 
@@ -54,44 +50,51 @@ Saved directly to your Desktop:
 - `System_Info_YYYY-MM-DD.txt`
 - `Network_Info_YYYY-MM-DD.txt`
 - `Driver_List_YYYY-MM-DD.txt`
-- `routing_table_YYYY-MM-DD.txt` *(new in v2.9.5)*
+- `routing_table_YYYY-MM-DD_HH-mm-ss.txt` *(added in v2.9.6)*
+
+All paths are auto-detected to support OneDrive redirection.
 
 ---
 
 ## 🧪 Troubleshooting & FAQ
 
-**Q: The script didn’t restart as Admin?**  
-A: Make sure UAC is enabled. Right-click and select **Run as Administrator**.
+**Q: Script won't restart as admin?**  
+A: Ensure UAC is enabled. Right-click → **Run as Administrator**.
 
-**Q: Why does it crash when selecting winget upgrades?**  
-A: Fixed in v2.9.5 – now fully input-validated and error-handled.
+**Q: Crashing after CHKDSK or routing tool?**  
+A: Fixed in v2.9.7. Services are now conditionally checked and fail-safe.
 
-**Q: Why was Registry Defrag removed?**  
-A: The feature depended on a third-party tool (NTREGOPT) which is no longer accessible.  
-The script is now fully offline and native to Windows.
+**Q: My Desktop path is redirected?**  
+A: Fully supported. The script uses PowerShell to locate your actual Desktop, even with OneDrive sync.
+
+**Q: Why was NTREGOPT removed?**  
+A: The tool is no longer available and was replaced by native-safe registry cleanup logic.
 
 ---
 
-## ✍️ Changelog (v2.9.6)
+## ✍️ Changelog (v2.9.7)
 
-- 🛠 Fixed crash in `choice10` (CHKDSK scan)
-- 🔍 CHKDSK now targets only valid file system drives using PowerShell
-- ✅ Improved drive filtering for better compatibility on systems with external or locked volumes
-- 🧪 Rewrote scanning logic to support multi-partition setups
-- 🧼 Cleaned up CMD prompt formatting (replaced smart quotes, ensured ASCII-safe output)
+- ✅ Winget upgrade menu now supports individual package selection
+- 🛰️ Routing table can now be viewed or saved with timestamp to Desktop
+- 🧰 CHKDSK engine completely rewritten (choice10)
+- 🧠 Desktop path detection rewritten using PowerShell (OneDrive supported)
+- 🔁 Removed all third-party registry dependencies
+- 🧽 Cleaned logic, rewrote flow control and subroutines
+- 🛑 Eliminated batch crashes related to `goto` and `exit /b`
+- ✏️ All comments and prompts rewritten for clarity
 
 ---
 
 ## 🤝 Contributing
 
-Pull requests, issues, and feedback are welcome!  
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+Issues, suggestions, and PRs are welcome!  
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
 
 ---
 
 ## 📜 License
 
-Licensed under the MIT License. See [`LICENSE`](LICENSE) for full details.
+Licensed under the MIT License. See [`LICENSE`](LICENSE) for full terms.
 
 ---
 
