@@ -72,16 +72,48 @@ A: The tool is no longer available and was replaced by native-safe registry clea
 
 ---
 
-## ✍️ Changelog (v2.9.7)
+## ✍️ Changelog (v2.9.8)
+📂 Improved Output Path Options (choice22)
 
-- ✅ Winget upgrade menu now supports individual package selection
-- 🛰️ Routing table can now be viewed or saved with timestamp to Desktop
-- 🧰 CHKDSK engine completely rewritten (choice10)
-- 🧠 Desktop path detection rewritten using PowerShell (OneDrive supported)
-- 🔁 Removed all third-party registry dependencies
-- 🧽 Cleaned logic, rewrote flow control and subroutines
-- 🛑 Eliminated batch crashes related to `goto` and `exit /b`
-- ✏️ All comments and prompts rewritten for clarity
+Users can now select where reports are saved:
+
+[1] Desktop (recommended)
+
+[2] Enter a custom path
+
+[3] Step-by-step help for entering a path manually
+
+Designed to work even if Desktop is synced with OneDrive or replaced
+
+🧭 Path validation with clear error handling
+
+Checks if the selected folder exists before proceeding
+
+Displays a clear error if the path is invalid, and returns to the menu
+
+📘 New user guidance option
+
+Option [3] explains how to:
+
+Create a new folder (e.g., on OneDrive or another drive)
+
+Copy the full path using File Explorer
+
+Paste it safely into the script
+
+🗃️ Report filenames remain date-tagged and readable
+
+System_Info_YYYY-MM-DD.txt
+
+Network_Info_YYYY-MM-DD.txt
+
+Driver_List_YYYY-MM-DD.txt
+
+💡 General improvements
+
+More informative output
+
+Better layout and prompt consistency
 
 ---
 
