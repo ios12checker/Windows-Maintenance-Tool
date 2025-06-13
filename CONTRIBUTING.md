@@ -1,14 +1,27 @@
-## 👥 Contributors
-
+👥 Contributors
 A special thanks to everyone who helped improve Windows Maintenance Tool:
 
-- [@amakvana](https://github.com/amakvana) – Winget upgrade logic, registry backup improvements, duplicate cleanup refactor
-- [@callmenemo491](https://github.com/callmenemo491) – Idea for winget package list selection, ERUNT defrag report, UI/UX suggestions
-- [@mahirgul](https://github.com/mahirgul) – Pull request: route print command, `choice24` integration
-- [@ahk057](https://github.com/ahk057) – Reported OneDrive Desktop path issue
-- [@BladeJoe](https://github.com/BladeJoe) – UAC elevation bug testing
-- [@Owned67](https://github.com/Owned67) – Syntax bug report and validation
-- [@thepcformula](https://github.com/thepcformula) - `choice10` Helped with a fix for "CHKDSK".
+@amakvana – Winget upgrade logic, registry backup improvements, duplicate cleanup refactor
+
+@callmenemo491 – Winget selection UI (choice1), if/iif fix, feedback on choice routing
+
+@mahirgul – Pull request: route print improvements, choice24 integration
+
+@ahk057 – OneDrive Desktop path issue, script logic suggestions
+
+@BladeJoe – Helped test UAC elevation across Windows builds
+
+@Owned67 – Syntax error reports, false positive clarification
+
+@thepcformula – CHKDSK fix in choice10, Drive filter logic
+
+@djhenderson – Diagnostic logs, update repair feedback, issue #11 analysis
+
+@Lord-ZuzurNC – VirusTotal scan verification, helping clarify Trojan false flag
+
+@iAhmedEladwy – Community flag testing, validation support
+
+@henridbr – Reported early false positive (Phonzy.B!ml) and cleanup prompt mismatch
 
 ---
 
