@@ -1,16 +1,17 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v2.9.8-brightgreen)
+![Version](https://img.shields.io/badge/version-v2.9.9-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
 A powerful, all-in-one Windows maintenance toolkit built entirely in Batch.  
-Designed for power users, sysadmins, and curious tinkerers – now safer, smarter, and fully offline-compatible.
+Designed for power users, sysadmins, and curious tinkerers – now smarter, safer, and fully offline-compatible.
 
 ---
 
 ## 📸 Screenshot
-![27bef3937926e289ba712e50ae630ce4](https://github.com/user-attachments/assets/805bdc0e-351f-45c1-9540-0342ada02ef1)
+
+![f562edf726d2e0880f1089c29136693d](https://github.com/user-attachments/assets/edb29f79-6e6b-43bf-bd12-6e5abd8da74a)
 
 
 ---
@@ -18,118 +19,80 @@ Designed for power users, sysadmins, and curious tinkerers – now safer, smarte
 ## ✅ Features
 
 - Run essential repair tools: `SFC`, `DISM`, `CHKDSK`
-- Windows Update repair and cache reset (`choice21`)
-- **New:** Interactive `winget` upgrade selection (manual or full)
-- **New:** Routing Table Viewer (live or save to Desktop)
-- Generate detailed reports:
-  - System Info
-  - Network Info
-  - Driver List
-- Full compatibility with OneDrive-synced Desktops
-- Clean browser cache, temp files, logs
-- Safe Registry cleanup (no third-party EXEs)
-- Network troubleshooting tools (flush DNS, IP config, adapter reset)
+- Windows Update via `winget` (interactive selection)
+- View and upgrade individual packages (choose by ID)
+- Network diagnostics: `ipconfig`, routing table, DNS config, adapter reset
+- Clean temp files, logs, and browser cache
+- Save detailed reports to Desktop or custom folder:
+  - System Info, Network Info, Driver List
+- Registry tools:
+  - Safe cleanup, backup, corruption scan
 - Fully menu-driven interface with clean output
-- No external tools or dependencies
+- All language/region support – no hardcoded adapter names
+- No third-party dependencies required
 
 ---
 
 ## ⚙️ Installation
 
 1. Download the `.bat` file.
-2. **Right-click → Run as Administrator** (auto-elevation included).
-3. Use the interactive menu to choose an action.
+2. **Right-click → Run as Administrator** (auto-elevation supported).
+3. Follow the interactive menu.
 
-> ⚠️ Output may appear in your system language (e.g. English, Danish, etc). This is expected behavior.
+> ⚠️ Script output may appear in your system language (e.g. English, Danish, etc). This is normal.
 
 ---
 
 ## 📁 Output Files
 
-Saved directly to your Desktop:
+Saved directly to your chosen folder (by default: Desktop\SystemReports):
 
 - `System_Info_YYYY-MM-DD.txt`
 - `Network_Info_YYYY-MM-DD.txt`
 - `Driver_List_YYYY-MM-DD.txt`
-- `routing_table_YYYY-MM-DD_HH-mm-ss.txt` *(added in v2.9.6)*
-
-All paths are auto-detected to support OneDrive redirection.
+- `routing_table_YYYY-MM-DD.txt`
 
 ---
 
 ## 🧪 Troubleshooting & FAQ
 
-**Q: Script won't restart as admin?**  
-A: Ensure UAC is enabled. Right-click → **Run as Administrator**.
+**Q: The script didn’t restart as Admin?**  
+A: Make sure UAC is enabled. Right-click and select **Run as Administrator**.
 
-**Q: Crashing after CHKDSK or routing tool?**  
-A: Fixed in v2.9.7. Services are now conditionally checked and fail-safe.
+**Q: Why does it crash when selecting winget upgrades?**  
+A: Ensure you are running the latest version. All input is validated and error-handled.
 
-**Q: My Desktop path is redirected?**  
-A: Fully supported. The script uses PowerShell to locate your actual Desktop, even with OneDrive sync.
-
-**Q: Why was NTREGOPT removed?**  
-A: The tool is no longer available and was replaced by native-safe registry cleanup logic.
+**Q: Why was Registry Defrag removed?**  
+A: The feature depended on a third-party tool (NTREGOPT) which is no longer accessible.  
+The script is now fully offline and native to Windows.
 
 ---
 
-## ✍️ Changelog (v2.9.8)
-📂 Improved Output Path Options (choice22)
+## ✍️ Changelog (v2.9.9)
 
-Users can now select where reports are saved:
+See `CHANGELOG.md` for full history.
 
-[1] Desktop (recommended)
-
-[2] Enter a custom path
-
-[3] Step-by-step help for entering a path manually
-
-Designed to work even if Desktop is synced with OneDrive or replaced
-
-🧭 Path validation with clear error handling
-
-Checks if the selected folder exists before proceeding
-
-Displays a clear error if the path is invalid, and returns to the menu
-
-📘 New user guidance option
-
-Option [3] explains how to:
-
-Create a new folder (e.g., on OneDrive or another drive)
-
-Copy the full path using File Explorer
-
-Paste it safely into the script
-
-🗃️ Report filenames remain date-tagged and readable
-
-System_Info_YYYY-MM-DD.txt
-
-Network_Info_YYYY-MM-DD.txt
-
-Driver_List_YYYY-MM-DD.txt
-
-💡 General improvements
-
-More informative output
-
-Better layout and prompt consistency
+- Major DNS tools rewrite: works on all language editions (adapter auto-detection)
+- Reports now save to a dedicated folder (`SystemReports`) on Desktop (auto-created)
+- Improved error logging: any script errors are saved to `Desktop\WMT_errorlog.txt`
+- User can choose report save location or get a guided walkthrough
+- Safer temp deletion, confirmation required
+- Registry cleanup improved, more backup and restore options
+- Bug fixes and performance tweaks throughout
 
 ---
 
 ## 🤝 Contributing
 
-Issues, suggestions, and PRs are welcome!  
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines.
+Pull requests, issues, and feedback are welcome!  
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## 📜 License
 
-Licensed under the MIT License. See [`LICENSE`](LICENSE) for full terms.
-
----
+Licensed under the **MIT License**.  
+See [`LICENSE`](LICENSE) for full details.
 
 ## 🔗 Related Projects
 
