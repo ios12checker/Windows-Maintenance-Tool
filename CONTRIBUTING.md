@@ -12,7 +12,8 @@ A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 - [@djhenderson](https://github.com/djhenderson) – Diagnostic logs, update repair feedback, Issue #11 analysis  
 - [@Lord-ZuzurNC](https://github.com/Lord-ZuzurNC) – VirusTotal scan verification, helped clarify Trojan false flag  
 - [@iAhmedEladwy](https://github.com/iAhmedEladwy) – Community flag testing, validation support  
-- [@henridbr](https://github.com/henridbr) – Reported early false positive (Phonzy.B!ml), cleanup prompt mismatch  
+- [@henridbr](https://github.com/henridbr) – Reported early false positive (Phonzy.B!ml), cleanup prompt mismatch
+- [@BruceHarrison](https://github.com/BruceHarrison) - Feature request - Choice 13 (Optimize SSDs) Via powershell
 
 ---
 
