@@ -19,6 +19,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ## ✅ Features
 
 - Run essential repair tools: `SFC`, `DISM`, `CHKDSK`
+- Optimize SSD drives (TRIM/defrag compatible)
 - Windows Update via `winget` (interactive selection)
 - View and upgrade individual packages (choose by ID)
 - Network diagnostics: `ipconfig`, routing table, DNS config, adapter reset
