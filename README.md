@@ -80,22 +80,6 @@ Improved Wi-Fi adapter restart logic: All Wi-Fi adapters are now detected and re
 regardless of their name or language. No more hardcoded adapter names or DelayedExpansion required.
 ![34d0a452258da90a571632f2e2d738c8](https://github.com/user-attachments/assets/e9b95077-b1a5-410c-8233-8c6c1880c5cf)
 
-
-See `CHANGELOG.md` for full history.
-
-- **New registry cleanup menu:**  
-  - Now uses PowerShell for all registry queries and deletions
-  - No more script crashes on delete
-  - Option to list, bulk delete, backup, and restore registry entries  
-- **Backup/restore improvements:**  
-  - Backups are auto-versioned and easily restorable from the menu  
-- **Bugfixes and stability:**  
-  - Registry functions are now safer and more robust
-  - Improved error messages and input validation
-- **General enhancements:**  
-  - Menu structure and output improved
-  - All features verified on multiple Windows editions
-
 ---
 
 ## 🤝 Contributing
