@@ -105,8 +105,9 @@ If you wrote an article or made a video about this project, feel free to open an
 
 ## 🎬 Video Guides
 
-- [![Windows Maintenance Tool – Guide (by Info4Geek)](https://www.youtube.com/watch?v=TpZY1nXHTsw)
-- [![Walkthrough by ThomyPC)](https://www.youtube.com/watch?v=0aUu2agaIto)
+- [Windows Maintenance Tool – Guide (by Info4Geek)](https://www.youtube.com/watch?v=TpZY1nXHTsw)
+- [Walkthrough, by ThomyPC)](https://www.youtube.com/watch?v=0aUu2agaIto)
+
 
 ---
 
