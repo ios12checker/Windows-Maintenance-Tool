@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3-green)
+![Version](https://img.shields.io/badge/version-v3.1-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -11,7 +11,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## 📸 Screenshot
 
-![89e266338bc2cabf1fefe44dd7068698](https://github.com/user-attachments/assets/beca6ba4-94b3-4c20-80d0-a66585366aa7)
+![73098cadae66b49a26d034fd0739635f](https://github.com/user-attachments/assets/d09b932d-7b2c-44f1-b6b6-7475fdffd713)
+
 
 
 ---
@@ -74,7 +75,11 @@ The script is now fully offline and native to Windows.
 
 ---
 
-## ✍️ Changelog (v3)
+## ✍️ Changelog (v3.1)
+Improved Wi-Fi adapter restart logic: All Wi-Fi adapters are now detected and restarted automatically, 
+regardless of their name or language. No more hardcoded adapter names or DelayedExpansion required.
+![34d0a452258da90a571632f2e2d738c8](https://github.com/user-attachments/assets/e9b95077-b1a5-410c-8233-8c6c1880c5cf)
+
 
 See `CHANGELOG.md` for full history.
 
