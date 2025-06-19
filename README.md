@@ -98,6 +98,8 @@ Your articles, mentions, and feedback help more users discover and benefit from 
 - [Phonandroid.com – Gagnez un temps fou sur Windows 11 avec ce nouvel outil gratuit…](https://www.phonandroid.com/gagnez-un-temps-fou-sur-windows-11-avec-ce-nouvel-outil-gratuit-qui-repare-et-optimise-votre-pc.html)
 - [Ghacks – Windows Maintenance Tool: one-click access to Windows repairs and optimizations](https://www.ghacks.net/2025/06/11/windows-maintenance-tool-one-click-access-to-windows-repairs-and-optimizations/)
 - [PCWorld – This free all-in-one tool fixes common Windows problems](https://www.pcworld.com/article/2809221/this-free-all-in-one-tool-fixes-common-windows-problems.html)
+- [Unofficial script does the most useful official Windows 11/10 repairs you want automatically](https://www.neowin.net/news/unofficial-script-does-the-most-useful-official-windows-1110-repairs-you-want-automatically/)
+
 
 Also thank you to Neowin and all other tech sites and community members for your support and coverage!
 
@@ -105,8 +107,10 @@ If you wrote an article or made a video about this project, feel free to open an
 
 ## 🎬 Video Guides
 
-- [Windows Maintenance Tool – Guide (by Info4Geek)](https://www.youtube.com/watch?v=TpZY1nXHTsw)
-- [Walkthrough, by ThomyPC)](https://www.youtube.com/watch?v=0aUu2agaIto)
+- [Windows Maintenance Tool – Guide by Info4Geek](https://www.youtube.com/watch?v=TpZY1nXHTsw)
+- [Walkthrough, by ThomyPC](https://www.youtube.com/watch?v=0aUu2agaIto)
+- [Showcase of Windows Maintenance Tool by Tech Enthusiast](https://www.youtube.com/watch?v=zfIQvk8BEcM)
+- [Showcase by Harry Shares](https://www.youtube.com/watch?v=qxNhbPuukh0)
 
 
 ---
