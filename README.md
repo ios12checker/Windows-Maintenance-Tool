@@ -87,6 +87,22 @@ regardless of their name or language. No more hardcoded adapter names or Delayed
 Pull requests, issues, and feedback are welcome!  
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+## 🌐 Media & Community Thanks
+
+A huge thank you to everyone who has shared, reviewed, or written about the Windows Maintenance Tool!
+Your articles, mentions, and feedback help more users discover and benefit from this project.
+
+**Special thanks to:**
+
+- [Korben.info – Script de réparation Windows automatique](https://korben.info/script-reparation-windows-automatique.html)
+- [Phonandroid.com – Gagnez un temps fou sur Windows 11 avec ce nouvel outil gratuit…](https://www.phonandroid.com/gagnez-un-temps-fou-sur-windows-11-avec-ce-nouvel-outil-gratuit-qui-repare-et-optimise-votre-pc.html)
+- [Ghacks – Windows Maintenance Tool: one-click access to Windows repairs and optimizations](https://www.ghacks.net/2025/06/11/windows-maintenance-tool-one-click-access-to-windows-repairs-and-optimizations/)
+- [PCWorld – This free all-in-one tool fixes common Windows problems](https://www.pcworld.com/article/2809221/this-free-all-in-one-tool-fixes-common-windows-problems.html)
+
+Also thank you to Neowin and all other tech sites and community members for your support and coverage!
+
+If you wrote an article or made a video about this project, feel free to open an issue or pull request to get listed here!
+
 ---
 
 ## 📜 License
