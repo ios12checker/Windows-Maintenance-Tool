@@ -115,7 +115,7 @@ If you wrote an article or made a video about this project, feel free to open an
 
 ---
 
-##Donations to buy me a coffee
+## Donations to buy me a coffee
 If you find this project helpful and would like to support its continued development, you’re welcome to make a donation.
 Your support helps keep the Windows Maintenance Tool free and up-to-date for everyone.
 
