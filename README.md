@@ -115,6 +115,15 @@ If you wrote an article or made a video about this project, feel free to open an
 
 ---
 
+##Donations to buy me a coffee
+If you find this project helpful and would like to support its continued development, you’re welcome to make a donation.
+Your support helps keep the Windows Maintenance Tool free and up-to-date for everyone.
+
+[Donate via PayPal](https://www.paypal.me/Lilbatti69)
+
+Or simply star ⭐ the repository and share it!
+---
+
 ## 📜 License
 
 Licensed under the **MIT License**.  
