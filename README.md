@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.1-green)
+![Version](https://img.shields.io/badge/version-v3.1.1-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -72,13 +72,6 @@ A: This has been fixed in v3.1.0. The script now safely lists and deletes regist
 **Q: Why was Registry Defrag removed?**  
 A: The feature depended on a third-party tool (NTREGOPT) which is no longer accessible.  
 The script is now fully offline and native to Windows.
-
----
-
-## ✍️ Changelog (v3.1)
-Improved Wi-Fi adapter restart logic: All Wi-Fi adapters are now detected and restarted automatically, 
-regardless of their name or language. No more hardcoded adapter names or DelayedExpansion required.
-![34d0a452258da90a571632f2e2d738c8](https://github.com/user-attachments/assets/e9b95077-b1a5-410c-8233-8c6c1880c5cf)
 
 ---
 
