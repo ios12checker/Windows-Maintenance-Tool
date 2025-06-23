@@ -43,7 +43,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## ⚙️ Installation
 
-1. Download the `Start_Windows_Maintenance_Tool.bat` file.
+1. Start `Start_Windows_Maintenance_Tool.bat` file.
 2. Follow the interactive menu.
 
 > ⚠️ Script output may appear in your system language (e.g. English, Danish, etc). This is normal.
