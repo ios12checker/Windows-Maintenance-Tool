@@ -1,17 +1,18 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.1.1-green)
+![Version](https://img.shields.io/badge/version-v3.1.2-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-A powerful, all-in-one Windows maintenance toolkit built entirely in Batch.  
+A powerful, all-in-one Windows maintenance toolkit built entirely in Batch & Powershell.  
 Designed for power users, sysadmins, and curious tinkerers – now smarter, safer, and fully offline-compatible.
 
 ---
 
 ## 📸 Screenshot
 
-![13e80dd0d8eadd8a94ce0f07870ef326](https://github.com/user-attachments/assets/7bb0cf28-f023-4f74-a9af-4a077dc8ca4f)
+![d9b47971d689d8aec75e6a7615edbfcf](https://github.com/user-attachments/assets/3d399b99-9223-4d22-81d2-1889a977ec0d)
+
 
 
 
@@ -42,9 +43,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## ⚙️ Installation
 
-1. Download the `.bat` file.
-2. **Right-click → Run as Administrator** (auto-elevation supported).
-3. Follow the interactive menu.
+1. Download the `Start_Windows_Maintenance_Tool.bat` file.
+2. Follow the interactive menu.
 
 > ⚠️ Script output may appear in your system language (e.g. English, Danish, etc). This is normal.
 
@@ -64,9 +64,13 @@ Saved directly to your chosen folder (by default: Desktop\SystemReports):
 
 ## 🧪 Troubleshooting & FAQ
 
-**Q: The script didn’t restart as Admin?**  
-A: Make sure UAC is enabled. Right-click and select **Run as Administrator**.
+**Q: The script didn’t run with administrator rights?**  
+A: PowerShell requires elevation for system-level tasks. Right-click the `.ps1` file and choose **"Run with PowerShell"**, then confirm the UAC prompt.  
+If nothing happens, run this from PowerShell manually:
 
+```powershell
+Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File 'Path\To\Windows_Maintenance_Tool.ps1'"
+```
 **Q: Why does it crash when selecting registry cleanup?**  
 A: This has been fixed in v3.1.0. The script now safely lists and deletes registry keys using PowerShell, and errors are properly handled.
 
