@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.1.2-green)
+![Version](https://img.shields.io/badge/version-v3.1.3-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -11,7 +11,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## 📸 Screenshot
 
-![d9b47971d689d8aec75e6a7615edbfcf](https://github.com/user-attachments/assets/3d399b99-9223-4d22-81d2-1889a977ec0d)
+![162aaae4a014fa50fb6d71b8e965ece8](https://github.com/user-attachments/assets/4ca6b995-750d-4ec8-817d-d79ee80e845d)
+
 
 
 
@@ -64,15 +65,18 @@ Saved directly to your chosen folder (by default: Desktop\SystemReports):
 
 ## 🧪 Troubleshooting & FAQ
 
-**Q: The script didn’t run with administrator rights?**  
-A: PowerShell requires elevation for system-level tasks. Right-click the `.ps1` file and choose **"Run with PowerShell"**, then confirm the UAC prompt.  
-If nothing happens, run this from PowerShell manually:
+Q: The script didn’t run with administrator rights?
+A: For the tool to work properly, administrator rights are required.
+Right-click the .bat file and choose "Run as administrator". This will ensure that both the Batch and PowerShell scripts run with the necessary privileges.
+If nothing happens, check that User Account Control (UAC) is enabled and try again.
 
+If you want to run the PowerShell script manually, use this command from an elevated PowerShell window:
 ```powershell
 Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File 'Path\To\Windows_Maintenance_Tool.ps1'"
 ```
-**Q: Why does it crash when selecting registry cleanup?**  
-A: This has been fixed in v3.1.0. The script now safely lists and deletes registry keys using PowerShell, and errors are properly handled.
+Q: Why does it crash when selecting registry cleanup?
+A: This has been fully resolved in v3.1.3. The tool now safely lists and deletes registry keys using PowerShell.
+Before any deletion, a backup is automatically created, and errors are properly handled to avoid script crashes or accidental data loss.
 
 **Q: Why was Registry Defrag removed?**  
 A: The feature depended on a third-party tool (NTREGOPT) which is no longer accessible.  
