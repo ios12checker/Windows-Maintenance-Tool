@@ -15,7 +15,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.2.0 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.3.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
@@ -38,9 +38,10 @@ function Show-Menu {
     Write-Host " [11]  Perform System Optimization (Delete Temporary Files)"
     Write-Host " [12]  Advanced Registry Cleanup-Optimization"
     Write-Host " [13]  Optimize SSDs (ReTrim)"
+    Write-Host " [14]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host
     Write-Host "     === SUPPORT ==="
-    Write-Host " [14]  Contact and Support information (Discord)"
+    Write-Host " [15]  Contact and Support information (Discord)"
     Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
     Write-Host " [20]  Show installed drivers"
@@ -49,7 +50,7 @@ function Show-Menu {
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host
-    Write-Host " [15]  EXIT"
+    Write-Host " [16]  EXIT"
     Write-Host "------------------------------------------------------"
 }
 
@@ -440,6 +441,7 @@ function Choice-5 {
         }
     }
 }
+
 function Choice-6 { Clear-Host; Write-Host "Displaying Network Information..."; ipconfig /all; Pause-Menu }
 
 function Choice-7 {
@@ -717,6 +719,243 @@ function Choice-13 {
 
 function Choice-14 {
     Clear-Host
+    Write-Host "==============================================="
+    Write-Host "     Scheduled Task Management [Admin]"
+    Write-Host "==============================================="
+    Write-Host "Listing all scheduled tasks..."
+    Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+    Write-Host
+
+    # Check for admin privileges
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "Error: This function requires administrator privileges." -ForegroundColor Red
+        Write-Host "Please run the script as Administrator and try again."
+        Pause-Menu
+        return
+    }
+
+    # Helper function to display task list with dynamic alignment and modified author/taskname
+    function Show-TaskList {
+        # Retrieve scheduled tasks
+        try {
+            $tasks = schtasks /query /fo CSV /v | ConvertFrom-Csv | Where-Object {
+                $_."TaskName" -ne "" -and                        # Exclude empty TaskName
+                $_."TaskName" -ne "TaskName" -and               # Exclude placeholder "TaskName"
+                $_."Author" -ne "Author" -and                   # Exclude placeholder "Author"
+                $_."Status" -ne "Status" -and                   # Exclude placeholder "Status"
+                $_."Author" -notlike "*Scheduling data is not available in this format.*" -and  # Exclude invalid scheduling data
+                $_."TaskName" -notlike "*Enabled*" -and         # Exclude rows starting with "Enabled"
+                $_."TaskName" -notlike "*Disabled*"             # Exclude rows starting with "Disabled"
+            }
+            if (-not $tasks) {
+                Write-Host "No valid scheduled tasks found." -ForegroundColor Yellow
+                return $null
+            }
+        } catch {
+            Write-Host "Error retrieving scheduled tasks: $_" -ForegroundColor Red
+            return $null
+        }
+
+        # Remove duplicates based on TaskName, Author, and Status
+        $uniqueTasks = $tasks | Sort-Object "TaskName", "Author", "Status" -Unique
+
+        # Calculate maximum lengths for dynamic alignment
+        $maxIdLength = ($uniqueTasks.Count.ToString()).Length  # Length of largest ID
+        $maxTaskNameLength = 50  # Default max length for TaskName, adjustable
+        $maxAuthorLength = 30    # Default max length for Author, adjustable
+        $maxStatusLength = 10    # Default max length for Status (e.g., "Running", "Ready", "Disabled")
+
+        # Process tasks to adjust Author and TaskName, and calculate max lengths
+        $processedTasks = @()
+        foreach ($task in $uniqueTasks) {
+            $taskName = if ($task."TaskName") { $task."TaskName" } else { "N/A" }
+            $author = if ($task."Author") { $task."Author" } else { "N/A" }
+            $status = if ($task."Status") { $task."Status" } else { "Unknown" }
+
+            # Fix Author field for Microsoft tasks with resource strings (e.g., $(@%SystemRoot%\...))
+            if ($author -like '$(@%SystemRoot%\*' -or $taskName -like '\Microsoft\*') {
+                $author = "Microsoft Corporation"
+            }
+
+            # Extract first folder from TaskName for Author if still N/A
+            if ($author -eq "N/A" -and $taskName -match '^\\([^\\]+)\\') {
+                $author = $matches[1]  # Get first folder (e.g., "LGTV Companion")
+            }
+
+            # Remove first folder from TaskName
+            $displayTaskName = $taskName -replace '^\\[^\\]+\\', ''  # Remove "\Folder\"
+            if ($displayTaskName -eq $taskName) { $displayTaskName = $taskName.TrimStart('\') }  # Fallback for tasks without folder
+
+            # Truncate long fields for alignment
+            if ($displayTaskName.Length -gt $maxTaskNameLength) { $displayTaskName = $displayTaskName.Substring(0, $maxTaskNameLength - 3) + "..." }
+            if ($author.Length -gt $maxAuthorLength) { $author = $author.Substring(0, $maxAuthorLength - 3) + "..." }
+
+            # Update max lengths based on processed data
+            $maxTaskNameLength = [Math]::Max($maxTaskNameLength, [Math]::Min($displayTaskName.Length, 50))
+            $maxAuthorLength = [Math]::Max($maxAuthorLength, [Math]::Min($author.Length, 30))
+            $maxStatusLength = [Math]::Max($maxStatusLength, $status.Length)
+
+            $processedTasks += [PSCustomObject]@{
+                OriginalTaskName = $task."TaskName"
+                DisplayTaskName  = $displayTaskName
+                Author           = $author
+                Status           = $status
+            }
+        }
+
+        # Print header with dynamic widths
+        $headerFormat = "{0,-$maxIdLength} | {1,-$maxTaskNameLength} | {2,-$maxAuthorLength} | {3}"
+        Write-Host ($headerFormat -f "ID", "Task Name", "Author", "Status")
+        Write-Host ("-" * $maxIdLength + "-+-" + "-" * $maxTaskNameLength + "-+-" + "-" * $maxAuthorLength + "-+-" + "-" * $maxStatusLength)
+
+        # Display tasks with index and color coding
+        $taskList = @()
+        $index = 1
+        foreach ($task in $processedTasks) {
+            $isMicrosoft = $task.OriginalTaskName -like "\Microsoft\*" -or $task.Author -like "*Microsoft*"
+            $taskList += [PSCustomObject]@{
+                Index      = $index
+                TaskName   = $task.OriginalTaskName  # Store original for schtasks commands
+                Author     = $task.Author
+                Status     = $task.Status
+                IsMicrosoft = $isMicrosoft
+            }
+            $color = if ($isMicrosoft) { "Green" } else { "Yellow" }
+            Write-Host ($headerFormat -f $index, $task.DisplayTaskName, $task.Author, $task.Status) -ForegroundColor $color
+            $index++
+        }
+        Write-Host
+        return $taskList
+    }
+
+    # Display task list initially
+    $taskList = Show-TaskList
+    if (-not $taskList) {
+        Pause-Menu
+        return
+    }
+
+    # Main loop for task management options
+    while ($true) {
+        Write-Host "Options:"
+        Write-Host "[1] Enable a task"
+        Write-Host "[2] Disable a task"
+        Write-Host "[3] Delete a task"
+        Write-Host "[4] Refresh task list"
+        Write-Host "[0] Return to main menu"
+        Write-Host
+
+        $action = Read-Host "Enter option (0-4) or task ID to manage"
+        if ($action -eq "0") {
+            return
+        } elseif ($action -eq "1") {
+            $id = Read-Host "Enter task ID to enable"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "Enabling task: $($selectedTask.TaskName)"
+                try {
+                    schtasks /change /tn "$($selectedTask.TaskName)" /enable | Out-Null
+                    Write-Host "Task enabled successfully." -ForegroundColor Green
+                } catch {
+                    Write-Host "Error enabling task: $_" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "2") {
+            $id = Read-Host "Enter task ID to disable"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "Disabling task: $($selectedTask.TaskName)"
+                try {
+                    schtasks /change /tn "$($selectedTask.TaskName)" /disable | Out-Null
+                    Write-Host "Task disabled successfully." -ForegroundColor Green
+                } catch {
+                    Write-Host "Error disabling task: $_" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "3") {
+            $id = Read-Host "Enter task ID to delete"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "WARNING: Deleting task: $($selectedTask.TaskName)" -ForegroundColor Yellow
+                $confirm = Read-Host "Are you sure? (Y/N)"
+                if ($confirm -eq "Y" -or $confirm -eq "y") {
+                    try {
+                        schtasks /delete /tn "$($selectedTask.TaskName)" /f | Out-Null
+                        Write-Host "Task deleted successfully." -ForegroundColor Green
+                    } catch {
+                        Write-Host "Error deleting task: $_" -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "Action cancelled." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "4") {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } else {
+            Write-Host "Invalid option. Please enter 0-4 or a valid task ID." -ForegroundColor Red
+            Pause-Menu
+        }
+    }
+}
+
+function Choice-15 {
+    Clear-Host
     Write-Host
     Write-Host "=================================================="
     Write-Host "               CONTACT AND SUPPORT"
@@ -730,7 +969,7 @@ function Choice-14 {
     Read-Host "Press ENTER to return to the main menu"
 }
 
-function Choice-15 { Clear-Host; Write-Host "Exiting script..."; exit }
+function Choice-16 { Clear-Host; Write-Host "Exiting script..."; exit }
 
 function Choice-20 {
     Clear-Host
@@ -985,7 +1224,8 @@ while ($true) {
         "12" { Choice-12; continue }
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
-        "15" { Choice-15 }
+        "15" { Choice-15; continue }
+        "16" { Choice-16 }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
