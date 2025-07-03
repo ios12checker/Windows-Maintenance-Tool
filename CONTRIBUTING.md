@@ -14,7 +14,7 @@ A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 - [@iAhmedEladwy](https://github.com/iAhmedEladwy) – Community flag testing, validation support  
 - [@henridbr](https://github.com/henridbr) – Reported early false positive (Phonzy.B!ml), cleanup prompt mismatch
 - [@BruceHarrison](https://github.com/BruceHarrison) - Feature request - Choice 13 (Optimize SSDs) Via powershell
-- [@Chaython](https://github.com/Chaython) - Added IPV6 to DNS, added DOH to DNS, added Windows Host file patching to DNS, added a task scheduler manager.
+- [@Chaython](https://github.com/Chaython) - Added IPV6 to DNS, added DOH to DNS, added Windows Host file patching to DNS, added a task scheduler manager, fixed temporary file deletion and added recycle bin dumping
 
 Videos
 - [Windows Maintenance Tool – Guide by Info4Geek](https://www.youtube.com/watch?v=TpZY1nXHTsw)
