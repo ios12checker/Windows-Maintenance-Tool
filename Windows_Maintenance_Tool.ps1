@@ -268,9 +268,82 @@ function Choice-5 {
         Pause-Menu
     }
 
+    # Function to update hosts file with ad-blocking entries
+    function Update-HostsFile {
+        Clear-Host
+        Write-Host "==============================================="
+        Write-Host "   Updating Windows Hosts File with Ad-Blocking"
+        Write-Host "==============================================="
+        
+        # Check for admin privileges
+        if (-not (Test-Admin)) {
+            Write-Host "Error: This operation requires administrator privileges." -ForegroundColor Red
+            Write-Host "Please run the script as Administrator and try again."
+            Pause-Menu
+            return
+        }
+        
+        $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+        $backupPath = "$env:windir\System32\drivers\etc\hosts.bak"
+        
+        try {
+            # Create backup of current hosts file
+            if (Test-Path $hostsPath) {
+                Copy-Item $hostsPath $backupPath -Force
+                Write-Host "Created backup of hosts file at: $backupPath" -ForegroundColor Green
+            }
+            
+            # Download ad-blocking hosts file
+            $adBlockUrl = "https://o0.pages.dev/Lite/hosts.win"
+            Write-Host "Downloading ad-blocking hosts file from: $adBlockUrl"
+            $webClient = New-Object System.Net.WebClient
+            $adBlockContent = $webClient.DownloadString($adBlockUrl)
+            
+            # Get existing custom entries from current hosts file (if any)
+            $existingContent = ""
+            if (Test-Path $hostsPath) {
+                $existingContent = Get-Content $hostsPath | Where-Object {
+                    $_ -notmatch "^# Ad-blocking entries" -and 
+                    $_ -notmatch "^0\.0\.0\.0" -and 
+                    $_ -notmatch "^127\.0\.0\.1" -and
+                    $_ -notmatch "^::1" -and
+                    $_ -notmatch "^$"
+                }
+            }
+            
+            # Combine existing custom entries with new ad-blocking entries
+            $newContent = @"
+# Ad-blocking entries - Updated $(Get-Date)
+# Original hosts file backed up to: $backupPath
+
+$existingContent
+
+$adBlockContent
+"@
+            
+            # Write new content to hosts file
+            Set-Content -Path $hostsPath -Value $newContent -Encoding UTF8 -Force
+            Write-Host "Successfully updated hosts file with ad-blocking entries." -ForegroundColor Green
+            Write-Host "Total entries added: $($adBlockContent.Split("`n").Count)"
+            
+            # Flush DNS to apply changes
+            try {
+                ipconfig /flushdns | Out-Null
+                Write-Host "DNS cache flushed to apply changes." -ForegroundColor Green
+            } catch {
+                Write-Host "Warning: Could not flush DNS cache. Changes may require a reboot." -ForegroundColor Yellow
+            }
+            
+        } catch {
+            Write-Host "Error updating hosts file: $_" -ForegroundColor Red
+        }
+        
+        Pause-Menu
+    }
+
     $dohSupported = Test-DoHSupport
     if (-not $dohSupported) {
-        Write-Host "Warning: DNS over HTTPS (DoH) is not supported on this system. Option 6 will not be available." -ForegroundColor Yellow
+        Write-Host "Warning: DNS over HTTPS (DoH) is not supported on this system. Option 5 will not be available." -ForegroundColor Yellow
     }
 
     while ($true) {
@@ -283,9 +356,10 @@ function Choice-5 {
         Write-Host "[3] Restore automatic DNS (DHCP)"
         Write-Host "[4] Use your own DNS (IPv4/IPv6)"
         if ($dohSupported) {
-            Write-Host "[6] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
+            Write-Host "[5] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
         }
-        Write-Host "[5] Return to menu"
+        Write-Host "[6] Update Windows Hosts File with Ad-Blocking"
+        Write-Host "[0] Return to menu"
         Write-Host "======================================================"
         $dns_choice = Read-Host "Enter your choice"
         switch ($dns_choice) {
@@ -304,7 +378,7 @@ function Choice-5 {
                     }
                 }
                 Write-Host "Done. Google DNS set with IPv4 and IPv6."
-                Write-Host "To enable DoH, use option [6] or configure manually in Settings."
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
                 return
             }
@@ -323,7 +397,7 @@ function Choice-5 {
                     }
                 }
                 Write-Host "Done. Cloudflare DNS set with IPv4 and IPv6."
-                Write-Host "To enable DoH, use option [6] or configure manually in Settings."
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
                 return
             }
@@ -403,14 +477,14 @@ function Choice-5 {
                 foreach ($dns in $validDnsAddresses) {
                     Write-Host "      - $dns"
                 }
-                Write-Host "To enable DoH, use option [6] or configure manually in Settings."
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Write-Host "==============================================="
                 Pause-Menu
                 return
             }
-            "6" {
+            "5" {
                 if (-not $dohSupported) {
-                    Write-Host "Error: DoH is not supported on this system. Option 6 is unavailable." -ForegroundColor Red
+                    Write-Host "Error: DoH is not supported on this system. Option 5 is unavailable." -ForegroundColor Red
                     Pause-Menu
                     return
                 }
@@ -436,12 +510,12 @@ function Choice-5 {
                     }
                 }
             }
-            "5" { return }
+            "6" { Update-HostsFile }
+            "0" { return }
             default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
         }
     }
 }
-
 function Choice-6 { Clear-Host; Write-Host "Displaying Network Information..."; ipconfig /all; Pause-Menu }
 
 function Choice-7 {
