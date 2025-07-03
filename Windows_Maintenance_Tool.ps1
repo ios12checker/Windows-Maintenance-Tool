@@ -605,41 +605,115 @@ function Choice-10 {
 
 function Choice-11 {
     Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   Delete Temporary Files and System Cache"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "This will permanently delete temporary files for your user and Windows."
+    Write-Host "Warning: Close all applications to avoid file conflicts."
+    Write-Host
+
+    $deleteOption = ""
     while ($true) {
         Write-Host "==============================================="
-        Write-Host "   Delete Temporary Files and System Cache"
+        Write-Host "   Choose Cleanup Option"
         Write-Host "==============================================="
+        Write-Host "[1] Permanently delete temporary files"
+        Write-Host "[2] Permanently delete temporary files and empty Recycle Bin"
+        Write-Host "[0] Cancel"
         Write-Host
-        Write-Host "This will permanently remove temp files for your user and Windows."
-        Write-Host
-        $confirm = Read-Host "Do you want to continue? (Y/N)"
-        $c = $confirm.ToUpper().Trim()
-        if ($c -eq "Y" -or $c -eq "YES") { break }
-        if ($c -eq "N" -or $c -eq "NO") {
-            Write-Host "Operation cancelled."
-            Pause-Menu
-            return
+        $optionChoice = Read-Host "Select an option"
+        switch ($optionChoice) {
+            "1" { $deleteOption = "DeleteOnly"; break }
+            "2" { $deleteOption = "DeleteAndEmpty"; break }
+            "0" {
+                Write-Host "Operation cancelled." -ForegroundColor Yellow
+                Pause-Menu
+                return
+            }
+            default { Write-Host "Invalid input. Please enter 1, 2, or 0." -ForegroundColor Red }
         }
-        Write-Host "Invalid input. Please type Y or N."
+        if ($deleteOption) { break }
     }
-    $REAL_TEMP = [System.IO.Path]::GetTempPath()
-    if (-not ($REAL_TEMP.ToLower() -like "*$env:USERNAME.ToLower()*")) {
-        Write-Host "[ERROR] TEMP path unsafe or invalid: $REAL_TEMP"
-        Write-Host "Aborting to prevent system damage."
-        Pause-Menu
-        return
+
+    # Define paths to clean (remove redundant paths)
+    $paths = @(
+        $env:TEMP,              # User temp folder
+        "C:\Windows\Temp"       # System temp folder
+    )
+
+    # Remove duplicates
+    $paths = $paths | Select-Object -Unique
+
+    # Load assembly for Recycle Bin if needed (only for DeleteAndEmpty option)
+    if ($deleteOption -eq "DeleteAndEmpty") {
+        try {
+            Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+        } catch {
+            Write-Host "[ERROR] Failed to load Microsoft.VisualBasic assembly for Recycle Bin operations." -ForegroundColor Red
+            Write-Host "Proceeding with deletion only (Recycle Bin will not be emptied)." -ForegroundColor Yellow
+            $deleteOption = "DeleteOnly"
+        }
     }
-    Clear-Host
-    Write-Host "Deleting temporary files using PowerShell..."
-    try {
-        Remove-Item -Path "$env:TEMP\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path "C:\Windows\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Remove-Item -Path "$env:USERPROFILE\AppData\Local\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue
-        Write-Host
-        Write-Host "Temporary files deleted."
-    } catch {
-        Write-Host "Error deleting some temporary files." -ForegroundColor Yellow
+
+    $deletedCount = 0
+    $skippedCount = 0
+
+    # Perform permanent deletion
+    foreach ($path in $paths) {
+        # Validate path
+        if (-not (Test-Path $path)) {
+            Write-Host "[ERROR] Path does not exist: $path" -ForegroundColor Red
+            continue
+        }
+
+        # Additional safety check for user temp path
+        if ($path -eq $env:TEMP -and -not ($path.ToLower() -like "*$($env:USERNAME.ToLower())*")) {
+            Write-Host "[ERROR] TEMP path unsafe or invalid: $path" -ForegroundColor Red
+            Write-Host "Skipping to prevent system damage." -ForegroundColor Red
+            continue
+        }
+
+        Write-Host "Cleaning path: $path"
+        try {
+            Get-ChildItem -Path $path -Recurse -Force -ErrorAction Stop | ForEach-Object {
+                try {
+                    Remove-Item -Path $_.FullName -Force -Recurse -ErrorAction Stop
+                    if ($_.PSIsContainer) {
+                        Write-Host "Permanently deleted directory: $($_.FullName)" -ForegroundColor Green
+                    } else {
+                        Write-Host "Permanently deleted file: $($_.FullName)" -ForegroundColor Green
+                    }
+                    $deletedCount++
+                } catch {
+                    $skippedCount++
+                    Write-Host "Skipped: $($_.FullName) ($($_.Exception.Message))" -ForegroundColor Yellow
+                }
+            }
+        } catch {
+            Write-Host "Error processing path $path : $($_.Exception.Message)" -ForegroundColor Red
+        }
     }
+
+    Write-Host
+    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
+    Write-Host "Files and directories were permanently deleted."
+
+    # Empty Recycle Bin if selected
+    if ($deleteOption -eq "DeleteAndEmpty") {
+        try {
+            Write-Host "Emptying Recycle Bin..." -ForegroundColor Green
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+                "C:\`$Recycle.Bin",
+                'OnlyErrorDialogs',
+                'DeletePermanently'
+            )
+            Write-Host "Recycle Bin emptied successfully." -ForegroundColor Green
+        } catch {
+            Write-Host "Error emptying Recycle Bin: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
     Pause-Menu
 }
 
