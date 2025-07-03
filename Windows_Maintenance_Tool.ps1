@@ -50,7 +50,7 @@ function Show-Menu {
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host
-    Write-Host " [16]  EXIT"
+    Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
 }
 
@@ -1117,7 +1117,7 @@ function Choice-15 {
     Read-Host "Press ENTER to return to the main menu"
 }
 
-function Choice-16 { Clear-Host; Write-Host "Exiting script..."; exit }
+function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
 
 function Choice-20 {
     Clear-Host
@@ -1373,7 +1373,7 @@ while ($true) {
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
         "15" { Choice-15; continue }
-        "16" { Choice-16 }
+        "0" { Choice-0 }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
