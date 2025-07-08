@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.1.3-green)
+![Version](https://img.shields.io/badge/version-v3.3.0-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -11,7 +11,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## 📸 Screenshot
 
-![162aaae4a014fa50fb6d71b8e965ece8](https://github.com/user-attachments/assets/4ca6b995-750d-4ec8-817d-d79ee80e845d)
+![773e7b283bfe22c11bdfbc71d9c603a9](https://github.com/user-attachments/assets/9437c76d-2f0a-4767-b476-6f4b4c7d0efd)
+
 
 
 
