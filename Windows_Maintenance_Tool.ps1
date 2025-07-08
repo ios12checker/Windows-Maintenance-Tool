@@ -620,18 +620,20 @@ function Choice-11 {
         Write-Host "==============================================="
         Write-Host "[1] Permanently delete temporary files"
         Write-Host "[2] Permanently delete temporary files and empty Recycle Bin"
+        Write-Host "[3] Advanced Privacy Cleanup (includes temp files + privacy data)"
         Write-Host "[0] Cancel"
         Write-Host
         $optionChoice = Read-Host "Select an option"
         switch ($optionChoice) {
             "1" { $deleteOption = "DeleteOnly"; break }
             "2" { $deleteOption = "DeleteAndEmpty"; break }
+            "3" { $deleteOption = "PrivacyCleanup"; break }
             "0" {
                 Write-Host "Operation cancelled." -ForegroundColor Yellow
                 Pause-Menu
                 return
             }
-            default { Write-Host "Invalid input. Please enter 1, 2, or 0." -ForegroundColor Red }
+            default { Write-Host "Invalid input. Please enter 1, 2, 3, or 0." -ForegroundColor Red }
         }
         if ($deleteOption) { break }
     }
@@ -646,7 +648,7 @@ function Choice-11 {
     $paths = $paths | Select-Object -Unique
 
     # Load assembly for Recycle Bin if needed (only for DeleteAndEmpty option)
-    if ($deleteOption -eq "DeleteAndEmpty") {
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
         try {
             Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
         } catch {
@@ -695,12 +697,8 @@ function Choice-11 {
         }
     }
 
-    Write-Host
-    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
-    Write-Host "Files and directories were permanently deleted."
-
     # Empty Recycle Bin if selected
-    if ($deleteOption -eq "DeleteAndEmpty") {
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
         try {
             Write-Host "Emptying Recycle Bin..." -ForegroundColor Green
             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
@@ -712,6 +710,67 @@ function Choice-11 {
         } catch {
             Write-Host "Error emptying Recycle Bin: $($_.Exception.Message)" -ForegroundColor Red
         }
+    }
+
+    # Perform privacy cleanup if selected
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host
+        Write-Host "==============================================="
+        Write-Host "   Performing Advanced Privacy Cleanup"
+        Write-Host "==============================================="
+        
+        # Clear Activity History
+        try {
+            Write-Host "Clearing Activity History..."
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f 2>&1 | Out-Null
+            Write-Host "Activity History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Activity History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Location History
+        try {
+            Write-Host "Clearing Location History..."
+            Get-Process LocationNotificationWindows -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" /f 2>&1 | Out-Null
+            Write-Host "Location History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Location History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Diagnostic Data
+        try {
+            Write-Host "Clearing Diagnostic Data..."
+            wevtutil cl Microsoft-Windows-Diagnostics-Performance/Operational 2>&1 | Out-Null
+            Write-Host "Diagnostic Data cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Diagnostic Data: $_" -ForegroundColor Yellow
+        }
+
+        # Additional privacy cleanup commands
+        try {
+            Write-Host "Clearing Recent Items..."
+            Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Recent Items cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Recent Items: $_" -ForegroundColor Yellow
+        }
+
+        try {
+            Write-Host "Clearing Thumbnail Cache..."
+            Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue
+            Write-Host "Thumbnail Cache cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Thumbnail Cache: $_" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host
+    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host "Privacy-related data was also cleared."
+    } else {
+        Write-Host "Files and directories were permanently deleted."
     }
 
     Pause-Menu
