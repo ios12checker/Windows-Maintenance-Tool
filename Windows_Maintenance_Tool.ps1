@@ -56,19 +56,61 @@ function Show-Menu {
 
 function Choice-1 {
     Clear-Host
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host "Winget is not installed. Please install it from Microsoft Store."
-        Pause-Menu
-        return
-    }
     Write-Host "==============================================="
     Write-Host "    Windows Update (via Winget)"
     Write-Host "==============================================="
+
+    # Check if Winget is installed
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "Winget is not installed. Attempting to install it automatically..."
+        Write-Host
+        
+        try {
+            # Method 1: Try installing via Microsoft Store (App Installer)
+            Write-Host "Installing Winget via Microsoft Store..."
+            $result = Start-Process "ms-windows-store://pdp/?productid=9NBLGGH4NNS1" -Wait -PassThru
+            
+            if ($result.ExitCode -eq 0) {
+                Write-Host "Microsoft Store opened successfully. Please complete the installation."
+                Write-Host "After installation, restart this tool to use Winget features."
+                Pause-Menu
+                return
+            } else {
+                # Method 2: Alternative direct download if Store method fails
+                Write-Host "Microsoft Store method failed, trying direct download..."
+                $wingetUrl = "https://aka.ms/getwinget"
+                $installerPath = "$env:TEMP\winget-cli.msixbundle"
+                
+                # Download the installer
+                Invoke-WebRequest -Uri $wingetUrl -OutFile $installerPath
+                
+                # Install Winget
+                Add-AppxPackage -Path $installerPath
+                
+                # Verify installation
+                if (Get-Command winget -ErrorAction SilentlyContinue) {
+                    Write-Host "Winget installed successfully!"
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "Installation failed. Please install manually from Microsoft Store."
+                    Pause-Menu
+                    return
+                }
+            }
+        } catch {
+            Write-Host "Failed to install Winget automatically. Error: $_"
+            Write-Host "Please install 'App Installer' from Microsoft Store manually."
+            Pause-Menu
+            return
+        }
+    }
+
+    # Main Winget functionality
     Write-Host "Listing available upgrades..."
     Write-Host
     winget upgrade --include-unknown
     Write-Host
-    Pause-Menu
+    
     while ($true) {
         Write-Host "==============================================="
         Write-Host "Options:"
@@ -81,7 +123,7 @@ function Choice-1 {
         switch ($upopt) {
             "0" {
                 Write-Host "Cancelled. Returning to menu..."
-                Pause-Menu
+                Start-Sleep -Seconds 1
                 return
             }
             "1" {
