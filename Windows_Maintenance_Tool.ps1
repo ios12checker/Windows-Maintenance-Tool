@@ -41,7 +41,7 @@ function Show-Menu {
     Write-Host " [14]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host
     Write-Host "     === SUPPORT ==="
-    Write-Host " [15]  Contact and Support information (Discord)"
+    Write-Host " [30]  Contact and Support information (Discord) [h, help]"
     Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
     Write-Host " [20]  Show installed drivers"
@@ -1351,18 +1351,53 @@ function Choice-14 {
 }
 
 function Choice-15 {
-    Clear-Host
-    Write-Host
-    Write-Host "=================================================="
-    Write-Host "               CONTACT AND SUPPORT"
-    Write-Host "=================================================="
-    Write-Host "Do you have any questions or need help?"
-    Write-Host "You are always welcome to contact me."
-    Write-Host
-    Write-Host "Discord-Username: Lil_Batti"
-    Write-Host "Support-server: https://discord.gg/bCQqKHGxja"
-    Write-Host
-    Read-Host "Press ENTER to return to the main menu"
+    while ($true) {
+        Clear-Host
+        $discordUrl = "https://discord.gg/bCQqKHGxja"
+        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
+
+        Write-Host
+        Write-Host "=================================================="
+        Write-Host "               CONTACT AND SUPPORT"
+        Write-Host "=================================================="
+        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
+        Write-Host "How can we help you?"
+        Write-Host
+        Write-Host " [1] Open Support Discord Server ($discordUrl)"
+        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "=================================================="
+
+        $supportChoice = Read-Host "Enter your choice"
+
+        switch ($supportChoice) {
+            "1" {
+                Write-Host "Opening the support Discord server in your browser..."
+                try {
+                    Start-Process $discordUrl -ErrorAction Stop
+                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "2" {
+                Write-Host "Opening the GitHub issue page in your browser..."
+                try {
+                    Start-Process $githubUrl -ErrorAction Stop
+                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+        }
+    }
 }
 
 function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
@@ -1604,7 +1639,7 @@ function Choice-24 {
 # === MAIN MENU LOOP ===
 while ($true) {
     Show-Menu
-    $choice = Read-Host "Enter your choice"
+    $choice = (Read-Host "Enter your choice").ToLower().Trim()
     switch ($choice) {
         "1"  { Choice-1; continue }
         "2"  { Choice-2; continue }
@@ -1620,13 +1655,15 @@ while ($true) {
         "12" { Choice-12; continue }
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
-        "15" { Choice-15; continue }
         "0" { Choice-0 }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
+        "30" { Choice-15; continue }
+        "h"  { Choice-15; continue }
+        "help" { Choice-15; continue }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
 }
