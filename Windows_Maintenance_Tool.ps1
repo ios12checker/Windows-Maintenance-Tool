@@ -40,15 +40,15 @@ function Show-Menu {
     Write-Host " [13]  Optimize SSDs (ReTrim)"
     Write-Host " [14]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host
-    Write-Host "     === SUPPORT ==="
-    Write-Host " [30]  Contact and Support information (Discord) [h, help]"
-    Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
     Write-Host " [20]  Show installed drivers"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
+    Write-Host
+    Write-Host "     === SUPPORT ==="
+    Write-Host " [30]  Contact and Support information (Discord) [h, help]"
     Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
@@ -1350,7 +1350,7 @@ function Choice-14 {
     }
 }
 
-function Choice-15 {
+function Choice-30 {
     while ($true) {
         Clear-Host
         $discordUrl = "https://discord.gg/bCQqKHGxja"
@@ -1661,9 +1661,9 @@ while ($true) {
         "22" { Choice-22; continue }
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
-        "30" { Choice-15; continue }
-        "h"  { Choice-15; continue }
-        "help" { Choice-15; continue }
+        "30" { Choice-30; continue }
+        "h"  { Choice-30; continue }
+        "help" { Choice-30; continue }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
 }
