@@ -59,7 +59,7 @@ function Choice-1 {
     Write-Host "==============================================="
     Write-Host "    Windows Update (via Winget)"
     Write-Host "==============================================="
-
+    
     # Check if Winget is installed
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Host "Winget is not installed. Attempting to install it automatically..."
@@ -110,56 +110,38 @@ function Choice-1 {
     Write-Host
     winget upgrade --include-unknown
     Write-Host
-    
+
     while ($true) {
         Write-Host "==============================================="
         Write-Host "Options:"
         Write-Host "[1] Upgrade all packages"
-        Write-Host "[2] Upgrade selected packages"
         Write-Host "[0] Cancel"
         Write-Host
-        $upopt = Read-Host "Choose an option"
-        $upopt = $upopt.Trim()
-        switch ($upopt) {
-            "0" {
-                Write-Host "Cancelled. Returning to menu..."
-                Start-Sleep -Seconds 1
-                return
-            }
-            "1" {
-                Write-Host "Running full upgrade..."
-                winget upgrade --all --include-unknown
-                Pause-Menu
-                return
-            }
-            "2" {
-                Clear-Host
-                Write-Host "==============================================="
-                Write-Host "  Available Packages [Copy ID to upgrade]"
-                Write-Host "==============================================="
-                winget upgrade --include-unknown
-                Write-Host
-                Write-Host "Enter one or more package IDs to upgrade (comma-separated, no spaces)"
-                $packlist = Read-Host "IDs"
-                $packlist = $packlist -replace ' ', ''
-                if ([string]::IsNullOrWhiteSpace($packlist)) {
-                    Write-Host "No package IDs entered."
-                    Pause-Menu
-                    return
-                }
-                $ids = $packlist.Split(",")
-                foreach ($id in $ids) {
-                    Write-Host "Upgrading $id..."
-                    winget upgrade --id $id --include-unknown
-                    Write-Host
-                }
-                Pause-Menu
-                return
-            }
-            default {
-                Write-Host "Invalid option. Please choose 1, 2, or 0."
-                continue
-            }
+        Write-Host "Or simply enter a package ID to upgrade it directly"
+        Write-Host
+        $input = Read-Host "Enter your choice or package ID"
+        $input = $input.Trim()
+        
+        if ($input -eq "0") {
+            Write-Host "Cancelled. Returning to menu..."
+            Start-Sleep -Seconds 1
+            return
+        }
+        elseif ($input -eq "1") {
+            Write-Host "Running full upgrade..."
+            winget upgrade --all --include-unknown
+            Pause-Menu
+            return
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($input)) {
+            # Treat as package ID
+            Write-Host "Upgrading $input..."
+            winget upgrade --id $input --include-unknown
+            Pause-Menu
+            return
+        }
+        else {
+            Write-Host "Invalid input. Please enter a package ID, 1, or 0."
         }
     }
 }
