@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.3.0-green)
+![Version](https://img.shields.io/badge/version-v3.4.0-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -11,35 +11,87 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## 📸 Screenshot
 
-![773e7b283bfe22c11bdfbc71d9c603a9](https://github.com/user-attachments/assets/9437c76d-2f0a-4767-b476-6f4b4c7d0efd)
-
-
-
-
-
-
+<img width="697" height="653" alt="4d73225229b25ab6f6a04a1dfa6edb10" src="https://github.com/user-attachments/assets/74153118-339d-44dc-9b93-bc1572f08960" />
 
 ---
 
 ## ✅ Features
+**Run essential repair tools:**
 
-- Run essential repair tools: `SFC`, `DISM`, `CHKDSK`
-- Optimize SSD drives (TRIM/defrag compatible)
-- Windows Update via `winget` (interactive selection)
-- View and upgrade individual packages (choose by ID)
-- Network diagnostics: `ipconfig`, routing table, DNS config, adapter reset
+- Quick access to SFC, DISM, and CHKDSK for core Windows repairs
+
+- Optimize SSD drives:
+
+- TRIM and compatible defrag for faster, healthier drives
+
+
+**Windows Update management:**
+
+- Use winget to install, upgrade, and repair system packages
+
+- NEW: Automatically installs winget if missing!
+
+- Flexible package handling:
+
+- View, search, and upgrade individual apps/packages by entering their ID directly
+
+
+**Network diagnostics & repair:**
+
+- Includes ipconfig, routing table viewer, DNS config, adapter reset, and more
+
+
+**Privacy & temp cleanup:**
+
 - Clean temp files, logs, and browser cache
-- Save detailed reports to Desktop or custom folder:
-  - System Info, Network Info, Driver List
-- **Registry tools** *(new and improved!)*:
-  - Safe cleanup, backup, and corruption scan
-  - Fully menu-driven registry cleanup:  
-    - List "safe to delete" entries (matches: `IE40`, `IE4Data`, `DirectDrawEx`, `DXM_Runtime`, `SchedulingAgent`)
-    - Bulk delete all safe entries (now 100% stable)
-    - Easy backup & restore with versioned .reg files
-    - PowerShell-based logic for precision and compatibility
-- All language/region support – no hardcoded adapter names
-- No third-party dependencies required
+
+- NEW: Privacy cleanup for extra traces (history, cookies, etc.)
+
+
+**Save detailed reports:**
+
+- Export System Info, Network Info, and Driver List to your Desktop or a custom folder
+
+- Registry tools:
+
+- Safe cleanup, backup, and corruption scan
+
+
+**Menu-driven, stable registry cleaning:**
+
+- List “safe to delete” entries (IE40, IE4Data, DirectDrawEx, etc.)
+
+- Bulk delete all safe entries
+
+- Easy backup & restore with versioned .reg files
+
+
+**DNS-Adblock management:**
+
+- Block ad/tracker domains with hosts file (adblock/mirrors included)
+
+- Improved: Handles locked files, better messaging, multiple backup/restore
+
+
+**Task & driver management:**
+
+- View and repair scheduled tasks
+
+- List and export all installed drivers
+
+
+**Menu-driven and user-friendly:**
+
+- All functions accessible from a clear main menu—no PowerShell experience needed
+
+- Support/help, Discord/GitHub contact, openable with a single key press
+
+
+**Portable & safe:**
+
+- Runs from USB, no install or admin deployment required
+
+- No third-party dependencies or internet downloads required (except optional winget)
 
 ---
 
@@ -47,6 +99,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 1. Start `Start_Windows_Maintenance_Tool.bat` file.
 2. Follow the interactive menu.
+3. Make sure that `Start_Windows_Maintenance_Tool.bat` and `Windows_Maintenance_Tool.ps1` are in the same folder, otherwise the Maintenance Tool wont start properly.
 
 > ⚠️ Script output may appear in your system language (e.g. English, Danish, etc). This is normal.
 
@@ -57,11 +110,19 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 Saved directly to your chosen folder (by default: Desktop\SystemReports):
 
 - `System_Info_YYYY-MM-DD.txt`
+  (Full system information report)
+  
 - `Network_Info_YYYY-MM-DD.txt`
+  (Detailed network configuration)
+  
 - `Driver_List_YYYY-MM-DD.txt`
-- `routing_table_YYYY-MM-DD.txt`
-- `RegistryBackup_YYYY-MM-DD_HH-MM.reg` (registry backup files)
+  (List of all installed drivers)
 
+- `routing_table_YYYY-MM-DD.txt`
+  (Network routing table)
+
+- `RegistryBackup_YYYY-MM-DD_HH-MM.reg`
+  (Registry backup files, with date and time)
 ---
 
 ## 🧪 Troubleshooting & FAQ
