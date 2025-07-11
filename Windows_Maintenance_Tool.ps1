@@ -15,7 +15,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.3.0 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.4.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
@@ -40,9 +40,6 @@ function Show-Menu {
     Write-Host " [13]  Optimize SSDs (ReTrim)"
     Write-Host " [14]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host
-    Write-Host "     === SUPPORT ==="
-    Write-Host " [15]  Contact and Support information (Discord)"
-    Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
     Write-Host " [20]  Show installed drivers"
     Write-Host " [21]  Windows Update Repair Tool"
@@ -50,74 +47,101 @@ function Show-Menu {
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host
+    Write-Host "     === SUPPORT ==="
+    Write-Host " [30]  Contact and Support information (Discord) [h, help]"
+    Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
 }
 
 function Choice-1 {
     Clear-Host
-    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Host "Winget is not installed. Please install it from Microsoft Store."
-        Pause-Menu
-        return
-    }
     Write-Host "==============================================="
     Write-Host "    Windows Update (via Winget)"
     Write-Host "==============================================="
+    
+    # Check if Winget is installed
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "Winget is not installed. Attempting to install it automatically..."
+        Write-Host
+        
+        try {
+            # Method 1: Try installing via Microsoft Store (App Installer)
+            Write-Host "Installing Winget via Microsoft Store..."
+            $result = Start-Process "ms-windows-store://pdp/?productid=9NBLGGH4NNS1" -Wait -PassThru
+            
+            if ($result.ExitCode -eq 0) {
+                Write-Host "Microsoft Store opened successfully. Please complete the installation."
+                Write-Host "After installation, restart this tool to use Winget features."
+                Pause-Menu
+                return
+            } else {
+                # Method 2: Alternative direct download if Store method fails
+                Write-Host "Microsoft Store method failed, trying direct download..."
+                $wingetUrl = "https://aka.ms/getwinget"
+                $installerPath = "$env:TEMP\winget-cli.msixbundle"
+                
+                # Download the installer
+                Invoke-WebRequest -Uri $wingetUrl -OutFile $installerPath
+                
+                # Install Winget
+                Add-AppxPackage -Path $installerPath
+                
+                # Verify installation
+                if (Get-Command winget -ErrorAction SilentlyContinue) {
+                    Write-Host "Winget installed successfully!"
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "Installation failed. Please install manually from Microsoft Store."
+                    Pause-Menu
+                    return
+                }
+            }
+        } catch {
+            Write-Host "Failed to install Winget automatically. Error: $_"
+            Write-Host "Please install 'App Installer' from Microsoft Store manually."
+            Pause-Menu
+            return
+        }
+    }
+
+    # Main Winget functionality
     Write-Host "Listing available upgrades..."
     Write-Host
     winget upgrade --include-unknown
     Write-Host
-    Pause-Menu
+
     while ($true) {
         Write-Host "==============================================="
         Write-Host "Options:"
         Write-Host "[1] Upgrade all packages"
-        Write-Host "[2] Upgrade selected packages"
         Write-Host "[0] Cancel"
         Write-Host
-        $upopt = Read-Host "Choose an option"
-        $upopt = $upopt.Trim()
-        switch ($upopt) {
-            "0" {
-                Write-Host "Cancelled. Returning to menu..."
-                Pause-Menu
-                return
-            }
-            "1" {
-                Write-Host "Running full upgrade..."
-                winget upgrade --all --include-unknown
-                Pause-Menu
-                return
-            }
-            "2" {
-                Clear-Host
-                Write-Host "==============================================="
-                Write-Host "  Available Packages [Copy ID to upgrade]"
-                Write-Host "==============================================="
-                winget upgrade --include-unknown
-                Write-Host
-                Write-Host "Enter one or more package IDs to upgrade (comma-separated, no spaces)"
-                $packlist = Read-Host "IDs"
-                $packlist = $packlist -replace ' ', ''
-                if ([string]::IsNullOrWhiteSpace($packlist)) {
-                    Write-Host "No package IDs entered."
-                    Pause-Menu
-                    return
-                }
-                $ids = $packlist.Split(",")
-                foreach ($id in $ids) {
-                    Write-Host "Upgrading $id..."
-                    winget upgrade --id $id --include-unknown
-                    Write-Host
-                }
-                Pause-Menu
-                return
-            }
-            default {
-                Write-Host "Invalid option. Please choose 1, 2, or 0."
-                continue
-            }
+        Write-Host "Or simply enter a package ID to upgrade it directly"
+        Write-Host
+        $input = Read-Host "Enter your choice or package ID"
+        $input = $input.Trim()
+        
+        if ($input -eq "0") {
+            Write-Host "Cancelled. Returning to menu..."
+            Start-Sleep -Seconds 1
+            return
+        }
+        elseif ($input -eq "1") {
+            Write-Host "Running full upgrade..."
+            winget upgrade --all --include-unknown
+            Pause-Menu
+            return
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($input)) {
+            # Treat as package ID
+            Write-Host "Upgrading $input..."
+            winget upgrade --id $input --include-unknown
+            Pause-Menu
+            return
+        }
+        else {
+            Write-Host "Invalid input. Please enter a package ID, 1, or 0."
         }
     }
 }
@@ -269,77 +293,242 @@ function Choice-5 {
     }
 
     # Function to update hosts file with ad-blocking entries
-    function Update-HostsFile {
-        Clear-Host
-        Write-Host "==============================================="
-        Write-Host "   Updating Windows Hosts File with Ad-Blocking"
-        Write-Host "==============================================="
-        
-        # Check for admin privileges
-        if (-not (Test-Admin)) {
-            Write-Host "Error: This operation requires administrator privileges." -ForegroundColor Red
-            Write-Host "Please run the script as Administrator and try again."
-            Pause-Menu
-            return
+function Update-HostsFile {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   Updating Windows Hosts File with Ad-Blocking"
+    Write-Host "==============================================="
+    
+    # Check for admin privileges
+    if (-not (Test-Admin)) {
+        Write-Host "Error: This operation requires administrator privileges." -ForegroundColor Red
+        Write-Host "Please run the script as Administrator and try again."
+        Pause-Menu
+        return
+    }
+    
+    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+    $backupDir = "$env:windir\System32\drivers\etc\hosts_backups"
+    $dnsService = "Dnscache"
+    $maxRetries = 3
+    $retryDelay = 2 # seconds
+
+    # List of mirrors to try (in order)
+    $mirrors = @(
+        "https://o0.pages.dev/Lite/hosts.win",
+        "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/hosts.win",
+        "https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/hosts.win"
+    )
+
+    try {
+        # ===== ENSURE BACKUP DIRECTORY EXISTS =====
+        if (-not (Test-Path $backupDir)) {
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+            Write-Host "Created backup directory: $backupDir" -ForegroundColor Green
         }
+
+        # ===== CREATE BACKUP =====
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $uniqueBackupPath = "$backupDir\hosts_$timestamp.bak"
         
-        $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-        $backupPath = "$env:windir\System32\drivers\etc\hosts.bak"
-        
-        try {
-            # Create backup of current hosts file
-            if (Test-Path $hostsPath) {
-                Copy-Item $hostsPath $backupPath -Force
-                Write-Host "Created backup of hosts file at: $backupPath" -ForegroundColor Green
+        if (Test-Path $hostsPath) {
+            Write-Host "Creating backup of hosts file..."
+            try {
+                Copy-Item $hostsPath $uniqueBackupPath -Force
+                Write-Host "Backup created at: $uniqueBackupPath" -ForegroundColor Green
+            } catch {
+                Write-Host "Warning: Could not create backup - $($_.Exception.Message)" -ForegroundColor Yellow
+                $uniqueBackupPath = $null
             }
+        } else {
+            Write-Host "No existing hosts file found - will create new one" -ForegroundColor Yellow
+            $uniqueBackupPath = $null
+        }
+
+        # ===== DOWNLOAD WITH MIRROR FALLBACK =====
+        $adBlockContent = $null
+        $successfulMirror = $null
+
+        foreach ($mirror in $mirrors) {
+            Write-Host "`nAttempting download from: $mirror"
             
-            # Download ad-blocking hosts file
-            $adBlockUrl = "https://o0.pages.dev/Lite/hosts.win"
-            Write-Host "Downloading ad-blocking hosts file from: $adBlockUrl"
-            $webClient = New-Object System.Net.WebClient
-            $adBlockContent = $webClient.DownloadString($adBlockUrl)
-            
-            # Get existing custom entries from current hosts file (if any)
-            $existingContent = ""
-            if (Test-Path $hostsPath) {
-                $existingContent = Get-Content $hostsPath | Where-Object {
-                    $_ -notmatch "^# Ad-blocking entries" -and 
-                    $_ -notmatch "^0\.0\.0\.0" -and 
-                    $_ -notmatch "^127\.0\.0\.1" -and
-                    $_ -notmatch "^::1" -and
-                    $_ -notmatch "^$"
+            try {
+                $webClient = New-Object System.Net.WebClient
+                $adBlockContent = $webClient.DownloadString($mirror)
+                $successfulMirror = $mirror
+                Write-Host "Successfully downloaded hosts file" -ForegroundColor Green
+                break
+            } catch [System.Net.WebException] {
+                Write-Host "Download failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
+            } catch {
+                Write-Host "Unexpected error: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
+            } finally {
+                if ($webClient -ne $null) {
+                    $webClient.Dispose()
                 }
             }
-            
-            # Combine existing custom entries with new ad-blocking entries
-            $newContent = @"
+        }
+
+        if (-not $adBlockContent) {
+            throw "All mirrors failed! Could not download ad-blocking hosts file."
+        }
+
+        # ===== PREPARE NEW CONTENT =====
+        $existingContent = if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
+            Get-Content $uniqueBackupPath | Where-Object {
+                $_ -notmatch "^# Ad-blocking entries" -and 
+                $_ -notmatch "^0\.0\.0\.0" -and 
+                $_ -notmatch "^127\.0\.0\.1" -and
+                $_ -notmatch "^::1" -and
+                $_ -notmatch "^$"
+            }
+        } else { "" }
+        
+        $newContent = @"
 # Ad-blocking entries - Updated $(Get-Date)
-# Original hosts file backed up to: $backupPath
+# Downloaded from: $successfulMirror
+# Original hosts file backed up to: $(if ($uniqueBackupPath) { $uniqueBackupPath } else { "No backup created" })
 
 $existingContent
 
 $adBlockContent
 "@
-            
-            # Write new content to hosts file
-            Set-Content -Path $hostsPath -Value $newContent -Encoding UTF8 -Force
-            Write-Host "Successfully updated hosts file with ad-blocking entries." -ForegroundColor Green
-            Write-Host "Total entries added: $($adBlockContent.Split("`n").Count)"
-            
-            # Flush DNS to apply changes
-            try {
-                ipconfig /flushdns | Out-Null
-                Write-Host "DNS cache flushed to apply changes." -ForegroundColor Green
-            } catch {
-                Write-Host "Warning: Could not flush DNS cache. Changes may require a reboot." -ForegroundColor Yellow
-            }
-            
-        } catch {
-            Write-Host "Error updating hosts file: $_" -ForegroundColor Red
-        }
+
+        # ===== UPDATE HOSTS FILE =====
+        Write-Host "`nPreparing to update hosts file..."
         
-        Pause-Menu
+        # Write new content with retry logic
+        $attempt = 0
+        $success = $false
+        
+        while (-not $success -and $attempt -lt $maxRetries) {
+            $attempt++
+            try {
+                # Create temporary file
+                $tempFile = [System.IO.Path]::GetTempFileName()
+                [System.IO.File]::WriteAllText($tempFile, $newContent, [System.Text.Encoding]::UTF8)
+                
+                # Replace hosts file using cmd.exe for maximum reliability
+                $tempDest = "$hostsPath.tmp"
+                $copyCommand = @"
+@echo off
+if exist "$hostsPath" move /Y "$hostsPath" "$tempDest"
+move /Y "$tempFile" "$hostsPath"
+if exist "$tempDest" del /F /Q "$tempDest"
+"@
+                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
+                [System.IO.File]::WriteAllText($batchFile, $copyCommand)
+                
+                Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -WindowStyle Hidden
+                Remove-Item $batchFile -Force
+                
+                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
+                
+                $success = $true
+                $entryCount = ($adBlockContent -split "`n").Count
+                Write-Host "Successfully updated hosts file with $entryCount ad-blocking entries." -ForegroundColor Green
+            } catch {
+                Write-Host "Attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                if ($attempt -lt $maxRetries) {
+                    Write-Host "Retrying in $retryDelay seconds..."
+                    Start-Sleep -Seconds $retryDelay
+                }
+                # Clean up any temp files
+                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
+            }
+        }
+
+        if (-not $success) {
+            throw "Failed to update hosts file after $maxRetries attempts."
+        }
+
+        # ===== FLUSH DNS =====
+        Write-Host "Flushing DNS cache..."
+        try {
+            ipconfig /flushdns | Out-Null
+            Write-Host "DNS cache flushed successfully." -ForegroundColor Green
+        } catch {
+            Write-Host "Warning: Could not flush DNS cache. Changes may require a reboot." -ForegroundColor Yellow
+        }
+
+        # ===== CLEAN UP ALL BACKUPS =====
+        if ($success -and $uniqueBackupPath) {
+            Write-Host "`nChecking for backup files in $backupDir..."
+            
+            # Get all backup files
+            $allBackups = Get-ChildItem -Path $backupDir -Filter "hosts_*.bak" | 
+                         Sort-Object CreationTime -Descending
+            
+            if ($allBackups.Count -gt 0) {
+                Write-Host "Found $($allBackups.Count) backup files:"
+                $allBackups | ForEach-Object {
+                    Write-Host "  - $($_.Name) (Created: $($_.CreationTime))" -ForegroundColor Yellow
+                }
+                
+                Write-Host "`nWARNING: Deleting these backup files is permanent and they CANNOT be restored!" -ForegroundColor Red
+                $confirm = Read-Host "Are you sure you want to delete ALL $($allBackups.Count) backup files? (Y/1 for Yes, N/0 for No)"
+                if ($confirm -match '^[Yy1]$') {
+                    $deletedCount = 0
+                    $allBackups | ForEach-Object {
+                        try {
+                            Remove-Item $_.FullName -Force
+                            Write-Host "Deleted: $($_.Name)" -ForegroundColor Green
+                            $deletedCount++
+                        } catch {
+                            Write-Host "Failed to delete $($_.Name): $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host "Deleted $deletedCount backup files." -ForegroundColor Green
+                } else {
+                    Write-Host "Keeping all backup files." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No backup files found in $backupDir." -ForegroundColor Green
+            }
+        }
+
+    } catch {
+        Write-Host "`nERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Hosts file update failed!" -ForegroundColor Red
+        
+        # Attempt to restore from backup
+        if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
+            Write-Host "Attempting to restore from backup..."
+            try {
+                # Use cmd.exe for reliable file replacement
+                $restoreCommand = @"
+@echo off
+if exist "$hostsPath" del /F /Q "$hostsPath"
+copy /Y "$uniqueBackupPath" "$hostsPath"
+"@
+                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
+                [System.IO.File]::WriteAllText($batchFile, $restoreCommand)
+                
+                Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -WindowStyle Hidden
+                Remove-Item $batchFile -Force
+                
+                Write-Host "Original hosts file restored from backup." -ForegroundColor Green
+            } catch {
+                Write-Host "CRITICAL ERROR: Could not restore backup!" -ForegroundColor Red
+                Write-Host "Manual recovery required. Backup exists at:" -ForegroundColor Yellow
+                Write-Host $uniqueBackupPath -ForegroundColor Yellow
+                Write-Host "You may need to copy this file to $hostsPath manually" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "No backup available to restore." -ForegroundColor Red
+            if (-not (Test-Path $hostsPath)) {
+                Write-Host "The hosts file does not exist at $hostsPath" -ForegroundColor Yellow
+            }
+        }
     }
+    
+    Pause-Menu
+}
+    # End of Function to update hosts file with ad-blocking entries, start of settings
 
     $dohSupported = Test-DoHSupport
     if (-not $dohSupported) {
@@ -620,18 +809,20 @@ function Choice-11 {
         Write-Host "==============================================="
         Write-Host "[1] Permanently delete temporary files"
         Write-Host "[2] Permanently delete temporary files and empty Recycle Bin"
+        Write-Host "[3] Advanced Privacy Cleanup (includes temp files + privacy data)"
         Write-Host "[0] Cancel"
         Write-Host
         $optionChoice = Read-Host "Select an option"
         switch ($optionChoice) {
             "1" { $deleteOption = "DeleteOnly"; break }
             "2" { $deleteOption = "DeleteAndEmpty"; break }
+            "3" { $deleteOption = "PrivacyCleanup"; break }
             "0" {
                 Write-Host "Operation cancelled." -ForegroundColor Yellow
                 Pause-Menu
                 return
             }
-            default { Write-Host "Invalid input. Please enter 1, 2, or 0." -ForegroundColor Red }
+            default { Write-Host "Invalid input. Please enter 1, 2, 3, or 0." -ForegroundColor Red }
         }
         if ($deleteOption) { break }
     }
@@ -646,7 +837,7 @@ function Choice-11 {
     $paths = $paths | Select-Object -Unique
 
     # Load assembly for Recycle Bin if needed (only for DeleteAndEmpty option)
-    if ($deleteOption -eq "DeleteAndEmpty") {
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
         try {
             Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
         } catch {
@@ -695,12 +886,8 @@ function Choice-11 {
         }
     }
 
-    Write-Host
-    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
-    Write-Host "Files and directories were permanently deleted."
-
     # Empty Recycle Bin if selected
-    if ($deleteOption -eq "DeleteAndEmpty") {
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
         try {
             Write-Host "Emptying Recycle Bin..." -ForegroundColor Green
             [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
@@ -712,6 +899,67 @@ function Choice-11 {
         } catch {
             Write-Host "Error emptying Recycle Bin: $($_.Exception.Message)" -ForegroundColor Red
         }
+    }
+
+    # Perform privacy cleanup if selected
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host
+        Write-Host "==============================================="
+        Write-Host "   Performing Advanced Privacy Cleanup"
+        Write-Host "==============================================="
+        
+        # Clear Activity History
+        try {
+            Write-Host "Clearing Activity History..."
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f 2>&1 | Out-Null
+            Write-Host "Activity History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Activity History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Location History
+        try {
+            Write-Host "Clearing Location History..."
+            Get-Process LocationNotificationWindows -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" /f 2>&1 | Out-Null
+            Write-Host "Location History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Location History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Diagnostic Data
+        try {
+            Write-Host "Clearing Diagnostic Data..."
+            wevtutil cl Microsoft-Windows-Diagnostics-Performance/Operational 2>&1 | Out-Null
+            Write-Host "Diagnostic Data cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Diagnostic Data: $_" -ForegroundColor Yellow
+        }
+
+        # Additional privacy cleanup commands
+        try {
+            Write-Host "Clearing Recent Items..."
+            Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Recent Items cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Recent Items: $_" -ForegroundColor Yellow
+        }
+
+        try {
+            Write-Host "Clearing Thumbnail Cache..."
+            Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue
+            Write-Host "Thumbnail Cache cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Thumbnail Cache: $_" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host
+    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host "Privacy-related data was also cleared."
+    } else {
+        Write-Host "Files and directories were permanently deleted."
     }
 
     Pause-Menu
@@ -1102,19 +1350,54 @@ function Choice-14 {
     }
 }
 
-function Choice-15 {
-    Clear-Host
-    Write-Host
-    Write-Host "=================================================="
-    Write-Host "               CONTACT AND SUPPORT"
-    Write-Host "=================================================="
-    Write-Host "Do you have any questions or need help?"
-    Write-Host "You are always welcome to contact me."
-    Write-Host
-    Write-Host "Discord-Username: Lil_Batti"
-    Write-Host "Support-server: https://discord.gg/bCQqKHGxja"
-    Write-Host
-    Read-Host "Press ENTER to return to the main menu"
+function Choice-30 {
+    while ($true) {
+        Clear-Host
+        $discordUrl = "https://discord.gg/bCQqKHGxja"
+        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
+
+        Write-Host
+        Write-Host "=================================================="
+        Write-Host "               CONTACT AND SUPPORT"
+        Write-Host "=================================================="
+        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
+        Write-Host "How can we help you?"
+        Write-Host
+        Write-Host " [1] Open Support Discord Server ($discordUrl)"
+        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "=================================================="
+
+        $supportChoice = Read-Host "Enter your choice"
+
+        switch ($supportChoice) {
+            "1" {
+                Write-Host "Opening the support Discord server in your browser..."
+                try {
+                    Start-Process $discordUrl -ErrorAction Stop
+                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "2" {
+                Write-Host "Opening the GitHub issue page in your browser..."
+                try {
+                    Start-Process $githubUrl -ErrorAction Stop
+                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+        }
+    }
 }
 
 function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
@@ -1356,7 +1639,7 @@ function Choice-24 {
 # === MAIN MENU LOOP ===
 while ($true) {
     Show-Menu
-    $choice = Read-Host "Enter your choice"
+    $choice = (Read-Host "Enter your choice").ToLower().Trim()
     switch ($choice) {
         "1"  { Choice-1; continue }
         "2"  { Choice-2; continue }
@@ -1372,13 +1655,15 @@ while ($true) {
         "12" { Choice-12; continue }
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
-        "15" { Choice-15; continue }
         "0" { Choice-0 }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
+        "30" { Choice-30; continue }
+        "h"  { Choice-30; continue }
+        "help" { Choice-30; continue }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
 }
