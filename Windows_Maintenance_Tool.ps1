@@ -3,7 +3,7 @@ if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
     Start-Process pwsh -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
-# ===== ADMIN AND CERTIFICATE BYPASS =====
+# ===== Main Content =====
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Pause-Menu {
