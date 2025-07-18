@@ -1,10 +1,9 @@
-# ===== ADMIN CHECK =====
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
-    Write-Host "This script requires administrator privileges."
-    Write-Host "Requesting elevation now ..."
-    Start-Process powershell.exe "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+# ===== ADMIN AND CERTIFICATE BYPASS =====
+if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
+    Start-Process pwsh -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+# ===== ADMIN AND CERTIFICATE BYPASS =====
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Pause-Menu {
