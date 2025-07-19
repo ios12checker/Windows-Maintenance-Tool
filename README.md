@@ -21,49 +21,49 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 	•	Quick access to SFC, DISM, and CHKDSK for core Windows repairs
 
 **Optimize SSD drives:**
-	•	TRIM and compatible defrag for faster, healthier drives
+•	TRIM and compatible defrag for faster, healthier drives
 
 **Windows Update management:**
-	•	Use winget to install, upgrade, and repair system packages
-	•	NEW: Automatically installs winget if missing!
-	•	Flexible package handling: View, search, and upgrade individual apps/packages by entering their ID directly
+•	Use winget to install, upgrade, and repair system packages
+•	NEW: Automatically installs winget if missing!
+•	Flexible package handling: View, search, and upgrade individual apps/packages by entering their ID directly
 
 **Network diagnostics & repair:**
-	•	Includes ipconfig, routing table viewer, DNS config, adapter reset, and more
+•	Includes ipconfig, routing table viewer, DNS config, adapter reset, and more
 
 **Privacy & temp cleanup:**
-	•	Clean temp files, logs, and browser cache
-	•	NEW: Privacy cleanup for extra traces (history, cookies, etc.)
+•	Clean temp files, logs, and browser cache
+•	NEW: Privacy cleanup for extra traces (history, cookies, etc.)
 
 **Save detailed reports:**
-	•	Export System Info, Network Info, and Driver List to your Desktop or a custom folder
+•	Export System Info, Network Info, and Driver List to your Desktop or a custom folder
 
 **Registry tools:**
-	•	Safe cleanup, backup, and corruption scan
-	•	Menu-driven, stable registry cleaning:
-	•	List “safe to delete” entries (IE40, IE4Data, DirectDrawEx, etc.)
-	•	Bulk delete all safe entries
-	•	Easy backup & restore with versioned .reg files
+•	Safe cleanup, backup, and corruption scan
+•	Menu-driven, stable registry cleaning:
+•	List “safe to delete” entries (IE40, IE4Data, DirectDrawEx, etc.)
+•	Bulk delete all safe entries
+•	Easy backup & restore with versioned .reg files
 
 **DNS-Adblock management:**
-	•	Block ad/tracker domains with hosts file (adblock/mirrors included)
-	•	Improved: Handles locked files, better messaging, multiple backup/restore
+•	Block ad/tracker domains with hosts file (adblock/mirrors included)
+•	Improved: Handles locked files, better messaging, multiple backup/restore
 
 **Firewall Manager (NEW!):**
-	•	Built-in menu-driven PowerShell Firewall Manager
-	•	Manage firewall rules, enable/disable Windows Firewall, direct from the tool—no external software needed
+•	Built-in menu-driven PowerShell Firewall Manager
+•	Manage firewall rules, enable/disable Windows Firewall, direct from the tool—no external software needed
 
 **Task & driver management:**
-	•	View and repair scheduled tasks
-	•	List and export all installed drivers
+•	View and repair scheduled tasks
+•	List and export all installed drivers
 
 **Menu-driven and user-friendly:**
-	•	All functions accessible from a clear main menu—no PowerShell experience needed
-	•	Support/help, Discord/GitHub contact, openable with a single key press
+•	All functions accessible from a clear main menu—no PowerShell experience needed
+•	Support/help, Discord/GitHub contact, openable with a single key press
 
 **Portable & safe:**
-	•	Runs from USB, no install or admin deployment required
-	•	No third-party dependencies or internet downloads required (except optional winget)
+•	Runs from USB, no install or admin deployment required
+•	No third-party dependencies or internet downloads required (except optional winget)
 ---
 
 ## ⚙️ Installation
