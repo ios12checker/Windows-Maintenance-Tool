@@ -8,13 +8,13 @@ jobs:
   send-discord-message:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Fetch GitHub stars and forks
         id: repo-stats
         run: |
-          # Hent repo info med GitHub API
+          # Get repository info using GitHub API
           stats=$(curl -s https://api.github.com/repos/${GITHUB_REPOSITORY})
           stars=$(echo "$stats" | jq '.stargazers_count')
           forks=$(echo "$stats" | jq '.forks_count')
@@ -24,12 +24,12 @@ jobs:
       - name: Fetch latest release download count
         id: downloads
         run: |
-          # Hent seneste release info
+          # Get latest release info
           release=$(curl -s https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/latest)
           downloads=$(echo "$release" | jq '[.assets[]?.download_count] | add // 0')
           echo "downloads=$downloads" >> $GITHUB_OUTPUT
 
-           - name: Send embed message to Discord
+      - name: Send embed message to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
@@ -37,21 +37,23 @@ jobs:
           forks="${{ steps.repo-stats.outputs.forks }}"
           downloads="${{ steps.downloads.outputs.downloads }}"
           repo_url="https://github.com/${GITHUB_REPOSITORY}"
-          payload='{
-            "embeds": [
-              {
-                "title": "Windows Maintenance Tool – GitHub Stats",
-                "url": "'"$repo_url"'",
-                "color": 5793266,
-                "fields": [
-                  { "name": "⭐ Stars", "value": "'"$stars"'", "inline": true },
-                  { "name": "🍴 Forks", "value": "'"$forks"'", "inline": true },
-                  { "name": "📥 Downloads (latest)", "value": "'"$downloads"'", "inline": true }
-                ],
-                "footer": {
-                  "text": "Auto-updated • $(date '+%Y-%m-%d %H:%M')"
-                }
-              }
-            ]
-          }'
+          timestamp=$(date '+%Y-%m-%d %H:%M')
+          payload=$(cat <<EOF
+{
+  "embeds": [
+    {
+      "title": "Windows Maintenance Tool – GitHub Stats",
+      "url": "$repo_url",
+      "color": 5793266,
+      "fields": [
+        { "name": "⭐ Stars", "value": "$stars", "inline": true },
+        { "name": "🍴 Forks", "value": "$forks", "inline": true },
+        { "name": "📥 Downloads (latest)", "value": "$downloads", "inline": true }
+      ],
+      "footer": { "text": "Auto-updated • $timestamp" }
+    }
+  ]
+}
+EOF
+)
           curl -H "Content-Type: application/json" -X POST -d "$payload" $DISCORD_WEBHOOK
