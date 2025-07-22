@@ -1,4 +1,4 @@
-name: Discord Stats
+name: discord-stats
 
 on:
   workflow_dispatch:
@@ -11,11 +11,9 @@ jobs:
       - name: Send message to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          STARS: ${{ env.STARS }}
-          FORKS: ${{ env.FORKS }}
-          DOWNLOADS: ${{ env.DOWNLOADS }}
         run: |
-          message="**Windows Maintenance Tool – GitHub stats**\n⭐ Stars: ${STARS}\n🍴 Forks: ${FORKS}\n📥 Downloads (latest): ${DOWNLOADS}"
-          json_message=$(python3 -c "import json,os; print(json.dumps(os.environ['message']))" message="$message")
+          message=":tada: Workflow virker 100%! :rocket:\n\nDenne besked er sendt fra GitHub Actions til Discord-webhook."
+          # Escape beskeden til JSON
+          json_message=$(printf '%s' "$message" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
           payload="{\"content\": $json_message}"
           curl -H "Content-Type: application/json" -X POST -d "$payload" $DISCORD_WEBHOOK
