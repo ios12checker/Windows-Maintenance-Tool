@@ -1,46 +1,13 @@
-name: Discord Stats Notifier
-
-on:
-  schedule:
-    - cron: '0 9 * * *' # Runs daily at 9:00 UTC
-  workflow_dispatch:
-
-jobs:
-  send-stats:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Fetch repo stats
-        id: stats
-        run: |
-          sudo apt-get update
-          sudo apt-get install jq -y
-          stars=$(curl -s https://api.github.com/repos/ios12checker/Windows-Maintenance-Tool | jq '.stargazers_count')
-          forks=$(curl -s https://api.github.com/repos/ios12checker/Windows-Maintenance-Tool | jq '.forks_count')
-          downloads=$(curl -s https://api.github.com/repos/ios12checker/Windows-Maintenance-Tool/releases | jq '.[0].assets[0].download_count')
-          echo "STARS=$stars" >> $GITHUB_ENV
-          echo "FORKS=$forks" >> $GITHUB_ENV
-          echo "DOWNLOADS=$downloads" >> $GITHUB_ENV
-
-      - name: Send message to Discord
-        env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
-          STARS: ${{ env.STARS }}
-          FORKS: ${{ env.FORKS }}
-          DOWNLOADS: ${{ env.DOWNLOADS }}
-        run: |
-          # Send a simple test message first (uncomment to use)
-          # message="Test from GitHub Actions"
-          # echo "Sending message: $message"
-          # response=$(curl -s -w "%{http_code}" -o response.txt -H "Content-Type: application/json" -X POST -d "{\"content\": \"$message\"}" $DISCORD_WEBHOOK)
-          # cat response.txt
-          # echo "Discord Response code: $response"
-
-          # Send full stats message
-          message="**Windows Maintenance Tool – GitHub stats**
-          ⭐ Stars: $STARS
-          🍴 Forks: $FORKS
-          📥 Downloads (latest): $DOWNLOADS"
-          echo "Sending message: $message"
-          response=$(curl -s -w "%{http_code}" -o response.txt -H "Content-Type: application/json" -X POST -d "{\"content\": \"$message\"}" $DISCORD_WEBHOOK)
-          cat response.txt
-          echo "Discord Response code: $response"
+- name: Send message to Discord
+  env:
+    DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+    STARS: ${{ env.STARS }}
+    FORKS: ${{ env.FORKS }}
+    DOWNLOADS: ${{ env.DOWNLOADS }}
+  run: |
+    message="**Windows Maintenance Tool – GitHub stats**\n⭐ Stars: $STARS\n🍴 Forks: $FORKS\n📥 Downloads (latest): $DOWNLOADS"
+    echo "Sending message: $message"
+    payload="{\"content\": \"$message\"}"
+    response=$(curl -s -w "%{http_code}" -o response.txt -H "Content-Type: application/json" -X POST -d "$payload" $DISCORD_WEBHOOK)
+    cat response.txt
+    echo "Discord Response code: $response"
