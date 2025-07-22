@@ -1,4 +1,4 @@
-- name: Send message to Discord
+- name: Discord Stats Notifier
   env:
     DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
     STARS: ${{ env.STARS }}
