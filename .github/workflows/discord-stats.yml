@@ -28,8 +28,19 @@ jobs:
           FORKS: ${{ env.FORKS }}
           DOWNLOADS: ${{ env.DOWNLOADS }}
         run: |
+          # Send a simple test message first (uncomment to use)
+          # message="Test from GitHub Actions"
+          # echo "Sending message: $message"
+          # response=$(curl -s -w "%{http_code}" -o response.txt -H "Content-Type: application/json" -X POST -d "{\"content\": \"$message\"}" $DISCORD_WEBHOOK)
+          # cat response.txt
+          # echo "Discord Response code: $response"
+
+          # Send full stats message
           message="**Windows Maintenance Tool – GitHub stats**
           ⭐ Stars: $STARS
           🍴 Forks: $FORKS
           📥 Downloads (latest): $DOWNLOADS"
-          curl -H "Content-Type: application/json" -X POST -d "{\"content\": \"$message\"}" $DISCORD_WEBHOOK
+          echo "Sending message: $message"
+          response=$(curl -s -w "%{http_code}" -o response.txt -H "Content-Type: application/json" -X POST -d "{\"content\": \"$message\"}" $DISCORD_WEBHOOK)
+          cat response.txt
+          echo "Discord Response code: $response"
