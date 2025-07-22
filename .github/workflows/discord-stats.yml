@@ -29,14 +29,29 @@ jobs:
           downloads=$(echo "$release" | jq '[.assets[]?.download_count] | add // 0')
           echo "downloads=$downloads" >> $GITHUB_OUTPUT
 
-      - name: Send message to Discord
+           - name: Send embed message to Discord
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: |
           stars="${{ steps.repo-stats.outputs.stars }}"
           forks="${{ steps.repo-stats.outputs.forks }}"
           downloads="${{ steps.downloads.outputs.downloads }}"
-          message="**Windows Maintenance Tool – GitHub stats**\n⭐ Stars: $stars\n🍴 Forks: $forks\n📥 Downloads (latest): $downloads"
-          json_message=$(printf '%s' "$message" | python3 -c "import json,sys; print(json.dumps(sys.stdin.read()))")
-          payload="{\"content\": $json_message}"
+          repo_url="https://github.com/${GITHUB_REPOSITORY}"
+          payload='{
+            "embeds": [
+              {
+                "title": "Windows Maintenance Tool – GitHub Stats",
+                "url": "'"$repo_url"'",
+                "color": 5793266,
+                "fields": [
+                  { "name": "⭐ Stars", "value": "'"$stars"'", "inline": true },
+                  { "name": "🍴 Forks", "value": "'"$forks"'", "inline": true },
+                  { "name": "📥 Downloads (latest)", "value": "'"$downloads"'", "inline": true }
+                ],
+                "footer": {
+                  "text": "Auto-updated • $(date '+%Y-%m-%d %H:%M')"
+                }
+              }
+            ]
+          }'
           curl -H "Content-Type: application/json" -X POST -d "$payload" $DISCORD_WEBHOOK
