@@ -14,7 +14,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.5.0 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
@@ -690,7 +690,7 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                         Write-Host "DoH application failed. Check system permissions or Windows version."
                     }
                     Write-Host "[1] Check DoH status"
-                    Write-Host "[2] Return to menu"
+                    Write-Host "[0] Return to menu"
                     Write-Host "======================================================"
                     $doh_choice = Read-Host "Enter your choice"
                     switch ($doh_choice) {
@@ -1835,7 +1835,7 @@ function Choice-23 {
         Pause-Menu
         Write-Host
         Write-Host "[1] Reset Update Services (wuauserv, cryptsvc, appidsvc, bits)"
-        Write-Host "[2] Return to Main Menu"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
         $fixchoice = Read-Host "Select an option"
         switch ($fixchoice) {
@@ -1875,7 +1875,7 @@ function Choice-24 {
         Write-Host
         Write-Host "[1] Display routing table in this window"
         Write-Host "[2] Save routing table as a text file on Desktop"
-        Write-Host "[3] Return to Main Menu"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
         $routeopt = Read-Host "Choose an option"
         switch ($routeopt) {
@@ -1909,9 +1909,9 @@ function Choice-24 {
                 Pause-Menu
                 return
             }
-            "3" { return }
+            "0" { return }
             default {
-                Write-Host "Invalid input. Please enter 1, 2 or 3."
+                Write-Host "Invalid input. Please enter 1, 2 or 0."
                 Pause-Menu
             }
         }
