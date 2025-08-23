@@ -39,6 +39,7 @@ function Show-Menu {
     Write-Host " [13]  Advanced Registry Cleanup-Optimization"
     Write-Host " [14]  Optimize SSDs (ReTrim)"
     Write-Host " [15]  Task Management (Scheduled Tasks) [Admin]"
+    Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
     Write-Host " [20]  Show installed drivers"
@@ -1632,57 +1633,137 @@ function Choice-15 {
     }
 }
 
-function Choice-30 {
+function Choice-16 {
     while ($true) {
         Clear-Host
-        $discordUrl = "https://discord.gg/bCQqKHGxja"
-        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
-
+        Write-Host "==============================================="
+        Write-Host "     Broken Shortcut Finder & Fixer"
+        Write-Host "==============================================="
+        Write-Host "Scans Start Menu and Desktop for broken shortcuts."
         Write-Host
-        Write-Host "=================================================="
-        Write-Host "               CONTACT AND SUPPORT"
-        Write-Host "=================================================="
-        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
-        Write-Host "How can we help you?"
+        Write-Host "[1] Run Broken Shortcut Scan"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
-        Write-Host " [1] Open Support Discord Server ($discordUrl)"
-        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
-        Write-Host
-        Write-Host " [0] Return to main menu"
-        Write-Host "=================================================="
-
-        $supportChoice = Read-Host "Enter your choice"
-
-        switch ($supportChoice) {
+        $opt = Read-Host "Choose an option"
+        switch ($opt) {
             "1" {
-                Write-Host "Opening the support Discord server in your browser..."
-                try {
-                    Start-Process $discordUrl -ErrorAction Stop
-                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
-                } catch {
-                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                Clear-Host
+
+                # Paths to scan
+                $shortcutPaths = @(
+                    "C:\ProgramData\Microsoft\Windows\Start Menu",
+                    "$env:APPDATA\Microsoft\Windows\Start Menu",
+                    "$env:USERPROFILE\Desktop",
+                    "C:\Users\Public\Desktop"
+                )
+
+                # Known system shortcuts to skip
+                $systemShortcuts = @(
+                    "File Explorer.lnk",
+                    "Run.lnk",
+                    "Recycle Bin.lnk",
+                    "Control Panel.lnk"
+                )
+
+                function Get-ShortcutTarget {
+                    param([string]$shortcutPath)
+                    $shell = New-Object -ComObject WScript.Shell
+                    try { $shell.CreateShortcut($shortcutPath).TargetPath } catch { $null }
                 }
-                Pause-Menu
-                return
-            }
-            "2" {
-                Write-Host "Opening the GitHub issue page in your browser..."
-                try {
-                    Start-Process $githubUrl -ErrorAction Stop
-                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
-                } catch {
-                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+
+                function Is-SystemShortcut {
+                    param([string]$shortcutPath, [string]$target)
+                    $name = Split-Path $shortcutPath -Leaf
+                    if ($systemShortcuts -contains $name) { return $true }
+                    if ($target -match '^shell:') { return $true }
+                    if ($target -match '^\s*::{[0-9A-Fa-f-]+}') { return $true } # CLSID
+                    return $false
                 }
+
+                function Prompt-YesNo {
+                    param([string]$message)
+                    $response = Read-Host $message
+                    if ($response -match '^(y|yes|1)$') { return $true }
+                    elseif ($response -match '^(n|no|2)$') { return $false }
+                    else {
+                        Write-Host "Please enter yes/y/1 or no/n/2." -ForegroundColor Yellow
+                        return (Prompt-YesNo $message)
+                    }
+                }
+
+                $processedShortcuts = @{}
+
+                foreach ($path in $shortcutPaths) {
+                    Write-Host "`nScanning: $path" -ForegroundColor Cyan
+                    $shortcuts = Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+
+                    foreach ($shortcut in $shortcuts) {
+                        if ($processedShortcuts.ContainsKey($shortcut.FullName)) { continue }
+
+                        $target = Get-ShortcutTarget $shortcut.FullName
+
+                        # Skip system shortcuts
+                        if (Is-SystemShortcut $shortcut.FullName $target) {
+                            Write-Host "Skipping system shortcut: $($shortcut.FullName)" -ForegroundColor DarkGray
+                            $processedShortcuts[$shortcut.FullName] = $true
+                            continue
+                        }
+
+                        # If target missing or doesn't exist
+                        if (-not $target -or -not (Test-Path $target)) {
+                            Write-Host "Broken shortcut: $($shortcut.FullName)" -ForegroundColor Yellow
+
+                            # Try to guess install folder from other working shortcuts in same folder
+                            $workingTargets = @()
+                            Get-ChildItem -Path $shortcut.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue |
+                                Where-Object { $_.FullName -ne $shortcut.FullName } |
+                                ForEach-Object {
+                                    $t = Get-ShortcutTarget $_.FullName
+                                    if ($t -and (Test-Path $t)) {
+                                        $workingTargets += (Split-Path $t -Parent)
+                                    }
+                                }
+
+                            $found = $null
+                            if ($workingTargets.Count -gt 0) {
+                                $installFolder = $workingTargets | Select-Object -First 1
+                                $fileName = if ($target) { Split-Path $target -Leaf } else { ($shortcut.BaseName + ".exe") }
+                                $candidate = Join-Path $installFolder $fileName
+                                if (Test-Path $candidate) { $found = $candidate }
+                            }
+
+                            if ($found) {
+                                Write-Host "Found possible target in same folder: $found" -ForegroundColor Green
+                                if (Prompt-YesNo "Update shortcut to this path? (yes/y/1 or no/n/2)") {
+                                    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut.FullName)
+                                    $sc.TargetPath = $found
+                                    $sc.Save()
+                                    Write-Host "Shortcut updated." -ForegroundColor Green
+                                }
+                            } else {
+                                if (Prompt-YesNo "Target not found. Delete shortcut? (yes/y/1 or no/n/2)") {
+                                    Remove-Item $shortcut.FullName -Force
+                                    Write-Host "Shortcut deleted." -ForegroundColor Red
+                                }
+                            }
+                        }
+
+                        $processedShortcuts[$shortcut.FullName] = $true
+                    }
+                }
+
+                Write-Host "`nScan complete." -ForegroundColor Cyan
                 Pause-Menu
                 return
             }
             "0" { return }
-            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+            default {
+                Write-Host "Invalid input. Please enter 1 or 2."
+                Pause-Menu
+            }
         }
     }
 }
-
-function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
 
 function Choice-20 {
     Clear-Host
@@ -1996,6 +2077,57 @@ function Choice-25 {
         default { return }
     }
 }
+function Choice-30 {
+    while ($true) {
+        Clear-Host
+        $discordUrl = "https://discord.gg/bCQqKHGxja"
+        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
+
+        Write-Host
+        Write-Host "=================================================="
+        Write-Host "               CONTACT AND SUPPORT"
+        Write-Host "=================================================="
+        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
+        Write-Host "How can we help you?"
+        Write-Host
+        Write-Host " [1] Open Support Discord Server ($discordUrl)"
+        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "=================================================="
+
+        $supportChoice = Read-Host "Enter your choice"
+
+        switch ($supportChoice) {
+            "1" {
+                Write-Host "Opening the support Discord server in your browser..."
+                try {
+                    Start-Process $discordUrl -ErrorAction Stop
+                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "2" {
+                Write-Host "Opening the GitHub issue page in your browser..."
+                try {
+                    Start-Process $githubUrl -ErrorAction Stop
+                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+        }
+    }
+}
+
+function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
 
 
 # === MAIN MENU LOOP ===
@@ -2018,7 +2150,7 @@ while ($true) {
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
         "15" { Choice-15; continue }
-        "0" { Choice-0 }
+        "16" { Choice-16; continue }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
@@ -2028,6 +2160,7 @@ while ($true) {
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
+        "0" { Choice-0 }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
 }
