@@ -46,6 +46,7 @@ function Show-Menu {
     Write-Host " [22]  Generate Full System Report"
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
+    Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host
     Write-Host "     === SUPPORT ==="
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
@@ -1916,6 +1917,86 @@ function Choice-24 {
         }
     }
 }
+function Choice-25 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   .NET RollForward Settings"
+    Write-Host "==============================================="
+    Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
+    Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
+    Write-Host "[3] Enable roll-forward for BOTH          [WARNING] risk: unpredictable runtime/build behavior"
+    Write-Host "[4] Disable roll-forward (remove setting)"
+    Write-Host "[0] Return to main menu"
+    Write-Host
+
+    $choice = Read-Host "Select an option"
+    switch ($choice) {
+        "1" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            Write-Host "[OK] Configured .NET Runtime roll-forward to latest major version." -ForegroundColor Green
+            Pause-Menu
+        }
+        "2" {
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured .NET SDK to use version $version with roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "3" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured BOTH Runtime & SDK roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "4" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", $null, "Machine")
+            $globalJsonPath = "$env:USERPROFILE\global.json"
+            if (Test-Path $globalJsonPath) {
+                try {
+                    $json = Get-Content $globalJsonPath | ConvertFrom-Json
+                    if ($json.sdk.rollForward) {
+                        $json.sdk.PSObject.Properties.Remove("rollForward")
+                        $json | ConvertTo-Json -Depth 3 | Out-File -Encoding UTF8 $globalJsonPath
+                        Write-Host "[REMOVED] rollForward from global.json." -ForegroundColor Green
+                    }
+                } catch {
+                    Write-Host "[WARNING] Could not update global.json: $_" -ForegroundColor Yellow
+                }
+            }
+            Write-Host "[OK] DOTNET_ROLL_FORWARD environment variable removed." -ForegroundColor Green
+            Pause-Menu
+        }
+        default { return }
+    }
+}
+
 
 # === MAIN MENU LOOP ===
 while ($true) {
@@ -1943,6 +2024,7 @@ while ($true) {
         "22" { Choice-22; continue }
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
+        "25" { Choice-25; continue }
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
