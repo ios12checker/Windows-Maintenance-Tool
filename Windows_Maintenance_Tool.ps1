@@ -42,7 +42,7 @@ function Show-Menu {
     Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
-    Write-Host " [20]  Show installed drivers"
+    Write-Host " [20]  Driver Management"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
     Write-Host " [23]  Windows Update Utility & Service Reset"
@@ -1768,14 +1768,113 @@ function Choice-16 {
 function Choice-20 {
     Clear-Host
     Write-Host "==============================================="
-    Write-Host "    Saving Installed Driver Report to Desktop"
+    Write-Host "         Driver & Device Maintenance"
     Write-Host "==============================================="
-    $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
-    driverquery /v > $outfile
-    Write-Host
-    Write-Host "Driver report has been saved to: $outfile"
-    Pause-Menu
+    Write-Host "1. Save Installed Driver Report to Desktop"
+    Write-Host "2. List and Remove Hidden Devices"
+    Write-Host "3. Disable Automatic Driver Updates"
+    Write-Host "4. Enable Automatic Driver Updates"
+    Write-Host "5. Disable Device Metadata Downloads"
+    Write-Host "6. Enable Device Metadata Downloads"
+    Write-Host "0. Return to Main Menu"
+    Write-Host "==============================================="
+    
+    $choice = Read-Host "Enter your choice"
+
+    switch ($choice) {
+        '1' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Saving Installed Driver Report to Desktop"
+            Write-Host "==============================================="
+            $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
+            driverquery /v > $outfile
+            Write-Host
+            Write-Host "Driver report has been saved to: $outfile"
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '2' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Listing and Removing Hidden Devices"
+            Write-Host "==============================================="
+            $hiddenDevices = Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' }
+            if ($hiddenDevices) {
+                Write-Host "Found $($hiddenDevices.Count) hidden device(s). Removing..."
+                foreach ($device in $hiddenDevices) {
+                    pnputil /remove-device $device.InstanceId
+                }
+                Write-Host "All hidden devices removed."
+            } else {
+                Write-Host "No hidden devices found."
+            }
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '3' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 0
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Set-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -Value 1 -Type DWord
+            Write-Host "Automatic driver updates disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '4' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 1
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Remove-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -ErrorAction SilentlyContinue
+            Write-Host "Automatic driver updates enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '5' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 1 -Type DWord
+            Write-Host "Device metadata downloads disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '6' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 0 -Type DWord
+            Write-Host "Device metadata downloads enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '0' {
+            return
+        }
+        default {
+            Write-Host "Invalid choice. Please try again."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+    }
 }
+
 
 function Choice-21 {
     Clear-Host
@@ -1783,7 +1882,39 @@ function Choice-21 {
     Write-Host "    Windows Update Repair Tool [Admin]"
     Write-Host "==============================================="
     Write-Host
-    Write-Host "[1/4] Stopping update-related services..."
+
+    # Admin check
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "ERROR: Please run this script as Administrator." -ForegroundColor Red
+        return
+    }
+
+    # Optional cleanup of old .bak folders
+    $bakFolders = @(
+        Get-ChildItem -Path $env:windir -Directory -Filter "SoftwareDistribution.bak_*" -ErrorAction SilentlyContinue
+        Get-ChildItem -Path "$env:windir\System32" -Directory -Filter "catroot2.bak_*" -ErrorAction SilentlyContinue
+    )
+    if ($bakFolders.Count -gt 0) {
+        Write-Host "Found existing .bak folders from previous resets:"
+        $bakFolders | ForEach-Object { Write-Host "  - $($_.FullName)" }
+        $choice = Read-Host "Do you want to delete these now? (Y/N)"
+        if ($choice -match '^[Yy]$') {
+            foreach ($folder in $bakFolders) {
+                try {
+                    Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction Stop
+                    Write-Host "Deleted: $($folder.FullName)"
+                } catch {
+                    Write-Host "Warning: Could not delete $($folder.FullName)"
+                }
+            }
+        } else {
+            Write-Host "Skipping deletion of old .bak folders."
+        }
+        Write-Host
+    }
+
+    # Step 1: Stop services
+    Write-Host "[1/6] Stopping update-related services..."
     $services = @('wuauserv','bits','cryptsvc','msiserver','usosvc','trustedinstaller')
     foreach ($service in $services) {
         $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
@@ -1794,7 +1925,14 @@ function Choice-21 {
     }
     Start-Sleep -Seconds 2
     Write-Host
-    Write-Host "[2/4] Renaming update cache folders..."
+
+    # Step 2: Clear BITS queue
+    Write-Host "[2/6] Clearing BITS transfer queue..."
+    try { Get-BitsTransfer -AllUsers | Remove-BitsTransfer -Confirm:$false } catch {}
+    Write-Host
+
+    # Step 3: Rename update cache folders
+    Write-Host "[3/6] Renaming update cache folders..."
     $SUFFIX = ".bak_{0}" -f (Get-Random -Maximum 99999)
     $SD = "$env:windir\SoftwareDistribution"
     $CR = "$env:windir\System32\catroot2"
@@ -1803,25 +1941,40 @@ function Choice-21 {
     if (Test-Path $SD) {
         try {
             Rename-Item $SD -NewName ("SoftwareDistribution" + $SUFFIX) -ErrorAction Stop
-            if (Test-Path $renamedSD) {
-                Write-Host "Renamed: $renamedSD"
-            } else {
-                Write-Host "Warning: Could not rename SoftwareDistribution."
-            }
+            Write-Host "Renamed: $renamedSD"
         } catch { Write-Host "Warning: Could not rename SoftwareDistribution." }
     } else { Write-Host "Info: SoftwareDistribution not found." }
     if (Test-Path $CR) {
         try {
             Rename-Item $CR -NewName ("catroot2" + $SUFFIX) -ErrorAction Stop
-            if (Test-Path $renamedCR) {
-                Write-Host "Renamed: $renamedCR"
-            } else {
-                Write-Host "Warning: Could not rename catroot2."
-            }
+            Write-Host "Renamed: $renamedCR"
         } catch { Write-Host "Warning: Could not rename catroot2." }
     } else { Write-Host "Info: catroot2 not found." }
     Write-Host
-    Write-Host "[3/4] Restarting services..."
+
+    # Step 4: Re-register update DLLs
+    Write-Host "[4/6] Re-registering Windows Update components..."
+    $dlls = @(
+        "atl.dll","urlmon.dll","mshtml.dll","shdocvw.dll","browseui.dll","jscript.dll",
+        "vbscript.dll","scrrun.dll","msxml.dll","msxml3.dll","msxml6.dll","actxprxy.dll",
+        "softpub.dll","wintrust.dll","dssenh.dll","rsaenh.dll","gpkcsp.dll","sccbase.dll",
+        "slbcsp.dll","cryptdlg.dll","oleaut32.dll","ole32.dll","shell32.dll","initpki.dll",
+        "wuapi.dll","wuaueng.dll","wuaueng1.dll","wucltui.dll","wups.dll","wups2.dll",
+        "wuweb.dll","qmgr.dll","qmgrprxy.dll","wucltux.dll","muweb.dll","wuwebv.dll"
+    )
+    foreach ($dll in $dlls) {
+        try { regsvr32.exe /s $dll } catch {}
+    }
+    Write-Host
+
+    # Step 5: Reset Winsock & WinHTTP
+    Write-Host "[5/6] Resetting network settings..."
+    try { netsh winsock reset | Out-Null } catch {}
+    try { netsh winhttp reset proxy | Out-Null } catch {}
+    Write-Host
+
+    # Step 6: Restart services
+    Write-Host "[6/6] Restarting services..."
     foreach ($service in $services) {
         $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne "Running") {
@@ -1830,7 +1983,8 @@ function Choice-21 {
         }
     }
     Write-Host
-    Write-Host "[4/4] Windows Update components have been reset."
+
+    Write-Host "Windows Update components have been fully reset."
     Write-Host
     Write-Host "Renamed folders:"
     Write-Host "  - $renamedSD"
@@ -1839,6 +1993,7 @@ function Choice-21 {
     Write-Host
     Pause-Menu
 }
+
 
 function Choice-22 {
     Clear-Host
