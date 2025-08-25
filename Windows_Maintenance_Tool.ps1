@@ -14,7 +14,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.5.0 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
@@ -39,13 +39,15 @@ function Show-Menu {
     Write-Host " [13]  Advanced Registry Cleanup-Optimization"
     Write-Host " [14]  Optimize SSDs (ReTrim)"
     Write-Host " [15]  Task Management (Scheduled Tasks) [Admin]"
+    Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
     Write-Host "     === UTILITIES & EXTRAS ==="
-    Write-Host " [20]  Show installed drivers"
+    Write-Host " [20]  Driver Management"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
+    Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host
     Write-Host "     === SUPPORT ==="
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
@@ -689,7 +691,7 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                         Write-Host "DoH application failed. Check system permissions or Windows version."
                     }
                     Write-Host "[1] Check DoH status"
-                    Write-Host "[2] Return to menu"
+                    Write-Host "[0] Return to menu"
                     Write-Host "======================================================"
                     $doh_choice = Read-Host "Enter your choice"
                     switch ($doh_choice) {
@@ -1631,68 +1633,246 @@ function Choice-15 {
     }
 }
 
-function Choice-30 {
+function Choice-16 {
     while ($true) {
         Clear-Host
-        $discordUrl = "https://discord.gg/bCQqKHGxja"
-        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
-
+        Write-Host "==============================================="
+        Write-Host "     Broken Shortcut Finder & Fixer"
+        Write-Host "==============================================="
+        Write-Host "Scans Start Menu and Desktop for broken shortcuts."
         Write-Host
-        Write-Host "=================================================="
-        Write-Host "               CONTACT AND SUPPORT"
-        Write-Host "=================================================="
-        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
-        Write-Host "How can we help you?"
+        Write-Host "[1] Run Broken Shortcut Scan"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
-        Write-Host " [1] Open Support Discord Server ($discordUrl)"
-        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
-        Write-Host
-        Write-Host " [0] Return to main menu"
-        Write-Host "=================================================="
-
-        $supportChoice = Read-Host "Enter your choice"
-
-        switch ($supportChoice) {
+        $opt = Read-Host "Choose an option"
+        switch ($opt) {
             "1" {
-                Write-Host "Opening the support Discord server in your browser..."
-                try {
-                    Start-Process $discordUrl -ErrorAction Stop
-                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
-                } catch {
-                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                Clear-Host
+
+                # Paths to scan
+                $shortcutPaths = @(
+                    "C:\ProgramData\Microsoft\Windows\Start Menu",
+                    "$env:APPDATA\Microsoft\Windows\Start Menu",
+                    "$env:USERPROFILE\Desktop",
+                    "C:\Users\Public\Desktop"
+                )
+
+                # Known system shortcuts to skip
+                $systemShortcuts = @(
+                    "File Explorer.lnk",
+                    "Run.lnk",
+                    "Recycle Bin.lnk",
+                    "Control Panel.lnk"
+                )
+
+                function Get-ShortcutTarget {
+                    param([string]$shortcutPath)
+                    $shell = New-Object -ComObject WScript.Shell
+                    try { $shell.CreateShortcut($shortcutPath).TargetPath } catch { $null }
                 }
-                Pause-Menu
-                return
-            }
-            "2" {
-                Write-Host "Opening the GitHub issue page in your browser..."
-                try {
-                    Start-Process $githubUrl -ErrorAction Stop
-                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
-                } catch {
-                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+
+                function Is-SystemShortcut {
+                    param([string]$shortcutPath, [string]$target)
+                    $name = Split-Path $shortcutPath -Leaf
+                    if ($systemShortcuts -contains $name) { return $true }
+                    if ($target -match '^shell:') { return $true }
+                    if ($target -match '^\s*::{[0-9A-Fa-f-]+}') { return $true } # CLSID
+                    return $false
                 }
+
+                function Prompt-YesNo {
+                    param([string]$message)
+                    $response = Read-Host $message
+                    if ($response -match '^(y|yes|1)$') { return $true }
+                    elseif ($response -match '^(n|no|2)$') { return $false }
+                    else {
+                        Write-Host "Please enter yes/y/1 or no/n/2." -ForegroundColor Yellow
+                        return (Prompt-YesNo $message)
+                    }
+                }
+
+                $processedShortcuts = @{}
+
+                foreach ($path in $shortcutPaths) {
+                    Write-Host "`nScanning: $path" -ForegroundColor Cyan
+                    $shortcuts = Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+
+                    foreach ($shortcut in $shortcuts) {
+                        if ($processedShortcuts.ContainsKey($shortcut.FullName)) { continue }
+
+                        $target = Get-ShortcutTarget $shortcut.FullName
+
+                        # Skip system shortcuts
+                        if (Is-SystemShortcut $shortcut.FullName $target) {
+                            Write-Host "Skipping system shortcut: $($shortcut.FullName)" -ForegroundColor DarkGray
+                            $processedShortcuts[$shortcut.FullName] = $true
+                            continue
+                        }
+
+                        # If target missing or doesn't exist
+                        if (-not $target -or -not (Test-Path $target)) {
+                            Write-Host "Broken shortcut: $($shortcut.FullName)" -ForegroundColor Yellow
+
+                            # Try to guess install folder from other working shortcuts in same folder
+                            $workingTargets = @()
+                            Get-ChildItem -Path $shortcut.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue |
+                                Where-Object { $_.FullName -ne $shortcut.FullName } |
+                                ForEach-Object {
+                                    $t = Get-ShortcutTarget $_.FullName
+                                    if ($t -and (Test-Path $t)) {
+                                        $workingTargets += (Split-Path $t -Parent)
+                                    }
+                                }
+
+                            $found = $null
+                            if ($workingTargets.Count -gt 0) {
+                                $installFolder = $workingTargets | Select-Object -First 1
+                                $fileName = if ($target) { Split-Path $target -Leaf } else { ($shortcut.BaseName + ".exe") }
+                                $candidate = Join-Path $installFolder $fileName
+                                if (Test-Path $candidate) { $found = $candidate }
+                            }
+
+                            if ($found) {
+                                Write-Host "Found possible target in same folder: $found" -ForegroundColor Green
+                                if (Prompt-YesNo "Update shortcut to this path? (yes/y/1 or no/n/2)") {
+                                    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut.FullName)
+                                    $sc.TargetPath = $found
+                                    $sc.Save()
+                                    Write-Host "Shortcut updated." -ForegroundColor Green
+                                }
+                            } else {
+                                if (Prompt-YesNo "Target not found. Delete shortcut? (yes/y/1 or no/n/2)") {
+                                    Remove-Item $shortcut.FullName -Force
+                                    Write-Host "Shortcut deleted." -ForegroundColor Red
+                                }
+                            }
+                        }
+
+                        $processedShortcuts[$shortcut.FullName] = $true
+                    }
+                }
+
+                Write-Host "`nScan complete." -ForegroundColor Cyan
                 Pause-Menu
                 return
             }
             "0" { return }
-            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+            default {
+                Write-Host "Invalid input. Please enter 1 or 2."
+                Pause-Menu
+            }
         }
     }
 }
 
-function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
-
 function Choice-20 {
     Clear-Host
     Write-Host "==============================================="
-    Write-Host "    Saving Installed Driver Report to Desktop"
+    Write-Host "         Driver & Device Maintenance"
     Write-Host "==============================================="
-    $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
-    driverquery /v > $outfile
-    Write-Host
-    Write-Host "Driver report has been saved to: $outfile"
-    Pause-Menu
+    Write-Host "1. Save Installed Driver Report to Desktop"
+    Write-Host "2. List and Remove Hidden Devices"
+    Write-Host "3. Disable Automatic Driver Updates"
+    Write-Host "4. Enable Automatic Driver Updates"
+    Write-Host "5. Disable Device Metadata Downloads"
+    Write-Host "6. Enable Device Metadata Downloads"
+    Write-Host "0. Return to Main Menu"
+    Write-Host "==============================================="
+    
+    $choice = Read-Host "Enter your choice"
+
+    switch ($choice) {
+        '1' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Saving Installed Driver Report to Desktop"
+            Write-Host "==============================================="
+            $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
+            driverquery /v > $outfile
+            Write-Host
+            Write-Host "Driver report has been saved to: $outfile"
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '2' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Listing and Removing Hidden Devices"
+            Write-Host "==============================================="
+            $hiddenDevices = Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' }
+            if ($hiddenDevices) {
+                Write-Host "Found $($hiddenDevices.Count) hidden device(s). Removing..."
+                foreach ($device in $hiddenDevices) {
+                    pnputil /remove-device $device.InstanceId
+                }
+                Write-Host "All hidden devices removed."
+            } else {
+                Write-Host "No hidden devices found."
+            }
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '3' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 0
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Set-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -Value 1 -Type DWord
+            Write-Host "Automatic driver updates disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '4' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 1
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Remove-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -ErrorAction SilentlyContinue
+            Write-Host "Automatic driver updates enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '5' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 1 -Type DWord
+            Write-Host "Device metadata downloads disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '6' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 0 -Type DWord
+            Write-Host "Device metadata downloads enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+        '0' {
+            return
+        }
+        default {
+            Write-Host "Invalid choice. Please try again."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Choice-20
+        }
+    }
 }
 
 function Choice-21 {
@@ -1701,7 +1881,39 @@ function Choice-21 {
     Write-Host "    Windows Update Repair Tool [Admin]"
     Write-Host "==============================================="
     Write-Host
-    Write-Host "[1/4] Stopping update-related services..."
+
+    # Admin check
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "ERROR: Please run this script as Administrator." -ForegroundColor Red
+        return
+    }
+
+    # Optional cleanup of old .bak folders
+    $bakFolders = @(
+        Get-ChildItem -Path $env:windir -Directory -Filter "SoftwareDistribution.bak_*" -ErrorAction SilentlyContinue
+        Get-ChildItem -Path "$env:windir\System32" -Directory -Filter "catroot2.bak_*" -ErrorAction SilentlyContinue
+    )
+    if ($bakFolders.Count -gt 0) {
+        Write-Host "Found existing .bak folders from previous resets:"
+        $bakFolders | ForEach-Object { Write-Host "  - $($_.FullName)" }
+        $choice = Read-Host "Do you want to delete these now? (Y/N)"
+        if ($choice -match '^[Yy]$') {
+            foreach ($folder in $bakFolders) {
+                try {
+                    Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction Stop
+                    Write-Host "Deleted: $($folder.FullName)"
+                } catch {
+                    Write-Host "Warning: Could not delete $($folder.FullName)"
+                }
+            }
+        } else {
+            Write-Host "Skipping deletion of old .bak folders."
+        }
+        Write-Host
+    }
+
+    # Step 1: Stop services
+    Write-Host "[1/6] Stopping update-related services..."
     $services = @('wuauserv','bits','cryptsvc','msiserver','usosvc','trustedinstaller')
     foreach ($service in $services) {
         $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
@@ -1712,7 +1924,14 @@ function Choice-21 {
     }
     Start-Sleep -Seconds 2
     Write-Host
-    Write-Host "[2/4] Renaming update cache folders..."
+
+    # Step 2: Clear BITS queue
+    Write-Host "[2/6] Clearing BITS transfer queue..."
+    try { Get-BitsTransfer -AllUsers | Remove-BitsTransfer -Confirm:$false } catch {}
+    Write-Host
+
+    # Step 3: Rename update cache folders
+    Write-Host "[3/6] Renaming update cache folders..."
     $SUFFIX = ".bak_{0}" -f (Get-Random -Maximum 99999)
     $SD = "$env:windir\SoftwareDistribution"
     $CR = "$env:windir\System32\catroot2"
@@ -1721,25 +1940,40 @@ function Choice-21 {
     if (Test-Path $SD) {
         try {
             Rename-Item $SD -NewName ("SoftwareDistribution" + $SUFFIX) -ErrorAction Stop
-            if (Test-Path $renamedSD) {
-                Write-Host "Renamed: $renamedSD"
-            } else {
-                Write-Host "Warning: Could not rename SoftwareDistribution."
-            }
+            Write-Host "Renamed: $renamedSD"
         } catch { Write-Host "Warning: Could not rename SoftwareDistribution." }
     } else { Write-Host "Info: SoftwareDistribution not found." }
     if (Test-Path $CR) {
         try {
             Rename-Item $CR -NewName ("catroot2" + $SUFFIX) -ErrorAction Stop
-            if (Test-Path $renamedCR) {
-                Write-Host "Renamed: $renamedCR"
-            } else {
-                Write-Host "Warning: Could not rename catroot2."
-            }
+            Write-Host "Renamed: $renamedCR"
         } catch { Write-Host "Warning: Could not rename catroot2." }
     } else { Write-Host "Info: catroot2 not found." }
     Write-Host
-    Write-Host "[3/4] Restarting services..."
+
+    # Step 4: Re-register update DLLs
+    Write-Host "[4/6] Re-registering Windows Update components..."
+    $dlls = @(
+        "atl.dll","urlmon.dll","mshtml.dll","shdocvw.dll","browseui.dll","jscript.dll",
+        "vbscript.dll","scrrun.dll","msxml.dll","msxml3.dll","msxml6.dll","actxprxy.dll",
+        "softpub.dll","wintrust.dll","dssenh.dll","rsaenh.dll","gpkcsp.dll","sccbase.dll",
+        "slbcsp.dll","cryptdlg.dll","oleaut32.dll","ole32.dll","shell32.dll","initpki.dll",
+        "wuapi.dll","wuaueng.dll","wuaueng1.dll","wucltui.dll","wups.dll","wups2.dll",
+        "wuweb.dll","qmgr.dll","qmgrprxy.dll","wucltux.dll","muweb.dll","wuwebv.dll"
+    )
+    foreach ($dll in $dlls) {
+        try { regsvr32.exe /s $dll } catch {}
+    }
+    Write-Host
+
+    # Step 5: Reset Winsock & WinHTTP
+    Write-Host "[5/6] Resetting network settings..."
+    try { netsh winsock reset | Out-Null } catch {}
+    try { netsh winhttp reset proxy | Out-Null } catch {}
+    Write-Host
+
+    # Step 6: Restart services
+    Write-Host "[6/6] Restarting services..."
     foreach ($service in $services) {
         $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -ne "Running") {
@@ -1748,7 +1982,8 @@ function Choice-21 {
         }
     }
     Write-Host
-    Write-Host "[4/4] Windows Update components have been reset."
+
+    Write-Host "Windows Update components have been fully reset."
     Write-Host
     Write-Host "Renamed folders:"
     Write-Host "  - $renamedSD"
@@ -1834,7 +2069,7 @@ function Choice-23 {
         Pause-Menu
         Write-Host
         Write-Host "[1] Reset Update Services (wuauserv, cryptsvc, appidsvc, bits)"
-        Write-Host "[2] Return to Main Menu"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
         $fixchoice = Read-Host "Select an option"
         switch ($fixchoice) {
@@ -1874,7 +2109,7 @@ function Choice-24 {
         Write-Host
         Write-Host "[1] Display routing table in this window"
         Write-Host "[2] Save routing table as a text file on Desktop"
-        Write-Host "[3] Return to Main Menu"
+        Write-Host "[0] Return to Main Menu"
         Write-Host
         $routeopt = Read-Host "Choose an option"
         switch ($routeopt) {
@@ -1908,14 +2143,145 @@ function Choice-24 {
                 Pause-Menu
                 return
             }
-            "3" { return }
+            "0" { return }
             default {
-                Write-Host "Invalid input. Please enter 1, 2 or 3."
+                Write-Host "Invalid input. Please enter 1, 2 or 0."
                 Pause-Menu
             }
         }
     }
 }
+function Choice-25 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   .NET RollForward Settings"
+    Write-Host "==============================================="
+    Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
+    Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
+    Write-Host "[3] Enable roll-forward for BOTH          [WARNING] risk: unpredictable runtime/build behavior"
+    Write-Host "[4] Disable roll-forward (remove setting)"
+    Write-Host "[0] Return to main menu"
+    Write-Host
+
+    $choice = Read-Host "Select an option"
+    switch ($choice) {
+        "1" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            Write-Host "[OK] Configured .NET Runtime roll-forward to latest major version." -ForegroundColor Green
+            Pause-Menu
+        }
+        "2" {
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured .NET SDK to use version $version with roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "3" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured BOTH Runtime & SDK roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "4" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", $null, "Machine")
+            $globalJsonPath = "$env:USERPROFILE\global.json"
+            if (Test-Path $globalJsonPath) {
+                try {
+                    $json = Get-Content $globalJsonPath | ConvertFrom-Json
+                    if ($json.sdk.rollForward) {
+                        $json.sdk.PSObject.Properties.Remove("rollForward")
+                        $json | ConvertTo-Json -Depth 3 | Out-File -Encoding UTF8 $globalJsonPath
+                        Write-Host "[REMOVED] rollForward from global.json." -ForegroundColor Green
+                    }
+                } catch {
+                    Write-Host "[WARNING] Could not update global.json: $_" -ForegroundColor Yellow
+                }
+            }
+            Write-Host "[OK] DOTNET_ROLL_FORWARD environment variable removed." -ForegroundColor Green
+            Pause-Menu
+        }
+        default { return }
+    }
+}
+function Choice-30 {
+    while ($true) {
+        Clear-Host
+        $discordUrl = "https://discord.gg/bCQqKHGxja"
+        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
+
+        Write-Host
+        Write-Host "=================================================="
+        Write-Host "               CONTACT AND SUPPORT"
+        Write-Host "=================================================="
+        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
+        Write-Host "How can we help you?"
+        Write-Host
+        Write-Host " [1] Open Support Discord Server ($discordUrl)"
+        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "=================================================="
+
+        $supportChoice = Read-Host "Enter your choice"
+
+        switch ($supportChoice) {
+            "1" {
+                Write-Host "Opening the support Discord server in your browser..."
+                try {
+                    Start-Process $discordUrl -ErrorAction Stop
+                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "2" {
+                Write-Host "Opening the GitHub issue page in your browser..."
+                try {
+                    Start-Process $githubUrl -ErrorAction Stop
+                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+        }
+    }
+}
+
+function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
+
 
 # === MAIN MENU LOOP ===
 while ($true) {
@@ -1937,15 +2303,17 @@ while ($true) {
         "13" { Choice-13; continue }
         "14" { Choice-14; continue }
         "15" { Choice-15; continue }
-        "0" { Choice-0 }
+        "16" { Choice-16; continue }
         "20" { Choice-20; continue }
         "21" { Choice-21; continue }
         "22" { Choice-22; continue }
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
+        "25" { Choice-25; continue }
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
+        "0" { Choice-0 }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
 }
