@@ -1,6 +1,33 @@
+# ===== Error Checking =====
+trap {
+    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Press ENTER to exit"
+    exit 1
+}
+$ErrorActionPreference = "Stop"
+
+if ((Get-ExecutionPolicy) -in @('Restricted','AllSigned')) {
+    Write-Host "Execution Policy blocks this script. Try: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Yellow
+    Read-Host "Press ENTER to exit"
+    exit 1
+}
 # ===== ADMIN AND CERTIFICATE BYPASS =====
+function Get-PwshOrPowershellPath {
+    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwsh) { return $pwsh.Source }
+    $ps = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($ps) { return $ps.Source }
+    return $null
+}
+
 if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
-    Start-Process pwsh -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
+    $shellPath = Get-PwshOrPowershellPath
+    if (-not $shellPath) {
+        Write-Host "No compatible PowerShell found (pwsh or powershell). Please install PowerShell 7+ or use Windows PowerShell." -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
+    Start-Process $shellPath -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 # ===== Main Content =====
@@ -14,7 +41,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.0 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.1 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
