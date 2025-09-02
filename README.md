@@ -10,8 +10,9 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
+<img width="944" height="697" alt="c2996cf0da297aac0a50deec9880f2c4" src="https://github.com/user-attachments/assets/33dba0a2-c1ef-46ca-a2bb-9f34a5dd1fd2" />
 
-<img width="945" height="685" alt="Windows Maintenance Tool Screenshot" src="https://github.com/user-attachments/assets/f7cbc263-b6d0-47f8-af70-ef20b352924d" />  
+
 
 ---
 
