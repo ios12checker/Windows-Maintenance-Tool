@@ -75,6 +75,7 @@ function Show-Menu {
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
+    Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
     Write-Host
     Write-Host "     === SUPPORT ==="
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
@@ -2324,6 +2325,50 @@ function Choice-25 {
         default { return }
     }
 }
+function Choice-26 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Xbox Credential Cleanup"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "Searching for Xbox Live credentials..."
+    Write-Host
+
+# Get all stored credentials from cmdkey and split into lines
+$allCreds = (cmdkey /list) -split "`r?`n"
+
+# Counter for deleted credentials
+$deletedCount = 0
+
+# Debug: Print all lines for inspection
+Write-Host "Inspecting cmdkey output:" -ForegroundColor Cyan
+$allCreds | ForEach-Object { Write-Host "Line: $_" }
+
+# Loop through each line that starts with "Target:" and contains "Xbl"
+foreach ($line in $allCreds) {
+    if ($line -match "(?i)^\s*Target:.*(Xbl.*)$") {
+        $target = $matches[1]
+        Write-Host "Deleting credential: $target" -ForegroundColor Yellow
+        cmdkey /delete:$target
+        $deletedCount++
+    }
+}
+
+# Output results
+if ($deletedCount -eq 0) {
+    Write-Host "No Xbox Live credentials found." -ForegroundColor Yellow
+} else {
+    Write-Host "`nSuccessfully deleted $deletedCount Xbox Live credential(s)." -ForegroundColor Green
+}
+
+# Pause if Pause-Menu is defined, otherwise use Read-Host
+if (Get-Command -Name Pause-Menu -ErrorAction SilentlyContinue) {
+    Pause-Menu
+} else {
+    Write-Host "`nPress Enter to continue..." -ForegroundColor Cyan
+    Read-Host
+}
+}
 function Choice-30 {
     while ($true) {
         Clear-Host
@@ -2376,7 +2421,6 @@ function Choice-30 {
 
 function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
 
-
 # === MAIN MENU LOOP ===
 while ($true) {
     Show-Menu
@@ -2404,6 +2448,7 @@ while ($true) {
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
         "25" { Choice-25; continue }
+        "26" { Choice-26; continue }
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
