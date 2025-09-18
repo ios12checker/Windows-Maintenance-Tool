@@ -41,7 +41,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.1 - By Lil_Batti & Chaython"
+    Write-Host "         WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
     Write-Host "     === WINDOWS UPDATES ==="
@@ -405,22 +405,66 @@ function Update-HostsFile {
         }
 
         # ===== PREPARE NEW CONTENT =====
-        $existingContent = if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
-            Get-Content $uniqueBackupPath | Where-Object {
-                $_ -notmatch "^# Ad-blocking entries" -and 
-                $_ -notmatch "^0\.0\.0\.0" -and 
-                $_ -notmatch "^127\.0\.0\.1" -and
-                $_ -notmatch "^::1" -and
-                $_ -notmatch "^$"
-            }
-        } else { "" }
+        # Extract user custom entries from existing hosts file if it exists
+        $userCustomEntries = ""
+        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
         
+        if (Test-Path $hostsPath) {
+            try {
+                $currentContent = Get-Content $hostsPath -Raw
+                if ($currentContent -match "(?ms)$customSectionStart\r?\n(.*?)\r?\n$customSectionEnd") {
+                    $userCustomEntries = $matches[1]
+                }
+            } catch {
+                Write-Host "Note: Could not read existing custom entries." -ForegroundColor Yellow
+            }
+        }
+
+        # If no custom entries section exists, create the template
+        if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
+            $userCustomEntries = @"
+# Add your custom host entries below this line
+# Example:
+# 192.168.1.100    myserver.local    # My local server
+"@
+        }
+
+        # Create basic Windows hosts entries for localhost
+        $defaultContent = @"
+# Copyright (c) 1993-2009 Microsoft Corp.
+#
+# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.
+#
+# This file contains the mappings of IP addresses to host names. Each
+# entry should be kept on an individual line. The IP address should
+# be placed in the first column followed by the corresponding host name.
+# The IP address and the host name should be separated by at least one
+# space.
+#
+# Additionally, comments (such as these) may be inserted on individual
+# lines or following the machine name denoted by a '#' symbol.
+#
+# For example:
+#
+#      102.54.94.97     rhino.acme.com          # source server
+#       38.25.63.10     x.acme.com              # x client host
+
+# localhost name resolution is handled within DNS itself.
+127.0.0.1       localhost
+::1             localhost
+
+$customSectionStart
+$userCustomEntries
+$customSectionEnd
+
+"@
+
         $newContent = @"
+$defaultContent
 # Ad-blocking entries - Updated $(Get-Date)
 # Downloaded from: $successfulMirror
 # Original hosts file backed up to: $(if ($uniqueBackupPath) { $uniqueBackupPath } else { "No backup created" })
-
-$existingContent
 
 $adBlockContent
 "@
@@ -577,6 +621,7 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
             Write-Host "[5] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
         }
         Write-Host "[6] Update Windows Hosts File with Ad-Blocking"
+        Write-Host "[7] View/Edit Hosts File (Opens in Notepad as Admin)"
         Write-Host "[0] Return to menu"
         Write-Host "======================================================"
         $dns_choice = Read-Host "Enter your choice"
@@ -598,7 +643,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "Done. Google DNS set with IPv4 and IPv6."
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
-                return
             }
             "2" {
                 $adapters = Get-ActiveAdapters
@@ -617,7 +661,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "Done. Cloudflare DNS set with IPv4 and IPv6."
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
-                return
             }
             "3" {
                 $adapters = Get-ActiveAdapters
@@ -634,7 +677,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 }
                 Write-Host "Done. DNS set to automatic."
                 Pause-Menu
-                return
             }
             "4" {
                 $adapters = Get-ActiveAdapters
@@ -698,7 +740,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Write-Host "==============================================="
                 Pause-Menu
-                return
             }
             "5" {
                 if (-not $dohSupported) {
@@ -729,6 +770,32 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 }
             }
             "6" { Update-HostsFile }
+            "7" {
+                Clear-Host
+                Write-Host "==============================================="
+                Write-Host "   View/Edit Hosts File"
+                Write-Host "==============================================="
+                
+                $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+                
+                if (-not (Test-Path $hostsPath)) {
+                    Write-Host "Hosts file not found at: $hostsPath" -ForegroundColor Red
+                    Pause-Menu
+                    return
+                }
+                
+                Write-Host "Opening hosts file in Notepad with administrative privileges..."
+                try {
+                    Start-Process "notepad.exe" -ArgumentList $hostsPath -Verb RunAs
+                    Write-Host "Hosts file opened successfully." -ForegroundColor Green
+                    Write-Host "`nNOTE: Save any changes in Notepad and close it before continuing." -ForegroundColor Yellow
+                    Write-Host "Location: $hostsPath" -ForegroundColor Gray
+                } catch {
+                    Write-Host "Error opening hosts file: $($_.Exception.Message)" -ForegroundColor Red
+                }
+                
+                Pause-Menu
+            }
             "0" { return }
             default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
         }
