@@ -30,7 +30,38 @@ if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
     Start-Process $shellPath -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
-# ===== Main Content =====
+function Test-IsWindowsTerminal {
+    if ($env:WT_SESSION) { return $true }
+    if ($IsWindows) {
+        $currentPid = $PID
+        while ($currentPid) {
+            try {
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid"
+                if ($process.Name -eq 'WindowsTerminal.exe') { return $true }
+                $currentPid = $process.ParentProcessId
+            } catch { break }
+        }
+    }
+    return $false
+}
+
+function Get-SectionEmoji {
+    param($name, $fallback)
+
+    if (-not (Test-IsWindowsTerminal)) { return $fallback }
+
+    $isPS5 = $PSVersionTable.PSVersion.Major -le 5
+    switch ($name) {
+        'updates'   { if ($isPS5) { return [char]0xD83D + [char]0xDCE5 } else { return "`u{1F4E5}" } } # 📥
+        'health'    { if ($isPS5) { return [char]0xD83E + [char]0xDE7A } else { return "`u{1FA7A}" } } # 🩺
+        'network'   { if ($isPS5) { return [char]0xD83C + [char]0xDF10 } else { return "`u{1F310}" } } # 🌐
+        'cleanup'   { if ($isPS5) { return [char]0xD83E + [char]0xDDF9 } else { return "`u{1F9F9}" } } # 🧹
+        'utilities' { if ($isPS5) { return [char]0xD83D + [char]0xDEE0 } else { return "`u{1F6E0}" } } # 🛠
+        'support'   { if ($isPS5) { return [char]0x2753 } else { return "`u{2753}" } }                 # ❓
+        default     { return $fallback }
+    }
+}
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Pause-Menu {
@@ -41,25 +72,29 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
-    Write-Host "     === WINDOWS UPDATES ==="
+
+    Write-Host " $(Get-SectionEmoji 'updates' '[UPDATES]') WINDOWS UPDATES"
     Write-Host "  [1]  Update Windows Apps / Programs (Winget upgrade)"
     Write-Host
-    Write-Host "     === SYSTEM HEALTH CHECKS ==="
+
+    Write-Host " $(Get-SectionEmoji 'health' '[HEALTH]') SYSTEM HEALTH CHECKS"
     Write-Host "  [2]  Scan for corrupt files (SFC /scannow) [Admin]"
     Write-Host "  [3]  Windows CheckHealth (DISM) [Admin]"
     Write-Host "  [4]  Restore Windows Health (DISM /RestoreHealth) [Admin]"
     Write-Host
-    Write-Host "     === NETWORK TOOLS ==="
+
+    Write-Host " $(Get-SectionEmoji 'network' '[NETWORK]') NETWORK TOOLS"
     Write-Host "  [5]  DNS Options (Flush/Set/Reset, IPv4/IPv6, DoH)"
     Write-Host "  [6]  Show network information (ipconfig /all)"
     Write-Host "  [7]  Restart Wi-Fi Adapters"
     Write-Host "  [8]  Network Repair - Automatic Troubleshooter"
     Write-Host "  [9]  Firewall Manager [Admin]"
-    Write-Host 
-    Write-Host "     === CLEANUP & OPTIMIZATION ==="
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'cleanup' '[CLEANUP]') CLEANUP & OPTIMIZATION"
     Write-Host " [10]  Disk Cleanup (cleanmgr)"
     Write-Host " [11]  Run Advanced Error Scan (CHKDSK) [Admin]"
     Write-Host " [12]  Perform System Optimization (Delete Temporary Files)"
@@ -68,7 +103,8 @@ function Show-Menu {
     Write-Host " [15]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
-    Write-Host "     === UTILITIES & EXTRAS ==="
+
+    Write-Host " $(Get-SectionEmoji 'utilities' '[UTILITIES]') $space UTILITIES & EXTRAS"
     Write-Host " [20]  Driver Management"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
@@ -77,12 +113,15 @@ function Show-Menu {
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
     Write-Host
-    Write-Host "     === SUPPORT ==="
+
+    Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
     Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
 }
+
+
 
 function Choice-1 {
     Clear-Host
