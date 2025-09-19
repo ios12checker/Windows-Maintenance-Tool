@@ -154,16 +154,6 @@ If you wrote an article or made a video, open an issue or PR to get listed here.
 
 ---
 
-## ☕ Donations  
-
-If you find this project helpful, you can support its continued development:  
-
-[Donate via PayPal](https://www.paypal.me/Lilbatti69)  
-
-Or simply star ⭐ the repository and share it!  
-
----
-
 ## 📜 License  
 
 Licensed under the **MIT License**.  
