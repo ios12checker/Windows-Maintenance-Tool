@@ -10,7 +10,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="944" height="697" alt="c2996cf0da297aac0a50deec9880f2c4" src="https://github.com/user-attachments/assets/33dba0a2-c1ef-46ca-a2bb-9f34a5dd1fd2" />
+<img width="926" height="848" alt="image" src="https://github.com/user-attachments/assets/f3ddec56-9d1d-4c25-acc6-75cc5109aae0" />
 
 
 
@@ -119,7 +119,7 @@ A: It depended on NTREGOPT, which is no longer accessible. The script is now ful
 
 ## 📜 Credits  
 
-This release (**v3.6.0**) was fully contributed by **[@Chaython](https://github.com/Chaython)**.  
+This release (**v3.7.0**) was fully contributed by **[@Chaython](https://github.com/Chaython)**.  
 All new features, fixes, and improvements are thanks to his work.  
 
 ---

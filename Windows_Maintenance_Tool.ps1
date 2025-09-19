@@ -30,7 +30,38 @@ if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
     Start-Process $shellPath -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
-# ===== Main Content =====
+function Test-IsWindowsTerminal {
+    if ($env:WT_SESSION) { return $true }
+    if ($IsWindows) {
+        $currentPid = $PID
+        while ($currentPid) {
+            try {
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid"
+                if ($process.Name -eq 'WindowsTerminal.exe') { return $true }
+                $currentPid = $process.ParentProcessId
+            } catch { break }
+        }
+    }
+    return $false
+}
+
+function Get-SectionEmoji {
+    param($name, $fallback)
+
+    if (-not (Test-IsWindowsTerminal)) { return $fallback }
+
+    $isPS5 = $PSVersionTable.PSVersion.Major -le 5
+    switch ($name) {
+        'updates'   { if ($isPS5) { return [char]0xD83D + [char]0xDCE5 } else { return "`u{1F4E5}" } } # 📥
+        'health'    { if ($isPS5) { return [char]0xD83E + [char]0xDE7A } else { return "`u{1FA7A}" } } # 🩺
+        'network'   { if ($isPS5) { return [char]0xD83C + [char]0xDF10 } else { return "`u{1F310}" } } # 🌐
+        'cleanup'   { if ($isPS5) { return [char]0xD83E + [char]0xDDF9 } else { return "`u{1F9F9}" } } # 🧹
+        'utilities' { if ($isPS5) { return [char]0xD83D + [char]0xDEE0 } else { return "`u{1F6E0}" } } # 🛠
+        'support'   { if ($isPS5) { return [char]0x2753 } else { return "`u{2753}" } }                 # ❓
+        default     { return $fallback }
+    }
+}
+
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 function Pause-Menu {
@@ -41,25 +72,29 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host "         WINDOWS MAINTENANCE TOOL V3.6.1 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
-    Write-Host "     === WINDOWS UPDATES ==="
+
+    Write-Host " $(Get-SectionEmoji 'updates' '[UPDATES]') WINDOWS UPDATES"
     Write-Host "  [1]  Update Windows Apps / Programs (Winget upgrade)"
     Write-Host
-    Write-Host "     === SYSTEM HEALTH CHECKS ==="
+
+    Write-Host " $(Get-SectionEmoji 'health' '[HEALTH]') SYSTEM HEALTH CHECKS"
     Write-Host "  [2]  Scan for corrupt files (SFC /scannow) [Admin]"
     Write-Host "  [3]  Windows CheckHealth (DISM) [Admin]"
     Write-Host "  [4]  Restore Windows Health (DISM /RestoreHealth) [Admin]"
     Write-Host
-    Write-Host "     === NETWORK TOOLS ==="
+
+    Write-Host " $(Get-SectionEmoji 'network' '[NETWORK]') NETWORK TOOLS"
     Write-Host "  [5]  DNS Options (Flush/Set/Reset, IPv4/IPv6, DoH)"
     Write-Host "  [6]  Show network information (ipconfig /all)"
     Write-Host "  [7]  Restart Wi-Fi Adapters"
     Write-Host "  [8]  Network Repair - Automatic Troubleshooter"
     Write-Host "  [9]  Firewall Manager [Admin]"
-    Write-Host 
-    Write-Host "     === CLEANUP & OPTIMIZATION ==="
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'cleanup' '[CLEANUP]') CLEANUP & OPTIMIZATION"
     Write-Host " [10]  Disk Cleanup (cleanmgr)"
     Write-Host " [11]  Run Advanced Error Scan (CHKDSK) [Admin]"
     Write-Host " [12]  Perform System Optimization (Delete Temporary Files)"
@@ -68,20 +103,25 @@ function Show-Menu {
     Write-Host " [15]  Task Management (Scheduled Tasks) [Admin]"
     Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
-    Write-Host "     === UTILITIES & EXTRAS ==="
+
+    Write-Host " $(Get-SectionEmoji 'utilities' '[UTILITIES]') $space UTILITIES & EXTRAS"
     Write-Host " [20]  Driver Management"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
     Write-Host " [23]  Windows Update Utility & Service Reset"
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
+    Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
     Write-Host
-    Write-Host "     === SUPPORT ==="
+
+    Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
     Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
 }
+
+
 
 function Choice-1 {
     Clear-Host
@@ -405,22 +445,66 @@ function Update-HostsFile {
         }
 
         # ===== PREPARE NEW CONTENT =====
-        $existingContent = if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
-            Get-Content $uniqueBackupPath | Where-Object {
-                $_ -notmatch "^# Ad-blocking entries" -and 
-                $_ -notmatch "^0\.0\.0\.0" -and 
-                $_ -notmatch "^127\.0\.0\.1" -and
-                $_ -notmatch "^::1" -and
-                $_ -notmatch "^$"
-            }
-        } else { "" }
+        # Extract user custom entries from existing hosts file if it exists
+        $userCustomEntries = ""
+        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
         
+        if (Test-Path $hostsPath) {
+            try {
+                $currentContent = Get-Content $hostsPath -Raw
+                if ($currentContent -match "(?ms)$customSectionStart\r?\n(.*?)\r?\n$customSectionEnd") {
+                    $userCustomEntries = $matches[1]
+                }
+            } catch {
+                Write-Host "Note: Could not read existing custom entries." -ForegroundColor Yellow
+            }
+        }
+
+        # If no custom entries section exists, create the template
+        if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
+            $userCustomEntries = @"
+# Add your custom host entries below this line
+# Example:
+# 192.168.1.100    myserver.local    # My local server
+"@
+        }
+
+        # Create basic Windows hosts entries for localhost
+        $defaultContent = @"
+# Copyright (c) 1993-2009 Microsoft Corp.
+#
+# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.
+#
+# This file contains the mappings of IP addresses to host names. Each
+# entry should be kept on an individual line. The IP address should
+# be placed in the first column followed by the corresponding host name.
+# The IP address and the host name should be separated by at least one
+# space.
+#
+# Additionally, comments (such as these) may be inserted on individual
+# lines or following the machine name denoted by a '#' symbol.
+#
+# For example:
+#
+#      102.54.94.97     rhino.acme.com          # source server
+#       38.25.63.10     x.acme.com              # x client host
+
+# localhost name resolution is handled within DNS itself.
+127.0.0.1       localhost
+::1             localhost
+
+$customSectionStart
+$userCustomEntries
+$customSectionEnd
+
+"@
+
         $newContent = @"
+$defaultContent
 # Ad-blocking entries - Updated $(Get-Date)
 # Downloaded from: $successfulMirror
 # Original hosts file backed up to: $(if ($uniqueBackupPath) { $uniqueBackupPath } else { "No backup created" })
-
-$existingContent
 
 $adBlockContent
 "@
@@ -577,6 +661,7 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
             Write-Host "[5] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
         }
         Write-Host "[6] Update Windows Hosts File with Ad-Blocking"
+        Write-Host "[7] View/Edit Hosts File (Opens in Notepad as Admin)"
         Write-Host "[0] Return to menu"
         Write-Host "======================================================"
         $dns_choice = Read-Host "Enter your choice"
@@ -598,7 +683,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "Done. Google DNS set with IPv4 and IPv6."
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
-                return
             }
             "2" {
                 $adapters = Get-ActiveAdapters
@@ -617,7 +701,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "Done. Cloudflare DNS set with IPv4 and IPv6."
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Pause-Menu
-                return
             }
             "3" {
                 $adapters = Get-ActiveAdapters
@@ -634,7 +717,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 }
                 Write-Host "Done. DNS set to automatic."
                 Pause-Menu
-                return
             }
             "4" {
                 $adapters = Get-ActiveAdapters
@@ -698,7 +780,6 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                 Write-Host "To enable DoH, use option [5] or configure manually in Settings."
                 Write-Host "==============================================="
                 Pause-Menu
-                return
             }
             "5" {
                 if (-not $dohSupported) {
@@ -723,12 +804,38 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                     $doh_choice = Read-Host "Enter your choice"
                     switch ($doh_choice) {
                         "1" { Check-DoHStatus }
-                        "2" { return }
+                        "0" { return }
                         default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
                     }
                 }
             }
             "6" { Update-HostsFile }
+            "7" {
+                Clear-Host
+                Write-Host "==============================================="
+                Write-Host "   View/Edit Hosts File"
+                Write-Host "==============================================="
+                
+                $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+                
+                if (-not (Test-Path $hostsPath)) {
+                    Write-Host "Hosts file not found at: $hostsPath" -ForegroundColor Red
+                    Pause-Menu
+                    return
+                }
+                
+                Write-Host "Opening hosts file in Notepad with administrative privileges..."
+                try {
+                    Start-Process "notepad.exe" -ArgumentList $hostsPath -Verb RunAs
+                    Write-Host "Hosts file opened successfully." -ForegroundColor Green
+                    Write-Host "`nNOTE: Save any changes in Notepad and close it before continuing." -ForegroundColor Yellow
+                    Write-Host "Location: $hostsPath" -ForegroundColor Gray
+                } catch {
+                    Write-Host "Error opening hosts file: $($_.Exception.Message)" -ForegroundColor Red
+                }
+                
+                Pause-Menu
+            }
             "0" { return }
             default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
         }
@@ -2183,6 +2290,63 @@ function Choice-25 {
     Write-Host "==============================================="
     Write-Host "   .NET RollForward Settings"
     Write-Host "==============================================="
+    
+    # Check if .NET Runtime or SDK is installed
+    $dotnetInstalled = $false
+    $dotnetRuntime = $false
+    $dotnetSdk = $false
+
+    # Check for .NET Runtime using registry
+    $runtimeKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\NET Framework Setup\NDP\v4\Full"
+    )
+    foreach ($key in $runtimeKeys) {
+        if (Test-Path $key) {
+            try {
+                $version = Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue
+                if ($version) {
+                    $dotnetRuntime = $true
+                    $dotnetInstalled = $true
+                    break
+                }
+            } catch { }
+        }
+    }
+
+    # Check for .NET Core/5+
+    try {
+        $dotnetCheck = dotnet --list-runtimes 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetRuntime = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    # Check for .NET SDK
+    try {
+        $sdkCheck = dotnet --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetSdk = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    if (-not $dotnetInstalled) {
+        Write-Host "[ERROR] Neither .NET Runtime nor SDK is installed." -ForegroundColor Red
+        Write-Host "You can download .NET from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+        Write-Host "- For development, install the SDK" -ForegroundColor Yellow
+        Write-Host "- For running applications, install the Runtime" -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    # Show appropriate options based on what's installed
+    Write-Host "Detected .NET installations:"
+    if ($dotnetRuntime) { Write-Host "- .NET Runtime is installed" -ForegroundColor Green }
+    if ($dotnetSdk) { Write-Host "- .NET SDK is installed" -ForegroundColor Green }
+    Write-Host
+    
     Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
     Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
     Write-Host "[3] Enable roll-forward for BOTH          [WARNING] risk: unpredictable runtime/build behavior"
@@ -2257,6 +2421,50 @@ function Choice-25 {
         default { return }
     }
 }
+function Choice-26 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Xbox Credential Cleanup"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "Searching for Xbox Live credentials..."
+    Write-Host
+
+# Get all stored credentials from cmdkey and split into lines
+$allCreds = (cmdkey /list) -split "`r?`n"
+
+# Counter for deleted credentials
+$deletedCount = 0
+
+# Debug: Print all lines for inspection
+Write-Host "Inspecting cmdkey output:" -ForegroundColor Cyan
+$allCreds | ForEach-Object { Write-Host "Line: $_" }
+
+# Loop through each line that starts with "Target:" and contains "Xbl"
+foreach ($line in $allCreds) {
+    if ($line -match "(?i)^\s*Target:.*(Xbl.*)$") {
+        $target = $matches[1]
+        Write-Host "Deleting credential: $target" -ForegroundColor Yellow
+        cmdkey /delete:$target
+        $deletedCount++
+    }
+}
+
+# Output results
+if ($deletedCount -eq 0) {
+    Write-Host "No Xbox Live credentials found." -ForegroundColor Yellow
+} else {
+    Write-Host "`nSuccessfully deleted $deletedCount Xbox Live credential(s)." -ForegroundColor Green
+}
+
+# Pause if Pause-Menu is defined, otherwise use Read-Host
+if (Get-Command -Name Pause-Menu -ErrorAction SilentlyContinue) {
+    Pause-Menu
+} else {
+    Write-Host "`nPress Enter to continue..." -ForegroundColor Cyan
+    Read-Host
+}
+}
 function Choice-30 {
     while ($true) {
         Clear-Host
@@ -2309,7 +2517,6 @@ function Choice-30 {
 
 function Choice-0 { Clear-Host; Write-Host "Exiting script..."; exit }
 
-
 # === MAIN MENU LOOP ===
 while ($true) {
     Show-Menu
@@ -2337,6 +2544,7 @@ while ($true) {
         "23" { Choice-23; continue }
         "24" { Choice-24; continue }
         "25" { Choice-25; continue }
+        "26" { Choice-26; continue }
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
