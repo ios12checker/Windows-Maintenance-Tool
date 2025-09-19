@@ -2290,6 +2290,18 @@ function Choice-25 {
     Write-Host "==============================================="
     Write-Host "   .NET RollForward Settings"
     Write-Host "==============================================="
+    
+    # Check if .NET is installed
+    $dotnetInstalled = $null
+    try {
+        $dotnetInstalled = Get-Command dotnet -ErrorAction Stop
+    } catch {
+        Write-Host "[ERROR] .NET SDK is not installed. Please install .NET SDK first." -ForegroundColor Red
+        Write-Host "You can download it from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+    
     Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
     Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
     Write-Host "[3] Enable roll-forward for BOTH          [WARNING] risk: unpredictable runtime/build behavior"
