@@ -2291,16 +2291,61 @@ function Choice-25 {
     Write-Host "   .NET RollForward Settings"
     Write-Host "==============================================="
     
-    # Check if .NET is installed
-    $dotnetInstalled = $null
+    # Check if .NET Runtime or SDK is installed
+    $dotnetInstalled = $false
+    $dotnetRuntime = $false
+    $dotnetSdk = $false
+
+    # Check for .NET Runtime using registry
+    $runtimeKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\NET Framework Setup\NDP\v4\Full"
+    )
+    foreach ($key in $runtimeKeys) {
+        if (Test-Path $key) {
+            try {
+                $version = Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue
+                if ($version) {
+                    $dotnetRuntime = $true
+                    $dotnetInstalled = $true
+                    break
+                }
+            } catch { }
+        }
+    }
+
+    # Check for .NET Core/5+
     try {
-        $dotnetInstalled = Get-Command dotnet -ErrorAction Stop
-    } catch {
-        Write-Host "[ERROR] .NET SDK is not installed. Please install .NET SDK first." -ForegroundColor Red
-        Write-Host "You can download it from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+        $dotnetCheck = dotnet --list-runtimes 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetRuntime = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    # Check for .NET SDK
+    try {
+        $sdkCheck = dotnet --version 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetSdk = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    if (-not $dotnetInstalled) {
+        Write-Host "[ERROR] Neither .NET Runtime nor SDK is installed." -ForegroundColor Red
+        Write-Host "You can download .NET from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+        Write-Host "- For development, install the SDK" -ForegroundColor Yellow
+        Write-Host "- For running applications, install the Runtime" -ForegroundColor Yellow
         Pause-Menu
         return
     }
+
+    # Show appropriate options based on what's installed
+    Write-Host "Detected .NET installations:"
+    if ($dotnetRuntime) { Write-Host "- .NET Runtime is installed" -ForegroundColor Green }
+    if ($dotnetSdk) { Write-Host "- .NET SDK is installed" -ForegroundColor Green }
+    Write-Host
     
     Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
     Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
