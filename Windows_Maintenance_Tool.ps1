@@ -804,7 +804,7 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                     $doh_choice = Read-Host "Enter your choice"
                     switch ($doh_choice) {
                         "1" { Check-DoHStatus }
-                        "2" { return }
+                        "0" { return }
                         default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
                     }
                 }
