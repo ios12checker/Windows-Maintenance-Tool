@@ -10,7 +10,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="926" height="848" alt="image" src="https://github.com/user-attachments/assets/f3ddec56-9d1d-4c25-acc6-75cc5109aae0" />
+<img width="926" height="851" alt="image" src="https://github.com/user-attachments/assets/a0eaac5b-bf79-4365-8eea-ce3ac726e7cc" />
 
 
 
