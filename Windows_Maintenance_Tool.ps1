@@ -72,7 +72,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.8.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 
@@ -112,6 +112,7 @@ function Show-Menu {
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
+    Write-Host " [27]  Windows/Office Activation Manager (MAS) [Downloads/runs MAS from massgrave.dev]"
     Write-Host
 
     Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
@@ -2465,6 +2466,30 @@ if (Get-Command -Name Pause-Menu -ErrorAction SilentlyContinue) {
     Read-Host
 }
 }
+function Choice-27 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Windows/Office Activation Manager"
+    Write-Host "    Using https://massgrave.dev MAS (Microsoft Activation Script)"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "Preparing to download and execute MAS activation script..."
+    Write-Host "Note: This process may take several minutes to complete."
+    Write-Host "A separate window may open during execution."
+    Write-Host
+    
+    # Download and execute the MAS script
+    Write-Host "Downloading MAS from https://get.activated.win..." -ForegroundColor Yellow
+    $scriptContent = Invoke-RestMethod -Uri "https://get.activated.win" -ErrorAction Stop
+    
+    Write-Host "Executing MAS activation script..." -ForegroundColor Yellow
+    Invoke-Expression -Command $scriptContent -ErrorAction Stop
+    
+    Write-Host "`nMAS script executed successfully!" -ForegroundColor Green
+
+    Write-Host "`nPress Enter to return to the main menu..." -ForegroundColor Yellow
+    $null = Read-Host
+}
 function Choice-30 {
     while ($true) {
         Clear-Host
@@ -2545,6 +2570,7 @@ while ($true) {
         "24" { Choice-24; continue }
         "25" { Choice-25; continue }
         "26" { Choice-26; continue }
+        "27" { Choice-27; continue }
         "30" { Choice-30; continue }
         "h"  { Choice-30; continue }
         "help" { Choice-30; continue }
