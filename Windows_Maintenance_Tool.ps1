@@ -112,7 +112,7 @@ function Show-Menu {
     Write-Host " [24]  View Network Routing Table [Advanced]"
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
-    Write-Host " [27]  Windows/Office Activation Manager (MAS) [Downoloads/runs MAS from massgrave.dev]"
+    Write-Host " [27]  Windows/Office Activation Manager (MAS) [Downloads/runs MAS from massgrave.dev]"
     Write-Host
 
     Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
