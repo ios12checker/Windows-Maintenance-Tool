@@ -72,7 +72,7 @@ function Pause-Menu {
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.7.0 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.8.0 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 

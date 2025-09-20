@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.7.0-green)  
+![Version](https://img.shields.io/badge/version-v3.8.0-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
