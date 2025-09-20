@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.6.1-green)  
+![Version](https://img.shields.io/badge/version-v3.7.0-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
@@ -151,16 +151,6 @@ If you wrote an article or made a video, open an issue or PR to get listed here.
 - [Guide by Info4Geek](https://www.youtube.com/watch?v=TpZY1nXHTsw)  
 - [Walkthrough by ThomyPC](https://www.youtube.com/watch?v=0aUu2agaIto)  
 - [Showcase by Tech Enthusiast](https://www.youtube.com/watch?v=zfIQvk8BEcM)  
-
----
-
-## ☕ Donations  
-
-If you find this project helpful, you can support its continued development:  
-
-[Donate via PayPal](https://www.paypal.me/Lilbatti69)  
-
-Or simply star ⭐ the repository and share it!  
 
 ---
 
