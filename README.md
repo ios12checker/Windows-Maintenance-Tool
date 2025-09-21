@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.8.0-green)  
+![Version](https://img.shields.io/badge/version-v3.8.1-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
@@ -10,9 +10,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="926" height="851" alt="image" src="https://github.com/user-attachments/assets/a0eaac5b-bf79-4365-8eea-ce3ac726e7cc" />
-
-
+<img width="960" height="1032" alt="Skærmbillede 2025-09-21 033249" src="https://github.com/user-attachments/assets/67bbc8ac-2e3d-4eec-842a-fc758f7df3c8" />
 
 ---
 
@@ -67,6 +65,11 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 - More return-to-menu options added (v3.6.0)  
 - All functions accessible from a clear main menu—no PowerShell experience needed  
 - Support/help, Discord/GitHub contact, openable with a single key press  
+ 
+**Windows Activation:**
+- Thanks to the [MAS (Microsoft Activation Script)](https://massgrave.dev) project, Windows and Office activation support is now integrated into this tool.  
+- Full credit goes to the Massgrave team for maintaining and developing MAS. This project does not modify or redistribute MAS — it only provides a convenient way to access it.  
+- A clear warning and confirmation step has been added to ensure that users review the documentation and accept responsibility before running the script.
 
 **Portable & safe:**  
 - Runs from USB, no install or admin deployment required  
