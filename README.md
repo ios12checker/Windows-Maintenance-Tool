@@ -10,7 +10,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="960" height="1032" alt="Skærmbillede 2025-09-21 033249" src="https://github.com/user-attachments/assets/67bbc8ac-2e3d-4eec-842a-fc758f7df3c8" />
+<img width="958" height="878" alt="2025-10-19 01_47_11-NVIDIA GeForce Overlay" src="https://github.com/user-attachments/assets/6cb19d7f-d302-4d98-bcf0-1a6f5769f6b1" />
+
 
 ---
 
