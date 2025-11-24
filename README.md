@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.8.2-green)  
+![Version](https://img.shields.io/badge/version-v3.9-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
@@ -10,7 +10,7 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="958" height="878" alt="2025-10-19 01_47_11-NVIDIA GeForce Overlay" src="https://github.com/user-attachments/assets/6cb19d7f-d302-4d98-bcf0-1a6f5769f6b1" />
+<img width="958" height="878" alt="3.9 Windows Terminal" src="https://github.com/user-attachments/assets/b47721d1-63de-4f52-a681-119a70b0f596" />
 
 
 ---
@@ -123,7 +123,7 @@ A: It depended on NTREGOPT, which is no longer accessible. The script is now ful
 
 ## 📜 Credits  
 
-This release (**v3.7.0**) was fully contributed by **[@Chaython](https://github.com/Chaython)**.  
+This release (**v3.9.0**) was fully contributed by **[@Chaython](https://github.com/Chaython)**.  
 All new features, fixes, and improvements are thanks to his work.  
 
 ---
