@@ -85,7 +85,7 @@ Set-Alias -Name Pause-Menu -Value Wait-Menu -Force
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.8.2 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.9 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 
@@ -372,7 +372,9 @@ function Invoke-Choice5 {
         } catch {
             Write-Host "Failed to check DoH status: $_" -ForegroundColor Red
         }
-        Pause-Menu
+        # Pause and return specifically to the DNS / Network Tool menu
+        Write-Host
+        Read-Host "Press ENTER to return to DNS / Network Tool"
     }
 
     # Function to update hosts file with ad-blocking entries
@@ -798,26 +800,19 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                     return
                 }
                 $dohApplied = Enable-DoHAllServers
-                while ($true) {
-                    Clear-Host
-                    Write-Host "======================================================"
-                    Write-Host "DoH Configuration Menu"
-                    Write-Host "======================================================"
-                    if ($dohApplied) {
-                        Write-Host "DoH was applied for $successCount DNS servers."
-                    } else {
-                        Write-Host "DoH application failed. Check system permissions or Windows version."
-                    }
-                    Write-Host "[1] Check DoH status"
-                    Write-Host "[0] Return to menu"
-                    Write-Host "======================================================"
-                    $doh_choice = Read-Host "Enter your choice"
-                    switch ($doh_choice) {
-                        "1" { Test-DoHStatus }
-                        "0" { return }
-                        default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
-                    }
+
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "DoH Configuration"
+                Write-Host "======================================================"
+                if ($dohApplied) {
+                    Write-Host "DoH was applied for $successCount DNS servers."
+                } else {
+                    Write-Host "DoH application failed. Check system permissions or Windows version."
                 }
+                Write-Host
+                # Output DoH status directly on this page; after keypress the DNS menu will be re-displayed
+                Test-DoHStatus
             }
             "6" { Update-HostsFile }
             "7" {
@@ -1920,6 +1915,7 @@ function Invoke-Choice20 {
     Write-Host "4. Enable Automatic Driver Updates"
     Write-Host "5. Disable Device Metadata Downloads"
     Write-Host "6. Enable Device Metadata Downloads"
+    Write-Host "7. Clean Old Drivers from Driver Store"
     Write-Host "0. Return to Main Menu"
     Write-Host "==============================================="
     
@@ -2007,6 +2003,112 @@ function Invoke-Choice20 {
             Write-Host "Device metadata downloads enabled."
             Read-Host "`nPress Enter to return to the previous menu"
             Invoke-Choice20
+        }
+        '7' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "      Old Driver Cleanup"
+            Write-Host "==============================================="
+            Write-Host "Scanning Driver Store..." -ForegroundColor Cyan
+
+            # --- FAST ENUMERATION START ---
+            # Instead of Get-WindowsDriver (Slow/DISM), we parse pnputil text output (Fast)
+            $rawOutput = pnputil.exe /enum-drivers
+            $drivers = @()
+            $currentDriver = $null
+
+            foreach ($line in $rawOutput) {
+                # Start of a new driver block
+                if ($line -match '^Published Name:\s+(.+)$') {
+                    # Save previous driver if exists
+                    if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+                    
+                    # Initialize new object
+                    # We map 'Driver' to Published Name (oemXX.inf) to match previous logic
+                    $currentDriver = [ordered]@{ 
+                        Driver = $matches[1].Trim()
+                        OriginalFileName = $null
+                        ProviderName = $null
+                        Version = $null
+                        Date = $null
+                    }
+                }
+                elseif ($line -match '^Original Name:\s+(.+)$') { 
+                    $currentDriver.OriginalFileName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Provider Name:\s+(.+)$') { 
+                    $currentDriver.ProviderName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Driver Version:\s+(.+)$') { 
+                    try { $currentDriver.Version = [Version]$matches[1].Trim() } catch { $currentDriver.Version = [Version]"0.0.0.0" }
+                }
+                elseif ($line -match '^Date:\s+(.+)$') { 
+                    try { $currentDriver.Date = [DateTime]$matches[1].Trim() } catch { $currentDriver.Date = [DateTime]::MinValue }
+                }
+            }
+            # Add the very last driver found
+            if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+            # --- FAST ENUMERATION END ---
+
+            # Group by name and provider to find duplicates
+            # We filter out items where OriginalFileName is missing to avoid errors
+            $groupedDrivers = $drivers | Where-Object { $_.OriginalFileName } | Group-Object -Property OriginalFileName, ProviderName
+            $driversToDelete = @()
+
+            Write-Host "`n--- Analysis Results ---"
+            
+            foreach ($group in $groupedDrivers) {
+                if ($group.Count -gt 1) {
+                    # Sort: Newest Date first, then highest Version
+                    $sortedGroup = $group.Group | Sort-Object Date, Version -Descending
+                    
+                    # Keep the first one (Index 0)
+                    $keeper = $sortedGroup[0]
+                    # Delete the rest
+                    $oldDrivers = $sortedGroup | Select-Object -Skip 1
+
+                    Write-Host "Package: $($keeper.OriginalFileName)" -ForegroundColor Gray
+                    Write-Host "  [KEEP] Ver: $($keeper.Version)" -ForegroundColor Green
+                    
+                    foreach ($old in $oldDrivers) {
+                        Write-Host "  [DEL ] Ver: $($old.Version) ($($old.Driver))" -ForegroundColor Yellow
+                        $driversToDelete += $old
+                    }
+                }
+            }
+
+            $count = $driversToDelete.Count
+
+            if ($count -eq 0) {
+                Write-Host "`nDriver store is clean! No old versions found." -ForegroundColor Green
+                Read-Host "`nPress Enter to return to the previous menu"
+                Invoke-Choice20
+            }
+            else {
+                Write-Host "`nFound $count obsolete driver(s)." -ForegroundColor Yellow
+                
+                $confirmation = Read-Host "Do you want to delete these drivers now? (Y/N)"
+                
+                if ($confirmation -eq 'Y' -or $confirmation -eq 'y') {
+                    Write-Host "Starting cleanup..." -ForegroundColor Cyan
+                    foreach ($target in $driversToDelete) {
+                        Write-Host "Deleting $($target.Driver)... " -NoNewline
+                        $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($target.Driver) /uninstall /force" -NoNewWindow -Wait -PassThru
+                        
+                        if ($proc.ExitCode -eq 0) {
+                            Write-Host "SUCCESS" -ForegroundColor Green
+                        } else {
+                            Write-Host "LOCKED/IN USE" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host "`nCleanup Complete."
+                } else {
+                    Write-Host "Operation Cancelled." -ForegroundColor Gray
+                }
+                
+                Read-Host "`nPress Enter to return to the previous menu"
+                Invoke-Choice20
+            }
         }
         '0' {
             return
