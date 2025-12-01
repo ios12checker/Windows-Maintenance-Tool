@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.8.2-green)  
+![Version](https://img.shields.io/badge/version-v3.9-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
@@ -10,7 +10,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshot  
-<img width="958" height="878" alt="2025-10-19 01_47_11-NVIDIA GeForce Overlay" src="https://github.com/user-attachments/assets/6cb19d7f-d302-4d98-bcf0-1a6f5769f6b1" />
+<img width="860" height="885" alt="image" src="https://github.com/user-attachments/assets/1ee7da98-9358-4618-80f5-55ff9721f28a" />
+
 
 
 ---
@@ -19,18 +20,23 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 **Run essential repair tools:**  
 - Quick access to SFC, DISM, and CHKDSK for core Windows repairs  
+- Component store repair and basic health scans for stuck or broken systems  
 
 **Optimize SSD drives:**  
-- TRIM and compatible defrag for faster, healthier drives  
+- TRIM and compatible defrag for faster, healthier SSDs and HDDs  
 
-**Windows Update management:**  
+**Windows Update management & repair:**  
 - Use winget to install, upgrade, and repair system packages  
-- Automatically installs winget if missing  
-- Flexible package handling: View, search, and upgrade individual apps/packages by entering their ID directly  
-- **Improved in v3.6.0:** Windows Update Repair Tool now supports **full nuke & rebuild** with more repair options  
+- Automatically installs/configures winget if missing  
+- Flexible package handling: view, search, and upgrade individual apps/packages by entering their ID directly  
+- Windows Update Repair Tool supports a **full nuke & rebuild** of update components, including automatic restart of key services like `cryptsvc`  
 
-**Network diagnostics & repair:**  
-- Includes ipconfig, routing table viewer, DNS config, adapter reset, and more  
+**Network diagnostics, DNS & DoH:**  
+- Includes ipconfig, routing table viewer, DNS configuration, adapter reset, and more  
+- **DNS over HTTPS (DoH) management:**  
+  - Enable DoH using `netsh dns add encryption` for known providers (Cloudflare, Google, Quad9, AdGuard)  
+  - One-click **Disable DoH** option to remove the same encryption entries and revert cleanly  
+- Export detailed network information to file for troubleshooting or support  
 
 **Privacy & temp cleanup:**  
 - Clean temp files, logs, and browser cache  
@@ -39,42 +45,62 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 **Save detailed reports:**  
 - Export System Info, Network Info, and Driver List to your Desktop or a custom folder  
 
+**Driver & device maintenance:**  
+- Enumerate all drivers in the Driver Store using fast pnputil parsing  
+- **Old Driver Cleanup:**  
+  - Groups drivers by package (OriginalFileName + Provider)  
+  - Keeps the newest version in each group and marks older duplicates as removal candidates  
+- **Mandatory driver backup before cleanup:**  
+  - Automatically exports all drivers with `pnputil /export-driver *` to a timestamped `DriverBackup_…` folder on the Desktop  
+  - Reuses an existing backup if it already contains at least as many driver INF files as the current system  
+  - No deletions are performed if backup or verification fails  
+- **Driver restore:**  
+  - Built-in “Restore Drivers from Backup” option  
+  - Re-imports all drivers from a selected `DriverBackup_…` folder using `pnputil /add-driver ... /subdirs /install`  
+
 **Registry tools:**  
 - Safe cleanup, backup, and corruption scan  
 - Menu-driven, stable registry cleaning:  
   - List “safe to delete” entries (IE40, IE4Data, DirectDrawEx, etc.)  
   - Bulk delete all safe entries  
-  - Easy backup & restore with versioned .reg files  
+  - Easy backup & restore with versioned `.reg` files  
 
-**DNS-Adblock management:**  
-- Block ad/tracker domains with hosts file (adblock/mirrors included)  
-- Improved handling of locked files, better messaging, multiple backup/restore  
+**DNS / hosts-based Adblock management:**  
+- Block ad/tracker domains with a curated hosts file (multiple mirrors supported)  
+- Automatic backup of the existing hosts file before changes  
+- Improved handling of locked files and clearer status/error messages  
 
 **Firewall Manager:**  
 - Built-in menu-driven PowerShell Firewall Manager  
 - Manage firewall rules, enable/disable Windows Firewall directly from the tool  
 
-**.NET RollForward Settings (New in v3.6.0):**  
+**.NET RollForward Settings:**  
 - Lets the system use a specific .NET version (SDK/runtime)  
 - Reduces the need to install multiple .NET runtimes  
 
-**Shortcut Fixer (New in v3.6.0):**  
-- Automatic shortcut repair  
-- Menu reorganized (options 30 and 0 moved to the end for better structure)  
+**Shortcut Fixer:**  
+- Automatic shortcut repair for broken Start Menu / desktop shortcuts  
+- Menu reorganized so “exit” and global options sit at the end for better structure  
 
 **Menu-driven and user-friendly:**  
-- More return-to-menu options added (v3.6.0)  
 - All functions accessible from a clear main menu—no PowerShell experience needed  
-- Support/help, Discord/GitHub contact, openable with a single key press  
- 
-**Windows Activation:**
-- Thanks to the [MAS (Microsoft Activation Script)](https://massgrave.dev) project, Windows and Office activation support is now integrated into this tool.  
-- Full credit goes to the Massgrave team for maintaining and developing MAS. This project does not modify or redistribute MAS — it only provides a convenient way to access it.  
-- A clear warning and confirmation step has been added to ensure that users review the documentation and accept responsibility before running the script.
+- More consistent “return to menu” behavior across tools  
+- Built-in support/help, Discord/GitHub contact links  
+- **Developer Options submenu:**  
+  - **Dry Run mode:** simulate menu actions without touching the system, with a visible “DRY RUN ENABLED” banner in the main menu  
+  - **Dev Mode:** extra diagnostics and a “DEV MODE ENABLED” banner so you always see when you are in test mode  
 
-**Portable & safe:**  
-- Runs from USB, no install or admin deployment required  
-- No third-party dependencies or internet downloads required (except optional winget)  
+**Windows Activation:**  
+- Thanks to the [MAS (Microsoft Activation Script)](https://massgrave.dev) project, Windows and Office activation support is integrated as an **optional** tool  
+- Full credit goes to the Massgrave team for maintaining and developing MAS  
+- This project does not modify or redistribute MAS — it only provides a convenient way to download and run it  
+- Clear warning and confirmation step ensures users read the documentation and accept responsibility before running the script  
+
+**Portable & safe (for personal use):**  
+- Runs from any folder or USB drive, no installation required  
+- Automatically relaunches itself with a **temporary process-scoped ExecutionPolicy bypass** when needed, so no code-signing certificate is required  
+- Core maintenance features can run offline; some modules (winget, MAS, DoH profiles, hosts adblock) use the internet when invoked  
+
 
 ---
 
@@ -123,8 +149,8 @@ A: It depended on NTREGOPT, which is no longer accessible. The script is now ful
 
 ## 📜 Credits  
 
-This release (**v3.7.0**) was fully contributed by **[@Chaython](https://github.com/Chaython)**.  
-All new features, fixes, and improvements are thanks to his work.  
+This release (**v3.9**) was contributed by **[@Chaython](https://github.com/Chaython)**, **[@ios12checker](https://github.com/ios12checker)**  
+All new features, fixes, and improvements  
 
 ---
 
