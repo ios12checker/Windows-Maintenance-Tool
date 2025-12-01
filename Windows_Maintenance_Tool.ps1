@@ -4,6 +4,8 @@ trap {
     Read-Host "Press ENTER to exit"
     exit 1
 }
+$Global:DryRun = $false  # When true, menu options are simulated and not executed
+$Global:DevMode = $false # When true, detailed simulation/logging is enabled for testing
 $ErrorActionPreference = "Stop"
 
 # Clear-Host fails in headless/non-interactive hosts ("Handle is invalid").
@@ -16,10 +18,22 @@ function Clear-Host {
     }
 }
 
-if ((Get-ExecutionPolicy) -in @('Restricted','AllSigned')) {
-    Write-Host "Execution Policy blocks this script. Try: Set-ExecutionPolicy RemoteSigned -Scope CurrentUser" -ForegroundColor Yellow
-    Read-Host "Press ENTER to exit"
-    exit 1
+$currentPolicy = Get-ExecutionPolicy
+if ($currentPolicy -in @('Restricted','AllSigned')) {
+    # Attempt to relaunch with a process-scoped bypass so users without a certificate can run the tool
+    $shellPath = $null
+    try { $shellPath = Get-PwshOrPowershellPath } catch {}
+    if (-not $shellPath) { $shellPath = 'powershell' }
+
+    Write-Host "Execution Policy ($currentPolicy) blocks this script. Relaunching with -ExecutionPolicy Bypass for this session..." -ForegroundColor Yellow
+    try {
+        Start-Process $shellPath -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -WorkingDirectory (Get-Location) -WindowStyle Normal
+        exit
+    } catch {
+        Write-Host "Automatic bypass failed. You can run manually: powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
 }
 # ===== ADMIN AND CERTIFICATE BYPASS =====
 function Get-PwshOrPowershellPath {
@@ -79,13 +93,79 @@ function Wait-Menu {
     Read-Host "Press ENTER to return to menu"
 }
 
+function Invoke-DeveloperOptions {
+    while ($true) {
+        Clear-Host
+        Write-Host "====================================================="
+        Write-Host "            Developer / Testing Options"
+        Write-Host "====================================================="
+        Write-Host " Dry Run: $($Global:DryRun)"
+        Write-Host " Dev Mode: $($Global:DevMode)"
+        Write-Host
+        Write-Host " [1] Toggle Dry Run"
+        Write-Host "     - Simulates menu selections without executing any action."
+        Write-Host "     - Use this to explore menus safely; shows '[DRY RUN]' messages."
+        Write-Host
+        Write-Host " [2] Toggle Dev Mode"
+        Write-Host "     - Enables extra diagnostic/logging hooks you add for testing."
+        Write-Host "     - Also shows the yellow 'DEV MODE ENABLED' banner on the main menu."
+        Write-Host
+        Write-Host " [3] Disable both"
+        Write-Host "     - Turns off Dry Run and Dev Mode and returns the tool to normal behavior."
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "====================================================="
+        $devChoice = Read-Host "Select an option"
+        switch ($devChoice) {
+            "1" {
+                $Global:DryRun = -not $Global:DryRun
+                if ($Global:DryRun) {
+                    Write-Host "DRY RUN ENABLED: menu options will be simulated, no changes applied." -ForegroundColor Yellow
+                } else {
+                    Write-Host "DRY RUN DISABLED: actions will run normally." -ForegroundColor Green
+                }
+                Pause-Menu
+            }
+            "2" {
+                $Global:DevMode = -not $Global:DevMode
+                if ($Global:DevMode) {
+                    Write-Host "DEV MODE ENABLED: verbose simulation/logging for testing." -ForegroundColor Cyan
+                } else {
+                    Write-Host "DEV MODE DISABLED." -ForegroundColor Green
+                }
+                Pause-Menu
+            }
+            "3" {
+                $Global:DryRun = $false
+                $Global:DevMode = $false
+                Write-Host "Dry Run and Dev Mode are now OFF." -ForegroundColor Green
+                Pause-Menu
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 0-3."; Pause-Menu }
+        }
+    }
+}
+
 # Backwards compatibility: keep old name as an alias but avoid defining a function with an unapproved verb
 Set-Alias -Name Pause-Menu -Value Wait-Menu -Force
 
 function Show-Menu {
     Clear-Host
+    if ($Global:DevMode) {
+        Write-Host "*****************************************************" -ForegroundColor Yellow
+        Write-Host "*                  DEV MODE ENABLED                 *" -ForegroundColor Yellow
+        Write-Host "*****************************************************" -ForegroundColor Yellow
+        Write-Host
+    }
+    if ($Global:DryRun) {
+        Write-Host "*****************************************************" -ForegroundColor Yellow
+        Write-Host "*                 DRY RUN ENABLED                  *" -ForegroundColor Yellow
+        Write-Host "*****************************************************" -ForegroundColor Yellow
+        Write-Host
+    }
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.8.2 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.9 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 
@@ -117,7 +197,7 @@ function Show-Menu {
     Write-Host " [16]  Broken Shortcut Finder & Fixer"
     Write-Host
 
-    Write-Host " $(Get-SectionEmoji 'utilities' '[UTILITIES]') $space UTILITIES & EXTRAS"
+    Write-Host " $(Get-SectionEmoji 'utilities' '[UTILITIES]') UTILITIES & EXTRAS"
     Write-Host " [20]  Driver Management"
     Write-Host " [21]  Windows Update Repair Tool"
     Write-Host " [22]  Generate Full System Report"
@@ -130,6 +210,8 @@ function Show-Menu {
 
     Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
+    Write-Host
+    Write-Host " [40] Developer Options (Dry Run / Dev Mode)"
     Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
@@ -251,6 +333,30 @@ function Invoke-Choice4 {
 }
 
 function Invoke-Choice5 {
+    # Known DoH-capable DNS servers (shared by enable/disable actions)
+    $dnsServers = @(
+        # Cloudflare DNS
+        @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" },
+        # Google DNS
+        @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" },
+        @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" },
+        @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" },
+        @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" },
+        # Quad9 DNS
+        @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" },
+        # AdGuard DNS
+        @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
+    )
+
     function Get-ActiveAdapters {
         # Exclude virtual adapters like vEthernet
         Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' } | Select-Object -ExpandProperty Name
@@ -271,28 +377,6 @@ function Invoke-Choice5 {
 
     # Function to enable DoH for all known DNS servers using netsh
     function Enable-DoHAllServers {
-        $dnsServers = @(
-            # Cloudflare DNS
-            @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" },
-            @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" },
-            @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" },
-            @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" },
-            # Google DNS
-            @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" },
-            @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" },
-            @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" },
-            @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" },
-            # Quad9 DNS
-            @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" },
-            @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" },
-            @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" },
-            @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" },
-            # AdGuard DNS
-            @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" },
-            @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" },
-            @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" },
-            @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
-        )
         Write-Host "Enabling DoH for all known DNS servers..."
         $successCount = 0
         foreach ($dns in $dnsServers) {
@@ -311,7 +395,10 @@ function Invoke-Choice5 {
         }
         if ($successCount -eq 0) {
             Write-Host "  - No DoH settings were applied successfully. Check system permissions or Windows version." -ForegroundColor Red
-            return $false
+            return [pscustomobject]@{
+                Success      = $false
+                AppliedCount = 0
+            }
         }
         # Flush DNS cache to ensure changes are applied
         try {
@@ -353,7 +440,53 @@ function Invoke-Choice5 {
         } else {
             Write-Host "  - Not running as Administrator. Cannot restart DNS client service. Please reboot to apply DoH settings." -ForegroundColor Yellow
         }
-        return $true
+        return [pscustomobject]@{
+            Success      = $true
+            AppliedCount = $successCount
+        }
+    }
+
+    function Remove-DoHAllServers {
+        Write-Host "Removing DoH encryption entries for known DNS servers..."
+        $removedCount = 0
+        foreach ($dns in $dnsServers) {
+            try {
+                $command = "netsh dns delete encryption server=$($dns.Server)"
+                $result = Invoke-Expression $command 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  - Removed DoH entry for $($dns.Server)" -ForegroundColor Green
+                    $removedCount++
+                } else {
+                    Write-Host "  - No DoH entry found for $($dns.Server) (or removal failed): $result" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "  - Failed to remove DoH for $($dns.Server): $_" -ForegroundColor Yellow
+            }
+        }
+        if ($removedCount -eq 0) {
+            Write-Host "  - No DoH entries were removed. They may not have been configured." -ForegroundColor Yellow
+        }
+        try {
+            Invoke-Expression "ipconfig /flushdns" | Out-Null
+            Write-Host "  - DNS cache flushed." -ForegroundColor Green
+        } catch {
+            Write-Host "  - Failed to flush DNS cache: $_" -ForegroundColor Yellow
+        }
+        if (Test-Admin) {
+            $service = Get-Service -Name Dnscache -ErrorAction SilentlyContinue
+            if ($service.Status -eq "Running" -and $service.StartType -ne "Disabled") {
+                try {
+                    Restart-Service -Name Dnscache -Force -ErrorAction Stop
+                    Write-Host "  - DNS client service restarted." -ForegroundColor Green
+                } catch {
+                    Write-Host "  - Could not restart DNS client service: $_" -ForegroundColor Yellow
+                }
+            }
+        }
+        return [pscustomobject]@{
+            Success      = $removedCount -ge 0
+            RemovedCount = $removedCount
+        }
     }
 
     # Function to check DoH status
@@ -372,7 +505,9 @@ function Invoke-Choice5 {
         } catch {
             Write-Host "Failed to check DoH status: $_" -ForegroundColor Red
         }
-        Pause-Menu
+        # Pause and return specifically to the DNS / Network Tool menu
+        Write-Host
+        Read-Host "Press ENTER to return to DNS / Network Tool"
     }
 
     # Function to update hosts file with ad-blocking entries
@@ -673,8 +808,9 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
         if ($dohSupported) {
             Write-Host "[5] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
         }
-        Write-Host "[6] Update Windows Hosts File with Ad-Blocking"
-        Write-Host "[7] View/Edit Hosts File (Opens in Notepad as Admin)"
+        Write-Host "[6] Disable DoH (remove encryption entries for known DNS servers)"
+        Write-Host "[7] Update Windows Hosts File with Ad-Blocking"
+        Write-Host "[8] View/Edit Hosts File (Opens in Notepad as Admin)"
         Write-Host "[0] Return to menu"
         Write-Host "======================================================"
         $dns_choice = Read-Host "Enter your choice"
@@ -797,30 +933,37 @@ copy /Y "$uniqueBackupPath" "$hostsPath"
                     Pause-Menu
                     return
                 }
-                $dohApplied = Enable-DoHAllServers
-                while ($true) {
-                    Clear-Host
-                    Write-Host "======================================================"
-                    Write-Host "DoH Configuration Menu"
-                    Write-Host "======================================================"
-                    if ($dohApplied) {
-                        Write-Host "DoH was applied for $successCount DNS servers."
-                    } else {
-                        Write-Host "DoH application failed. Check system permissions or Windows version."
-                    }
-                    Write-Host "[1] Check DoH status"
-                    Write-Host "[0] Return to menu"
-                    Write-Host "======================================================"
-                    $doh_choice = Read-Host "Enter your choice"
-                    switch ($doh_choice) {
-                        "1" { Test-DoHStatus }
-                        "0" { return }
-                        default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
-                    }
+                $dohResult = Enable-DoHAllServers
+                if (-not $dohResult) {
+                    $dohResult = [pscustomobject]@{ Success = $false; AppliedCount = 0 }
                 }
+
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "DoH Configuration"
+                Write-Host "======================================================"
+                if ($dohResult.Success) {
+                    Write-Host "DoH was applied for $($dohResult.AppliedCount) DNS servers."
+                } else {
+                    Write-Host "DoH application failed. Check system permissions or Windows version."
+                }
+                Write-Host
+                # Output DoH status directly on this page; after keypress the DNS menu will be re-displayed
+                Test-DoHStatus
             }
-            "6" { Update-HostsFile }
-            "7" {
+            "6" {
+                $removeResult = Remove-DoHAllServers
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "DoH Removal"
+                Write-Host "======================================================"
+                Write-Host "Removed entries for $($removeResult.RemovedCount) DNS servers."
+                Write-Host "If you changed DNS addresses manually, you may also want to set them back to automatic (option 3)."
+                Write-Host
+                Pause-Menu
+            }
+            "7" { Update-HostsFile }
+            "8" {
                 Clear-Host
                 Write-Host "==============================================="
                 Write-Host "   View/Edit Hosts File"
@@ -1920,6 +2063,8 @@ function Invoke-Choice20 {
     Write-Host "4. Enable Automatic Driver Updates"
     Write-Host "5. Disable Device Metadata Downloads"
     Write-Host "6. Enable Device Metadata Downloads"
+    Write-Host "7. Clean Old Drivers from Driver Store"
+    Write-Host "8. Restore Drivers from Backup"
     Write-Host "0. Return to Main Menu"
     Write-Host "==============================================="
     
@@ -2007,6 +2152,225 @@ function Invoke-Choice20 {
             Write-Host "Device metadata downloads enabled."
             Read-Host "`nPress Enter to return to the previous menu"
             Invoke-Choice20
+        }
+        '7' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "      Old Driver Cleanup"
+            Write-Host "==============================================="
+
+            # Safety: require elevation for pnputil operations
+            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+            if (-not $isAdmin) {
+                Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+                Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option."
+                Pause-Menu
+                return
+            }
+
+            Write-Host "Scanning Driver Store..." -ForegroundColor Cyan
+
+            # --- FAST ENUMERATION START ---
+            # Instead of Get-WindowsDriver (Slow/DISM), we parse pnputil text output (Fast)
+            $rawOutput = pnputil.exe /enum-drivers
+            $drivers = @()
+            $currentDriver = $null
+
+            foreach ($line in $rawOutput) {
+                # Start of a new driver block
+                if ($line -match '^Published Name:\s+(.+)$') {
+                    # Save previous driver if exists
+                    if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+                    
+                    # Initialize new object
+                    # We map 'Driver' to Published Name (oemXX.inf) to match previous logic
+                    $currentDriver = [ordered]@{ 
+                        Driver = $matches[1].Trim()
+                        OriginalFileName = $null
+                        ProviderName = $null
+                        Version = $null
+                        Date = $null
+                    }
+                }
+                elseif ($line -match '^Original Name:\s+(.+)$') { 
+                    $currentDriver.OriginalFileName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Provider Name:\s+(.+)$') { 
+                    $currentDriver.ProviderName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Driver Version:\s+(.+)$') { 
+                    try { $currentDriver.Version = [Version]$matches[1].Trim() } catch { $currentDriver.Version = [Version]"0.0.0.0" }
+                }
+                elseif ($line -match '^Date:\s+(.+)$') { 
+                    try { $currentDriver.Date = [DateTime]$matches[1].Trim() } catch { $currentDriver.Date = [DateTime]::MinValue }
+                }
+            }
+            # Add the very last driver found
+            if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+            # --- FAST ENUMERATION END ---
+
+            # Group by name and provider to find duplicates
+            # We filter out items where OriginalFileName is missing to avoid errors
+            $groupedDrivers = $drivers | Where-Object { $_.OriginalFileName } | Group-Object -Property OriginalFileName, ProviderName
+            $driversToDelete = @()
+            $totalDrivers = $drivers.Count
+
+            Write-Host "`n--- Analysis Results ---"
+            
+            foreach ($group in $groupedDrivers) {
+                if ($group.Count -gt 1) {
+                    # Sort: Newest Date first, then highest Version
+                    $sortedGroup = $group.Group | Sort-Object Date, Version -Descending
+                    
+                    # Keep the first one (Index 0)
+                    $keeper = $sortedGroup[0]
+                    # Delete the rest
+                    $oldDrivers = $sortedGroup | Select-Object -Skip 1
+
+                    Write-Host "Package: $($keeper.OriginalFileName)" -ForegroundColor Gray
+                    Write-Host "  [KEEP] Ver: $($keeper.Version)" -ForegroundColor Green
+                    
+                    foreach ($old in $oldDrivers) {
+                        Write-Host "  [DEL ] Ver: $($old.Version) ($($old.Driver))" -ForegroundColor Yellow
+                        $driversToDelete += $old
+                    }
+                }
+            }
+
+            $count = $driversToDelete.Count
+
+            if ($count -eq 0) {
+                Write-Host "`nDriver store is clean! No old versions found." -ForegroundColor Green
+                Pause-Menu
+                return
+            }
+            else {
+                Write-Host "`nFound $count obsolete driver(s)." -ForegroundColor Yellow
+                Write-Host "The newest driver in each group will be kept. Older ones can be removed."
+
+                # Mandatory backup before any deletion, re-use a valid existing backup when possible
+                $desktop = [Environment]::GetFolderPath('Desktop')
+                if (-not $desktop) { $desktop = "$env:USERPROFILE\Desktop" }
+                $backupDir = $null
+                $latestBackup = Get-ChildItem -Path $desktop -Directory -Filter "DriverBackup_*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestBackup) {
+                    $existingInfCount = (Get-ChildItem -Path $latestBackup.FullName -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
+                    if ($existingInfCount -ge $totalDrivers -and $existingInfCount -gt 0) {
+                        $backupDir = $latestBackup.FullName
+                        Write-Host "[OK] Reusing existing backup ($existingInfCount drivers): $backupDir" -ForegroundColor Green
+                    }
+                }
+                if (-not $backupDir) {
+                    $backupDir = Join-Path $desktop ("DriverBackup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+                    Write-Host "Creating driver backup at: $backupDir"
+                    try {
+                        if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+                        # Quote the target path so usernames with spaces work
+                        $export = Start-Process pnputil.exe -ArgumentList @("/export-driver","*","""$backupDir""") -NoNewWindow -Wait -PassThru
+                        if ($export.ExitCode -ne 0) {
+                            Write-Host "[ERROR] Driver backup failed (exit code $($export.ExitCode)). No deletions performed." -ForegroundColor Red
+                            Write-Host "Try running PowerShell as Administrator and ensure the path is writable, then rerun this option." -ForegroundColor Yellow
+                            Pause-Menu
+                            return
+                        }
+                        $exportedCount = (Get-ChildItem -Path $backupDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
+                        if ($exportedCount -lt $totalDrivers) {
+                            Write-Host "[ERROR] Backup verification failed (expected >= $totalDrivers drivers, found $exportedCount). No deletions performed." -ForegroundColor Red
+                            Pause-Menu
+                            return
+                        }
+                        Write-Host "[OK] Driver backup completed ($exportedCount drivers)." -ForegroundColor Green
+                    } catch {
+                        Write-Host "[ERROR] Driver backup failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "No deletions were performed." -ForegroundColor Yellow
+                        Pause-Menu
+                        return
+                    }
+                }
+                
+                $confirmation = Read-Host "Delete ALL listed old drivers? (Y/N)"
+                
+                if ($confirmation -eq 'Y' -or $confirmation -eq 'y') {
+                    Write-Host "Starting cleanup..." -ForegroundColor Cyan
+                    $deleted = 0
+                    $skipped = 0
+                    foreach ($target in $driversToDelete) {
+                        $perConfirm = Read-Host "Delete $($target.Driver) (v$($target.Version))? (Y/N)"
+                        if ($perConfirm -notin @('Y','y')) {
+                            Write-Host "Skipped $($target.Driver)" -ForegroundColor Yellow
+                            $skipped++
+                            continue
+                        }
+
+                        Write-Host "Deleting $($target.Driver)... " -NoNewline
+                        $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($target.Driver) /uninstall" -NoNewWindow -Wait -PassThru
+
+                        if ($proc.ExitCode -eq 0) {
+                            Write-Host "SUCCESS" -ForegroundColor Green
+                            $deleted++
+                        } else {
+                            Write-Host "LOCKED/IN USE (pnputil exit code $($proc.ExitCode))" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host "`nCleanup Complete. Deleted: $deleted, Skipped: $skipped" -ForegroundColor Green
+                } else {
+                    Write-Host "Operation Cancelled." -ForegroundColor Gray
+                }
+                
+                Pause-Menu
+                return
+            }
+        }
+        '8' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "      Restore Drivers from Backup"
+            Write-Host "==============================================="
+
+            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+            if (-not $isAdmin) {
+                Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+                Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option."
+                Pause-Menu
+                return
+            }
+
+            $desktop = [Environment]::GetFolderPath('Desktop')
+            if (-not $desktop) { $desktop = "$env:USERPROFILE\Desktop" }
+            $latestBackup = Get-ChildItem -Path $desktop -Directory -Filter "DriverBackup_*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            $defaultPath = if ($latestBackup) { $latestBackup.FullName } else { "" }
+
+            if (-not $defaultPath) {
+                Write-Host "No DriverBackup_* folder found on Desktop." -ForegroundColor Yellow
+            } else {
+                Write-Host "Latest backup detected: $defaultPath"
+            }
+            $inputPath = Read-Host "Enter backup folder path (press ENTER to use latest shown)"
+            $restorePath = if ([string]::IsNullOrWhiteSpace($inputPath)) { $defaultPath } else { $inputPath }
+
+            if (-not $restorePath -or -not (Test-Path $restorePath)) {
+                Write-Host "[ERROR] Backup folder not found: $restorePath" -ForegroundColor Red
+                Pause-Menu
+                return
+            }
+
+            $infPattern = Join-Path $restorePath "*.inf"
+            if (-not (Get-ChildItem -Path $restorePath -Recurse -Filter *.inf -ErrorAction SilentlyContinue)) {
+                Write-Host "[ERROR] No .inf files found under $restorePath. Ensure this is a valid driver backup." -ForegroundColor Red
+                Pause-Menu
+                return
+            }
+
+            Write-Host "Restoring drivers from: $restorePath" -ForegroundColor Cyan
+            $proc = Start-Process pnputil.exe -ArgumentList @("/add-driver","""$infPattern""","/subdirs","/install") -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0) {
+                Write-Host "[OK] Driver restore completed (pnputil exit code 0)." -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Driver restore failed (pnputil exit code $($proc.ExitCode))." -ForegroundColor Red
+                Write-Host "Try rerunning as Administrator and verify the backup folder." -ForegroundColor Yellow
+            }
+            Pause-Menu
+            return
         }
         '0' {
             return
@@ -2230,6 +2594,8 @@ function Invoke-Choice23 {
                 try { Start-Service -Name appidsvc -ErrorAction Stop } catch {}
                 Write-Host "Starting Windows Update service..."
                 try { Start-Service -Name wuauserv -ErrorAction Stop } catch {}
+                Write-Host "Starting Cryptographic service..."
+                try { Start-Service -Name cryptsvc -ErrorAction Stop } catch {}
                 Write-Host "Starting Background Intelligent Transfer Service..."
                 try { Start-Service -Name bits -ErrorAction Stop } catch {}
                 Write-Host
@@ -2237,7 +2603,7 @@ function Invoke-Choice23 {
                 Pause-Menu
                 return
             }
-            "2" { return }
+            "0" { return }
             default { Write-Host "Invalid input. Try again."; Pause-Menu }
         }
     }
@@ -2570,6 +2936,14 @@ function Invoke-Choice0 { Clear-Host; Write-Host "Exiting script..."; exit }
 while ($true) {
     Show-Menu
     $choice = (Read-Host "Enter your choice").ToLower().Trim()
+
+    # Simulated dry run mode: report the option instead of executing it
+    if ($Global:DryRun -and $choice -notin @("0","40","help","h")) {
+        Write-Host "[DRY RUN] Would run option [$choice]. No actions were executed." -ForegroundColor Yellow
+        Pause-Menu
+        continue
+    }
+
     switch ($choice) {
         "1"  { Invoke-Choice1; continue }
         "2"  { Invoke-Choice2; continue }
@@ -2598,6 +2972,7 @@ while ($true) {
         "30" { Invoke-Choice30; continue }
         "h"  { Invoke-Choice30; continue }
         "help" { Invoke-Choice30; continue }
+        "40" { Invoke-DeveloperOptions; continue }
         "0" { Invoke-Choice0 }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
