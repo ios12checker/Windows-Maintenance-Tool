@@ -4,8 +4,6 @@ trap {
     Read-Host "Press ENTER to exit"
     exit 1
 }
-$Global:DryRun = $false  # When true, menu options are simulated and not executed
-$Global:DevMode = $false # When true, detailed simulation/logging is enabled for testing
 $ErrorActionPreference = "Stop"
 
 # Clear-Host fails in headless/non-interactive hosts ("Handle is invalid").
@@ -20,12 +18,20 @@ function Clear-Host {
 
 $currentPolicy = Get-ExecutionPolicy
 if ($currentPolicy -in @('Restricted','AllSigned')) {
-    # Attempt to relaunch with a process-scoped bypass so users without a certificate can run the tool
+    Write-Host "Execution Policy ($currentPolicy) blocks this script." -ForegroundColor Yellow
+    $consent = Read-Host "Re-launch this script with -ExecutionPolicy Bypass for this session? (Y/N)"
+    if ($consent.ToUpper() -ne 'Y') {
+        Write-Host "Execution policy unchanged. Exiting." -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
+
+    # Attempt to relaunch with a process-scoped bypass (user-approved)
     $shellPath = $null
     try { $shellPath = Get-PwshOrPowershellPath } catch {}
     if (-not $shellPath) { $shellPath = 'powershell' }
 
-    Write-Host "Execution Policy ($currentPolicy) blocks this script. Relaunching with -ExecutionPolicy Bypass for this session..." -ForegroundColor Yellow
+    Write-Host "Relaunching with -ExecutionPolicy Bypass for this session..." -ForegroundColor Yellow
     try {
         Start-Process $shellPath -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -WorkingDirectory (Get-Location) -WindowStyle Normal
         exit
@@ -93,79 +99,13 @@ function Wait-Menu {
     Read-Host "Press ENTER to return to menu"
 }
 
-function Invoke-DeveloperOptions {
-    while ($true) {
-        Clear-Host
-        Write-Host "====================================================="
-        Write-Host "            Developer / Testing Options"
-        Write-Host "====================================================="
-        Write-Host " Dry Run: $($Global:DryRun)"
-        Write-Host " Dev Mode: $($Global:DevMode)"
-        Write-Host
-        Write-Host " [1] Toggle Dry Run"
-        Write-Host "     - Simulates menu selections without executing any action."
-        Write-Host "     - Use this to explore menus safely; shows '[DRY RUN]' messages."
-        Write-Host
-        Write-Host " [2] Toggle Dev Mode"
-        Write-Host "     - Enables extra diagnostic/logging hooks you add for testing."
-        Write-Host "     - Also shows the yellow 'DEV MODE ENABLED' banner on the main menu."
-        Write-Host
-        Write-Host " [3] Disable both"
-        Write-Host "     - Turns off Dry Run and Dev Mode and returns the tool to normal behavior."
-        Write-Host
-        Write-Host " [0] Return to main menu"
-        Write-Host "====================================================="
-        $devChoice = Read-Host "Select an option"
-        switch ($devChoice) {
-            "1" {
-                $Global:DryRun = -not $Global:DryRun
-                if ($Global:DryRun) {
-                    Write-Host "DRY RUN ENABLED: menu options will be simulated, no changes applied." -ForegroundColor Yellow
-                } else {
-                    Write-Host "DRY RUN DISABLED: actions will run normally." -ForegroundColor Green
-                }
-                Pause-Menu
-            }
-            "2" {
-                $Global:DevMode = -not $Global:DevMode
-                if ($Global:DevMode) {
-                    Write-Host "DEV MODE ENABLED: verbose simulation/logging for testing." -ForegroundColor Cyan
-                } else {
-                    Write-Host "DEV MODE DISABLED." -ForegroundColor Green
-                }
-                Pause-Menu
-            }
-            "3" {
-                $Global:DryRun = $false
-                $Global:DevMode = $false
-                Write-Host "Dry Run and Dev Mode are now OFF." -ForegroundColor Green
-                Pause-Menu
-            }
-            "0" { return }
-            default { Write-Host "Invalid choice. Please enter 0-3."; Pause-Menu }
-        }
-    }
-}
-
 # Backwards compatibility: keep old name as an alias but avoid defining a function with an unapproved verb
 Set-Alias -Name Pause-Menu -Value Wait-Menu -Force
 
 function Show-Menu {
     Clear-Host
-    if ($Global:DevMode) {
-        Write-Host "*****************************************************" -ForegroundColor Yellow
-        Write-Host "*                  DEV MODE ENABLED                 *" -ForegroundColor Yellow
-        Write-Host "*****************************************************" -ForegroundColor Yellow
-        Write-Host
-    }
-    if ($Global:DryRun) {
-        Write-Host "*****************************************************" -ForegroundColor Yellow
-        Write-Host "*                 DRY RUN ENABLED                  *" -ForegroundColor Yellow
-        Write-Host "*****************************************************" -ForegroundColor Yellow
-        Write-Host
-    }
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.9 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.10 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 
@@ -210,8 +150,6 @@ function Show-Menu {
 
     Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
     Write-Host " [30]  Contact and Support information (Discord) [h, help]"
-    Write-Host
-    Write-Host " [40] Developer Options (Dry Run / Dev Mode)"
     Write-Host
     Write-Host " [0]  EXIT"
     Write-Host "------------------------------------------------------"
@@ -1065,271 +1003,324 @@ function Invoke-Choice8 {
 
 function Invoke-Choice9 {
     $Host.UI.RawUI.WindowTitle = "Firewall Manager"
-    Clear-Host
-    Write-Host
-    Write-Host "==============================="
-    Write-Host "      Firewall Manager"
-    Write-Host "==============================="
-    Write-Host
-    
-    # Main program loop - adapted from the original script
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host "[ERROR] Firewall Manager requires Administrator privileges." -ForegroundColor Red
+        Write-Host "Please rerun the tool as Administrator." -ForegroundColor Yellow
+        Wait-Menu
+        return
+    }
+
+    $formsAvailable = $true
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop } catch { $formsAvailable = $false }
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+
+    function Export-FirewallRulesSafe {
+        param([string]$Path)
+        try {
+            Get-NetFirewallRule | Select-Object Name,DisplayName,Description,Action,Direction,Enabled,LocalPort,RemotePort,Program,Profile,Protocol |
+                Export-Csv -Path $Path -NoTypeInformation -Force
+            return $true
+        } catch {
+            Write-Host "[ERROR] Failed to export firewall rules: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+
     do {
+        Clear-Host
         Write-Host
-        Write-Host "1: View and Manage Firewall Rules"
-        Write-Host "2: Export firewall rules to CSV"
-        Write-Host "3: Import firewall rules from CSV"
-        Write-Host "0: Back to main menu"
+        Write-Host "==============================="
+        Write-Host "      Firewall Manager"
+        Write-Host "==============================="
+        Write-Host
+        Write-Host "1: View and Manage Rules (Search/Add/Delete)"
+        Write-Host "2: Export Rules to CSV (Save As...)"
+        Write-Host "3: Import Rules from CSV (Open File...)"
+        Write-Host "4: Restore Default Windows Rules"
+        Write-Host "5: Delete ALL Rules (Danger)" -ForegroundColor Red
+        Write-Host "0: Back to Main Menu"
         Write-Host
         
         $selection = Read-Host "Please make a selection"
         
-        switch ($selection.ToUpper()) {
+        switch ($selection) {
             '1' {
+                # --- VIEW LOOP ---
+                $filter = ""
                 do {
                     Clear-Host
+                Write-Host "==============================="
+                Write-Host "      Firewall Rules"
+                Write-Host "==============================="
+                
+                if ($filter) {
+                        Write-Host "Filter: '$filter'" -ForegroundColor Cyan
+                        $rules = @(Get-NetFirewallRule | Where-Object { $_.DisplayName -like "*$filter*" } | Sort-Object DisplayName)
+                    } else {
+                        Write-Host "Showing ALL rules" -ForegroundColor Gray
+                        $rules = @(Get-NetFirewallRule | Sort-Object DisplayName)
+                    }
+
                     Write-Host
-                    Write-Host "==============================="
-                    Write-Host "      Firewall Rules"
-                    Write-Host "==============================="
-                    Write-Host
-                    
-                    # Sort rules alphabetically by DisplayName
-                    $rules = Get-NetFirewallRule | Sort-Object -Property DisplayName
+                    Write-Host "  #   Act    Dir   En    Rule Name"
+                    Write-Host "---  -----   ---   --    ---------"
+
                     $count = 1
-                    
-                    Write-Host "#  Action   Enabled   Rule Name"
-                    Write-Host "--  ------   -------   ---------"
-                    
+                    if ($rules.Count -eq 0) { Write-Host "No rules found." -ForegroundColor Yellow }
+
                     foreach ($rule in $rules) {
-                        $action = $rule.Action.ToString().PadRight(6)
-                        $enabled = if ($rule.Enabled -eq $true) { "Yes" } else { "No" }
-                        $cleanName = Get-CleanRuleName -name $rule.DisplayName
-                        if ([string]::IsNullOrWhiteSpace($cleanName)) {
-                            $cleanName = Get-CleanRuleName -name $rule.Name
-                        }
-                        Write-Host "$($count.ToString().PadLeft(2))  $action   $($enabled.PadRight(7))   $cleanName"
+                        $idx = $count.ToString().PadLeft(3)
+                        $act = $rule.Action.ToString()
+                        $actColor = if ($act -eq "Allow") { "Green" } else { "Red" }
+                        $act = $act.PadRight(6)
+                        $dir = if ($rule.Direction -eq "Inbound") { "In " } else { "Out" }
+                        $en = if ($rule.Enabled -eq $true) { "Y " } else { "N " }
+                        $dName = $rule.DisplayName
+                        
+                        Write-Host "$idx  " -NoNewline
+                        Write-Host "$act " -ForegroundColor $actColor -NoNewline
+                        Write-Host "$dir   $en    $dName"
                         $count++
                     }
-                    
+
                     Write-Host
-                    Write-Host "1: Enable a rule (type '1 NUMBER')"
-                    Write-Host "2: Disable a rule (type '2 NUMBER')"
-                    Write-Host "3: Add new rule"
-                    Write-Host "4: Remove a rule (type '4 NUMBER')"
-                    Write-Host "0: Back"
-                    Write-Host
+                    Write-Host "---------------------------------------------"
+                    Write-Host "F: Filter   C: Clear Filter"
+                    Write-Host "1: Enable   2: Disable    4: Delete"
+                    Write-Host "3: Add New  0: Back"
+                    Write-Host "---------------------------------------------"
                     
-                    $ruleMenuInput = Read-Host "Enter action and number (e.g., '2 5') or 0 to return"
+                    $userInput = Read-Host "Command (e.g., '4 1')"
                     
-                    if ($ruleMenuInput -eq '0') { break }
-                    
-                    $parts = $ruleMenuInput -split '\s+'
-                    $action = $parts[0]
-                    $ruleNum = if ($parts.Count -gt 1) { $parts[1] } else { $null }
-                    
-                    if (@('1','2','4') -contains $action -and ($ruleNum -notmatch '^\d+$')) {
-                        Write-Host "Invalid rule number" -ForegroundColor Red
-                        Write-Host "Press any key to continue..."
-                        $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                        continue
+                    if ($userInput -eq '0') { break }
+                    if ($userInput.ToUpper() -eq 'C') { $filter = ""; continue }
+
+                    $parts = $userInput -split '\s+', 2
+                    $cmd = $parts[0].ToUpper()
+                    $arg = if ($parts.Count -gt 1) { $parts[1] } else { $null }
+
+                    if ($cmd -eq 'F') { 
+                        if ($arg) { $filter = $arg } else { $filter = Read-Host "Search term" }
+                        continue 
                     }
-                    
-                    switch ($action) {
-                        '1' { 
-                            $rules = @(Get-NetFirewallRule | Sort-Object -Property DisplayName)
-                            if ($ruleNum -gt 0 -and $ruleNum -le $rules.Count) {
-                                $rule = $rules[$ruleNum - 1]
-                                $ruleName = Get-CleanRuleName -name $rule.DisplayName
-                                try {
-                                    Set-NetFirewallRule -Name $rule.Name -Enabled True -ErrorAction Stop
-                                    Write-Host "Enabled rule: $ruleName" -ForegroundColor Green
-                                } catch {
-                                    Write-Host "Failed to enable rule $ruleName`: $_" -ForegroundColor Red
-                                }
-                            } else {
-                                Write-Host "Invalid rule number" -ForegroundColor Red
-                            }
-                            Write-Host "Press any key to continue..."
-                            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+                    # --- ADD NEW RULE ---
+                    if ($cmd -eq '3') {
+                        Clear-Host; Write-Host "=== ADD RULE ==="
+                        
+                        do {
+                            $dName = Read-Host "Display Name (Required)"
+                            if ([string]::IsNullOrWhiteSpace($dName)) { Write-Host "Error: Name required." -ForegroundColor Red }
+                        } while ([string]::IsNullOrWhiteSpace($dName))
+
+                        $uNameInput = Read-Host "Unique ID (Blank = Auto-Generate)"
+                        if ([string]::IsNullOrWhiteSpace($uNameInput)) {
+                            $baseName = "$($dName -replace '[^a-zA-Z0-9]','')-$(Get-Random -Min 1000 -Max 9999)"
+                        } else { $baseName = $uNameInput }
+
+                        $desc = Read-Host "Description (Optional)"
+
+                        Write-Host "Direction (I=In, O=Out, Enter=Both):"
+                        $dIn = Read-Host
+                        $dirs = switch($dIn.ToUpper()){ 'I' {@('Inbound')}; 'O' {@('Outbound')}; Default {@('Inbound','Outbound')} }
+                        
+                        do { $act = Read-Host "Action (Allow/Block)" } while ($act -notin 'Allow','Block')
+                        
+                        do {
+                            $profInput = Read-Host "Profile (Domain/Private/Public/Any) [Default: Any]"
+                            if ([string]::IsNullOrWhiteSpace($profInput)) { $prof = "Any" } else { $prof = $profInput }
+                        } while ($prof -notin "Domain", "Private", "Public", "Any")
+                        
+                        $prot = Read-Host "Protocol (TCP/UDP/Any) [Default: Any]"
+                        if (-not $prot) { $prot = "Any" }
+                        
+                        function Read-PortInput {
+                            param([string]$prompt)
+                            $val = Read-Host $prompt
+                            if ([string]::IsNullOrWhiteSpace($val)) { return $null }
+                            if ($val -match '^\d{1,5}$' -and [int]$val -ge 1 -and [int]$val -le 65535) { return $val }
+                            Write-Host "Invalid port. Enter 1-65535 or leave blank for Any." -ForegroundColor Red
+                            return (Read-PortInput -prompt $prompt)
                         }
-                        '2' { 
-                            $rules = @(Get-NetFirewallRule | Sort-Object -Property DisplayName)
-                            if ($ruleNum -gt 0 -and $ruleNum -le $rules.Count) {
-                                $rule = $rules[$ruleNum - 1]
-                                $ruleName = Get-CleanRuleName -name $rule.DisplayName
-                                try {
-                                    Set-NetFirewallRule -Name $rule.Name -Enabled False -ErrorAction Stop
-                                    Write-Host "Disabled rule: $ruleName" -ForegroundColor Green
-                                } catch {
-                                    Write-Host "Failed to disable rule $ruleName`: $_" -ForegroundColor Red
-                                }
-                            } else {
-                                Write-Host "Invalid rule number" -ForegroundColor Red
-                            }
-                            Write-Host "Press any key to continue..."
-                            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+                        if ($prot -in 'TCP','UDP') {
+                            $lp = Read-PortInput -prompt "Local Port (Blank=Any)"
+                            $rp = Read-PortInput -prompt "Remote Port (Blank=Any)"
                         }
-                        '3' { 
-                            Clear-Host
-                            Write-Host
-                            Write-Host "==============================="
-                            Write-Host "      Add New Firewall Rule"
-                            Write-Host "==============================="
-                            Write-Host
-                            
-                            $displayName = Read-Host "Enter a display name for the rule"
-                            $name = Read-Host "Enter a unique name for the rule (no spaces, use hyphens)"
-                            $description = Read-Host "Enter a description for the rule"
-                            
-                            do {
-                                $direction = Read-Host "Enter direction (Inbound/Outbound)"
-                            } while ($direction -notin "Inbound", "Outbound")
-                            
-                            do {
-                                $action = Read-Host "Enter action (Allow/Block)"
-                            } while ($action -notin "Allow", "Block")
-                            
-                            do {
-                                $firewallProfile = Read-Host "Enter profile (Domain, Private, Public, Any)"
-                            } while ($firewallProfile -notin "Domain", "Private", "Public", "Any")
-                            
-                            do {
-                                $protocol = Read-Host "Enter protocol (TCP, UDP, ICMP, Any)"
-                            } while ($protocol -notin "TCP", "UDP", "ICMP", "Any")
-                            
-                            $localPort = Read-Host "Enter local port (leave blank for any)"
-                            $remotePort = Read-Host "Enter remote port (leave blank for any)"
-                            $program = Read-Host "Enter program path (leave blank for any)"
-                            
+
+                        Write-Host "Program (Blank=Any, 'B'=Browse):"
+                        $progIn = Read-Host
+                        if ($progIn -eq 'B' -and $formsAvailable) {
+                            $fb = New-Object System.Windows.Forms.OpenFileDialog
+                            $fb.Filter = "Exe|*.exe|All|*.*"; $fb.InitialDirectory = "C:\Program Files"
+                            if ($fb.ShowDialog() -eq 'OK') { $prog = $fb.FileName }
+                        } else { $prog = $progIn }
+                        if ($prog -and -not (Test-Path $prog)) {
+                            Write-Host "Program path not found: $prog" -ForegroundColor Yellow
+                            $useMissing = Read-Host "Continue with Program=Any instead? (Y/N)"
+                            if ($useMissing.ToUpper() -ne 'Y') { Pause-Menu; continue }
+                            $prog = $null
+                        }
+
+                        foreach ($d in $dirs) {
+                            $ruleName = "$baseName-$d"
+                            if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {
+                                $ruleName = "$ruleName-$([Guid]::NewGuid().ToString('N').Substring(0,6))"
+                                Write-Host "Adjusted rule name to avoid duplicate: $ruleName" -ForegroundColor Yellow
+                            }
+                            $p = @{DisplayName=$dName; Name=$ruleName; Direction=$d; Action=$act; Profile=$prof; Protocol=$prot; Description=$desc}
+                            if ($lp) { $p.LocalPort = $lp }; if ($rp) { $p.RemotePort = $rp }; if ($prog) { $p.Program = $prog }
+                            try { New-NetFirewallRule @p -ErrorAction Stop; Write-Host "Created $d rule." -ForegroundColor Green } catch { Write-Host "Error: $_" -ForegroundColor Red }
+                        }
+                        Pause-Menu; continue
+                    }
+
+                    # --- ACTIONS (1,2,4) ---
+                    if ($cmd -in '1','2','4') {
+                        if ($arg -match '^\d+$' -and [int]$arg -le $rules.Count -and [int]$arg -gt 0) {
+                            $targetIndex = [int]$arg - 1
+                            $targetRule = $rules[$targetIndex]
                             try {
-                                $params = @{
-                                    DisplayName = $displayName
-                                    Name        = $name
-                                    Description = $description
-                                    Direction   = $direction
-                                    Action      = $action
-                                    Profile     = $firewallProfile
-                                    Protocol    = $protocol
-                                }
-                                
-                                if ($localPort) { $params['LocalPort'] = $localPort }
-                                if ($remotePort) { $params['RemotePort'] = $remotePort }
-                                if ($program) { $params['Program'] = $program }
-                                
-                                New-NetFirewallRule @params
-                                Write-Host "Firewall rule created: $displayName" -ForegroundColor Green
-                            } catch {
-                                Write-Host "Failed to create rule: $_" -ForegroundColor Red
-                            }
-                            Write-Host "Press any key to continue..."
-                            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                        }
-                        '4' { 
-                            $rules = @(Get-NetFirewallRule | Sort-Object -Property DisplayName)
-                            if ($ruleNum -gt 0 -and $ruleNum -le $rules.Count) {
-                                $rule = $rules[$ruleNum - 1]
-                                $ruleName = Get-CleanRuleName -name $rule.DisplayName
-                                try {
-                                    Remove-NetFirewallRule -Name $rule.Name -ErrorAction Stop
-                                    Write-Host "Removed rule: $ruleName" -ForegroundColor Green
-                                } catch {
-                                    Write-Host "Failed to remove rule $ruleName`: $_" -ForegroundColor Red
-                                }
-                            } else {
-                                Write-Host "Invalid rule number" -ForegroundColor Red
-                            }
-                            Write-Host "Press any key to continue..."
-                            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                        }
-                        default { 
-                            Write-Host "Invalid action" -ForegroundColor Red
-                            Write-Host "Press any key to continue..."
-                            $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-                        }
+                                if ($cmd -eq '1') { $targetRule | Set-NetFirewallRule -Enabled True; Write-Host "Enabled." -ForegroundColor Green }
+                                elseif ($cmd -eq '2') { $targetRule | Set-NetFirewallRule -Enabled False; Write-Host "Disabled." -ForegroundColor Green }
+                                elseif ($cmd -eq '4') { $targetRule | Remove-NetFirewallRule -ErrorAction Stop; Write-Host "Deleted." -ForegroundColor Green }
+                            } catch { Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red }
+                        } else { Write-Host "Invalid number." -ForegroundColor Red }
+                        Pause-Menu
                     }
                 } while ($true)
             }
             '2' {
+                # --- EXPORT ---
                 Clear-Host
-                Write-Host
-                Write-Host "==============================="
-                Write-Host "      Export Firewall Rules"
-                Write-Host "==============================="
-                Write-Host
-                
-                $defaultPath = "$env:USERPROFILE\Desktop\firewall_rules_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
-                $filePath = Read-Host "Enter the file path to save the CSV (default: $defaultPath)"
-                
-                if ([string]::IsNullOrWhiteSpace($filePath)) {
-                    $filePath = $defaultPath
+                $path = $null
+                if ($formsAvailable) {
+                    $saveDialog = New-Object System.Windows.Forms.SaveFileDialog
+                    $saveDialog.Title = "Select where to save Rules CSV"
+                    $saveDialog.Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+                    $saveDialog.FileName = "firewall_rules_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                    if (Test-Path $desktopPath) { $saveDialog.InitialDirectory = $desktopPath }
+                    if ($saveDialog.ShowDialog() -eq 'OK') { $path = $saveDialog.FileName }
+                } else {
+                    $path = Read-Host "Enter path to save CSV (e.g., $desktopPath\\firewall_rules_yyyyMMdd.csv)"
                 }
-                
-                try {
-                    Get-NetFirewallRule | Sort-Object -Property DisplayName | Export-Csv -Path $filePath -NoTypeInformation
-                    Write-Host "Rules exported to $filePath" -ForegroundColor Green
-                } catch {
-                    Write-Host "Export failed: $_" -ForegroundColor Red
-                }
-                Write-Host "Press any key to continue..."
-                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+                if ($path) {
+                    if (Export-FirewallRulesSafe -Path $path) { Write-Host "Successfully exported to: $path" -ForegroundColor Green }
+                } else { Write-Host "Export cancelled." -ForegroundColor Yellow }
+                Wait-Menu
             }
             '3' {
+                # --- IMPORT ---
                 Clear-Host
-                Write-Host
-                Write-Host "==============================="
-                Write-Host "      Import Firewall Rules"
-                Write-Host "==============================="
-                Write-Host
-                
-                $defaultPath = "$env:USERPROFILE\Desktop\firewall_rules.csv"
-                $filePath = Read-Host "Enter the file path of the CSV to import (default looks on Desktop for firewall_rules.csv)"
-                
-                if ([string]::IsNullOrWhiteSpace($filePath)) {
-                    $filePath = $defaultPath
-                }
-                
-                if (Test-Path $filePath) {
-                    try {
-                        $rules = Import-Csv -Path $filePath
-                        $successCount = 0
-                        $errorCount = 0
-                        
-                        foreach ($rule in $rules) {
-                            try {
-                                $params = @{
-                                    DisplayName = $rule.DisplayName
-                                    Name        = $rule.Name
-                                    Description = $rule.Description
-                                    Direction   = $rule.Direction
-                                    Action      = $rule.Action
-                                    Profile     = $rule.Profile
-                                    Enabled     = if ($rule.Enabled -eq "True") { $true } else { $false }
-                                }
-                                
-                                New-NetFirewallRule @params
-                                $successCount++
-                            } catch {
-                                $errorCount++
-                                Write-Host "Error importing rule $($rule.DisplayName): $_" -ForegroundColor Yellow
-                            }
-                        }
-                        
-                        Write-Host "Import completed: $successCount succeeded, $errorCount failed" -ForegroundColor Green
-                    } catch {
-                        Write-Host "Import failed: $_" -ForegroundColor Red
-                    }
+                $path = $null
+                if ($formsAvailable) {
+                    $openDialog = New-Object System.Windows.Forms.OpenFileDialog
+                    $openDialog.Title = "Select CSV to Import"
+                    $openDialog.Filter = "CSV Files (*.csv)|*.csv"
+                    if (Test-Path $desktopPath) { $openDialog.InitialDirectory = $desktopPath }
+                    if ($openDialog.ShowDialog() -eq 'OK') { $path = $openDialog.FileName }
                 } else {
-                    Write-Host "File not found: $filePath" -ForegroundColor Red
+                    $path = Read-Host "Enter path to CSV to import"
                 }
-                Write-Host "Press any key to continue..."
-                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+
+                if ($path -and (Test-Path $path)) {
+                    Write-Host "Importing from $path..." -ForegroundColor Cyan
+                    Write-Host
+                    
+                    try { $csvData = Import-Csv $path } catch { Write-Host "Failed to read CSV: $_" -ForegroundColor Red; Wait-Menu; continue }
+                    if (-not $csvData) { Write-Host "CSV contained no rows." -ForegroundColor Yellow; Wait-Menu; continue }
+
+                    $required = @('Name','DisplayName','Action','Direction','Enabled')
+                    $cols = $csvData | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name -Unique
+                    $missingCols = $required | Where-Object { $_ -notin $cols }
+                    if ($missingCols) {
+                        Write-Host "CSV missing required columns: $($missingCols -join ', ')" -ForegroundColor Red
+                        Wait-Menu; continue
+                    }
+
+                    function Test-PortValue {
+                        param([string]$val)
+                        if ([string]::IsNullOrWhiteSpace($val)) { return $true }
+                        if ($val -match '^\d{1,5}$' -and [int]$val -ge 1 -and [int]$val -le 65535) { return $true }
+                        return $false
+                    }
+                    $validProfiles = @('Domain','Private','Public','Any')
+                    $validProtocols = @('TCP','UDP','Any','Any')
+
+                    $conflicts = @()
+                    foreach ($row in $csvData) {
+                        if (Get-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue) { $conflicts += $row.Name }
+                    }
+                    if ($conflicts.Count -gt 0) {
+                        Write-Host "Warning: the following rule Names already exist and will be overwritten:" -ForegroundColor Yellow
+                        ($conflicts | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" }
+                        $overwrite = Read-Host "Type YES to continue with overwrite, anything else to cancel"
+                        if ($overwrite.ToUpper() -ne 'YES') { Write-Host "Import cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                    }
+
+                    foreach ($row in $csvData) {
+                        try {
+                            if (-not (Test-PortValue $row.LocalPort)) { Write-Host "Skipping '$($row.DisplayName)': invalid LocalPort '$($row.LocalPort)'." -ForegroundColor Yellow; continue }
+                            if (-not (Test-PortValue $row.RemotePort)) { Write-Host "Skipping '$($row.DisplayName)': invalid RemotePort '$($row.RemotePort)'." -ForegroundColor Yellow; continue }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Profile) -and $row.Profile -notin $validProfiles) { Write-Host "Skipping '$($row.DisplayName)': invalid Profile '$($row.Profile)'." -ForegroundColor Yellow; continue }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Protocol) -and $row.Protocol -notin $validProtocols) { Write-Host "Skipping '$($row.DisplayName)': invalid Protocol '$($row.Protocol)'." -ForegroundColor Yellow; continue }
+
+                            if (Get-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue) {
+                                Remove-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue
+                                Write-Host "Overwriting existing: $($row.DisplayName)" -ForegroundColor DarkGray
+                            }
+
+                            $params = @{
+                                Name        = $row.Name
+                                DisplayName = $row.DisplayName
+                                Description = $row.Description
+                                Action      = $row.Action
+                                Direction   = $row.Direction
+                                Enabled     = $row.Enabled
+                            }
+                            
+                            if (-not [string]::IsNullOrWhiteSpace($row.Program)) { $params['Program'] = $row.Program }
+                            if (-not [string]::IsNullOrWhiteSpace($row.LocalPort)) { $params['LocalPort'] = $row.LocalPort }
+                            if (-not [string]::IsNullOrWhiteSpace($row.RemotePort)) { $params['RemotePort'] = $row.RemotePort }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Profile)) { $params['Profile'] = $row.Profile }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Protocol)) { $params['Protocol'] = $row.Protocol }
+
+                            New-NetFirewallRule @params -ErrorAction Stop
+                            Write-Host "Imported: $($row.DisplayName)" -ForegroundColor Green
+                        } catch {
+                            Write-Host "Failed to import '$($row.DisplayName)': $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host
+                    Write-Host "Import process complete." -ForegroundColor Cyan
+                } else { Write-Host "Import cancelled or file not found." -ForegroundColor Yellow }
+                
+                Wait-Menu
+            }
+            '4' { 
+                $ruleCount = (Get-NetFirewallRule).Count
+                $backupPath = Join-Path $desktopPath "firewall_rules_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                Write-Host "This will restore default Windows firewall rules." -ForegroundColor Yellow
+                Write-Host "Current rules detected: $ruleCount. A backup CSV will be saved to: $backupPath" -ForegroundColor Yellow
+                if (-not (Export-FirewallRulesSafe -Path $backupPath)) { Write-Host "Backup failed. Aborting restore." -ForegroundColor Red; Wait-Menu; continue }
+                if ((Read-Host "Type 'RESTORE DEFAULTS' to confirm") -ne 'RESTORE DEFAULTS') { Write-Host "Restore cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                try { netsh advfirewall reset; Write-Host "Restored defaults." -ForegroundColor Green } catch { Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red }
+                Wait-Menu
+            }
+            '5' { 
+                $ruleCount = (Get-NetFirewallRule).Count
+                if ($ruleCount -eq 0) { Write-Host "No rules to delete." -ForegroundColor Yellow; Wait-Menu; continue }
+                $backupPath = Join-Path $desktopPath "firewall_rules_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                Write-Host "This will delete ALL firewall rules ($ruleCount)." -ForegroundColor Red
+                Write-Host "A backup CSV will be saved first to: $backupPath" -ForegroundColor Yellow
+                if (-not (Export-FirewallRulesSafe -Path $backupPath)) { Write-Host "Backup failed. Aborting delete." -ForegroundColor Red; Wait-Menu; continue }
+                if ((Read-Host "Type 'DELETE ALL RULES' to confirm") -ne 'DELETE ALL RULES') { Write-Host "Deletion cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                try { Remove-NetFirewallRule -All; Write-Host "Deleted all rules." -ForegroundColor Red } catch { Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red }
+                Wait-Menu
             }
             '0' { return }
-            default { 
-                Write-Host "Invalid selection" -ForegroundColor Red
-                Write-Host "Press any key to continue..."
-                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
-            }
         }
     } while ($true)
 }
@@ -2806,32 +2797,44 @@ function Invoke-Choice26 {
     Write-Host "Searching for Xbox Live credentials..."
     Write-Host
 
-# Get all stored credentials from cmdkey and split into lines
-$allCreds = (cmdkey /list) -split "`r?`n"
+    # Get all stored credentials from cmdkey and split into lines
+    $allCreds = (cmdkey /list) -split "`r?`n"
 
-# Counter for deleted credentials
-$deletedCount = 0
+    # Find Xbox Live targets
+    $xblTargets = @()
+    foreach ($line in $allCreds) {
+        if ($line -match "(?i)^\s*Target:.*(Xbl.*)$") {
+            $xblTargets += $matches[1]
+        }
+    }
 
-# Debug: Print all lines for inspection
-Write-Host "Inspecting cmdkey output:" -ForegroundColor Cyan
-$allCreds | ForEach-Object { Write-Host "Line: $_" }
+    if ($xblTargets.Count -eq 0) {
+        Write-Host "No Xbox Live credentials found." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
 
-# Loop through each line that starts with "Target:" and contains "Xbl"
-foreach ($line in $allCreds) {
-    if ($line -match "(?i)^\s*Target:.*(Xbl.*)$") {
-        $target = $matches[1]
+    Write-Host "Found $($xblTargets.Count) Xbox Live credential(s):" -ForegroundColor Cyan
+    $xblTargets | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
+    Write-Host
+
+    # Confirmation before deleting anything
+    $proceed = Read-Host "Delete these Xbox Live credentials? (Y/N)"
+    if ($proceed.ToUpper() -ne 'Y') {
+        Write-Host "Operation cancelled. No credentials were deleted." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    # Delete each target
+    $deletedCount = 0
+    foreach ($target in $xblTargets) {
         Write-Host "Deleting credential: $target" -ForegroundColor Yellow
         cmdkey /delete:$target
         $deletedCount++
     }
-}
 
-# Output results
-if ($deletedCount -eq 0) {
-    Write-Host "No Xbox Live credentials found." -ForegroundColor Yellow
-} else {
     Write-Host "`nSuccessfully deleted $deletedCount Xbox Live credential(s)." -ForegroundColor Green
-}
 
 # Pause if Pause-Menu is defined, otherwise use Read-Host
 if (Get-Command -Name Pause-Menu -ErrorAction SilentlyContinue) {
@@ -2937,13 +2940,6 @@ while ($true) {
     Show-Menu
     $choice = (Read-Host "Enter your choice").ToLower().Trim()
 
-    # Simulated dry run mode: report the option instead of executing it
-    if ($Global:DryRun -and $choice -notin @("0","40","help","h")) {
-        Write-Host "[DRY RUN] Would run option [$choice]. No actions were executed." -ForegroundColor Yellow
-        Pause-Menu
-        continue
-    }
-
     switch ($choice) {
         "1"  { Invoke-Choice1; continue }
         "2"  { Invoke-Choice2; continue }
@@ -2972,7 +2968,6 @@ while ($true) {
         "30" { Invoke-Choice30; continue }
         "h"  { Invoke-Choice30; continue }
         "help" { Invoke-Choice30; continue }
-        "40" { Invoke-DeveloperOptions; continue }
         "0" { Invoke-Choice0 }
         default { Write-Host "Invalid choice, please try again."; Pause-Menu }
     }
