@@ -104,8 +104,36 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 
 ---
+## 🔄 Windows Maintenance Tool – Updater Guide
 
-## ⚙️ Installation  
+The updater makes it easy to install or update Windows Maintenance Tool to the latest release. No manual downloads, no hassle.
+
+### 📌 How to Use the Updater
+
+1. Open the **Updater** folder inside your Windows Maintenance Tool directory.  
+   (Example: `C:\Users\<username>\Desktop\Windows Maintenance Tool\Updater`)
+
+2. Launch **Updater.exe**.  
+   The updater will automatically scan for an existing Windows Maintenance Tool installation in the selected folder.
+
+3. Make sure the selected path contains the following files:  
+   - `Start_Windows_Maintenance_Tool.bat`  
+   - `Windows_Maintenance_Tool.ps1`
+
+4. Click **“Update Windows Maintenance Tool”**.  
+   The updater downloads the latest release and updates the tool automatically.
+
+5. After the update completes:  
+   - Use **Open tool** to launch Windows Maintenance Tool immediately.  
+   - Use **Open folder** to open the installation directory.
+
+### 💡 Tips
+
+- If you move the tool to a new location, simply select the new folder using **Choose…**.
+- The updater always shows the newest available version and its release date.
+- “Ready” means a valid installation has been detected and the updater is good to go.
+
+## ⚙️ Manual Installation  
 
 1. Start `Start_Windows_Maintenance_Tool.bat`.  
 2. Follow the interactive menu.  
