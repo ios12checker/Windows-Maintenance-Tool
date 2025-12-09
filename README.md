@@ -11,7 +11,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 
 ## 📸 Screenshots  
 <img width="863" height="841" alt="image" src="https://github.com/user-attachments/assets/18d4d868-7cfe-4a2b-a947-892e94cd3a55" />
-<img width="815" height="617" alt="2025-12-09 14_47_02-NVIDIA GeForce Overlay DT" src="https://github.com/user-attachments/assets/66931aae-5f8b-4a9c-821c-710d6a6ec21d" />
+<img width="814" height="616" alt="2025-12-09 14_48_25-Windows Maintenance Tool Updater" src="https://github.com/user-attachments/assets/74d47f01-f1f2-45eb-9c9f-a2f76155998d" />
+
 
 
 
