@@ -9,12 +9,9 @@ A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 - [@BladeJoe](https://github.com/BladeJoe) – Helped test UAC elevation across Windows builds  
 - [@Owned67](https://github.com/Owned67) – Syntax error reports, false positive clarification  
 - [@thepcformula](https://github.com/thepcformula) – CHKDSK fix in `choice10`, drive filter logic  
-- [@djhenderson](https://github.com/djhenderson) – Diagnostic logs, update repair feedback, Issue #11 analysis  
-- [@Lord-ZuzurNC](https://github.com/Lord-ZuzurNC) – VirusTotal scan verification, helped clarify Trojan false flag  
-- [@iAhmedEladwy](https://github.com/iAhmedEladwy) – Community flag testing, validation support  
-- [@henridbr](https://github.com/henridbr) – Reported early false positive (Phonzy.B!ml), cleanup prompt mismatch
-- [@BruceHarrison](https://github.com/BruceHarrison) - Feature request - Choice 13 (Optimize SSDs) Via powershell
-- [@Chaython](https://github.com/Chaython) - Added IPV6 to DNS, added DOH to DNS, added Windows Host file patching to DNS, added a task scheduler manager, fixed temporary file deletion and added recycle bin dumping, Added Firewall Manager, remove admin check, added admin/group policy bypass [allowing it to run directly in windows terminal], added emoji rendering, .net rollforward, Xbox credential cleanup. 
+- [@djhenderson](https://github.com/djhenderson) – Diagnostic logs, update repair feedback, Issue #11 analysis   
+- [@BruceHarrison](https://github.com/BruceHarrison) - Feature request - Choice 13 (Optimize SSDs) Via powershell.
+- [@Chaython](https://github.com/Chaython) - Helped with this project alot.
 
 Videos
 - [Windows Maintenance Tool – Guide by Info4Geek](https://www.youtube.com/watch?v=TpZY1nXHTsw)
