@@ -1,6 +1,5 @@
 <#
     Windows Maintenance Tool - ULTIMATE WPF EDITION
-    v8.8 - Donation Button & Clickable Credits
 #>
 
 # ==========================================
@@ -865,3 +864,4 @@ $btnTaskManager.Add_Click({ Show-TaskManager })
 Check-ForUpdate $LogBox
 $window.Add_Loaded({ (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 $window.ShowDialog() | Out-Null
+
