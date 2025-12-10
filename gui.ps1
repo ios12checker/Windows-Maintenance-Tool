@@ -187,7 +187,7 @@ function Show-AddRuleForm {
 # 4. FORM DEFINITION
 # ==========================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Windows Maintenance Tool v4.0 (Complete GUI)"
+$form.Text = "Windows Maintenance Tool v4.4 (Complete GUI)"
 $form.Size = New-Object System.Drawing.Size(1020, 750) # Slightly wider for 3 columns
 $form.StartPosition = "CenterScreen"
 $form.BackColor = $Color_Background
@@ -302,3 +302,4 @@ New-StyledButton -Parent $tabSupport -Text "Report Issue on GitHub" -Top 150 -Le
 $form.Add_Load({ $outputBox.Text = "Welcome to Windows Maintenance Tool GUI v4.0.`r`nSelect a tab above to begin.`r`nRunning as: $env:USERNAME`r`n" })
 
 [void]$form.ShowDialog()
+
