@@ -1,13 +1,15 @@
 <#
-    Windows Maintenance Tool v4.4 - GUI Version
-    - Fixed Driver Report Export (Force Write)
-    - Fixed Color Syntax in Clean Drivers
-    - Network Tab Reorganized (3 Columns: General, DNS, Hosts)
+    Windows Maintenance Tool - GUI Version
+    
+    >>> VERSION CONTROL <<<
+    If you are editing this file for a new release, 
+    update the number in the variable below ($AppVersion).
 #>
 
 # ==========================================
-# 1. ADMIN CHECK & PRE-REQUISITES
+# 1. CONFIGURATION & ADMIN CHECK
 # ==========================================
+$AppVersion = "4.0" # <--- UPDATE THIS NUMBER HERE
 $ErrorActionPreference = "SilentlyContinue"
 
 # Check for Admin rights
@@ -47,6 +49,52 @@ $Color_Purple     = [System.Drawing.Color]::Purple
 # ==========================================
 # 3. HELPER FUNCTIONS & EDITORS
 # ==========================================
+
+function Check-ForUpdate {
+    # Add random query param to bypass GitHub CDN caching
+    $time = Get-Date -Format "yyyyMMddHHmmss"
+    $updateUrl = "https://raw.githubusercontent.com/Chaython/Windows-Maintenance-Tool/refs/heads/main/gui.ps1?t=$time"
+    
+    $localVer = [Version]$script:AppVersion
+    $remoteVer = [Version]"0.0"
+
+    # 1. GET REMOTE VERSION
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $webReq = Invoke-WebRequest -Uri $updateUrl -UseBasicParsing -TimeoutSec 5
+        $remoteContent = $webReq.Content
+
+        # We look for the variable definition in the remote file: $AppVersion = "X.X"
+        if ($remoteContent -match '\$AppVersion\s*=\s*"(\d+(\.\d+)+)"') {
+            $remoteVer = [Version]$matches[1]
+        }
+        # Fallback to header comment matching if variable match fails
+        elseif ($remoteContent -match "Windows Maintenance Tool v(\d+(\.\d+)+)") {
+            $remoteVer = [Version]$matches[1]
+        }
+    } catch {}
+
+    # Log to GUI Console
+    $outputBox.Text += "`r`n[UPDATE CHECK] Local: v$localVer | Remote: v$remoteVer"
+
+    # 2. COMPARE
+    if ($remoteVer -gt $localVer) {
+        $outputBox.Text += " -> Update Available!"
+        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+        $result = [System.Windows.Forms.MessageBox]::Show($msg, "Update Available", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Information)
+
+        if ($result -eq "Yes") {
+            $backupPath = "$PSCommandPath.bak"
+            Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
+            Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
+            [System.Windows.Forms.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
+            exit
+        }
+    } else {
+        $outputBox.Text += " -> You are up to date."
+    }
+}
 
 function Run-LogCommand {
     param([scriptblock]$ScriptBlock)
@@ -187,8 +235,8 @@ function Show-AddRuleForm {
 # 4. FORM DEFINITION
 # ==========================================
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Windows Maintenance Tool v4.4 (Complete GUI)"
-$form.Size = New-Object System.Drawing.Size(1020, 750) # Slightly wider for 3 columns
+$form.Text = "Windows Maintenance Tool v$AppVersion (Complete GUI)"
+$form.Size = New-Object System.Drawing.Size(1020, 750)
 $form.StartPosition = "CenterScreen"
 $form.BackColor = $Color_Background
 $form.ForeColor = $Color_Text
@@ -295,11 +343,12 @@ New-StyledButton -Parent $tabUtilities -Text "Scheduled Tasks Manager" -Top 170 
 New-StyledButton -Parent $tabUtilities -Text "Optimize/Trim SSDs" -Top 220 -Left 20 -Action { Run-LogCommand { Optimize-Volume -DriveLetter C -ReTrim -Verbose } }
 
 # Support
-$lblSupport = New-Object System.Windows.Forms.Label; $lblSupport.Text = "Windows Maintenance Tool`nBased on CLI by Lil_Batti & Chaython`nGUI Version 4.0"; $lblSupport.AutoSize = $true; $lblSupport.Top = 20; $lblSupport.Left = 20; $lblSupport.Font = New-Object System.Drawing.Font("Segoe UI", 12); $tabSupport.Controls.Add($lblSupport)
+$lblSupport = New-Object System.Windows.Forms.Label; $lblSupport.Text = "Windows Maintenance Tool`nBased on CLI by Lil_Batti && Chaython`nGUI Version v$AppVersion"; $lblSupport.AutoSize = $true; $lblSupport.Top = 20; $lblSupport.Left = 20; $lblSupport.Font = New-Object System.Drawing.Font("Segoe UI", 12); $tabSupport.Controls.Add($lblSupport)
 New-StyledButton -Parent $tabSupport -Text "Join Discord Support" -Top 100 -Left 20 -Action { Start-Process "https://discord.gg/bCQqKHGxja" }
 New-StyledButton -Parent $tabSupport -Text "Report Issue on GitHub" -Top 150 -Left 20 -Action { Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" } -Color [System.Drawing.Color]::Gray
 
-$form.Add_Load({ $outputBox.Text = "Welcome to Windows Maintenance Tool GUI v4.0.`r`nSelect a tab above to begin.`r`nRunning as: $env:USERNAME`r`n" })
-
+$form.Add_Load({ 
+    $outputBox.Text = "Welcome to Windows Maintenance Tool GUI v$AppVersion.`r`nSelect a tab above to begin.`r`nRunning as: $env:USERNAME`r`n"
+    Check-ForUpdate
+})
 [void]$form.ShowDialog()
-
