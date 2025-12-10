@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v3.10-green)  
+![Version](https://img.shields.io/badge/version-v3.10.1-green)  
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)  
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)  
 
@@ -10,13 +10,8 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 ---
 
 ## 📸 Screenshots  
-<img width="863" height="841" alt="image" src="https://github.com/user-attachments/assets/18d4d868-7cfe-4a2b-a947-892e94cd3a55" />
+<img width="860" height="892" alt="2025-12-10 22_44_19-NVIDIA GeForce Overlay DT" src="https://github.com/user-attachments/assets/e8c81ba0-ce60-4df6-87ee-bf440d0fb388" />
 <img width="814" height="616" alt="2025-12-09 14_48_25-Windows Maintenance Tool Updater" src="https://github.com/user-attachments/assets/74d47f01-f1f2-45eb-9c9f-a2f76155998d" />
-
-
-
-
-
 
 ---
 
@@ -99,6 +94,9 @@ Designed for power users, sysadmins, and curious tinkerers – now smarter, safe
 - Full credit goes to the Massgrave team for maintaining and developing MAS  
 - This project does not modify or redistribute MAS — it only provides a convenient way to download and run it  
 - Clear warning and confirmation step ensures users read the documentation and accept responsibility before running the script  
+
+**Install Local Group Policy Editor**
+This utility enables the Local Group Policy Editor (gpedit.msc) on supported systems where it isn’t available by default (such as Windows Home), by installing the built-in Group Policy components. Run as Administrator.
 
 **Portable & safe (for personal use):**  
 - Runs from any folder or USB drive, no installation required  
