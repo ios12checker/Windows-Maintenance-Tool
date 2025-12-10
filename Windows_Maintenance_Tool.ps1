@@ -1,0 +1,3063 @@
+# ===== Error Checking =====
+trap {
+    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Read-Host "Press ENTER to exit"
+    exit 1
+}
+$ErrorActionPreference = "Stop"
+
+# Clear-Host fails in headless/non-interactive hosts ("Handle is invalid").
+# Wrap the original implementation so the tool keeps running in those environments.
+function Clear-Host {
+    try {
+        Microsoft.PowerShell.Utility\Clear-Host
+    } catch {
+        try { [Console]::Clear() } catch { Write-Host "`n`n`n`n`n" }
+    }
+}
+
+$currentPolicy = Get-ExecutionPolicy
+if ($currentPolicy -in @('Restricted','AllSigned')) {
+    Write-Host "Execution Policy ($currentPolicy) blocks this script." -ForegroundColor Yellow
+    $consent = Read-Host "Re-launch this script with -ExecutionPolicy Bypass for this session? (Y/N)"
+    if ($consent.ToUpper() -ne 'Y') {
+        Write-Host "Execution policy unchanged. Exiting." -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
+
+    # Attempt to relaunch with a process-scoped bypass (user-approved)
+    $shellPath = $null
+    try { $shellPath = Get-PwshOrPowershellPath } catch {}
+    if (-not $shellPath) { $shellPath = 'powershell' }
+
+    Write-Host "Relaunching with -ExecutionPolicy Bypass for this session..." -ForegroundColor Yellow
+    try {
+        Start-Process $shellPath -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -WorkingDirectory (Get-Location) -WindowStyle Normal
+        exit
+    } catch {
+        Write-Host "Automatic bypass failed. You can run manually: powershell -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
+}
+# ===== ADMIN AND CERTIFICATE BYPASS =====
+function Get-PwshOrPowershellPath {
+    $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($pwsh) { return $pwsh.Source }
+    $ps = Get-Command powershell -ErrorAction SilentlyContinue
+    if ($ps) { return $ps.Source }
+    return $null
+}
+
+if (-NOT (whoami /groups | Select-String 'S-1-5-32-544')) {
+    $shellPath = Get-PwshOrPowershellPath
+    if (-not $shellPath) {
+        Write-Host "No compatible PowerShell found (pwsh or powershell). Please install PowerShell 7+ or use Windows PowerShell." -ForegroundColor Red
+        Read-Host "Press ENTER to exit"
+        exit 1
+    }
+    Start-Process $shellPath -Args "-NoExit -File `"$PSCommandPath`"" -Verb RunAs
+    exit
+}
+function Test-IsWindowsTerminal {
+    if ($env:WT_SESSION) { return $true }
+    if ($IsWindows) {
+        $currentPid = $PID
+        while ($currentPid) {
+            try {
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $currentPid"
+                if ($process.Name -eq 'WindowsTerminal.exe') { return $true }
+                $currentPid = $process.ParentProcessId
+            } catch { break }
+        }
+    }
+    return $false
+}
+
+function Get-SectionEmoji {
+    param($name, $fallback)
+
+    if (-not (Test-IsWindowsTerminal)) { return $fallback }
+
+    $isPS5 = $PSVersionTable.PSVersion.Major -le 5
+    switch ($name) {
+        'updates'   { if ($isPS5) { return [char]0xD83D + [char]0xDCE5 } else { return "`u{1F4E5}" } } # 📥
+        'health'    { if ($isPS5) { return [char]0xD83E + [char]0xDE7A } else { return "`u{1FA7A}" } } # 🩺
+        'network'   { if ($isPS5) { return [char]0xD83C + [char]0xDF10 } else { return "`u{1F310}" } } # 🌐
+        'cleanup'   { if ($isPS5) { return [char]0xD83E + [char]0xDDF9 } else { return "`u{1F9F9}" } } # 🧹
+        'utilities' { if ($isPS5) { return [char]0xD83D + [char]0xDEE0 } else { return "`u{1F6E0}" } } # 🛠
+        'support'   { if ($isPS5) { return [char]0x2753 } else { return "`u{2753}" } }                 # ❓
+        default     { return $fallback }
+    }
+}
+
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+function Wait-Menu {
+    Write-Host
+    Read-Host "Press ENTER to return to menu"
+}
+
+# Backwards compatibility: keep old name as an alias but avoid defining a function with an unapproved verb
+Set-Alias -Name Pause-Menu -Value Wait-Menu -Force
+
+function Show-Menu {
+    Clear-Host
+    Write-Host "====================================================="
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.10.1 - By Lil_Batti & Chaython"
+    Write-Host "====================================================="
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'updates' '[UPDATES]') WINDOWS UPDATES"
+    Write-Host "  [1]  Update Windows Apps / Programs (Winget upgrade)"
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'health' '[HEALTH]') SYSTEM HEALTH CHECKS"
+    Write-Host "  [2]  Scan for corrupt files (SFC /scannow) [Admin]"
+    Write-Host "  [3]  Windows CheckHealth (DISM) [Admin]"
+    Write-Host "  [4]  Restore Windows Health (DISM /RestoreHealth) [Admin]"
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'network' '[NETWORK]') NETWORK TOOLS"
+    Write-Host "  [5]  DNS Options (Flush/Set/Reset, IPv4/IPv6, DoH)"
+    Write-Host "  [6]  Show network information (ipconfig /all)"
+    Write-Host "  [7]  Restart Wi-Fi Adapters"
+    Write-Host "  [8]  Network Repair - Automatic Troubleshooter"
+    Write-Host "  [9]  Firewall Manager [Admin]"
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'cleanup' '[CLEANUP]') CLEANUP & OPTIMIZATION"
+    Write-Host " [10]  Disk Cleanup (cleanmgr)"
+    Write-Host " [11]  Run Advanced Error Scan (CHKDSK) [Admin]"
+    Write-Host " [12]  Perform System Optimization (Delete Temporary Files)"
+    Write-Host " [13]  Advanced Registry Cleanup-Optimization"
+    Write-Host " [14]  Optimize SSDs (ReTrim)"
+    Write-Host " [15]  Task Management (Scheduled Tasks) [Admin]"
+    Write-Host " [16]  Broken Shortcut Finder & Fixer"
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'utilities' '[UTILITIES]') UTILITIES & EXTRAS"
+    Write-Host " [20]  Driver Management"
+    Write-Host " [21]  Windows Update Repair Tool"
+    Write-Host " [22]  Generate Full System Report"
+    Write-Host " [23]  Windows Update Utility & Service Reset"
+    Write-Host " [24]  View Network Routing Table [Advanced]"
+    Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
+    Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
+    Write-Host " [27]  Windows/Office Activation Manager (MAS) [Downloads/runs MAS from massgrave.dev]"
+    Write-Host " [28]  Install Local Group Policy Editor (Home editions)"
+    Write-Host
+
+    Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
+    Write-Host " [30]  Contact and Support information (Discord) [h, help]"
+    Write-Host
+    Write-Host " [0]  EXIT"
+    Write-Host "------------------------------------------------------"
+}
+
+
+
+function Invoke-Choice1 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Windows Update (via Winget)"
+    Write-Host "==============================================="
+    
+    # Check if Winget is installed
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+        Write-Host "Winget is not installed. Attempting to install it automatically..."
+        Write-Host
+        
+        try {
+            # Method 1: Try installing via Microsoft Store (App Installer)
+            Write-Host "Installing Winget via Microsoft Store..."
+            $result = Start-Process "ms-windows-store://pdp/?productid=9NBLGGH4NNS1" -Wait -PassThru
+            
+            if ($result.ExitCode -eq 0) {
+                Write-Host "Microsoft Store opened successfully. Please complete the installation."
+                Write-Host "After installation, restart this tool to use Winget features."
+                Pause-Menu
+                return
+            } else {
+                # Method 2: Alternative direct download if Store method fails
+                Write-Host "Microsoft Store method failed, trying direct download..."
+                $wingetUrl = "https://aka.ms/getwinget"
+                $installerPath = "$env:TEMP\winget-cli.msixbundle"
+                
+                # Download the installer
+                Invoke-WebRequest -Uri $wingetUrl -OutFile $installerPath
+                
+                # Install Winget
+                Add-AppxPackage -Path $installerPath
+                
+                # Verify installation
+                if (Get-Command winget -ErrorAction SilentlyContinue) {
+                    Write-Host "Winget installed successfully!"
+                    Start-Sleep -Seconds 2
+                } else {
+                    Write-Host "Installation failed. Please install manually from Microsoft Store."
+                    Pause-Menu
+                    return
+                }
+            }
+        } catch {
+            Write-Host "Failed to install Winget automatically. Error: $_"
+            Write-Host "Please install 'App Installer' from Microsoft Store manually."
+            Pause-Menu
+            return
+        }
+    }
+
+    # Main Winget functionality
+    Write-Host "Listing available upgrades..."
+    Write-Host
+    winget upgrade --include-unknown
+    Write-Host
+
+    while ($true) {
+        Write-Host "==============================================="
+        Write-Host "Options:"
+        Write-Host "[1] Upgrade all packages"
+        Write-Host "[0] Cancel"
+        Write-Host
+        Write-Host "Or simply enter a package ID to upgrade it directly"
+        Write-Host
+        $userInput = Read-Host "Enter your choice or package ID"
+        $userInput = $userInput.Trim()
+        
+        if ($userInput -eq "0") {
+            Write-Host "Cancelled. Returning to menu..."
+            Start-Sleep -Seconds 1
+            return
+        }
+        elseif ($userInput -eq "1") {
+            Write-Host "Running full upgrade..."
+            winget upgrade --all --include-unknown
+            Pause-Menu
+            return
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($userInput)) {
+            # Treat as package ID
+            Write-Host "Upgrading $userInput..."
+            winget upgrade --id $userInput --include-unknown
+            Pause-Menu
+            return
+        }
+        else {
+            Write-Host "Invalid input. Please enter a package ID, 1, or 0."
+        }
+    }
+}
+
+function Invoke-Choice2 {
+    Clear-Host
+    Write-Host "Scanning for corrupt files (SFC /scannow)..."
+    sfc /scannow
+    Pause-Menu
+}
+
+function Invoke-Choice3 {
+    Clear-Host
+    Write-Host "Checking Windows health status (DISM /CheckHealth)..."
+    dism /online /cleanup-image /checkhealth
+    Pause-Menu
+}
+
+function Invoke-Choice4 {
+    Clear-Host
+    Write-Host "Restoring Windows health status (DISM /RestoreHealth)..."
+    dism /online /cleanup-image /restorehealth
+    Pause-Menu
+}
+
+function Invoke-Choice5 {
+    # Known DoH-capable DNS servers (shared by enable/disable actions)
+    $dnsServers = @(
+        # Cloudflare DNS
+        @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" },
+        @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" },
+        # Google DNS
+        @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" },
+        @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" },
+        @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" },
+        @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" },
+        # Quad9 DNS
+        @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" },
+        @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" },
+        # AdGuard DNS
+        @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" },
+        @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
+    )
+
+    function Get-ActiveAdapters {
+        # Exclude virtual adapters like vEthernet
+        Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' } | Select-Object -ExpandProperty Name
+    }
+
+    # Check if DoH is supported (Windows 11 or recent Windows 10)
+    function Test-DoHSupport {
+        $osVersion = [System.Environment]::OSVersion.Version
+        return ($osVersion.Major -eq 10 -and $osVersion.Build -ge 19041) -or ($osVersion.Major -gt 10)
+    }
+
+    # Check if running as Administrator
+    function Test-Admin {
+        $currentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object Security.Principal.WindowsPrincipal($currentUser)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+
+    # Function to enable DoH for all known DNS servers using netsh
+    function Enable-DoHAllServers {
+        Write-Host "Enabling DoH for all known DNS servers..."
+        $successCount = 0
+        foreach ($dns in $dnsServers) {
+            try {
+                $command = "netsh dns add encryption server=$($dns.Server) dohtemplate=$($dns.Template) autoupgrade=yes udpfallback=no"
+                $result = Invoke-Expression $command 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  - DoH enabled for $($dns.Server) with template $($dns.Template)" -ForegroundColor Green
+                    $successCount++
+                } else {
+                    Write-Host "  - Failed to enable DoH for $($dns.Server): $result" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "  - Failed to enable DoH for $($dns.Server): $_" -ForegroundColor Yellow
+            }
+        }
+        if ($successCount -eq 0) {
+            Write-Host "  - No DoH settings were applied successfully. Check system permissions or Windows version." -ForegroundColor Red
+            return [pscustomobject]@{
+                Success      = $false
+                AppliedCount = 0
+            }
+        }
+        # Flush DNS cache to ensure changes are applied
+        try {
+            Invoke-Expression "ipconfig /flushdns" | Out-Null
+            Write-Host "  - DNS cache flushed to apply changes" -ForegroundColor Green
+        } catch {
+            Write-Host "  - Failed to flush DNS cache: $_" -ForegroundColor Yellow
+        }
+        # Attempt to restart DNS client service if running as Administrator
+        if (Test-Admin) {
+            $service = Get-Service -Name Dnscache -ErrorAction SilentlyContinue
+            if ($service.Status -eq "Running" -and $service.StartType -ne "Disabled") {
+                try {
+                    Restart-Service -Name Dnscache -Force -ErrorAction Stop
+                    Write-Host "  - DNS client service restarted to apply DoH settings" -ForegroundColor Green
+                } catch {
+                    Write-Host "  - Failed to restart DNS client service: $_" -ForegroundColor Yellow
+                    try {
+                        $stopResult = Invoke-Expression "net stop dnscache" 2>&1
+                        if ($LASTEXITCODE -eq 0) {
+                            Start-Sleep -Seconds 2
+                            $startResult = Invoke-Expression "net start dnscache" 2>&1
+                            if ($LASTEXITCODE -eq 0) {
+                                Write-Host "  - DNS client service restarted using net stop/start" -ForegroundColor Green
+                            } else {
+                                Write-Host "  - Failed to start DNS client service: $startResult" -ForegroundColor Yellow
+                            }
+                        } else {
+                            Write-Host "  - Failed to stop DNS client service: $stopResult" -ForegroundColor Yellow
+                        }
+                    } catch {
+                        Write-Host "  - Failed to restart DNS client service via net commands: $_" -ForegroundColor Yellow
+                    }
+                }
+            } else {
+                Write-Host "  - DNS client service is not running or is disabled. Please enable and start it manually." -ForegroundColor Yellow
+            }
+            Write-Host "  - Please reboot your system to apply DoH settings or manually restart the 'DNS Client' service in services.msc." -ForegroundColor Yellow
+        } else {
+            Write-Host "  - Not running as Administrator. Cannot restart DNS client service. Please reboot to apply DoH settings." -ForegroundColor Yellow
+        }
+        return [pscustomobject]@{
+            Success      = $true
+            AppliedCount = $successCount
+        }
+    }
+
+    function Remove-DoHAllServers {
+        Write-Host "Removing DoH encryption entries for known DNS servers..."
+        $removedCount = 0
+        foreach ($dns in $dnsServers) {
+            try {
+                $command = "netsh dns delete encryption server=$($dns.Server)"
+                $result = Invoke-Expression $command 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Host "  - Removed DoH entry for $($dns.Server)" -ForegroundColor Green
+                    $removedCount++
+                } else {
+                    Write-Host "  - No DoH entry found for $($dns.Server) (or removal failed): $result" -ForegroundColor Yellow
+                }
+            } catch {
+                Write-Host "  - Failed to remove DoH for $($dns.Server): $_" -ForegroundColor Yellow
+            }
+        }
+        if ($removedCount -eq 0) {
+            Write-Host "  - No DoH entries were removed. They may not have been configured." -ForegroundColor Yellow
+        }
+        try {
+            Invoke-Expression "ipconfig /flushdns" | Out-Null
+            Write-Host "  - DNS cache flushed." -ForegroundColor Green
+        } catch {
+            Write-Host "  - Failed to flush DNS cache: $_" -ForegroundColor Yellow
+        }
+        if (Test-Admin) {
+            $service = Get-Service -Name Dnscache -ErrorAction SilentlyContinue
+            if ($service.Status -eq "Running" -and $service.StartType -ne "Disabled") {
+                try {
+                    Restart-Service -Name Dnscache -Force -ErrorAction Stop
+                    Write-Host "  - DNS client service restarted." -ForegroundColor Green
+                } catch {
+                    Write-Host "  - Could not restart DNS client service: $_" -ForegroundColor Yellow
+                }
+            }
+        }
+        return [pscustomobject]@{
+            Success      = $removedCount -ge 0
+            RemovedCount = $removedCount
+        }
+    }
+
+    # Function to check DoH status
+    function Test-DoHStatus {
+        try {
+            $netshOutput = Invoke-Expression "netsh dns show encryption" | Out-String
+            if ($netshOutput -match "cloudflare-dns\.com|dns\.google|dns\.quad9\.net|dns\.adguard\.com") {
+                Write-Host "DoH Status:"
+                Write-Host $netshOutput -ForegroundColor Green
+                Write-Host "DoH is enabled for at least one known DNS server." -ForegroundColor Green
+            } else {
+                Write-Host "DoH Status:"
+                Write-Host $netshOutput -ForegroundColor Yellow
+                Write-Host "No DoH settings detected. Ensure DNS servers are set and DoH was applied successfully." -ForegroundColor Yellow
+            }
+        } catch {
+            Write-Host "Failed to check DoH status: $_" -ForegroundColor Red
+        }
+        # Pause and return specifically to the DNS / Network Tool menu
+        Write-Host
+        Read-Host "Press ENTER to return to DNS / Network Tool"
+    }
+
+    # Function to update hosts file with ad-blocking entries
+function Update-HostsFile {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   Updating Windows Hosts File with Ad-Blocking"
+    Write-Host "==============================================="
+    
+    # Check for admin privileges
+    if (-not (Test-Admin)) {
+        Write-Host "Error: This operation requires administrator privileges." -ForegroundColor Red
+        Write-Host "Please run the script as Administrator and try again."
+        Pause-Menu
+        return
+    }
+    
+    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+    $backupDir = "$env:windir\System32\drivers\etc\hosts_backups"
+    $maxRetries = 3
+    $retryDelay = 2 # seconds
+
+    # List of mirrors to try (in order)
+    $mirrors = @(
+        "https://o0.pages.dev/Lite/hosts.win",
+        "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/hosts.win",
+        "https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/hosts.win"
+    )
+
+    try {
+        # ===== ENSURE BACKUP DIRECTORY EXISTS =====
+        if (-not (Test-Path $backupDir)) {
+            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
+            Write-Host "Created backup directory: $backupDir" -ForegroundColor Green
+        }
+
+        # ===== CREATE BACKUP =====
+        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+        $uniqueBackupPath = "$backupDir\hosts_$timestamp.bak"
+        
+        if (Test-Path $hostsPath) {
+            Write-Host "Creating backup of hosts file..."
+            try {
+                Copy-Item $hostsPath $uniqueBackupPath -Force
+                Write-Host "Backup created at: $uniqueBackupPath" -ForegroundColor Green
+            } catch {
+                Write-Host "Warning: Could not create backup - $($_.Exception.Message)" -ForegroundColor Yellow
+                $uniqueBackupPath = $null
+            }
+        } else {
+            Write-Host "No existing hosts file found - will create new one" -ForegroundColor Yellow
+            $uniqueBackupPath = $null
+        }
+
+        # ===== DOWNLOAD WITH MIRROR FALLBACK =====
+        $adBlockContent = $null
+        $successfulMirror = $null
+
+        foreach ($mirror in $mirrors) {
+            Write-Host "`nAttempting download from: $mirror"
+            
+            try {
+                $webClient = New-Object System.Net.WebClient
+                $adBlockContent = $webClient.DownloadString($mirror)
+                $successfulMirror = $mirror
+                Write-Host "Successfully downloaded hosts file" -ForegroundColor Green
+                break
+            } catch [System.Net.WebException] {
+                Write-Host "Download failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
+            } catch {
+                Write-Host "Unexpected error: $($_.Exception.Message)" -ForegroundColor Yellow
+                continue
+            } finally {
+                if ($null -ne $webClient) {
+                    $webClient.Dispose()
+                }
+            }
+        }
+
+        if (-not $adBlockContent) {
+            throw "All mirrors failed! Could not download ad-blocking hosts file."
+        }
+
+        # ===== PREPARE NEW CONTENT =====
+        # Extract user custom entries from existing hosts file if it exists
+        $userCustomEntries = ""
+        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
+        
+        if (Test-Path $hostsPath) {
+            try {
+                $currentContent = Get-Content $hostsPath -Raw
+                if ($currentContent -match "(?ms)$customSectionStart\r?\n(.*?)\r?\n$customSectionEnd") {
+                    $userCustomEntries = $matches[1]
+                }
+            } catch {
+                Write-Host "Note: Could not read existing custom entries." -ForegroundColor Yellow
+            }
+        }
+
+        # If no custom entries section exists, create the template
+        if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
+            $userCustomEntries = @"
+# Add your custom host entries below this line
+# Example:
+# 192.168.1.100    myserver.local    # My local server
+"@
+        }
+
+        # Create basic Windows hosts entries for localhost
+        $defaultContent = @"
+# Copyright (c) 1993-2009 Microsoft Corp.
+#
+# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.
+#
+# This file contains the mappings of IP addresses to host names. Each
+# entry should be kept on an individual line. The IP address should
+# be placed in the first column followed by the corresponding host name.
+# The IP address and the host name should be separated by at least one
+# space.
+#
+# Additionally, comments (such as these) may be inserted on individual
+# lines or following the machine name denoted by a '#' symbol.
+#
+# For example:
+#
+#      102.54.94.97     rhino.acme.com          # source server
+#       38.25.63.10     x.acme.com              # x client host
+
+# localhost name resolution is handled within DNS itself.
+127.0.0.1       localhost
+::1             localhost
+
+$customSectionStart
+$userCustomEntries
+$customSectionEnd
+
+"@
+
+        $newContent = @"
+$defaultContent
+# Ad-blocking entries - Updated $(Get-Date)
+# Downloaded from: $successfulMirror
+# Original hosts file backed up to: $(if ($uniqueBackupPath) { $uniqueBackupPath } else { "No backup created" })
+
+$adBlockContent
+"@
+
+        # ===== UPDATE HOSTS FILE =====
+        Write-Host "`nPreparing to update hosts file..."
+        
+        # Write new content with retry logic
+        $attempt = 0
+        $success = $false
+        
+        while (-not $success -and $attempt -lt $maxRetries) {
+            $attempt++
+            try {
+                # Create temporary file
+                $tempFile = [System.IO.Path]::GetTempFileName()
+                [System.IO.File]::WriteAllText($tempFile, $newContent, [System.Text.Encoding]::UTF8)
+                
+                # Replace hosts file using cmd.exe for maximum reliability
+                $tempDest = "$hostsPath.tmp"
+                $copyCommand = @"
+@echo off
+if exist "$hostsPath" move /Y "$hostsPath" "$tempDest"
+move /Y "$tempFile" "$hostsPath"
+if exist "$tempDest" del /F /Q "$tempDest"
+"@
+                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
+                [System.IO.File]::WriteAllText($batchFile, $copyCommand)
+                
+                Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -WindowStyle Hidden
+                Remove-Item $batchFile -Force
+                
+                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
+                
+                $success = $true
+                $entryCount = ($adBlockContent -split "`n").Count
+                Write-Host "Successfully updated hosts file with $entryCount ad-blocking entries." -ForegroundColor Green
+            } catch {
+                Write-Host "Attempt $attempt failed: $($_.Exception.Message)" -ForegroundColor Yellow
+                if ($attempt -lt $maxRetries) {
+                    Write-Host "Retrying in $retryDelay seconds..."
+                    Start-Sleep -Seconds $retryDelay
+                }
+                # Clean up any temp files
+                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
+                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
+            }
+        }
+
+        if (-not $success) {
+            throw "Failed to update hosts file after $maxRetries attempts."
+        }
+
+        # ===== FLUSH DNS =====
+        Write-Host "Flushing DNS cache..."
+        try {
+            ipconfig /flushdns | Out-Null
+            Write-Host "DNS cache flushed successfully." -ForegroundColor Green
+        } catch {
+            Write-Host "Warning: Could not flush DNS cache. Changes may require a reboot." -ForegroundColor Yellow
+        }
+
+        # ===== CLEAN UP ALL BACKUPS =====
+        if ($success -and $uniqueBackupPath) {
+            Write-Host "`nChecking for backup files in $backupDir..."
+            
+            # Get all backup files
+            $allBackups = Get-ChildItem -Path $backupDir -Filter "hosts_*.bak" | 
+                         Sort-Object CreationTime -Descending
+            
+            if ($allBackups.Count -gt 0) {
+                Write-Host "Found $($allBackups.Count) backup files:"
+                $allBackups | ForEach-Object {
+                    Write-Host "  - $($_.Name) (Created: $($_.CreationTime))" -ForegroundColor Yellow
+                }
+                
+                Write-Host "`nWARNING: Deleting these backup files is permanent and they CANNOT be restored!" -ForegroundColor Red
+                $confirm = Read-Host "Are you sure you want to delete ALL $($allBackups.Count) backup files? (Y/1 for Yes, N/0 for No)"
+                if ($confirm -match '^[Yy1]$') {
+                    $deletedCount = 0
+                    $allBackups | ForEach-Object {
+                        try {
+                            Remove-Item $_.FullName -Force
+                            Write-Host "Deleted: $($_.Name)" -ForegroundColor Green
+                            $deletedCount++
+                        } catch {
+                            Write-Host "Failed to delete $($_.Name): $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host "Deleted $deletedCount backup files." -ForegroundColor Green
+                } else {
+                    Write-Host "Keeping all backup files." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "No backup files found in $backupDir." -ForegroundColor Green
+            }
+        }
+
+    } catch {
+        Write-Host "`nERROR: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "Hosts file update failed!" -ForegroundColor Red
+        
+        # Attempt to restore from backup
+        if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
+            Write-Host "Attempting to restore from backup..."
+            try {
+                # Use cmd.exe for reliable file replacement
+                $restoreCommand = @"
+@echo off
+if exist "$hostsPath" del /F /Q "$hostsPath"
+copy /Y "$uniqueBackupPath" "$hostsPath"
+"@
+                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
+                [System.IO.File]::WriteAllText($batchFile, $restoreCommand)
+                
+                Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -WindowStyle Hidden
+                Remove-Item $batchFile -Force
+                
+                Write-Host "Original hosts file restored from backup." -ForegroundColor Green
+            } catch {
+                Write-Host "CRITICAL ERROR: Could not restore backup!" -ForegroundColor Red
+                Write-Host "Manual recovery required. Backup exists at:" -ForegroundColor Yellow
+                Write-Host $uniqueBackupPath -ForegroundColor Yellow
+                Write-Host "You may need to copy this file to $hostsPath manually" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "No backup available to restore." -ForegroundColor Red
+            if (-not (Test-Path $hostsPath)) {
+                Write-Host "The hosts file does not exist at $hostsPath" -ForegroundColor Yellow
+            }
+        }
+    }
+    
+    Pause-Menu
+}
+    # End of Function to update hosts file with ad-blocking entries, start of settings
+
+    $dohSupported = Test-DoHSupport
+    if (-not $dohSupported) {
+        Write-Host "Warning: DNS over HTTPS (DoH) is not supported on this system. Option 5 will not be available." -ForegroundColor Yellow
+    }
+
+    while ($true) {
+        Clear-Host
+        Write-Host "======================================================"
+        Write-Host "DNS / Network Tool"
+        Write-Host "======================================================"
+        Write-Host "[1] Set DNS to Google (8.8.8.8 / 8.8.4.4, IPv6)"
+        Write-Host "[2] Set DNS to Cloudflare (1.1.1.1 / 1.0.0.1, IPv6)"
+        Write-Host "[3] Restore automatic DNS (DHCP)"
+        Write-Host "[4] Use your own DNS (IPv4/IPv6)"
+        if ($dohSupported) {
+            Write-Host "[5] Encrypt DNS: Enable DoH using netsh on all known DNS servers"
+        }
+        Write-Host "[6] Disable DoH (remove encryption entries for known DNS servers)"
+        Write-Host "[7] Update Windows Hosts File with Ad-Blocking"
+        Write-Host "[8] View/Edit Hosts File (Opens in Notepad as Admin)"
+        Write-Host "[0] Return to menu"
+        Write-Host "======================================================"
+        $dns_choice = Read-Host "Enter your choice"
+        switch ($dns_choice) {
+            "1" {
+                $adapters = Get-ActiveAdapters
+                if (!$adapters) { Write-Host "No active network adapters found!" -ForegroundColor Red; Pause-Menu; return }
+                Write-Host "Applying Google DNS (IPv4: 8.8.8.8/8.8.4.4, IPv6: 2001:4860:4860::8888/2001:4860:4860::8844) to:"
+                foreach ($adapter in $adapters) {
+                    Write-Host "  - $adapter"
+                    $dnsAddresses = @("8.8.8.8", "8.8.4.4", "2001:4860:4860::8888", "2001:4860:4860::8844")
+                    try {
+                        Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $dnsAddresses -ErrorAction Stop
+                        Write-Host "  - Google DNS applied successfully on $adapter" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  - Failed to configure Google DNS on $adapter : $_" -ForegroundColor Yellow
+                    }
+                }
+                Write-Host "Done. Google DNS set with IPv4 and IPv6."
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
+                Pause-Menu
+            }
+            "2" {
+                $adapters = Get-ActiveAdapters
+                if (!$adapters) { Write-Host "No active network adapters found!" -ForegroundColor Red; Pause-Menu; return }
+                Write-Host "Applying Cloudflare DNS (IPv4: 1.1.1.1/1.0.0.1, IPv6: 2606:4700:4700::1111/2606:4700:4700::1001) to:"
+                foreach ($adapter in $adapters) {
+                    Write-Host "  - $adapter"
+                    $dnsAddresses = @("1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001")
+                    try {
+                        Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $dnsAddresses -ErrorAction Stop
+                        Write-Host "  - Cloudflare DNS applied successfully on $adapter" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  - Failed to configure Cloudflare DNS on $adapter : $_" -ForegroundColor Yellow
+                    }
+                }
+                Write-Host "Done. Cloudflare DNS set with IPv4 and IPv6."
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
+                Pause-Menu
+            }
+            "3" {
+                $adapters = Get-ActiveAdapters
+                if (!$adapters) { Write-Host "No active network adapters found!" -ForegroundColor Red; Pause-Menu; return }
+                Write-Host "Restoring automatic DNS (DHCP) on:"
+                foreach ($adapter in $adapters) {
+                    Write-Host "  - $adapter"
+                    try {
+                        Set-DnsClientServerAddress -InterfaceAlias $adapter -ResetServerAddresses -ErrorAction Stop
+                        Write-Host "  - DNS set to automatic on $adapter" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  - Failed to reset DNS on $adapter : $_" -ForegroundColor Yellow
+                    }
+                }
+                Write-Host "Done. DNS set to automatic."
+                Pause-Menu
+            }
+            "4" {
+                $adapters = Get-ActiveAdapters
+                if (!$adapters) { Write-Host "No active network adapters found!" -ForegroundColor Red; Pause-Menu; return }
+                while ($true) {
+                    Clear-Host
+                    Write-Host "==============================================="
+                    Write-Host "          Enter your custom DNS"
+                    Write-Host "==============================================="
+                    Write-Host "Enter at least one DNS server (IPv4 or IPv6). Multiple addresses can be comma-separated."
+                    $customDNS = Read-Host "Enter DNS addresses (e.g., 8.8.8.8,2001:4860:4860::8888)"
+                    Clear-Host
+                    Write-Host "==============================================="
+                    Write-Host "         Validating DNS addresses..."
+                    Write-Host "==============================================="
+                    $dnsAddresses = $customDNS.Split(",", [StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() }
+                    if ($dnsAddresses.Count -eq 0) {
+                        Write-Host "[!] ERROR: No DNS addresses entered." -ForegroundColor Red
+                        Pause-Menu
+                        continue
+                    }
+                    $validDnsAddresses = @()
+                    foreach ($dns in $dnsAddresses) {
+                        $reachable = Test-Connection -ComputerName $dns -Count 1 -Quiet -ErrorAction SilentlyContinue
+                        if ($reachable) {
+                            $validDnsAddresses += $dns
+                            Write-Host "Validated: $dns" -ForegroundColor Green
+                        } else {
+                            Write-Host "[!] ERROR: The DNS address `"$dns`" is not reachable and will be skipped." -ForegroundColor Yellow
+                        }
+                    }
+                    if ($validDnsAddresses.Count -eq 0) {
+                        Write-Host "[!] ERROR: No valid DNS addresses provided." -ForegroundColor Red
+                        Pause-Menu
+                        continue
+                    }
+                    break
+                }
+                Clear-Host
+                Write-Host "==============================================="
+                Write-Host "    Setting DNS for all active adapters..."
+                Write-Host "==============================================="
+                foreach ($adapter in $adapters) {
+                    Write-Host "  - $adapter"
+                    try {
+                        Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $validDnsAddresses -ErrorAction Stop
+                        Write-Host "  - Custom DNS applied successfully on $adapter" -ForegroundColor Green
+                    } catch {
+                        Write-Host "  - Failed to configure custom DNS on $adapter : $_" -ForegroundColor Yellow
+                    }
+                }
+                Write-Host
+                Write-Host "==============================================="
+                Write-Host "    DNS has been successfully updated:"
+                foreach ($dns in $validDnsAddresses) {
+                    Write-Host "      - $dns"
+                }
+                Write-Host "To enable DoH, use option [5] or configure manually in Settings."
+                Write-Host "==============================================="
+                Pause-Menu
+            }
+            "5" {
+                if (-not $dohSupported) {
+                    Write-Host "Error: DoH is not supported on this system. Option 5 is unavailable." -ForegroundColor Red
+                    Pause-Menu
+                    return
+                }
+                $dohResult = Enable-DoHAllServers
+                if (-not $dohResult) {
+                    $dohResult = [pscustomobject]@{ Success = $false; AppliedCount = 0 }
+                }
+
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "DoH Configuration"
+                Write-Host "======================================================"
+                if ($dohResult.Success) {
+                    Write-Host "DoH was applied for $($dohResult.AppliedCount) DNS servers."
+                } else {
+                    Write-Host "DoH application failed. Check system permissions or Windows version."
+                }
+                Write-Host
+                # Output DoH status directly on this page; after keypress the DNS menu will be re-displayed
+                Test-DoHStatus
+            }
+            "6" {
+                $removeResult = Remove-DoHAllServers
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "DoH Removal"
+                Write-Host "======================================================"
+                Write-Host "Removed entries for $($removeResult.RemovedCount) DNS servers."
+                Write-Host "If you changed DNS addresses manually, you may also want to set them back to automatic (option 3)."
+                Write-Host
+                Pause-Menu
+            }
+            "7" { Update-HostsFile }
+            "8" {
+                Clear-Host
+                Write-Host "==============================================="
+                Write-Host "   View/Edit Hosts File"
+                Write-Host "==============================================="
+                
+                $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+                
+                if (-not (Test-Path $hostsPath)) {
+                    Write-Host "Hosts file not found at: $hostsPath" -ForegroundColor Red
+                    Pause-Menu
+                    return
+                }
+                
+                Write-Host "Opening hosts file in Notepad with administrative privileges..."
+                try {
+                    Start-Process "notepad.exe" -ArgumentList $hostsPath -Verb RunAs
+                    Write-Host "Hosts file opened successfully." -ForegroundColor Green
+                    Write-Host "`nNOTE: Save any changes in Notepad and close it before continuing." -ForegroundColor Yellow
+                    Write-Host "Location: $hostsPath" -ForegroundColor Gray
+                } catch {
+                    Write-Host "Error opening hosts file: $($_.Exception.Message)" -ForegroundColor Red
+                }
+                
+                Pause-Menu
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice, please try again." -ForegroundColor Red; Pause-Menu }
+        }
+    }
+}
+function Invoke-Choice6 { Clear-Host; Write-Host "Displaying Network Information..."; ipconfig /all; Pause-Menu }
+
+function Invoke-Choice7 {
+    Clear-Host
+    Write-Host "=========================================="
+    Write-Host "    Restarting all Wi-Fi adapters..."
+    Write-Host "=========================================="
+
+    $wifiAdapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Wi-Fi|Wireless" -and $_.Status -eq "Up" -or $_.Status -eq "Disabled" }
+
+    if (-not $wifiAdapters) {
+        Write-Host "No Wi-Fi adapters found!"
+        Pause-Menu
+        return
+    }
+
+    foreach ($adapter in $wifiAdapters) {
+        Write-Host "Restarting '$($adapter.Name)'..."
+
+        Disable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 3
+        Enable-NetAdapter -Name $adapter.Name -Confirm:$false -ErrorAction SilentlyContinue
+
+        Start-Sleep -Seconds 5
+
+        # Check connection
+        $status = Get-NetAdapter -Name $adapter.Name
+        if ($status.Status -eq "Up") {
+            Write-Host "SUCCESS: '$($adapter.Name)' is back online!" -ForegroundColor Green
+        } else {
+            Write-Host "WARNING: '$($adapter.Name)' is still offline!" -ForegroundColor Yellow
+        }
+    }
+
+    Pause-Menu
+}
+
+function Invoke-Choice8 {
+    $Host.UI.RawUI.WindowTitle = "Network Repair - Automatic Troubleshooter"
+    Clear-Host
+    Write-Host
+    Write-Host "==============================="
+    Write-Host "    Automatic Network Repair"
+    Write-Host "==============================="
+    Write-Host
+    Write-Host "Step 1: Renewing your IP address..."
+    ipconfig /release | Out-Null
+    ipconfig /renew  | Out-Null
+    Write-Host
+    Write-Host "Step 2: Refreshing DNS settings..."
+    ipconfig /flushdns | Out-Null
+    Write-Host
+    Write-Host "Step 3: Resetting network components..."
+    netsh winsock reset | Out-Null
+    netsh int ip reset  | Out-Null
+    Write-Host
+    Write-Host "Your network settings have been refreshed."
+    Write-Host "A system restart is recommended for full effect."
+    Write-Host
+    while ($true) {
+        $restart = Read-Host "Would you like to restart now? (Y/N)"
+        switch ($restart.ToUpper()) {
+            "Y" { shutdown /r /t 5; return }
+            "N" { return }
+            default { Write-Host "Invalid input. Please enter Y or N." }
+        }
+    }
+}
+
+function Invoke-Choice9 {
+    $Host.UI.RawUI.WindowTitle = "Firewall Manager"
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltinRole]::Administrator)
+    if (-not $isAdmin) {
+        Write-Host "[ERROR] Firewall Manager requires Administrator privileges." -ForegroundColor Red
+        Write-Host "Please rerun the tool as Administrator." -ForegroundColor Yellow
+        Wait-Menu
+        return
+    }
+
+    $formsAvailable = $true
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop } catch { $formsAvailable = $false }
+    $desktopPath = [Environment]::GetFolderPath("Desktop")
+
+    function Export-FirewallRulesSafe {
+        param([string]$Path)
+        try {
+            Get-NetFirewallRule | Select-Object Name,DisplayName,Description,Action,Direction,Enabled,LocalPort,RemotePort,Program,Profile,Protocol |
+                Export-Csv -Path $Path -NoTypeInformation -Force
+            return $true
+        } catch {
+            Write-Host "[ERROR] Failed to export firewall rules: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+
+    do {
+        Clear-Host
+        Write-Host
+        Write-Host "==============================="
+        Write-Host "      Firewall Manager"
+        Write-Host "==============================="
+        Write-Host
+        Write-Host "1: View and Manage Rules (Search/Add/Delete)"
+        Write-Host "2: Export Rules to CSV (Save As...)"
+        Write-Host "3: Import Rules from CSV (Open File...)"
+        Write-Host "4: Restore Default Windows Rules"
+        Write-Host "5: Delete ALL Rules (Danger)" -ForegroundColor Red
+        Write-Host "0: Back to Main Menu"
+        Write-Host
+        
+        $selection = Read-Host "Please make a selection"
+        
+        switch ($selection) {
+            '1' {
+                # --- VIEW LOOP ---
+                $filter = ""
+                do {
+                    Clear-Host
+                Write-Host "==============================="
+                Write-Host "      Firewall Rules"
+                Write-Host "==============================="
+                
+                if ($filter) {
+                        Write-Host "Filter: '$filter'" -ForegroundColor Cyan
+                        $rules = @(Get-NetFirewallRule | Where-Object { $_.DisplayName -like "*$filter*" } | Sort-Object DisplayName)
+                    } else {
+                        Write-Host "Showing ALL rules" -ForegroundColor Gray
+                        $rules = @(Get-NetFirewallRule | Sort-Object DisplayName)
+                    }
+
+                    Write-Host
+                    Write-Host "  #   Act    Dir   En    Rule Name"
+                    Write-Host "---  -----   ---   --    ---------"
+
+                    $count = 1
+                    if ($rules.Count -eq 0) { Write-Host "No rules found." -ForegroundColor Yellow }
+
+                    foreach ($rule in $rules) {
+                        $idx = $count.ToString().PadLeft(3)
+                        $act = $rule.Action.ToString()
+                        $actColor = if ($act -eq "Allow") { "Green" } else { "Red" }
+                        $act = $act.PadRight(6)
+                        $dir = if ($rule.Direction -eq "Inbound") { "In " } else { "Out" }
+                        $en = if ($rule.Enabled -eq $true) { "Y " } else { "N " }
+                        $dName = $rule.DisplayName
+                        
+                        Write-Host "$idx  " -NoNewline
+                        Write-Host "$act " -ForegroundColor $actColor -NoNewline
+                        Write-Host "$dir   $en    $dName"
+                        $count++
+                    }
+
+                    Write-Host
+                    Write-Host "---------------------------------------------"
+                    Write-Host "F: Filter   C: Clear Filter"
+                    Write-Host "1: Enable   2: Disable    4: Delete"
+                    Write-Host "3: Add New  0: Back"
+                    Write-Host "---------------------------------------------"
+                    
+                    $userInput = Read-Host "Command (e.g., '4 1')"
+                    
+                    if ($userInput -eq '0') { break }
+                    if ($userInput.ToUpper() -eq 'C') { $filter = ""; continue }
+
+                    $parts = $userInput -split '\s+', 2
+                    $cmd = $parts[0].ToUpper()
+                    $arg = if ($parts.Count -gt 1) { $parts[1] } else { $null }
+
+                    if ($cmd -eq 'F') { 
+                        if ($arg) { $filter = $arg } else { $filter = Read-Host "Search term" }
+                        continue 
+                    }
+
+                    # --- ADD NEW RULE ---
+                    if ($cmd -eq '3') {
+                        Clear-Host; Write-Host "=== ADD RULE ==="
+                        
+                        do {
+                            $dName = Read-Host "Display Name (Required)"
+                            if ([string]::IsNullOrWhiteSpace($dName)) { Write-Host "Error: Name required." -ForegroundColor Red }
+                        } while ([string]::IsNullOrWhiteSpace($dName))
+
+                        $uNameInput = Read-Host "Unique ID (Blank = Auto-Generate)"
+                        if ([string]::IsNullOrWhiteSpace($uNameInput)) {
+                            $baseName = "$($dName -replace '[^a-zA-Z0-9]','')-$(Get-Random -Min 1000 -Max 9999)"
+                        } else { $baseName = $uNameInput }
+
+                        $desc = Read-Host "Description (Optional)"
+
+                        Write-Host "Direction (I=In, O=Out, Enter=Both):"
+                        $dIn = Read-Host
+                        $dirs = switch($dIn.ToUpper()){ 'I' {@('Inbound')}; 'O' {@('Outbound')}; Default {@('Inbound','Outbound')} }
+                        
+                        do { $act = Read-Host "Action (Allow/Block)" } while ($act -notin 'Allow','Block')
+                        
+                        do {
+                            $profInput = Read-Host "Profile (Domain/Private/Public/Any) [Default: Any]"
+                            if ([string]::IsNullOrWhiteSpace($profInput)) { $prof = "Any" } else { $prof = $profInput }
+                        } while ($prof -notin "Domain", "Private", "Public", "Any")
+                        
+                        $prot = Read-Host "Protocol (TCP/UDP/Any) [Default: Any]"
+                        if (-not $prot) { $prot = "Any" }
+                        
+                        function Read-PortInput {
+                            param([string]$prompt)
+                            $val = Read-Host $prompt
+                            if ([string]::IsNullOrWhiteSpace($val)) { return $null }
+                            if ($val -match '^\d{1,5}$' -and [int]$val -ge 1 -and [int]$val -le 65535) { return $val }
+                            Write-Host "Invalid port. Enter 1-65535 or leave blank for Any." -ForegroundColor Red
+                            return (Read-PortInput -prompt $prompt)
+                        }
+
+                        if ($prot -in 'TCP','UDP') {
+                            $lp = Read-PortInput -prompt "Local Port (Blank=Any)"
+                            $rp = Read-PortInput -prompt "Remote Port (Blank=Any)"
+                        }
+
+                        Write-Host "Program (Blank=Any, 'B'=Browse):"
+                        $progIn = Read-Host
+                        if ($progIn -eq 'B' -and $formsAvailable) {
+                            $fb = New-Object System.Windows.Forms.OpenFileDialog
+                            $fb.Filter = "Exe|*.exe|All|*.*"; $fb.InitialDirectory = "C:\Program Files"
+                            if ($fb.ShowDialog() -eq 'OK') { $prog = $fb.FileName }
+                        } else { $prog = $progIn }
+                        if ($prog -and -not (Test-Path $prog)) {
+                            Write-Host "Program path not found: $prog" -ForegroundColor Yellow
+                            $useMissing = Read-Host "Continue with Program=Any instead? (Y/N)"
+                            if ($useMissing.ToUpper() -ne 'Y') { Pause-Menu; continue }
+                            $prog = $null
+                        }
+
+                        foreach ($d in $dirs) {
+                            $ruleName = "$baseName-$d"
+                            if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) {
+                                $ruleName = "$ruleName-$([Guid]::NewGuid().ToString('N').Substring(0,6))"
+                                Write-Host "Adjusted rule name to avoid duplicate: $ruleName" -ForegroundColor Yellow
+                            }
+                            $p = @{DisplayName=$dName; Name=$ruleName; Direction=$d; Action=$act; Profile=$prof; Protocol=$prot; Description=$desc}
+                            if ($lp) { $p.LocalPort = $lp }; if ($rp) { $p.RemotePort = $rp }; if ($prog) { $p.Program = $prog }
+                            try { New-NetFirewallRule @p -ErrorAction Stop; Write-Host "Created $d rule." -ForegroundColor Green } catch { Write-Host "Error: $_" -ForegroundColor Red }
+                        }
+                        Pause-Menu; continue
+                    }
+
+                    # --- ACTIONS (1,2,4) ---
+                    if ($cmd -in '1','2','4') {
+                        if ($arg -match '^\d+$' -and [int]$arg -le $rules.Count -and [int]$arg -gt 0) {
+                            $targetIndex = [int]$arg - 1
+                            $targetRule = $rules[$targetIndex]
+                            try {
+                                if ($cmd -eq '1') { $targetRule | Set-NetFirewallRule -Enabled True; Write-Host "Enabled." -ForegroundColor Green }
+                                elseif ($cmd -eq '2') { $targetRule | Set-NetFirewallRule -Enabled False; Write-Host "Disabled." -ForegroundColor Green }
+                                elseif ($cmd -eq '4') { $targetRule | Remove-NetFirewallRule -ErrorAction Stop; Write-Host "Deleted." -ForegroundColor Green }
+                            } catch { Write-Host "Error: $($_.Exception.Message)" -ForegroundColor Red }
+                        } else { Write-Host "Invalid number." -ForegroundColor Red }
+                        Pause-Menu
+                    }
+                } while ($true)
+            }
+            '2' {
+                # --- EXPORT ---
+                Clear-Host
+                $path = $null
+                if ($formsAvailable) {
+                    $saveDialog = New-Object System.Windows.Forms.SaveFileDialog
+                    $saveDialog.Title = "Select where to save Rules CSV"
+                    $saveDialog.Filter = "CSV Files (*.csv)|*.csv|All Files (*.*)|*.*"
+                    $saveDialog.FileName = "firewall_rules_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                    if (Test-Path $desktopPath) { $saveDialog.InitialDirectory = $desktopPath }
+                    if ($saveDialog.ShowDialog() -eq 'OK') { $path = $saveDialog.FileName }
+                } else {
+                    $path = Read-Host "Enter path to save CSV (e.g., $desktopPath\\firewall_rules_yyyyMMdd.csv)"
+                }
+
+                if ($path) {
+                    if (Export-FirewallRulesSafe -Path $path) { Write-Host "Successfully exported to: $path" -ForegroundColor Green }
+                } else { Write-Host "Export cancelled." -ForegroundColor Yellow }
+                Wait-Menu
+            }
+            '3' {
+                # --- IMPORT ---
+                Clear-Host
+                $path = $null
+                if ($formsAvailable) {
+                    $openDialog = New-Object System.Windows.Forms.OpenFileDialog
+                    $openDialog.Title = "Select CSV to Import"
+                    $openDialog.Filter = "CSV Files (*.csv)|*.csv"
+                    if (Test-Path $desktopPath) { $openDialog.InitialDirectory = $desktopPath }
+                    if ($openDialog.ShowDialog() -eq 'OK') { $path = $openDialog.FileName }
+                } else {
+                    $path = Read-Host "Enter path to CSV to import"
+                }
+
+                if ($path -and (Test-Path $path)) {
+                    Write-Host "Importing from $path..." -ForegroundColor Cyan
+                    Write-Host
+                    
+                    try { $csvData = Import-Csv $path } catch { Write-Host "Failed to read CSV: $_" -ForegroundColor Red; Wait-Menu; continue }
+                    if (-not $csvData) { Write-Host "CSV contained no rows." -ForegroundColor Yellow; Wait-Menu; continue }
+
+                    $required = @('Name','DisplayName','Action','Direction','Enabled')
+                    $cols = $csvData | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name -Unique
+                    $missingCols = $required | Where-Object { $_ -notin $cols }
+                    if ($missingCols) {
+                        Write-Host "CSV missing required columns: $($missingCols -join ', ')" -ForegroundColor Red
+                        Wait-Menu; continue
+                    }
+
+                    function Test-PortValue {
+                        param([string]$val)
+                        if ([string]::IsNullOrWhiteSpace($val)) { return $true }
+                        if ($val -match '^\d{1,5}$' -and [int]$val -ge 1 -and [int]$val -le 65535) { return $true }
+                        return $false
+                    }
+                    $validProfiles = @('Domain','Private','Public','Any')
+                    $validProtocols = @('TCP','UDP','Any','Any')
+
+                    $conflicts = @()
+                    foreach ($row in $csvData) {
+                        if (Get-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue) { $conflicts += $row.Name }
+                    }
+                    if ($conflicts.Count -gt 0) {
+                        Write-Host "Warning: the following rule Names already exist and will be overwritten:" -ForegroundColor Yellow
+                        ($conflicts | Sort-Object -Unique) | ForEach-Object { Write-Host " - $_" }
+                        $overwrite = Read-Host "Type YES to continue with overwrite, anything else to cancel"
+                        if ($overwrite.ToUpper() -ne 'YES') { Write-Host "Import cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                    }
+
+                    foreach ($row in $csvData) {
+                        try {
+                            if (-not (Test-PortValue $row.LocalPort)) { Write-Host "Skipping '$($row.DisplayName)': invalid LocalPort '$($row.LocalPort)'." -ForegroundColor Yellow; continue }
+                            if (-not (Test-PortValue $row.RemotePort)) { Write-Host "Skipping '$($row.DisplayName)': invalid RemotePort '$($row.RemotePort)'." -ForegroundColor Yellow; continue }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Profile) -and $row.Profile -notin $validProfiles) { Write-Host "Skipping '$($row.DisplayName)': invalid Profile '$($row.Profile)'." -ForegroundColor Yellow; continue }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Protocol) -and $row.Protocol -notin $validProtocols) { Write-Host "Skipping '$($row.DisplayName)': invalid Protocol '$($row.Protocol)'." -ForegroundColor Yellow; continue }
+
+                            if (Get-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue) {
+                                Remove-NetFirewallRule -Name $row.Name -ErrorAction SilentlyContinue
+                                Write-Host "Overwriting existing: $($row.DisplayName)" -ForegroundColor DarkGray
+                            }
+
+                            $params = @{
+                                Name        = $row.Name
+                                DisplayName = $row.DisplayName
+                                Description = $row.Description
+                                Action      = $row.Action
+                                Direction   = $row.Direction
+                                Enabled     = $row.Enabled
+                            }
+                            
+                            if (-not [string]::IsNullOrWhiteSpace($row.Program)) { $params['Program'] = $row.Program }
+                            if (-not [string]::IsNullOrWhiteSpace($row.LocalPort)) { $params['LocalPort'] = $row.LocalPort }
+                            if (-not [string]::IsNullOrWhiteSpace($row.RemotePort)) { $params['RemotePort'] = $row.RemotePort }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Profile)) { $params['Profile'] = $row.Profile }
+                            if (-not [string]::IsNullOrWhiteSpace($row.Protocol)) { $params['Protocol'] = $row.Protocol }
+
+                            New-NetFirewallRule @params -ErrorAction Stop
+                            Write-Host "Imported: $($row.DisplayName)" -ForegroundColor Green
+                        } catch {
+                            Write-Host "Failed to import '$($row.DisplayName)': $($_.Exception.Message)" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host
+                    Write-Host "Import process complete." -ForegroundColor Cyan
+                } else { Write-Host "Import cancelled or file not found." -ForegroundColor Yellow }
+                
+                Wait-Menu
+            }
+            '4' { 
+                $ruleCount = (Get-NetFirewallRule).Count
+                $backupPath = Join-Path $desktopPath "firewall_rules_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                Write-Host "This will restore default Windows firewall rules." -ForegroundColor Yellow
+                Write-Host "Current rules detected: $ruleCount. A backup CSV will be saved to: $backupPath" -ForegroundColor Yellow
+                if (-not (Export-FirewallRulesSafe -Path $backupPath)) { Write-Host "Backup failed. Aborting restore." -ForegroundColor Red; Wait-Menu; continue }
+                if ((Read-Host "Type 'RESTORE DEFAULTS' to confirm") -ne 'RESTORE DEFAULTS') { Write-Host "Restore cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                try { netsh advfirewall reset; Write-Host "Restored defaults." -ForegroundColor Green } catch { Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red }
+                Wait-Menu
+            }
+            '5' { 
+                $ruleCount = (Get-NetFirewallRule).Count
+                if ($ruleCount -eq 0) { Write-Host "No rules to delete." -ForegroundColor Yellow; Wait-Menu; continue }
+                $backupPath = Join-Path $desktopPath "firewall_rules_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+                Write-Host "This will delete ALL firewall rules ($ruleCount)." -ForegroundColor Red
+                Write-Host "A backup CSV will be saved first to: $backupPath" -ForegroundColor Yellow
+                if (-not (Export-FirewallRulesSafe -Path $backupPath)) { Write-Host "Backup failed. Aborting delete." -ForegroundColor Red; Wait-Menu; continue }
+                if ((Read-Host "Type 'DELETE ALL RULES' to confirm") -ne 'DELETE ALL RULES') { Write-Host "Deletion cancelled." -ForegroundColor Yellow; Wait-Menu; continue }
+                try { Remove-NetFirewallRule -All; Write-Host "Deleted all rules." -ForegroundColor Red } catch { Write-Host "Failed: $($_.Exception.Message)" -ForegroundColor Red }
+                Wait-Menu
+            }
+            '0' { return }
+        }
+    } while ($true)
+}
+
+# Helper function used by Invoke-Choice9
+function Get-CleanRuleName {
+    param ([string]$name)
+    if ($name -match '@{.+?}\(?(.+?)\)?$') { $name = $matches[1] }
+    if ($name -match '(.+?)_\d+\.\d+\.\d+\.\d+_x64__.+') { $name = $matches[1] + "_x64" }
+    elseif ($name -match '(.+?)_\d+\.\d+\.\d+\.\d+_.+') { $name = $matches[1] }
+    $name = $name -replace '({[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}})', ''
+    return $name.Trim()
+}
+
+function Invoke-Choice10 { Clear-Host; Write-Host "Running Disk Cleanup..."; Start-Process "cleanmgr.exe"; Pause-Menu }
+
+function Invoke-Choice11 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "Running advanced error scan on all drives..."
+    Write-Host "==============================================="
+    $drives = Get-PSDrive -PSProvider FileSystem | Where-Object { $null -ne $_.Free } | Select-Object -ExpandProperty Name
+    foreach ($drive in $drives) {
+        Write-Host
+        Write-Host "Scanning drive $drive`:" ...
+        chkdsk "${drive}:" /f /r /x
+    }
+    Write-Host
+    Write-Host "All drives scanned."
+    Pause-Menu
+}
+
+function Invoke-Choice12 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   Delete Temporary Files and System Cache"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "This will permanently delete temporary files for your user and Windows."
+    Write-Host "Warning: Close all applications to avoid file conflicts."
+    Write-Host
+
+    $deleteOption = ""
+    while ($true) {
+        Write-Host "==============================================="
+        Write-Host "   Choose Cleanup Option"
+        Write-Host "==============================================="
+        Write-Host "[1] Permanently delete temporary files"
+        Write-Host "[2] Permanently delete temporary files and empty Recycle Bin"
+        Write-Host "[3] Advanced Privacy Cleanup (includes temp files + privacy data)"
+        Write-Host "[0] Cancel"
+        Write-Host
+        $optionChoice = Read-Host "Select an option"
+        switch ($optionChoice) {
+            "1" { $deleteOption = "DeleteOnly"; break }
+            "2" { $deleteOption = "DeleteAndEmpty"; break }
+            "3" { $deleteOption = "PrivacyCleanup"; break }
+            "0" {
+                Write-Host "Operation cancelled." -ForegroundColor Yellow
+                Pause-Menu
+                return
+            }
+            default { Write-Host "Invalid input. Please enter 1, 2, 3, or 0." -ForegroundColor Red }
+        }
+        if ($deleteOption) { break }
+    }
+
+    # Define paths to clean (remove redundant paths)
+    $paths = @(
+        $env:TEMP,              # User temp folder
+        "C:\Windows\Temp"       # System temp folder
+    )
+
+    # Remove duplicates
+    $paths = $paths | Select-Object -Unique
+
+    # Load assembly for Recycle Bin if needed (only for DeleteAndEmpty option)
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
+        try {
+            Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+        } catch {
+            Write-Host "[ERROR] Failed to load Microsoft.VisualBasic assembly for Recycle Bin operations." -ForegroundColor Red
+            Write-Host "Proceeding with deletion only (Recycle Bin will not be emptied)." -ForegroundColor Yellow
+            $deleteOption = "DeleteOnly"
+        }
+    }
+
+    $deletedCount = 0
+    $skippedCount = 0
+
+    # Perform permanent deletion
+    foreach ($path in $paths) {
+        # Validate path
+        if (-not (Test-Path $path)) {
+            Write-Host "[ERROR] Path does not exist: $path" -ForegroundColor Red
+            continue
+        }
+
+        # Additional safety check for user temp path
+        if ($path -eq $env:TEMP -and -not ($path.ToLower() -like "*$($env:USERNAME.ToLower())*")) {
+            Write-Host "[ERROR] TEMP path unsafe or invalid: $path" -ForegroundColor Red
+            Write-Host "Skipping to prevent system damage." -ForegroundColor Red
+            continue
+        }
+
+        Write-Host "Cleaning path: $path"
+        try {
+            Get-ChildItem -Path $path -Recurse -Force -ErrorAction Stop | ForEach-Object {
+                try {
+                    Remove-Item -Path $_.FullName -Force -Recurse -ErrorAction Stop
+                    if ($_.PSIsContainer) {
+                        Write-Host "Permanently deleted directory: $($_.FullName)" -ForegroundColor Green
+                    } else {
+                        Write-Host "Permanently deleted file: $($_.FullName)" -ForegroundColor Green
+                    }
+                    $deletedCount++
+                } catch {
+                    $skippedCount++
+                    Write-Host "Skipped: $($_.FullName) ($($_.Exception.Message))" -ForegroundColor Yellow
+                }
+            }
+        } catch {
+            Write-Host "Error processing path $path : $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
+    # Empty Recycle Bin if selected
+    if ($deleteOption -eq "DeleteAndEmpty" -or $deleteOption -eq "PrivacyCleanup") {
+        try {
+            Write-Host "Emptying Recycle Bin..." -ForegroundColor Green
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory(
+                "C:\`$Recycle.Bin",
+                'OnlyErrorDialogs',
+                'DeletePermanently'
+            )
+            Write-Host "Recycle Bin emptied successfully." -ForegroundColor Green
+        } catch {
+            Write-Host "Error emptying Recycle Bin: $($_.Exception.Message)" -ForegroundColor Red
+        }
+    }
+
+    # Perform privacy cleanup if selected
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host
+        Write-Host "==============================================="
+        Write-Host "   Performing Advanced Privacy Cleanup"
+        Write-Host "==============================================="
+        
+        # Clear Activity History
+        try {
+            Write-Host "Clearing Activity History..."
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f 2>&1 | Out-Null
+            Write-Host "Activity History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Activity History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Location History
+        try {
+            Write-Host "Clearing Location History..."
+            Get-Process LocationNotificationWindows -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+            reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs" /f 2>&1 | Out-Null
+            Write-Host "Location History cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Location History: $_" -ForegroundColor Yellow
+        }
+
+        # Clear Diagnostic Data
+        try {
+            Write-Host "Clearing Diagnostic Data..."
+            wevtutil cl Microsoft-Windows-Diagnostics-Performance/Operational 2>&1 | Out-Null
+            Write-Host "Diagnostic Data cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Diagnostic Data: $_" -ForegroundColor Yellow
+        }
+
+        # Additional privacy cleanup commands
+        try {
+            Write-Host "Clearing Recent Items..."
+            Remove-Item -Path "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -Recurse -ErrorAction SilentlyContinue
+            Write-Host "Recent Items cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Recent Items: $_" -ForegroundColor Yellow
+        }
+
+        try {
+            Write-Host "Clearing Thumbnail Cache..."
+            Remove-Item -Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue
+            Write-Host "Thumbnail Cache cleared." -ForegroundColor Green
+        } catch {
+            Write-Host "Failed to clear Thumbnail Cache: $_" -ForegroundColor Yellow
+        }
+    }
+
+    Write-Host
+    Write-Host "Cleanup complete. Processed $deletedCount files/directories, skipped $skippedCount files/directories." -ForegroundColor Green
+    if ($deleteOption -eq "PrivacyCleanup") {
+        Write-Host "Privacy-related data was also cleared."
+    } else {
+        Write-Host "Files and directories were permanently deleted."
+    }
+
+    Pause-Menu
+}
+
+function Invoke-Choice13 {
+    while ($true) {
+        Clear-Host
+        Write-Host "======================================================"
+        Write-Host " Advanced Registry Cleanup & Optimization"
+        Write-Host "======================================================"
+        Write-Host "[1] List 'safe to delete' registry keys under Uninstall"
+        Write-Host "[2] Delete all 'safe to delete' registry keys (with backup)"
+        Write-Host "[3] Create Registry Backup"
+        Write-Host "[4] Restore Registry Backup"
+        Write-Host "[5] Scan for corrupt registry entries"
+        Write-Host "[0] Return to main menu"
+        Write-Host
+        $rchoice = Read-Host "Enter your choice"
+        switch ($rchoice) {
+            "1" {
+                Write-Host
+                Write-Host "Listing registry keys matching: IE40, IE4Data, DirectDrawEx, DXM_Runtime, SchedulingAgent"
+                Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall |
+                  Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' } |
+                  ForEach-Object { Write-Host $_.PSChildName }
+                Pause-Menu
+            }
+            "2" {
+                Write-Host
+                $backupFolder = "$env:SystemRoot\Temp\RegistryBackups"
+                if (-not (Test-Path $backupFolder)) { New-Item -Path $backupFolder -ItemType Directory | Out-Null }
+
+                $now = Get-Date
+                $existingBackup = Get-ChildItem -Path $backupFolder -Filter "RegistryBackup_*.reg" |
+                    Where-Object { ($now - $_.CreationTime).TotalMinutes -lt 10 } |  # backup within last 10 min
+                    Sort-Object CreationTime -Descending | Select-Object -First 1
+
+                $backupFile = $null
+                if ($existingBackup) {
+                    Write-Host "A recent backup already exists: $($existingBackup.Name)"
+                    $useOld = Read-Host "Use this backup? (Y/n)"
+                    if ($useOld -notin @("n", "N")) {
+                        $backupFile = $existingBackup.FullName
+                        Write-Host "Using existing backup: $backupFile"
+                    } else {
+                        $backupName = "RegistryBackup_{0}.reg" -f ($now.ToString("yyyy-MM-dd_HH-mm"))
+                        $backupFile = Join-Path $backupFolder $backupName
+                        reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $backupFile /y | Out-Null
+                        Write-Host "New backup created: $backupFile"
+                    }
+                } else {
+                    $backupName = "RegistryBackup_{0}.reg" -f ($now.ToString("yyyy-MM-dd_HH-mm"))
+                    $backupFile = Join-Path $backupFolder $backupName
+                    reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $backupFile /y | Out-Null
+                    Write-Host "Backup created: $backupFile"
+                }
+
+                Write-Host "`nDeleting registry keys matching: IE40, IE4Data, DirectDrawEx, DXM_Runtime, SchedulingAgent"
+                $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall |
+                    Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
+                
+                if ($keys) {
+                    foreach ($key in $keys) {
+                        try {
+                            Remove-Item $key.PSPath -Recurse -Force -ErrorAction Stop
+                            Write-Host "Deleted:" $key.PSChildName
+                        } catch {
+                            Write-Host "Failed to delete:" $key.PSChildName "($_.Exception.Message)"
+                        }
+                    }
+                } else {
+                    Write-Host "No matching registry keys found."
+                }
+                Pause-Menu
+            }
+            "3" {
+                $backupFolder = "$env:SystemRoot\Temp\RegistryBackups"
+                if (-not (Test-Path $backupFolder)) { New-Item -Path $backupFolder -ItemType Directory | Out-Null }
+                $backupName = "RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm")
+                $backupFile = Join-Path $backupFolder $backupName
+                reg export HKLM $backupFile /y
+                Write-Host "Full HKLM backup created: $backupFile"
+                Pause-Menu
+            }
+            "4" {
+                $backupFolder = "$env:SystemRoot\Temp\RegistryBackups"
+                Write-Host "Available backups:"
+                Get-ChildItem "$backupFolder\*.reg" | ForEach-Object { Write-Host $_.Name }
+                $backupFile = Read-Host "Enter the filename to restore"
+                $fullBackup = Join-Path $backupFolder $backupFile
+                if (Test-Path $fullBackup) {
+                    reg import $fullBackup
+                    Write-Host "Backup successfully restored."
+                } else {
+                    Write-Host "File not found."
+                }
+                Pause-Menu
+            }
+            "5" {
+                Clear-Host
+                Write-Host "Scanning for corrupt registry entries..."
+                Start-Process "cmd.exe" "/c sfc /scannow" -Wait
+                Start-Process "cmd.exe" "/c dism /online /cleanup-image /checkhealth" -Wait
+                Write-Host "Registry scan complete. If errors were found, please restart your PC."
+                Pause-Menu
+            }
+            "0" { return }
+            default { Write-Host "Invalid input. Try again."; Pause-Menu }
+        }
+    }
+}
+
+function Invoke-Choice14 {
+    Clear-Host
+    Write-Host "=========================================="
+    Write-Host "     Optimize SSDs (ReTrim/TRIM)"
+    Write-Host "=========================================="
+    Write-Host "This will automatically optimize (TRIM) all detected SSDs."
+    Write-Host
+    Write-Host "Listing all detected SSD drives..."
+
+    $ssds = Get-PhysicalDisk | Where-Object MediaType -eq 'SSD'
+    if (-not $ssds) {
+        Write-Host "No SSDs detected."
+        Pause-Menu
+        return
+    }
+
+    $log = "$env:USERPROFILE\Desktop\SSD_OPTIMIZE_{0}.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss")
+    $logContent = @()
+    $logContent += "SSD Optimize Log - $(Get-Date)"
+
+    foreach ($ssd in $ssds) {
+        $disk = Get-Disk | Where-Object { $_.FriendlyName -eq $ssd.FriendlyName }
+        if ($disk) {
+            $volumes = $disk | Get-Partition | Get-Volume | Where-Object DriveLetter -ne $null
+            foreach ($vol in $volumes) {
+                Write-Host "Optimizing SSD: $($vol.DriveLetter):"
+                $logContent += "Optimizing SSD: $($vol.DriveLetter):"
+                $result = Optimize-Volume -DriveLetter $($vol.DriveLetter) -ReTrim -Verbose 4>&1
+                $logContent += $result
+            }
+        } else {
+            $logContent += "Could not find Disk for SSD: $($ssd.FriendlyName)"
+        }
+    }
+    Write-Host
+    Write-Host "SSD optimization completed. Log file saved on Desktop: $log"
+    $logContent | Out-File -FilePath $log -Encoding UTF8
+    Pause-Menu
+}
+
+function Invoke-Choice15 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "     Scheduled Task Management [Admin]"
+    Write-Host "==============================================="
+    Write-Host "Listing all scheduled tasks..."
+    Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+    Write-Host
+
+    # Check for admin privileges
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "Error: This function requires administrator privileges." -ForegroundColor Red
+        Write-Host "Please run the script as Administrator and try again."
+        Pause-Menu
+        return
+    }
+
+    # Helper function to display task list with dynamic alignment and modified author/taskname
+    function Show-TaskList {
+        # Retrieve scheduled tasks
+        try {
+            $tasks = schtasks /query /fo CSV /v | ConvertFrom-Csv | Where-Object {
+                $_."TaskName" -ne "" -and                        # Exclude empty TaskName
+                $_."TaskName" -ne "TaskName" -and               # Exclude placeholder "TaskName"
+                $_."Author" -ne "Author" -and                   # Exclude placeholder "Author"
+                $_."Status" -ne "Status" -and                   # Exclude placeholder "Status"
+                $_."Author" -notlike "*Scheduling data is not available in this format.*" -and  # Exclude invalid scheduling data
+                $_."TaskName" -notlike "*Enabled*" -and         # Exclude rows starting with "Enabled"
+                $_."TaskName" -notlike "*Disabled*"             # Exclude rows starting with "Disabled"
+            }
+            if (-not $tasks) {
+                Write-Host "No valid scheduled tasks found." -ForegroundColor Yellow
+                return $null
+            }
+        } catch {
+            Write-Host "Error retrieving scheduled tasks: $_" -ForegroundColor Red
+            return $null
+        }
+
+        # Remove duplicates based on TaskName, Author, and Status
+        $uniqueTasks = $tasks | Sort-Object "TaskName", "Author", "Status" -Unique
+
+        # Calculate maximum lengths for dynamic alignment
+        $maxIdLength = ($uniqueTasks.Count.ToString()).Length  # Length of largest ID
+        $maxTaskNameLength = 50  # Default max length for TaskName, adjustable
+        $maxAuthorLength = 30    # Default max length for Author, adjustable
+        $maxStatusLength = 10    # Default max length for Status (e.g., "Running", "Ready", "Disabled")
+
+        # Process tasks to adjust Author and TaskName, and calculate max lengths
+        $processedTasks = @()
+        foreach ($task in $uniqueTasks) {
+            $taskName = if ($task."TaskName") { $task."TaskName" } else { "N/A" }
+            $author = if ($task."Author") { $task."Author" } else { "N/A" }
+            $status = if ($task."Status") { $task."Status" } else { "Unknown" }
+
+            # Fix Author field for Microsoft tasks with resource strings (e.g., $(@%SystemRoot%\...))
+            if ($author -like '$(@%SystemRoot%\*' -or $taskName -like '\Microsoft\*') {
+                $author = "Microsoft Corporation"
+            }
+
+            # Extract first folder from TaskName for Author if still N/A
+            if ($author -eq "N/A" -and $taskName -match '^\\([^\\]+)\\') {
+                $author = $matches[1]  # Get first folder (e.g., "LGTV Companion")
+            }
+
+            # Remove first folder from TaskName
+            $displayTaskName = $taskName -replace '^\\[^\\]+\\', ''  # Remove "\Folder\"
+            if ($displayTaskName -eq $taskName) { $displayTaskName = $taskName.TrimStart('\') }  # Fallback for tasks without folder
+
+            # Truncate long fields for alignment
+            if ($displayTaskName.Length -gt $maxTaskNameLength) { $displayTaskName = $displayTaskName.Substring(0, $maxTaskNameLength - 3) + "..." }
+            if ($author.Length -gt $maxAuthorLength) { $author = $author.Substring(0, $maxAuthorLength - 3) + "..." }
+
+            # Update max lengths based on processed data
+            $maxTaskNameLength = [Math]::Max($maxTaskNameLength, [Math]::Min($displayTaskName.Length, 50))
+            $maxAuthorLength = [Math]::Max($maxAuthorLength, [Math]::Min($author.Length, 30))
+            $maxStatusLength = [Math]::Max($maxStatusLength, $status.Length)
+
+            $processedTasks += [PSCustomObject]@{
+                OriginalTaskName = $task."TaskName"
+                DisplayTaskName  = $displayTaskName
+                Author           = $author
+                Status           = $status
+            }
+        }
+
+        # Print header with dynamic widths
+        $headerFormat = "{0,-$maxIdLength} | {1,-$maxTaskNameLength} | {2,-$maxAuthorLength} | {3}"
+        Write-Host ($headerFormat -f "ID", "Task Name", "Author", "Status")
+        Write-Host ("-" * $maxIdLength + "-+-" + "-" * $maxTaskNameLength + "-+-" + "-" * $maxAuthorLength + "-+-" + "-" * $maxStatusLength)
+
+        # Display tasks with index and color coding
+        $taskList = @()
+        $index = 1
+        foreach ($task in $processedTasks) {
+            $isMicrosoft = $task.OriginalTaskName -like "\Microsoft\*" -or $task.Author -like "*Microsoft*"
+            $taskList += [PSCustomObject]@{
+                Index      = $index
+                TaskName   = $task.OriginalTaskName  # Store original for schtasks commands
+                Author     = $task.Author
+                Status     = $task.Status
+                IsMicrosoft = $isMicrosoft
+            }
+            $color = if ($isMicrosoft) { "Green" } else { "Yellow" }
+            Write-Host ($headerFormat -f $index, $task.DisplayTaskName, $task.Author, $task.Status) -ForegroundColor $color
+            $index++
+        }
+        Write-Host
+        return $taskList
+    }
+
+    # Display task list initially
+    $taskList = Show-TaskList
+    if (-not $taskList) {
+        Pause-Menu
+        return
+    }
+
+    # Main loop for task management options
+    while ($true) {
+        Write-Host "Options:"
+        Write-Host "[1] Enable a task"
+        Write-Host "[2] Disable a task"
+        Write-Host "[3] Delete a task"
+        Write-Host "[4] Refresh task list"
+        Write-Host "[0] Return to main menu"
+        Write-Host
+
+        $action = Read-Host "Enter option (0-4) or task ID to manage"
+        if ($action -eq "0") {
+            return
+        } elseif ($action -eq "1") {
+            $id = Read-Host "Enter task ID to enable"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "Enabling task: $($selectedTask.TaskName)"
+                try {
+                    schtasks /change /tn "$($selectedTask.TaskName)" /enable | Out-Null
+                    Write-Host "Task enabled successfully." -ForegroundColor Green
+                } catch {
+                    Write-Host "Error enabling task: $_" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "2") {
+            $id = Read-Host "Enter task ID to disable"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "Disabling task: $($selectedTask.TaskName)"
+                try {
+                    schtasks /change /tn "$($selectedTask.TaskName)" /disable | Out-Null
+                    Write-Host "Task disabled successfully." -ForegroundColor Green
+                } catch {
+                    Write-Host "Error disabling task: $_" -ForegroundColor Red
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "3") {
+            $id = Read-Host "Enter task ID to delete"
+            if ($id -match '^\d+$' -and $id -ge 1 -and $id -le $taskList.Count) {
+                $selectedTask = $taskList[$id - 1]
+                Write-Host "WARNING: Deleting task: $($selectedTask.TaskName)" -ForegroundColor Yellow
+                $confirm = Read-Host "Are you sure? (Y/N)"
+                if ($confirm -eq "Y" -or $confirm -eq "y") {
+                    try {
+                        schtasks /delete /tn "$($selectedTask.TaskName)" /f | Out-Null
+                        Write-Host "Task deleted successfully." -ForegroundColor Green
+                    } catch {
+                        Write-Host "Error deleting task: $_" -ForegroundColor Red
+                    }
+                } else {
+                    Write-Host "Action cancelled." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "Invalid task ID." -ForegroundColor Red
+            }
+            Pause-Menu
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } elseif ($action -eq "4") {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "     Scheduled Task Management [Admin]"
+            Write-Host "==============================================="
+            Write-Host "Refreshing task list..."
+            Write-Host "Microsoft tasks are shown in Green, third-party tasks in Yellow."
+            Write-Host
+            $taskList = Show-TaskList
+            if (-not $taskList) {
+                Pause-Menu
+                return
+            }
+        } else {
+            Write-Host "Invalid option. Please enter 0-4 or a valid task ID." -ForegroundColor Red
+            Pause-Menu
+        }
+    }
+}
+
+function Invoke-Choice16 {
+    while ($true) {
+        Clear-Host
+        Write-Host "==============================================="
+        Write-Host "     Broken Shortcut Finder & Fixer"
+        Write-Host "==============================================="
+        Write-Host "Scans Start Menu and Desktop for broken shortcuts."
+        Write-Host
+        Write-Host "[1] Run Broken Shortcut Scan"
+        Write-Host "[0] Return to Main Menu"
+        Write-Host
+        $opt = Read-Host "Choose an option"
+        switch ($opt) {
+            "1" {
+                Clear-Host
+
+                # Paths to scan
+                $shortcutPaths = @(
+                    "C:\ProgramData\Microsoft\Windows\Start Menu",
+                    "$env:APPDATA\Microsoft\Windows\Start Menu",
+                    "$env:USERPROFILE\Desktop",
+                    "C:\Users\Public\Desktop"
+                )
+
+                # Known system shortcuts to skip
+                $systemShortcuts = @(
+                    "File Explorer.lnk",
+                    "Run.lnk",
+                    "Recycle Bin.lnk",
+                    "Control Panel.lnk"
+                )
+
+                function Get-ShortcutTarget {
+                    param([string]$shortcutPath)
+                    $shell = New-Object -ComObject WScript.Shell
+                    try { $shell.CreateShortcut($shortcutPath).TargetPath } catch { $null }
+                }
+
+                function Test-SystemShortcut {
+                    param([string]$shortcutPath, [string]$target)
+                    $name = Split-Path $shortcutPath -Leaf
+                    if ($systemShortcuts -contains $name) { return $true }
+                    if ($target -match '^shell:') { return $true }
+                    if ($target -match '^\s*::{[0-9A-Fa-f-]+}') { return $true } # CLSID
+                    return $false
+                }
+
+                function Read-YesNoResponse {
+                    param([string]$message)
+                    $response = Read-Host $message
+                    if ($response -match '^(y|yes|1)$') { return $true }
+                    elseif ($response -match '^(n|no|2)$') { return $false }
+                    else {
+                        Write-Host "Please enter yes/y/1 or no/n/2." -ForegroundColor Yellow
+                        return (Read-YesNoResponse $message)
+                    }
+                }
+
+                $processedShortcuts = @{}
+
+                foreach ($path in $shortcutPaths) {
+                    Write-Host "`nScanning: $path" -ForegroundColor Cyan
+                    $shortcuts = Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue
+
+                    foreach ($shortcut in $shortcuts) {
+                        if ($processedShortcuts.ContainsKey($shortcut.FullName)) { continue }
+
+                        $target = Get-ShortcutTarget $shortcut.FullName
+
+                        # Skip system shortcuts
+                        if (Test-SystemShortcut $shortcut.FullName $target) {
+                            Write-Host "Skipping system shortcut: $($shortcut.FullName)" -ForegroundColor DarkGray
+                            $processedShortcuts[$shortcut.FullName] = $true
+                            continue
+                        }
+
+                        # If target missing or doesn't exist
+                        if (-not $target -or -not (Test-Path $target)) {
+                            Write-Host "Broken shortcut: $($shortcut.FullName)" -ForegroundColor Yellow
+
+                            # Try to guess install folder from other working shortcuts in same folder
+                            $workingTargets = @()
+                            Get-ChildItem -Path $shortcut.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue |
+                                Where-Object { $_.FullName -ne $shortcut.FullName } |
+                                ForEach-Object {
+                                    $t = Get-ShortcutTarget $_.FullName
+                                    if ($t -and (Test-Path $t)) {
+                                        $workingTargets += (Split-Path $t -Parent)
+                                    }
+                                }
+
+                            $found = $null
+                            if ($workingTargets.Count -gt 0) {
+                                $installFolder = $workingTargets | Select-Object -First 1
+                                $fileName = if ($target) { Split-Path $target -Leaf } else { ($shortcut.BaseName + ".exe") }
+                                $candidate = Join-Path $installFolder $fileName
+                                if (Test-Path $candidate) { $found = $candidate }
+                            }
+
+                            if ($found) {
+                                Write-Host "Found possible target in same folder: $found" -ForegroundColor Green
+                                if (Read-YesNoResponse "Update shortcut to this path? (yes/y/1 or no/n/2)") {
+                                    $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcut.FullName)
+                                    $sc.TargetPath = $found
+                                    $sc.Save()
+                                    Write-Host "Shortcut updated." -ForegroundColor Green
+                                }
+                            } else {
+                                if (Read-YesNoResponse "Target not found. Delete shortcut? (yes/y/1 or no/n/2)") {
+                                    Remove-Item $shortcut.FullName -Force
+                                    Write-Host "Shortcut deleted." -ForegroundColor Red
+                                }
+                            }
+                        }
+
+                        $processedShortcuts[$shortcut.FullName] = $true
+                    }
+                }
+
+                Write-Host "`nScan complete." -ForegroundColor Cyan
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default {
+                Write-Host "Invalid input. Please enter 1 or 2."
+                Pause-Menu
+            }
+        }
+    }
+}
+
+function Invoke-Choice20 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "         Driver & Device Maintenance"
+    Write-Host "==============================================="
+    Write-Host "1. Save Installed Driver Report to Desktop"
+    Write-Host "2. List and Remove Hidden Devices"
+    Write-Host "3. Disable Automatic Driver Updates"
+    Write-Host "4. Enable Automatic Driver Updates"
+    Write-Host "5. Disable Device Metadata Downloads"
+    Write-Host "6. Enable Device Metadata Downloads"
+    Write-Host "7. Clean Old Drivers from Driver Store"
+    Write-Host "8. Restore Drivers from Backup"
+    Write-Host "0. Return to Main Menu"
+    Write-Host "==============================================="
+    
+    $choice = Read-Host "Enter your choice"
+
+    switch ($choice) {
+        '1' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Saving Installed Driver Report to Desktop"
+            Write-Host "==============================================="
+            $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
+            driverquery /v > $outfile
+            Write-Host
+            Write-Host "Driver report has been saved to: $outfile"
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '2' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Listing and Removing Hidden Devices"
+            Write-Host "==============================================="
+            $hiddenDevices = Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' }
+            if ($hiddenDevices) {
+                Write-Host "Found $($hiddenDevices.Count) hidden device(s). Removing..."
+                foreach ($device in $hiddenDevices) {
+                    pnputil /remove-device $device.InstanceId
+                }
+                Write-Host "All hidden devices removed."
+            } else {
+                Write-Host "No hidden devices found."
+            }
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '3' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 0
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Set-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -Value 1 -Type DWord
+            Write-Host "Automatic driver updates disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '4' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Automatic Driver Updates"
+            Write-Host "==============================================="
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching" `
+                             -Name "SearchOrderConfig" -Value 1
+            $policyPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+            if (-not (Test-Path $policyPath)) { New-Item -Path $policyPath -Force | Out-Null }
+            Remove-ItemProperty -Path $policyPath -Name "ExcludeWUDriversInQualityUpdate" -ErrorAction SilentlyContinue
+            Write-Host "Automatic driver updates enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '5' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Disabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 1 -Type DWord
+            Write-Host "Device metadata downloads disabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '6' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "    Enabling Device Metadata Downloads"
+            Write-Host "==============================================="
+            $metaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            if (-not (Test-Path $metaPath)) { New-Item -Path $metaPath -Force | Out-Null }
+            Set-ItemProperty -Path $metaPath -Name "PreventDeviceMetadataFromNetwork" -Value 0 -Type DWord
+            Write-Host "Device metadata downloads enabled."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+        '7' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "      Old Driver Cleanup"
+            Write-Host "==============================================="
+
+            # Safety: require elevation for pnputil operations
+            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+            if (-not $isAdmin) {
+                Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+                Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option."
+                Pause-Menu
+                return
+            }
+
+            Write-Host "Scanning Driver Store..." -ForegroundColor Cyan
+
+            # --- FAST ENUMERATION START ---
+            # Instead of Get-WindowsDriver (Slow/DISM), we parse pnputil text output (Fast)
+            $rawOutput = pnputil.exe /enum-drivers
+            $drivers = @()
+            $currentDriver = $null
+
+            foreach ($line in $rawOutput) {
+                # Start of a new driver block
+                if ($line -match '^Published Name:\s+(.+)$') {
+                    # Save previous driver if exists
+                    if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+                    
+                    # Initialize new object
+                    # We map 'Driver' to Published Name (oemXX.inf) to match previous logic
+                    $currentDriver = [ordered]@{ 
+                        Driver = $matches[1].Trim()
+                        OriginalFileName = $null
+                        ProviderName = $null
+                        Version = $null
+                        Date = $null
+                    }
+                }
+                elseif ($line -match '^Original Name:\s+(.+)$') { 
+                    $currentDriver.OriginalFileName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Provider Name:\s+(.+)$') { 
+                    $currentDriver.ProviderName = $matches[1].Trim() 
+                }
+                elseif ($line -match '^Driver Version:\s+(.+)$') { 
+                    try { $currentDriver.Version = [Version]$matches[1].Trim() } catch { $currentDriver.Version = [Version]"0.0.0.0" }
+                }
+                elseif ($line -match '^Date:\s+(.+)$') { 
+                    try { $currentDriver.Date = [DateTime]$matches[1].Trim() } catch { $currentDriver.Date = [DateTime]::MinValue }
+                }
+            }
+            # Add the very last driver found
+            if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+            # --- FAST ENUMERATION END ---
+
+            # Group by name and provider to find duplicates
+            # We filter out items where OriginalFileName is missing to avoid errors
+            $groupedDrivers = $drivers | Where-Object { $_.OriginalFileName } | Group-Object -Property OriginalFileName, ProviderName
+            $driversToDelete = @()
+            $totalDrivers = $drivers.Count
+
+            Write-Host "`n--- Analysis Results ---"
+            
+            foreach ($group in $groupedDrivers) {
+                if ($group.Count -gt 1) {
+                    # Sort: Newest Date first, then highest Version
+                    $sortedGroup = $group.Group | Sort-Object Date, Version -Descending
+                    
+                    # Keep the first one (Index 0)
+                    $keeper = $sortedGroup[0]
+                    # Delete the rest
+                    $oldDrivers = $sortedGroup | Select-Object -Skip 1
+
+                    Write-Host "Package: $($keeper.OriginalFileName)" -ForegroundColor Gray
+                    Write-Host "  [KEEP] Ver: $($keeper.Version)" -ForegroundColor Green
+                    
+                    foreach ($old in $oldDrivers) {
+                        Write-Host "  [DEL ] Ver: $($old.Version) ($($old.Driver))" -ForegroundColor Yellow
+                        $driversToDelete += $old
+                    }
+                }
+            }
+
+            $count = $driversToDelete.Count
+
+            if ($count -eq 0) {
+                Write-Host "`nDriver store is clean! No old versions found." -ForegroundColor Green
+                Pause-Menu
+                return
+            }
+            else {
+                Write-Host "`nFound $count obsolete driver(s)." -ForegroundColor Yellow
+                Write-Host "The newest driver in each group will be kept. Older ones can be removed."
+
+                # Mandatory backup before any deletion, re-use a valid existing backup when possible
+                $desktop = [Environment]::GetFolderPath('Desktop')
+                if (-not $desktop) { $desktop = "$env:USERPROFILE\Desktop" }
+                $backupDir = $null
+                $latestBackup = Get-ChildItem -Path $desktop -Directory -Filter "DriverBackup_*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                if ($latestBackup) {
+                    $existingInfCount = (Get-ChildItem -Path $latestBackup.FullName -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
+                    if ($existingInfCount -ge $totalDrivers -and $existingInfCount -gt 0) {
+                        $backupDir = $latestBackup.FullName
+                        Write-Host "[OK] Reusing existing backup ($existingInfCount drivers): $backupDir" -ForegroundColor Green
+                    }
+                }
+                if (-not $backupDir) {
+                    $backupDir = Join-Path $desktop ("DriverBackup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+                    Write-Host "Creating driver backup at: $backupDir"
+                    try {
+                        if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+                        # Quote the target path so usernames with spaces work
+                        $export = Start-Process pnputil.exe -ArgumentList @("/export-driver","*","""$backupDir""") -NoNewWindow -Wait -PassThru
+                        if ($export.ExitCode -ne 0) {
+                            Write-Host "[ERROR] Driver backup failed (exit code $($export.ExitCode)). No deletions performed." -ForegroundColor Red
+                            Write-Host "Try running PowerShell as Administrator and ensure the path is writable, then rerun this option." -ForegroundColor Yellow
+                            Pause-Menu
+                            return
+                        }
+                        $exportedCount = (Get-ChildItem -Path $backupDir -Recurse -Filter *.inf -ErrorAction SilentlyContinue).Count
+                        if ($exportedCount -lt $totalDrivers) {
+                            Write-Host "[ERROR] Backup verification failed (expected >= $totalDrivers drivers, found $exportedCount). No deletions performed." -ForegroundColor Red
+                            Pause-Menu
+                            return
+                        }
+                        Write-Host "[OK] Driver backup completed ($exportedCount drivers)." -ForegroundColor Green
+                    } catch {
+                        Write-Host "[ERROR] Driver backup failed: $($_.Exception.Message)" -ForegroundColor Red
+                        Write-Host "No deletions were performed." -ForegroundColor Yellow
+                        Pause-Menu
+                        return
+                    }
+                }
+                
+                $confirmation = Read-Host "Delete ALL listed old drivers? (Y/N)"
+                
+                if ($confirmation -eq 'Y' -or $confirmation -eq 'y') {
+                    Write-Host "Starting cleanup..." -ForegroundColor Cyan
+                    $deleted = 0
+                    $skipped = 0
+                    foreach ($target in $driversToDelete) {
+                        $perConfirm = Read-Host "Delete $($target.Driver) (v$($target.Version))? (Y/N)"
+                        if ($perConfirm -notin @('Y','y')) {
+                            Write-Host "Skipped $($target.Driver)" -ForegroundColor Yellow
+                            $skipped++
+                            continue
+                        }
+
+                        Write-Host "Deleting $($target.Driver)... " -NoNewline
+                        $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($target.Driver) /uninstall" -NoNewWindow -Wait -PassThru
+
+                        if ($proc.ExitCode -eq 0) {
+                            Write-Host "SUCCESS" -ForegroundColor Green
+                            $deleted++
+                        } else {
+                            Write-Host "LOCKED/IN USE (pnputil exit code $($proc.ExitCode))" -ForegroundColor Red
+                        }
+                    }
+                    Write-Host "`nCleanup Complete. Deleted: $deleted, Skipped: $skipped" -ForegroundColor Green
+                } else {
+                    Write-Host "Operation Cancelled." -ForegroundColor Gray
+                }
+                
+                Pause-Menu
+                return
+            }
+        }
+        '8' {
+            Clear-Host
+            Write-Host "==============================================="
+            Write-Host "      Restore Drivers from Backup"
+            Write-Host "==============================================="
+
+            $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+            if (-not $isAdmin) {
+                Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+                Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option."
+                Pause-Menu
+                return
+            }
+
+            $desktop = [Environment]::GetFolderPath('Desktop')
+            if (-not $desktop) { $desktop = "$env:USERPROFILE\Desktop" }
+            $latestBackup = Get-ChildItem -Path $desktop -Directory -Filter "DriverBackup_*" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+            $defaultPath = if ($latestBackup) { $latestBackup.FullName } else { "" }
+
+            if (-not $defaultPath) {
+                Write-Host "No DriverBackup_* folder found on Desktop." -ForegroundColor Yellow
+            } else {
+                Write-Host "Latest backup detected: $defaultPath"
+            }
+            $inputPath = Read-Host "Enter backup folder path (press ENTER to use latest shown)"
+            $restorePath = if ([string]::IsNullOrWhiteSpace($inputPath)) { $defaultPath } else { $inputPath }
+
+            if (-not $restorePath -or -not (Test-Path $restorePath)) {
+                Write-Host "[ERROR] Backup folder not found: $restorePath" -ForegroundColor Red
+                Pause-Menu
+                return
+            }
+
+            $infPattern = Join-Path $restorePath "*.inf"
+            if (-not (Get-ChildItem -Path $restorePath -Recurse -Filter *.inf -ErrorAction SilentlyContinue)) {
+                Write-Host "[ERROR] No .inf files found under $restorePath. Ensure this is a valid driver backup." -ForegroundColor Red
+                Pause-Menu
+                return
+            }
+
+            Write-Host "Restoring drivers from: $restorePath" -ForegroundColor Cyan
+            $proc = Start-Process pnputil.exe -ArgumentList @("/add-driver","""$infPattern""","/subdirs","/install") -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0) {
+                Write-Host "[OK] Driver restore completed (pnputil exit code 0)." -ForegroundColor Green
+            } else {
+                Write-Host "[ERROR] Driver restore failed (pnputil exit code $($proc.ExitCode))." -ForegroundColor Red
+                Write-Host "Try rerunning as Administrator and verify the backup folder." -ForegroundColor Yellow
+            }
+            Pause-Menu
+            return
+        }
+        '0' {
+            return
+        }
+        default {
+            Write-Host "Invalid choice. Please try again."
+            Read-Host "`nPress Enter to return to the previous menu"
+            Invoke-Choice20
+        }
+    }
+}
+
+function Invoke-Choice21 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Windows Update Repair Tool [Admin]"
+    Write-Host "==============================================="
+    Write-Host
+
+    # Admin check
+    if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
+        Write-Host "ERROR: Please run this script as Administrator." -ForegroundColor Red
+        return
+    }
+
+    # Optional cleanup of old .bak folders
+    $bakFolders = @(
+        Get-ChildItem -Path $env:windir -Directory -Filter "SoftwareDistribution.bak_*" -ErrorAction SilentlyContinue
+        Get-ChildItem -Path "$env:windir\System32" -Directory -Filter "catroot2.bak_*" -ErrorAction SilentlyContinue
+    )
+    if ($bakFolders.Count -gt 0) {
+        Write-Host "Found existing .bak folders from previous resets:"
+        $bakFolders | ForEach-Object { Write-Host "  - $($_.FullName)" }
+        $choice = Read-Host "Do you want to delete these now? (Y/N)"
+        if ($choice -match '^[Yy]$') {
+            foreach ($folder in $bakFolders) {
+                try {
+                    Remove-Item -Path $folder.FullName -Recurse -Force -ErrorAction Stop
+                    Write-Host "Deleted: $($folder.FullName)"
+                } catch {
+                    Write-Host "Warning: Could not delete $($folder.FullName)"
+                }
+            }
+        } else {
+            Write-Host "Skipping deletion of old .bak folders."
+        }
+        Write-Host
+    }
+
+    # Step 1: Stop services
+    Write-Host "[1/6] Stopping update-related services..."
+    $services = @('wuauserv','bits','cryptsvc','msiserver','usosvc','trustedinstaller')
+    foreach ($service in $services) {
+        $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -ne "Stopped") {
+            Write-Host "Stopping $service"
+            try { Stop-Service -Name $service -Force -ErrorAction Stop } catch {}
+        }
+    }
+    Start-Sleep -Seconds 2
+    Write-Host
+
+    # Step 2: Clear BITS queue
+    Write-Host "[2/6] Clearing BITS transfer queue..."
+    try { Get-BitsTransfer -AllUsers | Remove-BitsTransfer -Confirm:$false } catch {}
+    Write-Host
+
+    # Step 3: Rename update cache folders
+    Write-Host "[3/6] Renaming update cache folders..."
+    $SUFFIX = ".bak_{0}" -f (Get-Random -Maximum 99999)
+    $SD = "$env:windir\SoftwareDistribution"
+    $CR = "$env:windir\System32\catroot2"
+    $renamedSD = "$env:windir\SoftwareDistribution$SUFFIX"
+    $renamedCR = "$env:windir\System32\catroot2$SUFFIX"
+    if (Test-Path $SD) {
+        try {
+            Rename-Item $SD -NewName ("SoftwareDistribution" + $SUFFIX) -ErrorAction Stop
+            Write-Host "Renamed: $renamedSD"
+        } catch { Write-Host "Warning: Could not rename SoftwareDistribution." }
+    } else { Write-Host "Info: SoftwareDistribution not found." }
+    if (Test-Path $CR) {
+        try {
+            Rename-Item $CR -NewName ("catroot2" + $SUFFIX) -ErrorAction Stop
+            Write-Host "Renamed: $renamedCR"
+        } catch { Write-Host "Warning: Could not rename catroot2." }
+    } else { Write-Host "Info: catroot2 not found." }
+    Write-Host
+
+    # Step 4: Re-register update DLLs
+    Write-Host "[4/6] Re-registering Windows Update components..."
+    $dlls = @(
+        "atl.dll","urlmon.dll","mshtml.dll","shdocvw.dll","browseui.dll","jscript.dll",
+        "vbscript.dll","scrrun.dll","msxml.dll","msxml3.dll","msxml6.dll","actxprxy.dll",
+        "softpub.dll","wintrust.dll","dssenh.dll","rsaenh.dll","gpkcsp.dll","sccbase.dll",
+        "slbcsp.dll","cryptdlg.dll","oleaut32.dll","ole32.dll","shell32.dll","initpki.dll",
+        "wuapi.dll","wuaueng.dll","wuaueng1.dll","wucltui.dll","wups.dll","wups2.dll",
+        "wuweb.dll","qmgr.dll","qmgrprxy.dll","wucltux.dll","muweb.dll","wuwebv.dll"
+    )
+    foreach ($dll in $dlls) {
+        try { regsvr32.exe /s $dll } catch {}
+    }
+    Write-Host
+
+    # Step 5: Reset Winsock & WinHTTP
+    Write-Host "[5/6] Resetting network settings..."
+    try { netsh winsock reset | Out-Null } catch {}
+    try { netsh winhttp reset proxy | Out-Null } catch {}
+    Write-Host
+
+    # Step 6: Restart services
+    Write-Host "[6/6] Restarting services..."
+    foreach ($service in $services) {
+        $svc = Get-Service -Name $service -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -ne "Running") {
+            Write-Host "Starting $service"
+            try { Start-Service -Name $service -ErrorAction Stop } catch {}
+        }
+    }
+    Write-Host
+
+    Write-Host "Windows Update components have been fully reset."
+    Write-Host
+    Write-Host "Renamed folders:"
+    Write-Host "  - $renamedSD"
+    Write-Host "  - $renamedCR"
+    Write-Host "You may delete them manually after reboot if all is working."
+    Write-Host
+    Pause-Menu
+}
+
+function Invoke-Choice22 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Generating Separated System Reports..."
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "Choose output location:"
+    Write-Host " [1] Desktop (recommended)"
+    Write-Host " [2] Enter custom path"
+    Write-Host " [3] Show guide for custom path setup"
+    $opt = Read-Host ">"
+    $outpath = ""
+    if ($opt -eq "1") {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        $reportdir = "SystemReports_{0}" -f (Get-Date -Format "yyyy-MM-dd_HHmm")
+        $outpath = Join-Path $desktop $reportdir
+        if (-not (Test-Path $outpath)) { New-Item -Path $outpath -ItemType Directory | Out-Null }
+    } elseif ($opt -eq "2") {
+        $outpath = Read-Host "Enter full path (e.g. D:\Reports)"
+        if (-not (Test-Path $outpath)) {
+            Write-Host
+            Write-Host "[ERROR] Folder not found: $outpath"
+            Pause-Menu
+            return
+        }
+    } elseif ($opt -eq "3") {
+        Clear-Host
+        Write-Host "==============================================="
+        Write-Host "    How to Use a Custom Report Path"
+        Write-Host "==============================================="
+        Write-Host
+        Write-Host "1. Open File Explorer and create a new folder, e.g.:"
+        Write-Host "   C:\Users\YourName\Desktop\SystemReports"
+        Write-Host "   or"
+        Write-Host "   C:\Users\YourName\OneDrive\Documents\SystemReports"
+        Write-Host
+        Write-Host "2. Copy the folder's full path from the address bar."
+        Write-Host "3. Re-run this and choose option [2], then paste it."
+        Write-Host
+        Pause-Menu
+        return
+    } else {
+        Write-Host
+        Write-Host "Invalid selection."
+        Start-Sleep -Seconds 2
+        return
+    }
+    $datestr = Get-Date -Format "yyyy-MM-dd"
+    $sys   = Join-Path $outpath "System_Info_$datestr.txt"
+    $net   = Join-Path $outpath "Network_Info_$datestr.txt"
+    $drv   = Join-Path $outpath "Driver_List_$datestr.txt"
+    Write-Host
+    Write-Host "Writing system info to: $sys"
+    systeminfo | Out-File -FilePath $sys -Encoding UTF8
+    Write-Host "Writing network info to: $net"
+    ipconfig /all | Out-File -FilePath $net -Encoding UTF8
+    Write-Host "Writing driver list to: $drv"
+    driverquery | Out-File -FilePath $drv -Encoding UTF8
+    Write-Host
+    Write-Host "Reports saved in:"
+    Write-Host $outpath
+    Write-Host
+    Pause-Menu
+}
+
+function Invoke-Choice23 {
+    while ($true) {
+        Clear-Host
+        Write-Host "======================================================"
+        Write-Host "           Windows Update Utility & Service Reset"
+        Write-Host "======================================================"
+        Write-Host "This tool will restart core Windows Update services."
+        Write-Host "Make sure no Windows Updates are installing right now."
+        Pause-Menu
+        Write-Host
+        Write-Host "[1] Reset Update Services (wuauserv, cryptsvc, appidsvc, bits)"
+        Write-Host "[0] Return to Main Menu"
+        Write-Host
+        $fixchoice = Read-Host "Select an option"
+        switch ($fixchoice) {
+            "1" {
+                Clear-Host
+                Write-Host "======================================================"
+                Write-Host "    Resetting Windows Update & Related Services"
+                Write-Host "======================================================"
+                Write-Host "Stopping Windows Update service..."
+                try { Stop-Service -Name wuauserv -Force -ErrorAction Stop } catch {}
+                Write-Host "Stopping Cryptographic service..."
+                try { Stop-Service -Name cryptsvc -Force -ErrorAction Stop } catch {}
+                Write-Host "Starting Application Identity service..."
+                try { Start-Service -Name appidsvc -ErrorAction Stop } catch {}
+                Write-Host "Starting Windows Update service..."
+                try { Start-Service -Name wuauserv -ErrorAction Stop } catch {}
+                Write-Host "Starting Cryptographic service..."
+                try { Start-Service -Name cryptsvc -ErrorAction Stop } catch {}
+                Write-Host "Starting Background Intelligent Transfer Service..."
+                try { Start-Service -Name bits -ErrorAction Stop } catch {}
+                Write-Host
+                Write-Host "[OK] Update-related services have been restarted."
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid input. Try again."; Pause-Menu }
+        }
+    }
+}
+
+function Invoke-Choice24 {
+    while ($true) {
+        Clear-Host
+        Write-Host "==============================================="
+        Write-Host "     View Network Routing Table  [Advanced]"
+        Write-Host "==============================================="
+        Write-Host "This shows how your system handles network traffic."
+        Write-Host
+        Write-Host "[1] Display routing table in this window"
+        Write-Host "[2] Save routing table as a text file on Desktop"
+        Write-Host "[0] Return to Main Menu"
+        Write-Host
+        $routeopt = Read-Host "Choose an option"
+        switch ($routeopt) {
+            "1" {
+                Clear-Host
+                route print
+                Write-Host
+                Pause-Menu
+                return
+            }
+            "2" {
+                $desktop = "$env:USERPROFILE\Desktop"
+                if (-not (Test-Path $desktop)) {
+                    Write-Host "Desktop folder not found."
+                    Pause-Menu
+                    return
+                }
+                $dt = Get-Date -Format "yyyy-MM-dd_HH-mm-ss"
+                if (-not $dt) { $dt = "manual_timestamp" }
+                $file = Join-Path $desktop "routing_table_${dt}.txt"
+                Clear-Host
+                Write-Host "Saving routing table to: `"$file`""
+                Write-Host
+                route print | Out-File -FilePath $file -Encoding UTF8
+                if (Test-Path $file) {
+                    Write-Host "[OK] Routing table saved successfully."
+                } else {
+                    Write-Host "[ERROR] Failed to save routing table to file."
+                }
+                Write-Host
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default {
+                Write-Host "Invalid input. Please enter 1, 2 or 0."
+                Pause-Menu
+            }
+        }
+    }
+}
+function Invoke-Choice25 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "   .NET RollForward Settings"
+    Write-Host "==============================================="
+    
+    # Check if .NET Runtime or SDK is installed
+    $dotnetInstalled = $false
+    $dotnetRuntime = $false
+    $dotnetSdk = $false
+
+    # Check for .NET Runtime using registry
+    $runtimeKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\NET Framework Setup\NDP\v4\Full",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\NET Framework Setup\NDP\v4\Full"
+    )
+    foreach ($key in $runtimeKeys) {
+        if (Test-Path $key) {
+            try {
+                $version = Get-ItemProperty -Path $key -Name Release -ErrorAction SilentlyContinue
+                if ($version) {
+                    $dotnetRuntime = $true
+                    $dotnetInstalled = $true
+                    break
+                }
+            } catch { }
+        }
+    }
+
+    # Check for .NET Core/5+
+    try {
+        dotnet --list-runtimes 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetRuntime = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    # Check for .NET SDK
+    try {
+        dotnet --version 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            $dotnetSdk = $true
+            $dotnetInstalled = $true
+        }
+    } catch { }
+
+    if (-not $dotnetInstalled) {
+        Write-Host "[ERROR] Neither .NET Runtime nor SDK is installed." -ForegroundColor Red
+        Write-Host "You can download .NET from: https://dotnet.microsoft.com/download" -ForegroundColor Yellow
+        Write-Host "- For development, install the SDK" -ForegroundColor Yellow
+        Write-Host "- For running applications, install the Runtime" -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    # Show appropriate options based on what's installed
+    Write-Host "Detected .NET installations:"
+    if ($dotnetRuntime) { Write-Host "- .NET Runtime is installed" -ForegroundColor Green }
+    if ($dotnetSdk) { Write-Host "- .NET SDK is installed" -ForegroundColor Green }
+    Write-Host
+    
+    Write-Host "[1] Enable roll-forward for RUNTIME only  [WARNING] risk: app may run on newer runtime with breaking changes"
+    Write-Host "[2] Enable roll-forward for SDK only      [WARNING] risk: builds may differ across machines"
+    Write-Host "[3] Enable roll-forward for BOTH          [WARNING] risk: unpredictable runtime/build behavior"
+    Write-Host "[4] Disable roll-forward (remove setting)"
+    Write-Host "[0] Return to main menu"
+    Write-Host
+
+    $choice = Read-Host "Select an option"
+    switch ($choice) {
+        "1" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            Write-Host "[OK] Configured .NET Runtime roll-forward to latest major version." -ForegroundColor Green
+            Pause-Menu
+        }
+        "2" {
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured .NET SDK to use version $version with roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "3" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", "LatestMajor", "Machine")
+            $latestSdk = & dotnet --list-sdks | Sort-Object -Descending | Select-Object -First 1
+            if ($latestSdk) {
+                $version = $latestSdk.Split()[0]
+                $globalJsonPath = "$env:USERPROFILE\global.json"
+                $globalJsonContent = @{
+                    sdk = @{
+                        version = $version
+                        rollForward = "latestMajor"
+                    }
+                } | ConvertTo-Json -Depth 3
+                $globalJsonContent | Out-File -Encoding UTF8 $globalJsonPath
+                Write-Host "[OK] Configured BOTH Runtime & SDK roll-forward to latest major." -ForegroundColor Green
+                Write-Host "[INFO] global.json updated at $globalJsonPath"
+            } else {
+                Write-Host "[WARNING] Could not detect installed .NET SDKs." -ForegroundColor Yellow
+            }
+            Pause-Menu
+        }
+        "4" {
+            [System.Environment]::SetEnvironmentVariable("DOTNET_ROLL_FORWARD", $null, "Machine")
+            $globalJsonPath = "$env:USERPROFILE\global.json"
+            if (Test-Path $globalJsonPath) {
+                try {
+                    $json = Get-Content $globalJsonPath | ConvertFrom-Json
+                    if ($json.sdk.rollForward) {
+                        $json.sdk.PSObject.Properties.Remove("rollForward")
+                        $json | ConvertTo-Json -Depth 3 | Out-File -Encoding UTF8 $globalJsonPath
+                        Write-Host "[REMOVED] rollForward from global.json." -ForegroundColor Green
+                    }
+                } catch {
+                    Write-Host "[WARNING] Could not update global.json: $_" -ForegroundColor Yellow
+                }
+            }
+            Write-Host "[OK] DOTNET_ROLL_FORWARD environment variable removed." -ForegroundColor Green
+            Pause-Menu
+        }
+        default { return }
+    }
+}
+function Invoke-Choice26 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Xbox Credential Cleanup"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "Searching for Xbox Live credentials..."
+    Write-Host
+
+    # Get all stored credentials from cmdkey and split into lines
+    $allCreds = (cmdkey /list) -split "`r?`n"
+
+    # Find Xbox Live targets
+    $xblTargets = @()
+    foreach ($line in $allCreds) {
+        if ($line -match "(?i)^\s*Target:.*(Xbl.*)$") {
+            $xblTargets += $matches[1]
+        }
+    }
+
+    if ($xblTargets.Count -eq 0) {
+        Write-Host "No Xbox Live credentials found." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    Write-Host "Found $($xblTargets.Count) Xbox Live credential(s):" -ForegroundColor Cyan
+    $xblTargets | Sort-Object -Unique | ForEach-Object { Write-Host " - $_" }
+    Write-Host
+
+    # Confirmation before deleting anything
+    $proceed = Read-Host "Delete these Xbox Live credentials? (Y/N)"
+    if ($proceed.ToUpper() -ne 'Y') {
+        Write-Host "Operation cancelled. No credentials were deleted." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    # Delete each target
+    $deletedCount = 0
+    foreach ($target in $xblTargets) {
+        Write-Host "Deleting credential: $target" -ForegroundColor Yellow
+        cmdkey /delete:$target
+        $deletedCount++
+    }
+
+    Write-Host "`nSuccessfully deleted $deletedCount Xbox Live credential(s)." -ForegroundColor Green
+
+# Pause if Pause-Menu is defined, otherwise use Read-Host
+if (Get-Command -Name Pause-Menu -ErrorAction SilentlyContinue) {
+    Pause-Menu
+} else {
+    Write-Host "`nPress Enter to continue..." -ForegroundColor Cyan
+    Read-Host
+}
+}
+function Invoke-Choice27 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "    Windows/Office Activation Manager"
+    Write-Host "    Using https://massgrave.dev MAS (Microsoft Activation Script)"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "IMPORTANT WARNING!!!" -ForegroundColor Red
+    Write-Host "This tool will download and execute the MAS script from:"
+    Write-Host "https://massgrave.dev" -ForegroundColor Yellow
+    Write-Host
+    Write-Host "I did NOT create or host this script. Please read the documentation"
+    Write-Host "at https://massgrave.dev before continuing."
+    Write-Host
+    Write-Host "If you continue, you are fully responsible for using MAS." -ForegroundColor Red
+    Write-Host
+    Write-Host "To proceed, type exactly: YES, I UNDERSTAND"
+    Write-Host "Or type anything else to cancel." -ForegroundColor Yellow
+
+    $choice = Read-Host "Your input"
+    if ($choice -eq "YES, I UNDERSTAND") {
+        Write-Host "`nDownloading and executing MAS..." -ForegroundColor Yellow
+        try {
+            $scriptContent = Invoke-RestMethod -Uri "https://get.activated.win" -ErrorAction Stop
+            Invoke-Expression -Command $scriptContent -ErrorAction Stop
+            Write-Host "`nMAS script executed successfully!" -ForegroundColor Green
+        }
+        catch {
+            Write-Host "`nAn error occurred: $_" -ForegroundColor Red
+        }
+    }
+    else {
+        Write-Host "`nYou chose to cancel. No changes were made." -ForegroundColor Cyan
+    }
+
+    Write-Host "`nPress Enter to return to the main menu..." -ForegroundColor Yellow
+    $null = Read-Host
+}
+
+function Invoke-Choice28 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "  Install Local Group Policy Editor (Home)"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "This enables the Local Group Policy Editor (gpedit.msc) on Windows" -ForegroundColor Cyan
+    Write-Host "Home by adding the built-in GroupPolicy ClientTools/ClientExtensions" -ForegroundColor Cyan
+    Write-Host "packages with DISM. It lets you use the same policy editor available" -ForegroundColor Cyan
+    Write-Host "on Pro (e.g., for system, security, and admin template policies)." -ForegroundColor Cyan
+    Write-Host "Run as Administrator; after success open gpedit.msc from Run (Win+R)." -ForegroundColor Cyan
+    Write-Host
+
+    # DISM package installs need elevation
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    if (-not $isAdmin) {
+        Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+        Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $editionId = $null
+    try { $editionId = (Get-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").EditionID } catch {}
+    if ($editionId) {
+        Write-Host "Detected Windows edition: $editionId" -ForegroundColor Cyan
+        if ($editionId -notmatch 'Home|Core') {
+            Write-Host "[INFO] Professional/Education/Enterprise editions already include Group Policy Editor." -ForegroundColor Yellow
+        }
+    }
+
+    $gpeditPath = Join-Path $env:SystemRoot "System32\\gpedit.msc"
+    if (Test-Path $gpeditPath) {
+        Write-Host "[INFO] gpedit.msc is already present at $gpeditPath." -ForegroundColor Yellow
+    }
+
+    Write-Host "This installs gpedit.msc using the built-in GroupPolicy ClientTools/ClientExtensions packages." -ForegroundColor Cyan
+    $confirm = Read-Host "Continue? (Y/N)"
+    if ($confirm.ToUpper() -ne 'Y') {
+        Write-Host "Operation cancelled." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $packageRoot = Join-Path $env:SystemRoot "servicing\\Packages"
+    if (-not (Test-Path $packageRoot)) {
+        Write-Host "[ERROR] Package directory not found: $packageRoot" -ForegroundColor Red
+        Pause-Menu
+        return
+    }
+
+    $clientTools = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" -ErrorAction SilentlyContinue
+    $clientExtensions = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" -ErrorAction SilentlyContinue
+
+    if (-not $clientTools -or -not $clientExtensions) {
+        Write-Host "[ERROR] Required GroupPolicy packages were not found under $packageRoot." -ForegroundColor Red
+        Write-Host "Make sure you are on Windows 10/11 and the component store is intact." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $packages = @($clientTools + $clientExtensions) | Sort-Object Name -Unique
+    $failures = @()
+    foreach ($pkg in $packages) {
+        Write-Host "Adding package: $($pkg.Name)" -ForegroundColor Cyan
+        $proc = Start-Process dism.exe -ArgumentList "/online","/norestart","/add-package:`"$($pkg.FullName)`"" -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            $failures += "$($pkg.Name) (exit code $($proc.ExitCode))"
+            Write-Host "[ERROR] DISM failed for $($pkg.Name) (exit code $($proc.ExitCode))." -ForegroundColor Red
+            break
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        Write-Host "`n[OK] Group Policy Editor packages installed." -ForegroundColor Green
+        if (Test-Path $gpeditPath) {
+            Write-Host "Launch gpedit.msc from Run or Start to open the editor." -ForegroundColor Cyan
+        } else {
+            Write-Host "If gpedit.msc is still missing, reboot and try launching it again." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "`nInstall completed with errors: $($failures -join ', ')" -ForegroundColor Red
+    }
+
+    Pause-Menu
+}
+
+function Invoke-Choice30 {
+    while ($true) {
+        Clear-Host
+        $discordUrl = "https://discord.gg/bCQqKHGxja"
+        $githubUrl = "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose"
+
+        Write-Host
+        Write-Host "=================================================="
+        Write-Host "               CONTACT AND SUPPORT"
+        Write-Host "=================================================="
+        Write-Host "For direct contact, the owner's Discord username is: Lil_Batti"
+        Write-Host "How can we help you?"
+        Write-Host
+        Write-Host " [1] Open Support Discord Server ($discordUrl)"
+        Write-Host " [2] Create a GitHub Issue ($githubUrl)"
+        Write-Host
+        Write-Host " [0] Return to main menu"
+        Write-Host "=================================================="
+
+        $supportChoice = Read-Host "Enter your choice"
+
+        switch ($supportChoice) {
+            "1" {
+                Write-Host "Opening the support Discord server in your browser..."
+                try {
+                    Start-Process $discordUrl -ErrorAction Stop
+                    Write-Host "The Discord support site has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $discordUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "2" {
+                Write-Host "Opening the GitHub issue page in your browser..."
+                try {
+                    Start-Process $githubUrl -ErrorAction Stop
+                    Write-Host "The GitHub issue page has been opened." -ForegroundColor Green
+                } catch {
+                    Write-Host "Failed to open URL. Please manually visit: $githubUrl" -ForegroundColor Red
+                }
+                Pause-Menu
+                return
+            }
+            "0" { return }
+            default { Write-Host "Invalid choice. Please enter 1, 2, or 0." -ForegroundColor Red; Start-Sleep -Seconds 2 }
+        }
+    }
+}
+
+function Invoke-Choice0 { Clear-Host; Write-Host "Exiting script..."; exit }
+
+# === MAIN MENU LOOP ===
+while ($true) {
+    Show-Menu
+    $choice = (Read-Host "Enter your choice").ToLower().Trim()
+
+    switch ($choice) {
+        "1"  { Invoke-Choice1; continue }
+        "2"  { Invoke-Choice2; continue }
+        "3"  { Invoke-Choice3; continue }
+        "4"  { Invoke-Choice4; continue }
+        "5"  { Invoke-Choice5; continue }
+        "6"  { Invoke-Choice6; continue }
+        "7"  { Invoke-Choice7; continue }
+        "8"  { Invoke-Choice8; continue }
+        "9"  { Invoke-Choice9; continue }
+        "10" { Invoke-Choice10; continue }
+        "11" { Invoke-Choice11; continue }
+        "12" { Invoke-Choice12; continue }
+        "13" { Invoke-Choice13; continue }
+        "14" { Invoke-Choice14; continue }
+        "15" { Invoke-Choice15; continue }
+        "16" { Invoke-Choice16; continue }
+        "20" { Invoke-Choice20; continue }
+        "21" { Invoke-Choice21; continue }
+        "22" { Invoke-Choice22; continue }
+        "23" { Invoke-Choice23; continue }
+        "24" { Invoke-Choice24; continue }
+        "25" { Invoke-Choice25; continue }
+        "26" { Invoke-Choice26; continue }
+        "27" { Invoke-Choice27; continue }
+        "28" { Invoke-Choice28; continue }
+        "30" { Invoke-Choice30; continue }
+        "h"  { Invoke-Choice30; continue }
+        "help" { Invoke-Choice30; continue }
+        "0" { Invoke-Choice0 }
+        default { Write-Host "Invalid choice, please try again."; Pause-Menu }
+    }
+}
