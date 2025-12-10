@@ -1,5 +1,5 @@
 <#
-    Windows Maintenance Tool v4.0 - GUI Version
+    Windows Maintenance Tool v4.4 - GUI Version
     - Fixed Driver Report Export (Force Write)
     - Fixed Color Syntax in Clean Drivers
     - Network Tab Reorganized (3 Columns: General, DNS, Hosts)
@@ -300,4 +300,5 @@ New-StyledButton -Parent $tabSupport -Text "Join Discord Support" -Top 100 -Left
 New-StyledButton -Parent $tabSupport -Text "Report Issue on GitHub" -Top 150 -Left 20 -Action { Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" } -Color [System.Drawing.Color]::Gray
 
 $form.Add_Load({ $outputBox.Text = "Welcome to Windows Maintenance Tool GUI v4.0.`r`nSelect a tab above to begin.`r`nRunning as: $env:USERNAME`r`n" })
+
 [void]$form.ShowDialog()
