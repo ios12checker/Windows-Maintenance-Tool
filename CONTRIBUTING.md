@@ -2,6 +2,7 @@
 
 A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 
+- [@Chaython](https://github.com/Chaython) - Complete rewrite: created the GUI, task scheduler, Firewall, winget search. Does most ongoing development.
 - [@amakvana](https://github.com/amakvana) – Winget upgrade logic, registry backup improvements, duplicate cleanup refactor  
 - [@callmenemo491](https://github.com/callmenemo491) – Winget selection UI (`choice1`), `if/iif` fix, feedback on choice routing  
 - [@mahirgul](https://github.com/mahirgul) – Pull request: route print improvements, `choice24` integration  
@@ -11,7 +12,6 @@ A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 - [@thepcformula](https://github.com/thepcformula) – CHKDSK fix in `choice10`, drive filter logic  
 - [@djhenderson](https://github.com/djhenderson) – Diagnostic logs, update repair feedback, Issue #11 analysis   
 - [@BruceHarrison](https://github.com/BruceHarrison) - Feature request - Choice 13 (Optimize SSDs) Via powershell.
-- [@Chaython](https://github.com/Chaython) - Helped with this project alot.
 
 Videos
 - [Windows Maintenance Tool – Guide by Info4Geek](https://www.youtube.com/watch?v=TpZY1nXHTsw)
