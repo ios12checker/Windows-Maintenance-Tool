@@ -1425,6 +1425,8 @@ Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 
 Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
 Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
 Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
+(Get-Ctrl "btnWingetFind").Width = 80
+Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Find" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
@@ -1579,13 +1581,84 @@ foreach ($btnName in $TabButtons) {
 # --- GLOBAL SEARCH ---
 $SearchIndex = @{}
 function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b=Get-Ctrl $BtnName; if($b){ $SearchIndex[$Desc]=@{Button=$b;Tab=$ParentTab} } }
-Add-SearchIndexEntry "btnWingetScan" "Winget Updates" "btnTabUpdates"
-Add-SearchIndexEntry "btnSFC" "SFC Scan" "btnTabHealth"
-Add-SearchIndexEntry "btnCleanDisk" "Disk Cleanup" "btnTabCleanup"
-Add-SearchIndexEntry "btnNetRepair" "Network Repair" "btnTabNetwork"
-Add-SearchIndexEntry "btnUpdateRepair" "Update Repair" "btnTabUtils"
-Add-SearchIndexEntry "btnTaskManager" "Task Scheduler" "btnTabUtils"
-Add-SearchIndexEntry "btnInstallGpedit" "Install Group Policy" "btnTabUtils"
+# --- GLOBAL SEARCH INDEX ---
+
+# 1. Updates (Winget)
+Add-SearchIndexEntry "btnWingetScan"        "Check for Updates (Winget)"      "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
+
+# 2. System Health
+Add-SearchIndexEntry "btnSFC"               "SFC Scan (System File Checker)"  "btnTabHealth"
+Add-SearchIndexEntry "btnDISMCheck"         "DISM Check Health"               "btnTabHealth"
+Add-SearchIndexEntry "btnDISMRestore"       "DISM Restore Health"             "btnTabHealth"
+Add-SearchIndexEntry "btnCHKDSK"            "CHKDSK (Check Disk C:)"          "btnTabHealth"
+
+# 3. Network & DNS
+Add-SearchIndexEntry "btnNetInfo"           "Show IP Config / Network Info"   "btnTabNetwork"
+Add-SearchIndexEntry "btnFlushDNS"          "Flush DNS Cache"                 "btnTabNetwork"
+Add-SearchIndexEntry "btnResetWifi"         "Restart Wi-Fi Adapter"           "btnTabNetwork"
+Add-SearchIndexEntry "btnNetRepair"         "Full Network Repair (Reset IP)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnRouteTable"        "Save Routing Table"              "btnTabNetwork"
+Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "btnTabNetwork"
+
+# DNS Presets
+Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
+
+# DNS Encryption & Hosts
+Add-SearchIndexEntry "btnDohAuto"           "Enable DoH (DNS over HTTPS)"     "btnTabNetwork"
+Add-SearchIndexEntry "btnDohDisable"        "Disable DoH"                     "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsRestore"      "Restore Hosts File"              "btnTabNetwork"
+
+# 4. Firewall
+Add-SearchIndexEntry "btnFwRefresh"         "Refresh Firewall Rules"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwAdd"             "Add New Firewall Rule"           "btnTabFirewall"
+Add-SearchIndexEntry "btnFwEdit"            "Edit/Modify Firewall Rule"       "btnTabFirewall"
+Add-SearchIndexEntry "btnFwExport"          "Export Firewall Policy"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwImport"          "Import Firewall Policy"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwDefaults"        "Restore Default Firewall Rules"  "btnTabFirewall"
+Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
+
+# 5. Drivers
+Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvDisableWU"      "Disable Driver Updates"          "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvEnableWU"       "Enable Driver Updates"           "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvDisableMeta"    "Disable Device Metadata"         "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvEnableMeta"     "Enable Device Metadata"          "btnTabDrivers"
+
+# 6. Cleanup
+Add-SearchIndexEntry "btnCleanDisk"         "Disk Cleanup Tool"               "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanTemp"         "Clean Temporary Files"           "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanShortcuts"    "Fix Broken Shortcuts"            "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanReg"          "Registry Cleanup & Backup"       "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "btnTabCleanup"
+
+# 7. Utilities
+Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
+Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
+Add-SearchIndexEntry "btnUtilMas"           "MAS Activation"                  "btnTabUtils"
+Add-SearchIndexEntry "btnUpdateRepair"      "Reset Windows Update Components" "btnTabUtils"
+Add-SearchIndexEntry "btnUpdateServices"    "Restart Update Services"         "btnTabUtils"
+Add-SearchIndexEntry "btnDotNetEnable"      "Set .NET RollForward"            "btnTabUtils"
+Add-SearchIndexEntry "btnDotNetDisable"     "Reset .NET RollForward"          "btnTabUtils"
+Add-SearchIndexEntry "btnTaskManager"       "Task Scheduler Manager"          "btnTabUtils"
+Add-SearchIndexEntry "btnInstallGpedit"     "Install Group Policy (Home)"     "btnTabUtils"
+
+# 8. Support
+Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
+Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
 
 $txtGlobalSearch.Add_TextChanged({
     $q = $txtGlobalSearch.Text
@@ -1719,7 +1792,7 @@ $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
 $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
 
-$btnSFC.Add_Click({ Invoke-UiCommand { sfc /scannow } "Running SFC..." })
+$btnSFC.Add_Click({ Start-Process cmd.exe -ArgumentList "/k sfc /scannow" })
 $btnDISMCheck.Add_Click({ Invoke-UiCommand { dism /online /cleanup-image /checkhealth } "Running DISM CheckHealth..." })
 $btnDISMRestore.Add_Click({ Invoke-UiCommand { dism /online /cleanup-image /restorehealth } "Running DISM RestoreHealth..." })
 $btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
