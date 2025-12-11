@@ -8,6 +8,18 @@
 $AppVersion = "1.1"
 $ErrorActionPreference = "SilentlyContinue"
 
+# --- DEFINE DATA DIRECTORY (Relative to Script) ---
+try {
+    # Try to get script path, fallback to current location if running in ISE/Console unsaved
+    $ScriptRoot = if ($PSCommandPath) { Split-Path -Parent $PSCommandPath } else { Get-Location }
+    $DataDir = Join-Path $ScriptRoot "data"
+    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+} catch {
+    # Fallback to Temp if we can't write to script dir
+    $DataDir = Join-Path $env:TEMP "WMT_Data"
+    if (-not (Test-Path $DataDir)) { New-Item -ItemType Directory -Path $DataDir -Force | Out-Null }
+}
+
 # HIDE CONSOLE
 $t = '[DllImport("user32.dll")] public static extern bool ShowWindow(int handle, int state);'
 $w = Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions -PassThru
@@ -106,11 +118,14 @@ function Check-ForUpdate {
 
         if ($result -eq "Yes") {
             try {
-                $backupPath = "$PSCommandPath.bak"
+                # Save backup to DataDir
+                $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
+                $backupPath = Join-Path $script:DataDir $backupName
+                
                 Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
                 Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
                 
-                [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+                [System.Windows.MessageBox]::Show("Update complete! Backup saved to: $backupName`nRestarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
                 Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
                 exit
             } catch {
@@ -147,12 +162,17 @@ function Start-NetRepair {
 
 function Start-RegClean {
     Run-Cmd {
-        $bkDir = "$env:SystemRoot\Temp\RegistryBackups"
+        # Save registry backups to .\data\RegistryBackups
+        $bkDir = Join-Path $script:DataDir "RegistryBackups"
         if(!(Test-Path $bkDir)){ New-Item -Path $bkDir -ItemType Directory | Out-Null }
+        
         $bkFile = "$bkDir\Backup_$(Get-Date -F 'yyyyMMdd_HHmm').reg"
         reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $bkFile /y | Out-Null
+        
         $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
         if ($keys) { foreach ($k in $keys) { Remove-Item $k.PSPath -Recurse -Force; Write-Output "Removed: $($k.PSChildName)" } } else { Write-Output "No obsolete keys found." }
+        
+        Write-Output "Backup saved to: $bkFile"
     } "Cleaning Registry..."
 }
 
@@ -1027,7 +1047,7 @@ $txtGlobalSearch.Add_TextChanged({
 })
 $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $match=$SearchIndex[$lstSearchResults.SelectedItem]; (Get-Ctrl $match.Tab).RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))); $txtGlobalSearch.Text="" } })
 
-# --- WINGET ---
+# --- WINGET (Kept in original location / Temp for performance) ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
@@ -1058,9 +1078,9 @@ $btnWingetFind.Add_Click({
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    $proc = Start-Process winget -ArgumentList "search `"$($txtWingetSearch.Text)`" --accept-source-agreements" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\winget_search.txt"
+    $proc = Start-Process winget ... -RedirectStandardOutput $null -NoNewWindow -PassThru
     $proc.WaitForExit()
-    $lines = Get-Content "$env:TEMP\winget_search.txt"
+    $lines = winget search "$($txtWingetSearch.Text)" --accept-source-agreements
     foreach ($line in $lines) {
         if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
             if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
@@ -1114,7 +1134,14 @@ $btnResetWifi.Add_Click({
     } "Restarting Wireless Adapters..."
 })
 $btnNetRepair.Add_Click({ Start-NetRepair })
-$btnRouteTable.Add_Click({ Run-Cmd { route print > "$env:USERPROFILE\Desktop\RouteTable.txt"; Write-Output "Saved to Desktop." } })
+
+$btnRouteTable.Add_Click({ 
+    Run-Cmd { 
+        $outFile = Join-Path $script:DataDir "RouteTable.txt"
+        route print > $outFile
+        Write-Output "Route table saved to: $outFile" 
+    } 
+})
 
 $btnDnsGoogle.Add_Click({ Run-Cmd { Get-NetAdapter | Where Status -eq 'Up' | Set-DnsClientServerAddress -ServerAddresses ("8.8.8.8","8.8.4.4") } "Google DNS Set" })
 $btnDnsCloudflare.Add_Click({ Run-Cmd { Get-NetAdapter | Where Status -eq 'Up' | Set-DnsClientServerAddress -ServerAddresses ("1.1.1.1","1.0.0.1") } "Cloudflare DNS Set" })
@@ -1144,12 +1171,23 @@ $btnFwDelete.Add_Click({ if($lstFw.SelectedItem){ Remove-NetFirewallRule -Name $
 $btnHostsEdit.Add_Click({ Show-HostsEditor })
 $btnHostsBackup.Add_Click({ 
     Run-Cmd { 
-        $desktop = [Environment]::GetFolderPath("Desktop")
-        Copy-Item "$env:windir\System32\drivers\etc\hosts" "$desktop\hosts_bk.bak" -Force
-        "Backup saved to: $desktop\hosts_bk.bak" 
+        $bkFile = Join-Path $script:DataDir "hosts_bk.bak"
+        Copy-Item "$env:windir\System32\drivers\etc\hosts" $bkFile -Force
+        Write-Output "Backup saved to: $bkFile" 
     } 
 })
-$btnHostsRestore.Add_Click({ $o=New-Object System.Windows.Forms.OpenFileDialog;$o.Filter="*.bak|*.bak";if($o.ShowDialog()-eq"OK"){Run-Cmd{Copy-Item $o.FileName "$env:windir\System32\drivers\etc\hosts" -Force} "Restored."} })
+
+$btnHostsRestore.Add_Click({ 
+    $o=New-Object System.Windows.Forms.OpenFileDialog
+    $o.Filter="*.bak|*.bak"
+    # Set initial directory to our data folder for convenience
+    $o.InitialDirectory = $script:DataDir
+    
+    if($o.ShowDialog()-eq"OK"){
+        Run-Cmd{Copy-Item $o.FileName "$env:windir\System32\drivers\etc\hosts" -Force} "Restored."
+    } 
+})
+
 $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
 $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
 $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
@@ -1264,10 +1302,11 @@ $btnInstallGpedit.Add_Click({ Start-GpeditInstall })
 $btnUtilSysInfo.Add_Click({
     Run-Cmd {
         # Create timestamped folder on Desktop
-        $desktop = [Environment]::GetFolderPath('Desktop')
         $timestamp = Get-Date -Format "yyyy-MM-dd_HHmm"
         $reportDirName = "SystemReports_$timestamp"
-        $outpath = Join-Path $desktop $reportDirName
+        
+        # Save to DataDir
+        $outpath = Join-Path $script:DataDir $reportDirName
         
         if (-not (Test-Path $outpath)) { 
             New-Item -Path $outpath -ItemType Directory | Out-Null 
@@ -1312,7 +1351,9 @@ $btnUtilTrim.Add_Click({
         }
 
         # 2. Setup Log
-        $logPath = "$env:USERPROFILE\Desktop\SSD_OPTIMIZE_$(Get-Date -f 'yyyy-MM-dd_HHmmss').log"
+        $logName = "SSD_OPTIMIZE_$(Get-Date -f 'yyyy-MM-dd_HHmmss').log"
+        $logPath = Join-Path $script:DataDir $logName
+        
         $logContent = @()
         $logContent += "SSD Optimize Log - $(Get-Date)"
         $logContent += "--------------------------------"
@@ -1445,9 +1486,9 @@ $btnCleanShortcuts.Add_Click({
 # 5. Generate Driver Report
 $btnDrvReport.Add_Click({
     Run-Cmd {
-        $path = "$env:USERPROFILE\Desktop\DriverReport.csv"
+        $path = Join-Path $script:DataDir "DriverReport.csv"
         Get-WindowsDriver -Online | Select-Object ProviderName, Date, Version, ClassName, OriginalFileName | Export-Csv $path -NoTypeInformation
-        Write-Output "Driver report saved to Desktop."
+        Write-Output "Driver report saved to: $path"
     } "Exporting drivers..."
 })
 
@@ -1455,7 +1496,9 @@ $btnDrvReport.Add_Click({
 $btnHostsUpdate.Add_Click({
     Run-Cmd {
         $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-        $backupDir = "$env:windir\System32\drivers\etc\hosts_backups"
+        # Save Backups to DataDir
+        $backupDir = Join-Path $script:DataDir "HostsBackups"
+        
         $maxRetries = 3
         $retryDelay = 2 
 
@@ -1633,77 +1676,118 @@ $btnCleanTemp.Add_Click({
 # 8. Clean Old Drivers (With Backup & Restore Logic)
 $btnDrvClean.Add_Click({
     Run-Cmd {
-        Write-Output "Analyzing Driver Store..."
+        Write-Output "Scanning Driver Store (Fast Mode)..."
         
-        # 1. Parse pnputil output
-        $rawOutput = pnputil.exe /enum-drivers
+        # 1. Capture pnputil output (Instant)
+        $rawOutput = pnputil.exe /enum-drivers 2>&1
+        
         $drivers = @()
-        $currentDriver = $null
+        $current = $null
 
+        # 2. Parse Text - Robust Regex Strategy
         foreach ($line in $rawOutput) {
-            if ($line -match '^Published Name:\s+(.+)$') {
-                if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
-                $currentDriver = [ordered]@{ Driver = $matches[1].Trim(); OriginalFileName = $null; ProviderName = $null; Version = $null; Date = $null }
+            $line = $line.ToString().Trim()
+            
+            # Detect Start of Block: "Published Name: oemXX.inf"
+            if ($line -match ':\s*(oem\d+\.inf)$') {
+                if ($current) { $drivers += [PSCustomObject]$current }
+                $current = [ordered]@{ 
+                    PublishedName = $matches[1]; 
+                    OriginalName = $null; 
+                    Provider = "Unknown"; 
+                    Version = [Version]"0.0.0.0"; 
+                    Date = [DateTime]::MinValue 
+                }
             }
-            elseif ($line -match '^Original Name:\s+(.+)$') { $currentDriver.OriginalFileName = $matches[1].Trim() }
-            elseif ($line -match '^Provider Name:\s+(.+)$') { $currentDriver.ProviderName = $matches[1].Trim() }
-            elseif ($line -match '^Driver Version:\s+(.+)$') { try { $currentDriver.Version = [Version]$matches[1].Trim() } catch { $currentDriver.Version = [Version]"0.0.0.0" } }
-            elseif ($line -match '^Date:\s+(.+)$') { try { $currentDriver.Date = [DateTime]$matches[1].Trim() } catch { $currentDriver.Date = [DateTime]::MinValue } }
+            # Detect Original Name: "Original Name: driver.inf"
+            elseif ($current -and $line -match ':\s*([\w\-\.]+\.inf)$') {
+                $val = $matches[1]
+                if ($val -notmatch '^oem\d+\.inf$') {
+                    $current.OriginalName = $val
+                }
+            }
+            # Detect Version
+            elseif ($current -and $line -match ':\s*(\d{1,5}(\.\d{1,5}){1,3})$') {
+                try { $current.Version = [Version]$matches[1] } catch {}
+            }
+            # Detect Provider
+            elseif ($current -and $line -match 'Provider.*:\s+(.+)$') {
+                $current.Provider = $matches[1]
+            }
+            # Detect Date
+            elseif ($current -and $line -match 'Date.*:\s+(\d{1,2}[/\.-]\d{1,2}[/\.-]\d{2,4})') {
+                try { $current.Date = [DateTime]$matches[1] } catch {}
+            }
         }
-        if ($currentDriver) { $drivers += [PSCustomObject]$currentDriver }
+        if ($current) { $drivers += [PSCustomObject]$current }
 
-        # 2. Identify Obsolete Drivers
-        $groupedDrivers = $drivers | Where-Object { $_.OriginalFileName } | Group-Object -Property OriginalFileName, ProviderName
-        $driversToDelete = @()
+        # 3. Group and Analyze
+        $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
+        $toDelete = @()
 
-        foreach ($group in $groupedDrivers) {
+        foreach ($group in $grouped) {
             if ($group.Count -gt 1) {
-                # Sort: Newest Date first, then highest Version. Keep [0], delete the rest.
-                $sortedGroup = $group.Group | Sort-Object Date, Version -Descending
-                $oldDrivers = $sortedGroup | Select-Object -Skip 1
-                $driversToDelete += $oldDrivers
+                # Sort: Newest Date first, then Highest Version
+                $sorted = $group.Group | Sort-Object Date, Version -Descending
+                # Keep top 1, delete the rest
+                $old = $sorted | Select-Object -Skip 1
+                $toDelete += $old
             }
         }
 
-        if ($driversToDelete.Count -eq 0) {
-            Write-Output "Driver store is already clean! No old versions found."
+        if ($toDelete.Count -eq 0) {
+            Write-Output "Driver store is optimized. No redundant drivers found."
             return
         }
 
-        # 3. Prompt for Backup
-        $count = $driversToDelete.Count
-        $msg = "Found $count obsolete driver(s).`n`nDo you want to BACKUP all drivers before deleting these?`n(Highly Recommended)"
-        $res = [System.Windows.Forms.MessageBox]::Show($msg, "Driver Cleanup", [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxImage]::Question)
+        # 4. User Prompt
+        $count = $toDelete.Count
+        $msg = "Found $count old driver versions.`n`nThese are old versions of drivers you currently have installed.`n`nBack up drivers to Desktop before cleaning?"
+        
+        $res = [System.Windows.Forms.MessageBox]::Show($msg, "Driver Cleanup", [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxIcon]::Question)
 
-        if ($res -eq "Cancel") { 
-            Write-Output "Operation Cancelled."; return 
-        }
+        if ($res -eq "Cancel") { Write-Output "Cancelled."; return }
 
+        # 5. Backup (To DataDir)
         if ($res -eq "Yes") {
-            $desktop = [Environment]::GetFolderPath('Desktop')
-            $backupDir = Join-Path $desktop ("DriverBackup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-            Write-Output "Backing up drivers to: $backupDir"
+            $bkFolderName = "Drivers_Backup_" + (Get-Date -f 'yyyyMMdd_HHmm')
+            # Save backup to DataDir
+            $bkPath = Join-Path $script:DataDir $bkFolderName
+
+            Write-Output "Backing up to: $bkPath"
+            New-Item -Path $bkPath -ItemType Directory -Force | Out-Null
             
-            if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
-            
-            $proc = Start-Process pnputil.exe -ArgumentList "/export-driver * `"$backupDir`"" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -ne 0) {
-                Write-Output "ERROR: Backup failed. Cleanup aborted for safety."
-                return
+            $proc = Start-Process pnputil -ArgumentList "/export-driver * `"$bkPath`"" -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -ne 0) { 
+                Write-Output "Backup failed. Aborting."
+                [System.Windows.Forms.MessageBox]::Show("Backup failed. Cleanup aborted.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                return 
             }
             Write-Output "Backup Complete."
         }
 
-        # 4. Perform Cleanup
-        Write-Output "Starting Cleanup..."
-        foreach ($target in $driversToDelete) {
-             Write-Output "Deleting old ver: $($target.Version) ($($target.Driver))..."
-             $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($target.Driver) /uninstall" -NoNewWindow -Wait -PassThru
-             if ($proc.ExitCode -eq 0) { Write-Output " -> Success" } 
-             else { Write-Output " -> Failed/In-Use" }
-        }
-        Write-Output "Cleanup Complete."
+        # 6. Delete Execution
+        Write-Output "`n--- Deleting $count Old Drivers ---"
+        $deleted = 0
+        $failed = 0
 
+        foreach ($item in $toDelete) {
+            $info = "$($item.OriginalName) (v$($item.Version))"
+            Write-Output "Removing: $info..."
+            
+            $proc = Start-Process pnputil -ArgumentList "/delete-driver $($item.PublishedName) /uninstall /force" -NoNewWindow -Wait -PassThru
+            
+            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) {
+                Write-Output " -> SUCCESS"
+                $deleted++
+            } else {
+                Write-Output " -> FAILED (In Use or Locked)"
+                $failed++
+            }
+        }
+
+        Write-Output "`nDone. Deleted: $deleted | Failed: $failed"
+        
     } "Cleaning Driver Store..."
 })
 
