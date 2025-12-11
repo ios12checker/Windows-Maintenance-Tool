@@ -1317,7 +1317,9 @@ function Show-TaskManager {
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                         <TextBlock Text="- Feature Integration &amp; Updates: " Foreground="#AAA" VerticalAlignment="Center"/>
-                        <Button Name="btnCreditIos12checker" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
+                         <Button Name="btnCreditIos12checker" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
+                        <TextBlock Text=" &amp; " Foreground="#AAA" VerticalAlignment="Center"/>
+                       <Button Name="btnCreditChaythonFeatures" Content="Chaython" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
                     </StackPanel>
 
                     <TextBlock Text="License: MIT License" Foreground="#666" Margin="0,10,0,0" FontSize="10"/>
@@ -1554,6 +1556,7 @@ $btnDonate = Get-Ctrl "btnDonate"
 $btnCreditLilBattiCLI = Get-Ctrl "btnCreditLilBattiCLI"
 $btnCreditChaythonCLI = Get-Ctrl "btnCreditChaythonCLI"
 $btnCreditChaythonGUI = Get-Ctrl "btnCreditChaythonGUI"
+$btnCreditChaythonFeatures = Get-Ctrl "btnCreditChaythonFeatures"
 $btnCreditIos12checker = Get-Ctrl "btnCreditIos12checker"
 
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
@@ -1787,6 +1790,7 @@ $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
 $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
 $btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" })
 $btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" })
+$btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
