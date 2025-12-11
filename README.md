@@ -1,15 +1,15 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v4.0-green)
+![Version](https://img.shields.io/badge/version-v4.1-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-All-in-one Windows maintenance toolkit in PowerShell + Batch. Runs locally, no install required.
+All-in-one Windows maintenance toolkit in PowerShell + Batch. Runs locally.
 
 ---
 
 ## 📸 Screenshots
-<img width="1180" height="837" alt="Windows Maintenance Tool UI" src="https://github.com/user-attachments/assets/fd029aed-69cb-4e35-9ba5-bd5212bdf13a" />
+<img width="1181" height="837" alt="2025-12-11 17_21_37-NVIDIA GeForce Overlay DT" src="https://github.com/user-attachments/assets/9980b0b8-1b6f-49a3-b0e6-54a1dbe9cbc9" />
 
 ---
 
@@ -33,28 +33,9 @@ All-in-one Windows maintenance toolkit in PowerShell + Batch. Runs locally, no i
 
 ---
 
-## 🔄 Updater Guide
-
-The included `update_run.bat` checks your local version, downloads the latest PS1/BAT from the repo, and only overwrites when newer (or when remote version is unknown but the payload is valid).
-
-1) Open your Windows Maintenance Tool folder (e.g., `C:\Users\<you>\Desktop\Windows Maintenance Tool`).
-2) Run `update_run.bat`.
-   - Reads local version from `Windows_Maintenance_Tool.ps1`.
-   - Downloads `Windows_Maintenance_Tool.ps1` and `Start_Windows_Maintenance_Tool.bat`.
-   - Updates only if newer; warns and skips on download failure.
-   - Leaves the window open with status messages.
-3) Press any key to exit after reviewing the messages.
-
-Tips:
-- Keep `update_run.bat` in the same folder as `Windows_Maintenance_Tool.ps1`.
-- Batch launcher is validated before overwrite.
-- GUI launcher carries `GUI_LAUNCHER_VERSION` inside `Start_WMT_GUI.bat` for “already up to date” detection.
-
----
-
 ## ⚙️ Manual Launch
 
-- CLI: Run `Start_Windows_Maintenance_Tool.bat` (or `powershell -NoProfile -ExecutionPolicy Bypass -File "Windows_Maintenance_Tool.ps1"`).
+- Click: Run `Start_WMT_GUI.bat` (or `powershell -NoProfile -ExecutionPolicy Bypass -File "WMT-GUI.ps1"`).
 - GUI: Run `Start_WMT_GUI.bat` (launches `WMT-GUI.ps1` elevated, hidden console).
 - Keep both the BAT and PS1 in the same folder.
 
