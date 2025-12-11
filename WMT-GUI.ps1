@@ -1,4 +1,4 @@
-<#
+﻿<#
     Windows Maintenance Tool - ULTIMATE WPF EDITION = Thanks to https://github.com/Chaython
 #>
 
@@ -72,7 +72,7 @@ function Check-ForUpdate {
     
     # 1. CONFIG & CACHE BUSTING
     $time = Get-Date -Format "yyyyMMddHHmmss"
-    $updateUrl = "https://raw.githubusercontent.com/Chaython/Windows-Maintenance-Tool/refs/heads/main/WMT-GUI.ps1?t=$time"
+    $updateUrl = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/refs/heads/main/WMT-GUI.ps1?t=$time"
     
     $localVer = [Version]$script:AppVersion
     $remoteVer = [Version]"0.0"
