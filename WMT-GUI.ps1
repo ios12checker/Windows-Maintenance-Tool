@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.0"
+$AppVersion = "4.1"
 $ErrorActionPreference = "SilentlyContinue"
 
 # HIDE CONSOLE
@@ -55,6 +55,17 @@ function Invoke-UiCommand {
     }
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
+
+# Centralized data path for exports (in repo folder)
+function Get-DataPath {
+    $root = Split-Path -Parent $PSCommandPath
+    $dataPath = Join-Path $root "data"
+    if (-not (Test-Path $dataPath)) {
+        New-Item -ItemType Directory -Path $dataPath -Force | Out-Null
+    }
+    return $dataPath
+}
+$script:DataDir = Get-DataPath
 
 # --- UPDATE CHECKER ---
 function Invoke-UpdateCheck {
@@ -108,11 +119,12 @@ function Invoke-UpdateCheck {
 
         if ($result -eq "Yes") {
             try {
-                $backupPath = "$PSCommandPath.bak"
+                $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
+                $backupPath = Join-Path (Get-DataPath) $backupName
                 Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
                 Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
                 
-                [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+                [System.Windows.MessageBox]::Show("Update complete! Backup saved to data folder.`nRestarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
                 Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
                 exit
             } catch {
@@ -149,20 +161,37 @@ function Start-NetRepair {
 
 function Start-RegClean {
     Invoke-UiCommand {
-        $bkDir = "$env:SystemRoot\Temp\RegistryBackups"
+        $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
         if(!(Test-Path $bkDir)){ New-Item -Path $bkDir -ItemType Directory | Out-Null }
         $bkFile = "$bkDir\Backup_$(Get-Date -F 'yyyyMMdd_HHmm').reg"
         reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $bkFile /y | Out-Null
         $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
         if ($keys) { foreach ($k in $keys) { Remove-Item $k.PSPath -Recurse -Force; Write-Output "Removed: $($k.PSChildName)" } } else { Write-Output "No obsolete keys found." }
+        Write-Output "Backup saved to: $bkFile"
     } "Cleaning Registry..."
 }
 
 function Start-XboxClean {
     Invoke-UiCommand {
+        Write-Output "Stopping Xbox Auth Manager..."
         Stop-Service -Name "XblAuthManager" -Force -ErrorAction SilentlyContinue
-        $creds = (cmdkey /list) | Select-String "Target:.*(Xbl.*)"
-        if ($creds) { foreach ($c in $creds) { $tgt = $c.ToString().Split(":")[1].Trim(); cmdkey /delete:$tgt; Write-Output "Deleted: $tgt" } } else { Write-Output "No Xbox credentials found." }
+
+        $allCreds = (cmdkey /list) -split "`r?`n"
+        $targets = @()
+        foreach ($line in $allCreds) {
+            if ($line -match "(?i)^\\s*Target:.*(Xbl.*)$") { $targets += $matches[1] }
+        }
+
+        if ($targets.Count -eq 0) {
+            Write-Output "No Xbox Live credentials found."
+        } else {
+            foreach ($t in $targets) {
+                Write-Output "Deleting credential: $t"
+                cmdkey /delete:$t 2>$null
+            }
+            Write-Output "Deleted $($targets.Count) credential(s)."
+        }
+
         Start-Service -Name "XblAuthManager" -ErrorAction SilentlyContinue
     } "Cleaning Xbox Credentials..."
 }
@@ -294,7 +323,9 @@ function Disable-AllDoh {
 function Invoke-HostsUpdate {
     Invoke-UiCommand {
         $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-        $backupDir = "$env:windir\System32\drivers\etc\hosts_backups"
+        $backupDir = Join-Path (Get-DataPath) "hosts_backups"
+        if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+
         $mirrors = @(
             "https://o0.pages.dev/Lite/hosts.win",
             "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/hosts.win",
@@ -303,116 +334,68 @@ function Invoke-HostsUpdate {
         $maxRetries = 3
         $retryDelay = 2
 
-        if (-not (Test-Path $backupDir)) {
-            New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
-            Write-Output "Created backup directory: $backupDir"
-        }
-
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $backupPath = Join-Path $backupDir "hosts_$timestamp.bak"
+        $uniqueBackupPath = Join-Path $backupDir ("hosts_{0}.bak" -f $timestamp)
         if (Test-Path $hostsPath) {
             try {
-                Copy-Item $hostsPath $backupPath -Force
-                Write-Output "Backup created: $backupPath"
+                Copy-Item $hostsPath $uniqueBackupPath -Force
+                Write-Output "Backup created: $uniqueBackupPath"
             } catch {
                 Write-Output "Backup failed: $($_.Exception.Message)"
-                $backupPath = $null
+                $uniqueBackupPath = $null
             }
         } else {
             Write-Output "No existing hosts file found. A new one will be created."
-            $backupPath = $null
+            $uniqueBackupPath = $null
         }
 
         $adBlockContent = $null
         $successfulMirror = $null
         foreach ($mirror in $mirrors) {
-            $client = $null
+            $webClient = $null
             try {
-                $client = New-Object System.Net.WebClient
-                $adBlockContent = $client.DownloadString($mirror)
+                $webClient = New-Object System.Net.WebClient
+                $adBlockContent = $webClient.DownloadString($mirror)
                 $successfulMirror = $mirror
                 Write-Output "Downloaded hosts from $mirror"
                 break
             } catch {
                 Write-Output "Mirror failed: $mirror -> $($_.Exception.Message)"
             } finally {
-                if ($client) { $client.Dispose() }
+                if ($null -ne $webClient) { $webClient.Dispose() }
             }
         }
         if (-not $adBlockContent) { throw "All mirrors failed. Hosts file not updated." }
 
-        $customStart = "# === BEGIN USER CUSTOM ENTRIES ==="
-        $customEnd = "# === END USER CUSTOM ENTRIES ==="
+        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
         $userCustomEntries = ""
         if (Test-Path $hostsPath) {
             try {
                 $currentContent = Get-Content $hostsPath -Raw
-                if ($currentContent -match "(?ms)$customStart`r?`n(.*?)`r?`n$customEnd") { $userCustomEntries = $matches[1] }
-            } catch {
-                Write-Output "Could not read existing custom entries: $($_.Exception.Message)"
-            }
+                if ($currentContent -match "(?ms)$([regex]::Escape($customSectionStart))\r?\n(.*?)\r?\n$([regex]::Escape($customSectionEnd))") {
+                    $userCustomEntries = $matches[1]
+                }
+            } catch { Write-Output "Could not read existing custom entries: $($_.Exception.Message)" }
         }
         if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
-            $userCustomEntries = "# Add your custom host entries below this line`n# 127.0.0.1    myserver.local    # Example entry"
+            $userCustomEntries = "# Add your custom host entries below this line`n# 127.0.0.1    myserver.local"
         }
 
-        $defaultContent = @"
-# Copyright (c) 1993-2009 Microsoft Corp.
-#
-# This is a sample HOSTS file used by Microsoft TCP/IP for Windows.
-#
-# This file contains the mappings of IP addresses to host names. Each
-# entry should be kept on an individual line. The IP address should
-# be placed in the first column followed by the corresponding host name.
-# The IP address and the host name should be separated by at least one
-# space.
-#
-# Additionally, comments (such as these) may be inserted on individual
-# lines or following the machine name denoted by a '#' symbol.
-#
-# For example:
-#
-#      102.54.94.97     rhino.acme.com          # source server
-#       38.25.63.10     x.acme.com              # x client host
-
-# localhost name resolution is handled within DNS itself.
-127.0.0.1       localhost
-::1             localhost
-
-$customStart
-$userCustomEntries
-$customEnd
-
-"@
-
-        $newContent = @"
-$defaultContent
-# Ad-blocking entries - Updated $(Get-Date)
-# Downloaded from: $successfulMirror
-# Original hosts file backed up to: $(if ($backupPath) { $backupPath } else { "No backup created" })
-
-$adBlockContent
-"@
+        $defaultContent = "# Microsoft Hosts`n127.0.0.1       localhost`n::1             localhost"
+        $newContent = "$defaultContent`n`n$customSectionStart`n$userCustomEntries`n$customSectionEnd`n`n# Ad-blocking entries - Updated $(Get-Date)`n# Source: $successfulMirror`n`n$adBlockContent"
 
         $attempt = 0
         $success = $false
-        $tempDest = "$hostsPath.tmp"
         while (-not $success -and $attempt -lt $maxRetries) {
             $attempt++
-            $tempFile = $null
             try {
                 $tempFile = [System.IO.Path]::GetTempFileName()
                 [System.IO.File]::WriteAllText($tempFile, $newContent, [System.Text.Encoding]::UTF8)
-
-                $copyCommand = @"
-@echo off
-if exist "$hostsPath" move /Y "$hostsPath" "$tempDest"
-move /Y "$tempFile" "$hostsPath"
-if exist "$tempDest" del /F /Q "$tempDest"
-"@
+                $tempDest = "$hostsPath.tmp"
+                $copyCommand = "@echo off`nif exist `"$hostsPath`" move /Y `"$hostsPath`" `"$tempDest`"`nmove /Y `"$tempFile`" `"$hostsPath`"`nif exist `"$tempDest`" del /F /Q `"$tempDest`""
                 $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
                 [System.IO.File]::WriteAllText($batchFile, $copyCommand)
-
                 $proc = Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -WindowStyle Hidden
                 Remove-Item $batchFile -Force
                 if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
@@ -428,18 +411,16 @@ if exist "$tempDest" del /F /Q "$tempDest"
                 }
             } catch {
                 Write-Output ("Attempt {0} failed: {1}" -f $attempt, $_.Exception.Message)
-                if ($tempFile -and (Test-Path $tempFile)) { Remove-Item $tempFile -Force }
-                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
                 if ($attempt -lt $maxRetries) { Start-Sleep -Seconds $retryDelay }
             }
         }
 
         if (-not $success) {
-            if ($backupPath -and (Test-Path $backupPath)) {
+            if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
                 Write-Output "Restoring original hosts from backup..."
                 try {
-                    Copy-Item $backupPath $hostsPath -Force
-                    Write-Output "Hosts restored from $backupPath"
+                    Copy-Item $uniqueBackupPath $hostsPath -Force
+                    Write-Output "Hosts restored from $uniqueBackupPath"
                 } catch {
                     Write-Output "Failed to restore backup: $($_.Exception.Message)"
                 }
@@ -535,7 +516,7 @@ function Invoke-RegistryTask {
         }
         "Delete" {
             Invoke-UiCommand {
-                $bkDir = "$env:SystemRoot\Temp\RegistryBackups"
+                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
                 if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
                 $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
                 reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $bkFile /y | Out-Null
@@ -546,7 +527,7 @@ function Invoke-RegistryTask {
         }
         "BackupHKLM" {
             Invoke-UiCommand {
-                $bkDir = "$env:SystemRoot\Temp\RegistryBackups"
+                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
                 if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
                 $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
                 reg export HKLM $bkFile /y | Out-Null
@@ -571,7 +552,7 @@ function Invoke-SSDTrim {
     Invoke-UiCommand {
         $ssds = Get-PhysicalDisk | Where-Object MediaType -eq 'SSD'
         if (-not $ssds) { Write-Output "No SSDs detected."; return }
-        $log = "$env:USERPROFILE\Desktop\SSD_OPTIMIZE_{0}.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss")
+        $log = Join-Path (Get-DataPath) ("SSD_OPTIMIZE_{0}.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))
         $out = @("SSD Optimize Log - $(Get-Date)")
         foreach ($ssd in $ssds) {
             $disk = Get-Disk | Where-Object { $_.FriendlyName -eq $ssd.FriendlyName }
@@ -620,8 +601,7 @@ function Invoke-ShortcutFix {
 
 # --- FIREWALL TOOLS ---
 function Invoke-FirewallExport {
-    $desktop = [Environment]::GetFolderPath("Desktop")
-    $target = Join-Path $desktop ("firewall_rules_{0}.wfw" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+    $target = Join-Path (Get-DataPath) ("firewall_rules_{0}.wfw" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
     Invoke-UiCommand { netsh advfirewall export "$target" } "Exporting firewall rules..."
 }
 
@@ -648,7 +628,7 @@ function Invoke-FirewallPurge {
 # --- DRIVER TOOLS ---
 function Invoke-DriverReport {
     Invoke-UiCommand {
-        $outfile = "$env:USERPROFILE\Desktop\Installed_Drivers.txt"
+        $outfile = Join-Path (Get-DataPath) "Installed_Drivers.txt"
         driverquery /v > $outfile
         Write-Output "Driver report saved to $outfile"
     } "Creating driver report..."
@@ -692,36 +672,55 @@ function Invoke-CleanOldDrivers {
     $confirm = [System.Windows.MessageBox]::Show("Backup drivers and remove older duplicates from Driver Store?", "Driver Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
     if ($confirm -ne "Yes") { return }
     Invoke-UiCommand {
-        # fast enumeration using pnputil output
-        $raw = pnputil.exe /enum-drivers
-        $drivers = @(); $current = $null
-        foreach ($line in $raw) {
-            if ($line -match '^Published Name:\\s+(.+)$') { if ($current) { $drivers += [PSCustomObject]$current }; $current = [ordered]@{ Driver=$matches[1].Trim(); OriginalFileName=$null; ProviderName=$null; Version=$null; Date=$null } }
-            elseif ($line -match '^Original Name:\\s+(.+)$') { $current.OriginalFileName = $matches[1].Trim() }
-            elseif ($line -match '^Provider Name:\\s+(.+)$') { $current.ProviderName = $matches[1].Trim() }
-            elseif ($line -match '^Driver Version:\\s+(.+)$') { try { $current.Version = [Version]$matches[1].Trim() } catch { $current.Version = [Version]"0.0.0.0" } }
-            elseif ($line -match '^Date:\\s+(.+)$') { try { $current.Date = [DateTime]$matches[1].Trim() } catch { $current.Date = [DateTime]::MinValue } }
+        Write-Output "Scanning Driver Store (fast mode)..."
+        $rawOutput = pnputil.exe /enum-drivers 2>&1
+        $drivers = @()
+        $current = $null
+
+        foreach ($line in $rawOutput) {
+            $line = $line.ToString().Trim()
+            if ($line -match 'Published Name:\\s*(oem\\d+\\.inf)$') {
+                if ($current) { $drivers += [PSCustomObject]$current }
+                $current = [ordered]@{ PublishedName=$matches[1]; OriginalName=$null; Provider="Unknown"; Version=[Version]"0.0.0.0"; Date=[DateTime]::MinValue }
+            }
+            elseif ($current -and $line -match 'Original Name:\\s*([\\w\\-\\.]+\\.inf)$') {
+                if ($matches[1] -notmatch '^oem\\d+\\.inf$') { $current.OriginalName = $matches[1] }
+            }
+            elseif ($current -and $line -match 'Provider.*:\\s+(.+)$') { $current.Provider = $matches[1] }
+            elseif ($current -and $line -match 'Driver Version:\\s*(\\d{1,5}(\\.\\d{1,5}){1,3})$') { try { $current.Version = [Version]$matches[1] } catch {} }
+            elseif ($current -and $line -match 'Date.*:\\s+(\\d{1,2}[\\/\\.\\-]\\d{1,2}[\\/\\.\\-]\\d{2,4})') { try { $current.Date = [DateTime]$matches[1] } catch {} }
         }
         if ($current) { $drivers += [PSCustomObject]$current }
-        $grouped = $drivers | Where-Object { $_.OriginalFileName } | Group-Object OriginalFileName, ProviderName
+
+        $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
         $toDelete = @()
-        foreach ($g in $grouped) {
-            if ($g.Count -gt 1) {
-                $sorted = $g.Group | Sort-Object Date, Version -Descending
+        foreach ($group in $grouped) {
+            if ($group.Count -gt 1) {
+                $sorted = $group.Group | Sort-Object Date, Version -Descending
                 $toDelete += $sorted | Select-Object -Skip 1
             }
         }
         if (-not $toDelete) { Write-Output "Driver store already clean."; return }
-        $desktop = [Environment]::GetFolderPath('Desktop'); if (-not $desktop) { $desktop = "$env:USERPROFILE\\Desktop" }
-        $backupDir = Join-Path $desktop ("DriverBackup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-        if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir | Out-Null }
-        $export = Start-Process pnputil.exe -ArgumentList @("/export-driver","*","""$backupDir""") -NoNewWindow -Wait -PassThru
-        if ($export.ExitCode -ne 0) { Write-Output "Backup failed (pnputil exit $($export.ExitCode))."; return }
-        foreach ($d in $toDelete) {
-            $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($d.Driver) /uninstall" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0) { Write-Output "Deleted $($d.Driver) ($($d.Version))" } else { Write-Output "Failed $($d.Driver) (pnputil exit $($proc.ExitCode))" }
+
+        $count = $toDelete.Count
+        $bkPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
+        Write-Output "Backing up drivers to: $bkPath"
+        New-Item -Path $bkPath -ItemType Directory -Force | Out-Null
+        $export = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$bkPath""" -NoNewWindow -Wait -PassThru
+        if ($export.ExitCode -ne 0) {
+            Write-Output "Backup failed (pnputil exit $($export.ExitCode)). Cleanup aborted."
+            return
         }
-        Write-Output "Backup saved to $backupDir"
+
+        Write-Output "--- Deleting $count old driver(s) ---"
+        $deleted = 0; $failed = 0
+        foreach ($item in $toDelete) {
+            $info = "$($item.OriginalName) (v$($item.Version))"
+            Write-Output "Removing: $info..."
+            $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($item.PublishedName) /uninstall /force" -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+        }
+        Write-Output "Done. Deleted: $deleted | Failed: $failed | Backup: $bkPath"
     } "Cleaning old drivers..."
 }
 
@@ -888,27 +887,101 @@ function Show-RuleDialog {
     return $null
 }
 
-# --- TASK SCHEDULER MANAGER ---
+# --- TASK SCHEDULER MANAGER (styled to match Firewall UI) ---
 function Show-TaskManager {
     $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Task Scheduler Manager"; $f.Size = "900, 600"; $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(30,30,30); $f.ForeColor = "White"
+    $f.Text = "Task Scheduler Manager"
+    $f.Size = "900, 600"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+
     $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"; $dg.Height = 450; $dg.BackgroundColor = [System.Drawing.Color]::FromArgb(45,45,48)
-    $dg.ForeColor = "Black"; $dg.AutoSizeColumnsMode = "Fill"; $dg.SelectionMode = "FullRowSelect"; $dg.MultiSelect = $false
+    $dg.Dock = "Top"
+    $dg.Height = 450
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $false
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+    $dg.ColumnHeadersHeight = 30
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
     $f.Controls.Add($dg)
-    $pnl = New-Object System.Windows.Forms.Panel; $pnl.Dock = "Bottom"; $pnl.Height = 80; $f.Controls.Add($pnl)
-    $btnRef = New-Object System.Windows.Forms.Button; $btnRef.Text="Refresh"; $btnRef.Top=20; $btnRef.Left=20; $btnRef.Width=100; $pnl.Controls.Add($btnRef)
-    $btnEn  = New-Object System.Windows.Forms.Button; $btnEn.Text="Enable"; $btnEn.Top=20; $btnEn.Left=130; $btnEn.Width=100; $btnEn.BackColor="SeaGreen"; $btnEn.ForeColor="White"; $pnl.Controls.Add($btnEn)
-    $btnDis = New-Object System.Windows.Forms.Button; $btnDis.Text="Disable"; $btnDis.Top=20; $btnDis.Left=240; $btnDis.Width=100; $btnDis.BackColor="Orange"; $pnl.Controls.Add($btnDis)
-    $btnDel = New-Object System.Windows.Forms.Button; $btnDel.Text="Delete"; $btnDel.Top=20; $btnDel.Left=350; $btnDel.Width=100; $btnDel.BackColor="Maroon"; $btnDel.ForeColor="White"; $pnl.Controls.Add($btnDel)
-    $tip = New-Object System.Windows.Forms.ToolTip; $tip.SetToolTip($btnRef, "Reload tasks"); $tip.SetToolTip($btnEn, "Enable task"); $tip.SetToolTip($btnDis, "Disable task"); $tip.SetToolTip($btnDel, "Delete task")
+
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 80
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnl)
+
+    function New-StyledBtn ($Text, $X, $Color=$null) {
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $Text
+        $b.Top = 20; $b.Left = $X; $b.Width = 100; $b.Height = 35
+        $b.FlatStyle = "Flat"
+        $b.FlatAppearance.BorderSize = 1
+        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
+        $b.ForeColor = [System.Drawing.Color]::White
+        if ($Color) {
+            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($Color)
+            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+        } else {
+            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
+        }
+        $pnl.Controls.Add($b)
+        return $b
+    }
+
+    $btnRef = New-StyledBtn "Refresh" 20
+    $btnEn  = New-StyledBtn "Enable" 130 "#006600"
+    $btnDis = New-StyledBtn "Disable" 240 "#CCAA00"
+    $btnDel = New-StyledBtn "Delete" 350 "#802020"
+
+    $dg.Add_RowPrePaint({
+        param($src, $e)
+        $row = $src.Rows[$e.RowIndex]
+        if ($row.Cells["State"].Value) {
+            $state = $row.Cells["State"].Value.ToString()
+            if ($state -eq "Running") {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#00FF00")
+            } elseif ($state -eq "Ready") {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#FFFF00")
+            } elseif ($state -eq "Disabled") {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#FF3333")
+            } else {
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGray
+            }
+        }
+    })
+
     $LoadTasks = {
         $tasks = Get-ScheduledTask | Select-Object TaskName, State, Author, TaskPath
-        $dt = New-Object System.Data.DataTable; $dt.Columns.Add("TaskName"); $dt.Columns.Add("State"); $dt.Columns.Add("Author"); $dt.Columns.Add("Path")
-        foreach ($t in $tasks) { $r=$dt.NewRow(); $r["TaskName"]=$t.TaskName; $r["State"]=$t.State; $r["Author"]=$t.Author; $r["Path"]=$t.TaskPath; $dt.Rows.Add($r) }
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("TaskName"); $dt.Columns.Add("State"); $dt.Columns.Add("Author"); $dt.Columns.Add("Path")
+        foreach ($t in $tasks) {
+            $r=$dt.NewRow()
+            $r["TaskName"]=$t.TaskName; $r["State"]=$t.State; $r["Author"]=$t.Author; $r["Path"]=$t.TaskPath
+            $dt.Rows.Add($r)
+        }
         $dg.DataSource = $dt
+        $dg.ClearSelection()
     }
+
     $btnRef.Add_Click({ & $LoadTasks })
     $btnEn.Add_Click({ if($dg.SelectedRows.Count -gt 0){ $n=$dg.SelectedRows[0].Cells["TaskName"].Value; Enable-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; & $LoadTasks } })
     $btnDis.Add_Click({ if($dg.SelectedRows.Count -gt 0){ $n=$dg.SelectedRows[0].Cells["TaskName"].Value; Disable-ScheduledTask -TaskName $n -ErrorAction SilentlyContinue; & $LoadTasks } })
@@ -1331,7 +1404,7 @@ if ($btnHealth) {
 }
 
 Set-ButtonIcon "btnNetRepair" "M20,12H19.5C19.5,14.5 17.5,16.5 15,16.5H9V18.5H15C18.6,18.5 21.5,15.6 21.5,12H21C21,15 19,17.5 16,18V16L13,19L16,22V20C19.9,19.4 23,16 23,12M3,12H3.5C3.5,9.5 5.5,7.5 8,7.5H14V5.5H8C4.4,5.5 1.5,8.4 1.5,12H2C2,9 4,6.5 7,6V8L10,5L7,2V4C3.1,4.6 0,8 0,12H3Z" "Full Net Repair" "Full network stack reset (Winsock, IP, Flush DNS)"
-Set-ButtonIcon "btnRouteTable" "M19,15L13,21L11.58,19.58L15.17,16H4V4H6V14H15.17L11.58,10.42L13,9L19,15Z" "Save Route Table" "Exports the current IP routing table to the Desktop"
+Set-ButtonIcon "btnRouteTable" "M19,15L13,21L11.58,19.58L15.17,16H4V4H6V14H15.17L11.58,10.42L13,9L19,15Z" "Save Route Table" "Exports the current IP routing table to the data folder"
 Set-ButtonIcon "btnRouteView" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,17C14.76,17 17,14.76 17,12C17,9.24 14.76,7 12,7C9.24,7 7,9.24 7,12C7,14.76 9.24,17 12,17M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" "View Route Table" "Displays the routing table in the log"
 Set-ButtonIcon "btnCleanReg" "M5,3H19A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3M7,7V9H9V7H7M11,7V9H13V7H11M15,7V9H17V7H15M7,11V13H9V11H7M11,11V13H13V11H11M15,11V13H17V11H15M7,15V17H9V15H7M11,15V17H13V15H11M15,15V17H17V15H15Z" "Clean Reg Keys" "Backs up & deletes obsolete Uninstall registry keys"
 Set-ButtonIcon "btnCleanXbox" "M6.4,4.8L12,10.4L17.6,4.8L19.2,6.4L13.6,12L19.2,17.6L17.6,19.2L12,13.6L6.4,19.2L4.8,17.6L10.4,12L4.8,6.4L6.4,4.8Z" "Clean Xbox Data" "Removes Xbox Live credentials to fix login loops" 18 "#107C10"
@@ -1351,7 +1424,7 @@ Set-ButtonIcon "btnNetInfo" "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A
 Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Restart Wi-Fi" "Disables and Re-Enables Wi-Fi adapters"
 Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
 Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
-Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts on Desktop"
+Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
@@ -1367,7 +1440,7 @@ Set-ButtonIcon "btnDnsAuto" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,
 Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses across active adapters"
 Set-ButtonIcon "btnHostsUpdate" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Download AdBlock" "Updates Hosts file with AdBlocking list"
 Set-ButtonIcon "btnHostsEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Edit Hosts" "Opens the Hosts File Editor"
-Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to Desktop"
+Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to the data folder"
 Set-ButtonIcon "btnHostsRestore" "M13,3A9,9 0 0,0 4,12H1L4.89,15.89L4.96,16.03L9,12H6A7,7 0 0,1 13,5A7,7 0 0,1 20,12A7,7 0 0,1 13,19C11.07,19 9.32,18.21 8.06,16.94L6.64,18.36C8.27,20 10.5,21 13,21A9,9 0 0,0 22,12A9,9 0 0,0 13,3Z" "Restore Hosts" "Restores a previous hosts file backup"
 Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable DoH (All)" "Enables DNS over HTTPS for all supported providers" "#00FFFF"
 Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable DoH" "Disables DNS over HTTPS" "#FF5555"
@@ -1377,11 +1450,11 @@ Set-ButtonIcon "btnFwEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.
 Set-ButtonIcon "btnFwEnable" "M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable" "Enable selected rule"
 Set-ButtonIcon "btnFwDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable" "Disable selected rule"
 Set-ButtonIcon "btnFwDelete" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete" "Delete selected rule"
-Set-ButtonIcon "btnFwExport" "M15,14H14V10H10V14H9L12,17L15,14M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3Z" "Export" "Export firewall policy to Desktop"
+Set-ButtonIcon "btnFwExport" "M15,14H14V10H10V14H9L12,17L15,14M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3Z" "Export" "Export firewall policy to the data folder"
 Set-ButtonIcon "btnFwImport" "M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3M12,6.15L17.5,10.2V14C17.5,16.96 15.56,19.5 12,20.82C8.44,19.5 6.5,16.96 6.5,14V10.2L12,6.15M12,9L8,13H11V17H13V13H16L12,9Z" "Import" "Import firewall policy (.wfw)"
 Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2M7,9H9V13H11V9H13V13H15V9H17V15H7V9Z" "Restore Defaults" "Reset firewall to default rules"
 Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
-Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to Desktop"
+Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
 Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
 Set-ButtonIcon "btnDrvClean" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Clean Old Drivers" "Removes obsolete drivers from the Windows Driver Store"
 Set-ButtonIcon "btnDrvRestore" "M12,2L3,7V17L12,22L21,17V7L12,2M12,4.3L18.5,8L12,11.7L5.5,8L12,4.3M5,9.85L12,14L19,9.85V16.15L12,20.3L5,16.15V9.85M7,11H9V14H7V11M15,11H17V14H15V11Z" "Restore Drivers" "Imports drivers from a DriverBackup folder"
@@ -1578,7 +1651,7 @@ $btnNetInfo.Add_Click({ Invoke-UiCommand { ipconfig /all } "Showing IP configura
 $btnFlushDNS.Add_Click({ Invoke-UiCommand { ipconfig /flushdns } "Flushing DNS cache..." })
 $btnResetWifi.Add_Click({ Invoke-UiCommand { Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Wi-Fi|Wireless" } | Restart-NetAdapter } "Restarting Wi-Fi adapters..." })
 $btnNetRepair.Add_Click({ Start-NetRepair })
-$btnRouteTable.Add_Click({ Invoke-UiCommand { $path="$env:USERPROFILE\Desktop\RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
+$btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
 $btnRouteView.Add_Click({ Invoke-UiCommand { route print } "Routing table" })
 
 $btnDnsGoogle.Add_Click({ Set-DnsAddresses -Addresses @("8.8.8.8","8.8.4.4") -Label "Google DNS" })
@@ -1628,7 +1701,7 @@ $btnFwPurge.Add_Click({ Invoke-FirewallPurge; $btnFwRefresh.RaiseEvent((New-Obje
 # --- CLEANUP & UTIL ---
 $btnHostsEdit.Add_Click({ Show-HostsEditor })
 $btnHostsUpdate.Add_Click({ Invoke-HostsUpdate })
-$btnHostsBackup.Add_Click({ Invoke-UiCommand { Copy-Item "$env:windir\System32\drivers\etc\hosts" "$env:USERPROFILE\Desktop\hosts_bk.bak"; "Backup on Desktop" } "Backing up hosts file..." })
+$btnHostsBackup.Add_Click({ Invoke-UiCommand { $dest = Join-Path (Get-DataPath) ("hosts_bk_{0}.bak" -f (Get-Date -Format "yyyyMMdd_HHmmss")); Copy-Item "$env:windir\System32\drivers\etc\hosts" $dest; "Backup saved to $dest" } "Backing up hosts file..." })
 $btnHostsRestore.Add_Click({
     $o=New-Object System.Windows.Forms.OpenFileDialog
     $o.Filter="*.bak;*.txt|*.bak;*.txt"
