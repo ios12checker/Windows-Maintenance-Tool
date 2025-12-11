@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.1"
+$AppVersion = "4.2"
 $ErrorActionPreference = "SilentlyContinue"
 
 # HIDE CONSOLE
