@@ -538,49 +538,69 @@ function Show-TaskManager {
 
         <Border Grid.Column="1" Background="#121212">
             <Grid Margin="20">
-                
-                <Grid Name="pnlUpdates" Visibility="Visible">
+            <Grid Name="pnlUpdates">
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     
-                    <Grid Grid.Row="0" Margin="0,0,0,15">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/></Grid.ColumnDefinitions>
-                        <StackPanel>
-                             <TextBlock Name="lblWingetTitle" Text="Available Updates" FontSize="24" Foreground="White" FontWeight="Light"/>
-                             <TextBlock Name="lblWingetStatus" Text="Scanning..." Foreground="Yellow" Visibility="Hidden"/>
-                        </StackPanel>
-                        <Grid Grid.Column="1">
-                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                             <TextBox Name="txtWingetSearch" Grid.Column="0" Height="30" VerticalContentAlignment="Center" Text="Search new packages..." Padding="5" Background="#1E1E1E" Foreground="White"/>
-                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="50" Height="30" Background="#007ACC" Foreground="White" ToolTip="Search the Winget repository for new apps"/>
+                    <StackPanel Grid.Row="0">
+                        <TextBlock Text="Windows Updates (Winget)" FontSize="24" Margin="0,0,0,10"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Name="lblWingetTitle" Text="Available Updates" FontSize="14" Foreground="#AAA" VerticalAlignment="Bottom"/>
+                                <TextBlock Name="lblWingetStatus" Text="Ready" Foreground="Cyan" Margin="15,0,0,0" VerticalAlignment="Bottom" Visibility="Hidden"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <TextBox Name="txtWingetSearch" Width="200" Text="Search new packages..." Padding="5" Background="#1E1E1E" Foreground="#AAA" BorderBrush="#444"/>
+                                <Button Name="btnWingetFind" Content="Find" Width="60" Style="{StaticResource ActionBtn}" Margin="5,0,0,0"/>
+                            </StackPanel>
                         </Grid>
-                    </Grid>
-
-                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="White" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended">
+                    </StackPanel>
+                    
+                    <ListView Name="lstWinget" Grid.Row="1" Margin="0,10" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" AlternationCount="2">
+                        <ListView.ItemContainerStyle>
+                            <Style TargetType="ListViewItem">
+                                <Setter Property="BorderThickness" Value="0"/>
+                                <Style.Triggers>
+                                    <Trigger Property="ItemsControl.AlternationIndex" Value="0"><Setter Property="Background" Value="#1E1E1E"/></Trigger>
+                                    <Trigger Property="ItemsControl.AlternationIndex" Value="1"><Setter Property="Background" Value="#252526"/></Trigger>
+                                    <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#007ACC"/><Setter Property="Foreground" Value="White"/></Trigger>
+                                    <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#3E3E42"/></Trigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ListView.ItemContainerStyle>
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" Width="300" DisplayMemberBinding="{Binding Name}"/>
                                 <GridViewColumn Header="Id" Width="200" DisplayMemberBinding="{Binding Id}"/>
-                                <GridViewColumn Header="Version" Width="120" DisplayMemberBinding="{Binding Version}"/>
-                                <GridViewColumn Header="Available" Width="120" DisplayMemberBinding="{Binding Available}"/>
+                                <GridViewColumn Header="Version" Width="100" DisplayMemberBinding="{Binding Version}"/>
+                                <GridViewColumn Header="New Ver" Width="100" DisplayMemberBinding="{Binding Available}"/>
+                                <GridViewColumn Header="Source" Width="80" DisplayMemberBinding="{Binding Source}"/>
                             </GridView>
                         </ListView.View>
                     </ListView>
 
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Name="btnWingetScan" Content="Refresh Updates" Width="150" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600"/>
-                        <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
-                        <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#802020"/>
+                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                        <Button Name="btnWingetScan" Content="Refresh Updates" Width="140" Style="{StaticResource ActionBtn}"/>
+                        <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#006600"/>
+                        <Button Name="btnWingetInstall" Content="Install Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
+                        <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#802020"/>
                     </StackPanel>
                 </Grid>
-
                 <StackPanel Name="pnlHealth" Visibility="Collapsed">
                     <TextBlock Text="System Health" FontSize="24" Margin="0,0,0,20"/>
-                    <WrapPanel>
+                    
+                    <TextBlock Text="File System &amp; Image" Foreground="#888" Margin="5"/>
+                    <WrapPanel Margin="0,0,0,15">
                         <Button Name="btnSFC" Content="SFC Scan" Width="220" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDISMCheck" Content="DISM Check" Width="220" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDISMRestore" Content="DISM Restore" Width="220" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnCHKDSK" Content="CHKDSK C:" Width="220" Style="{StaticResource ActionBtn}"/>
+                    </WrapPanel>
+
+                    <TextBlock Text="Windows Update Repairs" Foreground="#888" Margin="5"/>
+                    <WrapPanel>
+                        <Button Name="btnHealthUpdateRepair" Content="Full Update Repair" Width="220" Style="{StaticResource ActionBtn}" Background="#8B0000"/>
+                        <Button Name="btnHealthServiceReset" Content="Reset Update Services" Width="220" Style="{StaticResource ActionBtn}" Background="#B8860B"/>
                     </WrapPanel>
                 </StackPanel>
 
@@ -828,7 +848,8 @@ if ($btnHealth) {
     $btnHealth.Content = $sp
     $btnHealth.ToolTip = "System integrity checks (SFC, DISM, CHKDSK)"
 }
-
+Set-ButtonIcon "btnHealthUpdateRepair" "M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8 M3 3v5h5 M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16 M16 21h5v-5" "Full Update Repair" "Stops services, clears cache, re-registers DLLs, and resets network (Option 21)" 16 "#FF3333"
+Set-ButtonIcon "btnHealthServiceReset" "M12,5V1L7,6L12,11V7C15.31,7 18,9.69 18,13C18,16.31 15.31,19 12,19C8.69,19 6,16.31 6,13H4C4,17.42 7.58,21 12,21C16.42,21 20,17.42 20,13C20,8.58 16.42,5 12,5Z" "Reset Update Services" "Quickly restarts update-related services without clearing cache (Option 23)"
 Set-ButtonIcon "btnNetRepair" "M20,12H19.5C19.5,14.5 17.5,16.5 15,16.5H9V18.5H15C18.6,18.5 21.5,15.6 21.5,12H21C21,15 19,17.5 16,18V16L13,19L16,22V20C19.9,19.4 23,16 23,12M3,12H3.5C3.5,9.5 5.5,7.5 8,7.5H14V5.5H8C4.4,5.5 1.5,8.4 1.5,12H2C2,9 4,6.5 7,6V8L10,5L7,2V4C3.1,4.6 0,8 0,12H3Z" "Full Net Repair" "Full network stack reset (Winsock, IP, Flush DNS)"
 Set-ButtonIcon "btnRouteTable" "M19,15L13,21L11.58,19.58L15.17,16H4V4H6V14H15.17L11.58,10.42L13,9L19,15Z" "Save Route Table" "Exports the current IP routing table to the Desktop"
 Set-ButtonIcon "btnCleanReg" "M5,3H19A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3M7,7V9H9V7H7M11,7V9H13V7H11M15,7V9H17V7H15M7,11V13H9V11H7M11,11V13H13V11H11M15,11V13H17V11H15M7,15V17H9V15H7M11,15V17H13V15H11M15,15V17H17V15H15Z" "Clean Reg Keys" "Backs up & deletes obsolete Uninstall registry keys"
@@ -898,6 +919,9 @@ $lstWinget = Get-Ctrl "lstWinget"
 $txtWingetSearch = Get-Ctrl "txtWingetSearch"
 $lblWingetStatus = Get-Ctrl "lblWingetStatus"
 $lblWingetTitle = Get-Ctrl "lblWingetTitle"
+
+$btnHealthUpdateRepair = Get-Ctrl "btnHealthUpdateRepair"
+$btnHealthServiceReset = Get-Ctrl "btnHealthServiceReset"
 
 $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
@@ -1201,6 +1225,27 @@ $btnCHKDSK.Add_Click({
         # interactive Y/N input for scheduling on reboot (for C: drive).
         Start-Process cmd.exe -ArgumentList "/k chkdsk $selectedDrive /f /r /x"
     }
+})
+# --- WINDOWS UPDATE REPAIR LOGIC ---
+
+# Option 21: Full Update Repair
+# Note: This reuses the robust Start-UpdateRepair function we updated earlier.
+$btnHealthUpdateRepair.Add_Click({
+    # Call the helper function defined at the top of the script
+    Start-UpdateRepair
+})
+
+# Option 23: Service Reset Only (Lighter version)
+$btnHealthServiceReset.Add_Click({
+    Run-Cmd {
+        Write-Output "Stopping Windows Update Services..."
+        Stop-Service -Name wuauserv, cryptsvc, bits -Force -ErrorAction SilentlyContinue
+        
+        Write-Output "Starting Services..."
+        Start-Service -Name appidsvc, wuauserv, cryptsvc, bits -ErrorAction SilentlyContinue
+        
+        Write-Output "Update services have been restarted."
+    } "Resetting Update Services..."
 })
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanReg.Add_Click({ Start-RegClean })
