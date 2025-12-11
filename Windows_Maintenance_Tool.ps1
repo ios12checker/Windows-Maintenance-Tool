@@ -105,7 +105,7 @@ Set-Alias -Name Pause-Menu -Value Wait-Menu -Force
 function Show-Menu {
     Clear-Host
     Write-Host "====================================================="
-    Write-Host " WINDOWS MAINTENANCE TOOL V3.10 - By Lil_Batti & Chaython"
+    Write-Host " WINDOWS MAINTENANCE TOOL V3.10.1 - By Lil_Batti & Chaython"
     Write-Host "====================================================="
     Write-Host
 
@@ -146,6 +146,7 @@ function Show-Menu {
     Write-Host " [25]  .NET RollForward Settings [Reduces apps requesting you to install older .NET versions]"
     Write-Host " [26]  Xbox Credential Cleanup [Fixes Xbox game sign-in issues, but will sign you out.]"
     Write-Host " [27]  Windows/Office Activation Manager (MAS) [Downloads/runs MAS from massgrave.dev]"
+    Write-Host " [28]  Install Local Group Policy Editor (Home editions)"
     Write-Host
 
     Write-Host " $(Get-SectionEmoji 'support' '[SUPPORT]') SUPPORT"
@@ -2883,6 +2884,93 @@ function Invoke-Choice27 {
     $null = Read-Host
 }
 
+function Invoke-Choice28 {
+    Clear-Host
+    Write-Host "==============================================="
+    Write-Host "  Install Local Group Policy Editor (Home)"
+    Write-Host "==============================================="
+    Write-Host
+    Write-Host "This enables the Local Group Policy Editor (gpedit.msc) on Windows" -ForegroundColor Cyan
+    Write-Host "Home by adding the built-in GroupPolicy ClientTools/ClientExtensions" -ForegroundColor Cyan
+    Write-Host "packages with DISM. It lets you use the same policy editor available" -ForegroundColor Cyan
+    Write-Host "on Pro (e.g., for system, security, and admin template policies)." -ForegroundColor Cyan
+    Write-Host "Run as Administrator; after success open gpedit.msc from Run (Win+R)." -ForegroundColor Cyan
+    Write-Host
+
+    # DISM package installs need elevation
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")
+    if (-not $isAdmin) {
+        Write-Host "[ERROR] This action requires administrator privileges." -ForegroundColor Red
+        Write-Host "Right-click PowerShell and choose 'Run as administrator', then rerun this option." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $editionId = $null
+    try { $editionId = (Get-ItemProperty "HKLM:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion").EditionID } catch {}
+    if ($editionId) {
+        Write-Host "Detected Windows edition: $editionId" -ForegroundColor Cyan
+        if ($editionId -notmatch 'Home|Core') {
+            Write-Host "[INFO] Professional/Education/Enterprise editions already include Group Policy Editor." -ForegroundColor Yellow
+        }
+    }
+
+    $gpeditPath = Join-Path $env:SystemRoot "System32\\gpedit.msc"
+    if (Test-Path $gpeditPath) {
+        Write-Host "[INFO] gpedit.msc is already present at $gpeditPath." -ForegroundColor Yellow
+    }
+
+    Write-Host "This installs gpedit.msc using the built-in GroupPolicy ClientTools/ClientExtensions packages." -ForegroundColor Cyan
+    $confirm = Read-Host "Continue? (Y/N)"
+    if ($confirm.ToUpper() -ne 'Y') {
+        Write-Host "Operation cancelled." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $packageRoot = Join-Path $env:SystemRoot "servicing\\Packages"
+    if (-not (Test-Path $packageRoot)) {
+        Write-Host "[ERROR] Package directory not found: $packageRoot" -ForegroundColor Red
+        Pause-Menu
+        return
+    }
+
+    $clientTools = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" -ErrorAction SilentlyContinue
+    $clientExtensions = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" -ErrorAction SilentlyContinue
+
+    if (-not $clientTools -or -not $clientExtensions) {
+        Write-Host "[ERROR] Required GroupPolicy packages were not found under $packageRoot." -ForegroundColor Red
+        Write-Host "Make sure you are on Windows 10/11 and the component store is intact." -ForegroundColor Yellow
+        Pause-Menu
+        return
+    }
+
+    $packages = @($clientTools + $clientExtensions) | Sort-Object Name -Unique
+    $failures = @()
+    foreach ($pkg in $packages) {
+        Write-Host "Adding package: $($pkg.Name)" -ForegroundColor Cyan
+        $proc = Start-Process dism.exe -ArgumentList "/online","/norestart","/add-package:`"$($pkg.FullName)`"" -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -ne 0) {
+            $failures += "$($pkg.Name) (exit code $($proc.ExitCode))"
+            Write-Host "[ERROR] DISM failed for $($pkg.Name) (exit code $($proc.ExitCode))." -ForegroundColor Red
+            break
+        }
+    }
+
+    if ($failures.Count -eq 0) {
+        Write-Host "`n[OK] Group Policy Editor packages installed." -ForegroundColor Green
+        if (Test-Path $gpeditPath) {
+            Write-Host "Launch gpedit.msc from Run or Start to open the editor." -ForegroundColor Cyan
+        } else {
+            Write-Host "If gpedit.msc is still missing, reboot and try launching it again." -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "`nInstall completed with errors: $($failures -join ', ')" -ForegroundColor Red
+    }
+
+    Pause-Menu
+}
+
 function Invoke-Choice30 {
     while ($true) {
         Clear-Host
@@ -2965,6 +3053,7 @@ while ($true) {
         "25" { Invoke-Choice25; continue }
         "26" { Invoke-Choice26; continue }
         "27" { Invoke-Choice27; continue }
+        "28" { Invoke-Choice28; continue }
         "30" { Invoke-Choice30; continue }
         "h"  { Invoke-Choice30; continue }
         "help" { Invoke-Choice30; continue }
