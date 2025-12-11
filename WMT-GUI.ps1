@@ -5,7 +5,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "1.2"
+$AppVersion = "4.1"
 $ErrorActionPreference = "SilentlyContinue"
 
 # --- DEFINE DATA DIRECTORY (Relative to Script) ---
