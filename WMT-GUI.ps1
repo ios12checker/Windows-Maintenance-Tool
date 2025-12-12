@@ -319,132 +319,172 @@ function Disable-AllDoh {
         Write-Output "Removed $removed DoH entries."
     } "Disabling DoH entries..."
 }
-
+# --- Hosts Adblock ---
 function Invoke-HostsUpdate {
     Invoke-UiCommand {
+        # 1. Find PATHS
         $hostsPath = "$env:windir\System32\drivers\etc\hosts"
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
 
+        # 2. DOWNLOAD HOSTS FILE
         $mirrors = @(
             "https://o0.pages.dev/Lite/hosts.win",
-            "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/hosts.win",
             "https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/hosts.win"
         )
-        $maxRetries = 3
-        $retryDelay = 2
-
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $uniqueBackupPath = Join-Path $backupDir ("hosts_{0}.bak" -f $timestamp)
-        if (Test-Path $hostsPath) {
-            try {
-                Copy-Item $hostsPath $uniqueBackupPath -Force
-                Write-Output "Backup created: $uniqueBackupPath"
-            } catch {
-                Write-Output "Backup failed: $($_.Exception.Message)"
-                $uniqueBackupPath = $null
-            }
-        } else {
-            Write-Output "No existing hosts file found. A new one will be created."
-            $uniqueBackupPath = $null
-        }
-
         $adBlockContent = $null
-        $successfulMirror = $null
         foreach ($mirror in $mirrors) {
-            $webClient = $null
             try {
-                $webClient = New-Object System.Net.WebClient
-                $adBlockContent = $webClient.DownloadString($mirror)
-                $successfulMirror = $mirror
-                Write-Output "Downloaded hosts from $mirror"
-                break
-            } catch {
-                Write-Output "Mirror failed: $mirror -> $($_.Exception.Message)"
-            } finally {
-                if ($null -ne $webClient) { $webClient.Dispose() }
+                $wc = New-Object System.Net.WebClient
+                # CRITICAL SPEED FIX: Bypasses auto-proxy detection delay (saves 1-5s)
+                $wc.Proxy = $null 
+                $wc.Encoding = [System.Text.Encoding]::UTF8
+                
+                Write-GuiLog "Downloading from $mirror..."
+                $tempContent = $wc.DownloadString($mirror)
+                
+                # SAFETY CHECK: Ensure file is valid (> 1KB)
+                if ($tempContent.Length -gt 1024) { 
+                    $adBlockContent = $tempContent
+                    Write-Output "Download complete ($([math]::Round($adBlockContent.Length / 1KB, 2)) KB)"
+                    break 
+                }
+            } catch { 
+                Write-Output "Mirror failed: $mirror" 
+            } finally { 
+                if ($wc) {$wc.Dispose()} 
             }
         }
-        if (-not $adBlockContent) { throw "All mirrors failed. Hosts file not updated." }
 
-        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
-        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
-        $userCustomEntries = ""
+        if (-not $adBlockContent) { 
+            Write-GuiLog "ERROR: Download failed or file was empty. Aborting."
+            return 
+        }
+
+        # 3. BACKUP EXISTING
+        if (Test-Path $hostsPath) {
+            $bkName = "hosts_$(Get-Date -F yyyyMMdd_HHmmss).bak"
+            Copy-Item $hostsPath (Join-Path $backupDir $bkName) -Force
+            Write-Output "Backup created: $bkName"
+        }
+
+        # 4. PRESERVE CUSTOM ENTRIES
+        $customStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customEnd = "# === END USER CUSTOM ENTRIES ==="
+        $userEntries = "$customStart`r`n# Add custom entries here`r`n127.0.0.1 localhost`r`n::1 localhost`r`n$customEnd"
+
         if (Test-Path $hostsPath) {
             try {
-                $currentContent = Get-Content $hostsPath -Raw
-                if ($currentContent -match "(?ms)$([regex]::Escape($customSectionStart))\r?\n(.*?)\r?\n$([regex]::Escape($customSectionEnd))") {
-                    $userCustomEntries = $matches[1]
+                $raw = Get-Content $hostsPath -Raw
+                if ($raw -match "(?s)$([regex]::Escape($customStart))(.*?)$([regex]::Escape($customEnd))") {
+                    $userEntries = $matches[0]
                 }
-            } catch { Write-Output "Could not read existing custom entries: $($_.Exception.Message)" }
-        }
-        if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
-            $userCustomEntries = "# Add your custom host entries below this line`n# 127.0.0.1    myserver.local"
+            } catch {}
         }
 
-        $defaultContent = "# Microsoft Hosts`n127.0.0.1       localhost`n::1             localhost"
-        $newContent = "$defaultContent`n`n$customSectionStart`n$userCustomEntries`n$customSectionEnd`n`n# Ad-blocking entries - Updated $(Get-Date)`n# Source: $successfulMirror`n`n$adBlockContent"
-
-        $attempt = 0
-        $success = $false
-        while (-not $success -and $attempt -lt $maxRetries) {
-            $attempt++
-            try {
-                $tempFile = [System.IO.Path]::GetTempFileName()
-                [System.IO.File]::WriteAllText($tempFile, $newContent, [System.Text.Encoding]::UTF8)
-                $tempDest = "$hostsPath.tmp"
-                $copyCommand = "@echo off`nif exist `"$hostsPath`" move /Y `"$hostsPath`" `"$tempDest`"`nmove /Y `"$tempFile`" `"$hostsPath`"`nif exist `"$tempDest`" del /F /Q `"$tempDest`""
-                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
-                [System.IO.File]::WriteAllText($batchFile, $copyCommand)
-                $proc = Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -WindowStyle Hidden
-                Remove-Item $batchFile -Force
-                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
-                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
-
-                if ($proc.ExitCode -eq 0) {
-                    $success = $true
-                    $entryCount = ($adBlockContent -split "`n").Count
-                    Write-Output "Successfully updated hosts file with $entryCount entries."
-                } else {
-                    Write-Output ("Attempt {0} failed (cmd exit {1})." -f $attempt, $proc.ExitCode)
-                    Start-Sleep -Seconds $retryDelay
-                }
-            } catch {
-                Write-Output ("Attempt {0} failed: {1}" -f $attempt, $_.Exception.Message)
-                if ($attempt -lt $maxRetries) { Start-Sleep -Seconds $retryDelay }
+        # 5. CONSTRUCT & WRITE
+        $finalContent = "$userEntries`r`n`r`n# UPDATED: $(Get-Date)`r`n$adBlockContent"
+        
+        try {
+            Set-Content -Path $hostsPath -Value $finalContent -Encoding UTF8 -Force
+            
+            # Simple Permission Reset
+            Start-Process icacls.exe -ArgumentList "`"$hostsPath`" /reset" -NoNewWindow -Wait
+            
+            # Validation
+            if ((Get-Item $hostsPath).Length -lt 100) { throw "Write verification failed (File empty)." }
+            
+            ipconfig /flushdns | Out-Null
+            Write-Output "Hosts file updated successfully."
+        } catch {
+            Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
+            # Restore backup if write failed
+            $latestBackup = Get-ChildItem $backupDir | Sort-Object CreationTime -Descending | Select-Object -First 1
+            if ($latestBackup) {
+                Copy-Item $latestBackup.FullName $hostsPath -Force
+                Write-GuiLog "Restored backup due to failure."
             }
         }
-
-        if (-not $success) {
-            if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
-                Write-Output "Restoring original hosts from backup..."
-                try {
-                    Copy-Item $uniqueBackupPath $hostsPath -Force
-                    Write-Output "Hosts restored from $uniqueBackupPath"
-                } catch {
-                    Write-Output "Failed to restore backup: $($_.Exception.Message)"
-                }
-            }
-            throw "Failed to update hosts file after $maxRetries attempts."
-        }
-
-        try { ipconfig /flushdns | Out-Null; Write-Output "DNS cache flushed." } catch { Write-Output "Could not flush DNS cache: $($_.Exception.Message)" }
-
-        $backups = @()
-        try { $backups = Get-ChildItem -Path $backupDir -Filter "hosts_*.bak" -ErrorAction SilentlyContinue } catch {}
-        if ($backups.Count -gt 5) {
-            $cleanupPrompt = [System.Windows.MessageBox]::Show("Delete older hosts backups in $backupDir?`nFound $($backups.Count) backups. Newest 3 will be kept.", "Cleanup backups", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-            if ($cleanupPrompt -eq "Yes") {
-                $toDelete = $backups | Sort-Object CreationTime -Descending | Select-Object -Skip 3
-                foreach ($file in $toDelete) {
-                    try { Remove-Item $file.FullName -Force } catch { Write-Output "Could not delete $($file.Name): $($_.Exception.Message)" }
-                }
-                Write-Output "Old backups cleaned; newest copies kept."
-            }
-        }
-    } "Updating hosts file (with backups, retries, and custom entries)..."
+    } "Updating hosts file..."
 }
+# --- HOSTS EDITOR ---
+function Show-HostsEditor {
+    $hForm = New-Object System.Windows.Forms.Form
+    $hForm.Text = "Hosts File Editor"
+    $hForm.Size = "900, 700"
+    $hForm.StartPosition = "CenterScreen"
+    $hForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+    $hForm.KeyPreview = $true # Essential for Ctrl+S
 
+    $txtHosts = New-Object System.Windows.Forms.RichTextBox
+    $txtHosts.Dock = "Fill"
+    $txtHosts.BackColor = [System.Drawing.Color]::FromArgb(45,45,48)
+    $txtHosts.ForeColor = "White"
+    $txtHosts.Font = "Consolas, 11"
+    $txtHosts.AcceptsTab = $true
+    $txtHosts.DetectUrls = $false
+    $hForm.Controls.Add($txtHosts)
+
+    $pnl = New-Object System.Windows.Forms.Panel; $pnl.Dock="Bottom"; $pnl.Height=50; $hForm.Controls.Add($pnl)
+    $btn = New-Object System.Windows.Forms.Button; $btn.Text="Save"; $btn.BackColor="SeaGreen"; $btn.ForeColor="White"; $btn.FlatStyle="Flat"; $btn.Top=10; $btn.Left=20; $btn.Width=100; $pnl.Controls.Add($btn)
+    $lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text="Ctrl+S to Save"; $lblInfo.ForeColor="Gray"; $lblInfo.AutoSize=$true; $lblInfo.Top=15; $lblInfo.Left=140; $pnl.Controls.Add($lblInfo)
+
+    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+
+    # Load File
+    if (Test-Path $hostsPath) {
+        $txtHosts.Text = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
+        $txtHosts.Modified = $false
+    }
+
+    $Highlight = {
+        $sel = $txtHosts.SelectionStart; $len = $txtHosts.SelectionLength
+        $txtHosts.SelectAll(); $txtHosts.SelectionColor = "White"
+        $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
+        $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
+        if ($s -ge 0 -and $e -gt $s) { $txtHosts.Select($s, ($e+33)-$s); $txtHosts.SelectionColor="Cyan" }
+        $txtHosts.Select($sel, $len)
+    }
+    & $Highlight
+
+    $SaveAction = {
+        try {
+            if ([string]::IsNullOrWhiteSpace($txtHosts.Text)) {
+                if ([System.Windows.Forms.MessageBox]::Show("File is empty. Save anyway?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "No") { return }
+            }
+            
+            Set-Content -Path $hostsPath -Value $txtHosts.Text -Encoding UTF8 -Force
+            Start-Process icacls.exe -ArgumentList "`"$hostsPath`" /reset" -NoNewWindow -Wait
+            
+            $txtHosts.Modified = $false
+            [System.Windows.Forms.MessageBox]::Show("Saved successfully!")
+            & $Highlight
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error saving: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxImage]::Error)
+        }
+    }
+
+    $btn.Add_Click($SaveAction)
+
+    $hForm.Add_KeyDown({ 
+        param($s, $e)
+        if ($e.Control -and $e.KeyCode -eq 'S') {
+            $e.SuppressKeyPress = $true
+            & $SaveAction
+        }
+    })
+
+    $hForm.Add_FormClosing({
+        param($s, $e)
+        if ($txtHosts.Modified) {
+            $res = [System.Windows.Forms.MessageBox]::Show("Unsaved changes. Save now?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxImage]::Warning)
+            if ($res -eq "Yes") { & $SaveAction }
+            elseif ($res -eq "Cancel") { $e.Cancel = $true }
+        }
+    })
+
+    $hForm.ShowDialog()
+}
 # --- STORAGE / SYSTEM ---
 function Invoke-ChkdskAll {
     $confirm = [System.Windows.MessageBox]::Show("Run CHKDSK /f /r on all drives? This may require a reboot and can take a while.", "Confirm CHKDSK", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
@@ -839,27 +879,6 @@ function Invoke-MASActivation {
         Invoke-Expression -Command $scriptContent
         Write-Output "MAS script executed."
     } "Running MAS activation..."
-}
-
-# --- HOSTS EDITOR ---
-function Show-HostsEditor {
-    $hForm = New-Object System.Windows.Forms.Form
-    $hForm.Text = "Hosts File Editor"; $hForm.Size = "900, 700"; $hForm.StartPosition = "CenterScreen"; $hForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
-    $txtHosts = New-Object System.Windows.Forms.RichTextBox; $txtHosts.Dock="Fill"; $txtHosts.BackColor=[System.Drawing.Color]::FromArgb(45,45,48); $txtHosts.ForeColor="White"; $txtHosts.Font="Consolas, 11"; $hForm.Controls.Add($txtHosts)
-    $pnl = New-Object System.Windows.Forms.Panel; $pnl.Dock="Bottom"; $pnl.Height=50; $hForm.Controls.Add($pnl)
-    $btn = New-Object System.Windows.Forms.Button; $btn.Text="Save"; $btn.BackColor="SeaGreen"; $btn.ForeColor="White"; $btn.FlatStyle="Flat"; $btn.Top=10; $btn.Left=20; $btn.Width=100; $pnl.Controls.Add($btn)
-    $tip = New-Object System.Windows.Forms.ToolTip; $tip.SetToolTip($btn, "Save changes to the Hosts file immediately")
-    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-    $txtHosts.Text = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
-    $Highlight = {
-        $txtHosts.SelectAll(); $txtHosts.SelectionColor = "White"
-        $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
-        $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
-        if ($s -ge 0 -and $e -gt $s) { $txtHosts.Select($s, ($e+33)-$s); $txtHosts.SelectionColor="Cyan" }
-        $txtHosts.Select(0,0)
-    }; & $Highlight
-    $btn.Add_Click({ try { Set-Content $hostsPath $txtHosts.Text -NoNewline; [System.Windows.MessageBox]::Show("Saved!"); & $Highlight } catch { [System.Windows.MessageBox]::Show("Error: $_") } })
-    $hForm.ShowDialog()
 }
 
 # --- FIREWALL RULE DIALOG ---
