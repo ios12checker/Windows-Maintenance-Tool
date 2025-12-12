@@ -2,7 +2,7 @@
 
 A special thanks to everyone who helped improve **Windows Maintenance Tool**:
 
-- [@Chaython](https://github.com/Chaython) - Complete rewrite: created the GUI, task scheduler, Firewall, winget search. Does most ongoing development.
+- [@Chaython](https://github.com/Chaython) - Complete rewrite: created the GUI, task scheduler, Firewall, winget search.
 - [@amakvana](https://github.com/amakvana) – Winget upgrade logic, registry backup improvements, duplicate cleanup refactor  
 - [@callmenemo491](https://github.com/callmenemo491) – Winget selection UI (`choice1`), `if/iif` fix, feedback on choice routing  
 - [@mahirgul](https://github.com/mahirgul) – Pull request: route print improvements, `choice24` integration  
