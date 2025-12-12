@@ -5,7 +5,8 @@
     GUI thanks to https://github.com/Chaython
     Imported and integrated from Lil_Batti (author) with contributions from Chaython
 #>
-
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$OutputEncoding = [System.Text.Encoding]::UTF8
 # ==========================================
 # 1. SETUP
 # ==========================================
@@ -1098,7 +1099,8 @@ function Show-TaskManager {
 # ==========================================
 # 3. XAML GUI
 # ==========================================
-[xml]$xaml = @"
+[xml]$xaml = @" 
+<?xml version="1.0" encoding="utf-8"?>
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Maintenance Tool v$AppVersion" Height="850" Width="1200"
@@ -1783,17 +1785,24 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
-
 $btnWingetScan.Add_Click({
     $lblWingetTitle.Text = "Available Updates"
     $lblWingetStatus.Text = "Scanning..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Visible"; $btnWingetInstall.Visibility = "Collapsed"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    $proc = Start-Process winget -ArgumentList "list --upgrade-available --accept-source-agreements" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\winget_upd.txt"
-    $proc.WaitForExit()
-    $lines = Get-Content "$env:TEMP\winget_upd.txt"
+    
+    # --- DIRECT RAM CAPTURE START ---
+    try {
+        # This captures the output directly into the $lines array
+        $lines = & winget list --upgrade-available --accept-source-agreements
+    } catch {
+        $lines = @()
+    }
+    # --- DIRECT RAM CAPTURE END ---
+
     foreach ($line in $lines) {
+        # The Regex logic remains the same
         if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
             if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
                [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
@@ -1803,7 +1812,6 @@ $btnWingetScan.Add_Click({
     $lblWingetStatus.Visibility = "Hidden"
     Write-GuiLog "Found $($lstWinget.Items.Count) updates."
 })
-
 $btnWingetFind.Add_Click({
     if ($txtWingetSearch.Text -eq "" -or $txtWingetSearch.Text -eq "Search new packages...") { return }
     $lblWingetTitle.Text = "Search Results: " + $txtWingetSearch.Text
@@ -1811,9 +1819,16 @@ $btnWingetFind.Add_Click({
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    $proc = Start-Process winget -ArgumentList "search `"$($txtWingetSearch.Text)`" --accept-source-agreements" -NoNewWindow -PassThru -RedirectStandardOutput "$env:TEMP\winget_search.txt"
-    $proc.WaitForExit()
-    $lines = Get-Content "$env:TEMP\winget_search.txt"
+    
+    # --- DIRECT RAM CAPTURE START ---
+    try {
+        # Captures search results directly
+        $lines = & winget search "$($txtWingetSearch.Text)" --accept-source-agreements
+    } catch {
+        $lines = @()
+    }
+    # --- DIRECT RAM CAPTURE END ---
+
     foreach ($line in $lines) {
         if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
             if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
@@ -1823,7 +1838,6 @@ $btnWingetFind.Add_Click({
     }
     $lblWingetStatus.Visibility = "Hidden"
 })
-
 $btnWingetUpdateSel.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget upgrade --id $item.Id --accept-package-agreements --accept-source-agreements } "Updating $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 $btnWingetInstall.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget install --id $item.Id --accept-package-agreements --accept-source-agreements } "Installing $($item.Name)..." } })
 $btnWingetUninstall.Add_Click({ if ($lstWinget.SelectedItems.Count -gt 0) { if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget uninstall --id $item.Id } "Uninstalling $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } } })
