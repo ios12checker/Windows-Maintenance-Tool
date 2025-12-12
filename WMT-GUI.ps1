@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.1"
+$AppVersion = "4.2"
 $ErrorActionPreference = "SilentlyContinue"
 
 # HIDE CONSOLE
@@ -319,132 +319,259 @@ function Disable-AllDoh {
         Write-Output "Removed $removed DoH entries."
     } "Disabling DoH entries..."
 }
-
+# --- Hosts Adblock ---
 function Invoke-HostsUpdate {
     Invoke-UiCommand {
+        # 1. Find PATHS
         $hostsPath = "$env:windir\System32\drivers\etc\hosts"
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
 
+        # 2. DOWNLOAD HOSTS FILE
         $mirrors = @(
             "https://o0.pages.dev/Lite/hosts.win",
-            "https://cdn.jsdelivr.net/gh/badmojr/1Hosts@master/Lite/hosts.win",
             "https://raw.githubusercontent.com/badmojr/1Hosts/master/Lite/hosts.win"
         )
-        $maxRetries = 3
-        $retryDelay = 2
-
-        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-        $uniqueBackupPath = Join-Path $backupDir ("hosts_{0}.bak" -f $timestamp)
-        if (Test-Path $hostsPath) {
-            try {
-                Copy-Item $hostsPath $uniqueBackupPath -Force
-                Write-Output "Backup created: $uniqueBackupPath"
-            } catch {
-                Write-Output "Backup failed: $($_.Exception.Message)"
-                $uniqueBackupPath = $null
-            }
-        } else {
-            Write-Output "No existing hosts file found. A new one will be created."
-            $uniqueBackupPath = $null
-        }
-
         $adBlockContent = $null
-        $successfulMirror = $null
         foreach ($mirror in $mirrors) {
-            $webClient = $null
             try {
-                $webClient = New-Object System.Net.WebClient
-                $adBlockContent = $webClient.DownloadString($mirror)
-                $successfulMirror = $mirror
-                Write-Output "Downloaded hosts from $mirror"
-                break
-            } catch {
-                Write-Output "Mirror failed: $mirror -> $($_.Exception.Message)"
-            } finally {
-                if ($null -ne $webClient) { $webClient.Dispose() }
+                $wc = New-Object System.Net.WebClient
+                # CRITICAL SPEED FIX: Bypasses auto-proxy detection delay (saves 1-5s)
+                $wc.Proxy = $null 
+                $wc.Encoding = [System.Text.Encoding]::UTF8
+                
+                Write-GuiLog "Downloading from $mirror..."
+                $tempContent = $wc.DownloadString($mirror)
+                
+                # SAFETY CHECK: Ensure file is valid (> 1KB)
+                if ($tempContent.Length -gt 1024) { 
+                    $adBlockContent = $tempContent
+                    Write-Output "Download complete ($([math]::Round($adBlockContent.Length / 1KB, 2)) KB)"
+                    break 
+                }
+            } catch { 
+                Write-Output "Mirror failed: $mirror" 
+            } finally { 
+                if ($wc) {$wc.Dispose()} 
             }
         }
-        if (-not $adBlockContent) { throw "All mirrors failed. Hosts file not updated." }
 
-        $customSectionStart = "# === BEGIN USER CUSTOM ENTRIES ==="
-        $customSectionEnd = "# === END USER CUSTOM ENTRIES ==="
-        $userCustomEntries = ""
+        if (-not $adBlockContent) { 
+            Write-GuiLog "ERROR: Download failed or file was empty. Aborting."
+            return 
+        }
+
+        # 3. BACKUP EXISTING
+        if (Test-Path $hostsPath) {
+            $bkName = "hosts_$(Get-Date -F yyyyMMdd_HHmmss).bak"
+            Copy-Item $hostsPath (Join-Path $backupDir $bkName) -Force
+            Write-Output "Backup created: $bkName"
+        }
+
+        # 4. PRESERVE CUSTOM ENTRIES
+        $customStart = "# === BEGIN USER CUSTOM ENTRIES ==="
+        $customEnd = "# === END USER CUSTOM ENTRIES ==="
+        $userEntries = "$customStart`r`n# Add custom entries here`r`n127.0.0.1 localhost`r`n::1 localhost`r`n$customEnd"
+
         if (Test-Path $hostsPath) {
             try {
-                $currentContent = Get-Content $hostsPath -Raw
-                if ($currentContent -match "(?ms)$([regex]::Escape($customSectionStart))\r?\n(.*?)\r?\n$([regex]::Escape($customSectionEnd))") {
-                    $userCustomEntries = $matches[1]
+                $raw = Get-Content $hostsPath -Raw
+                if ($raw -match "(?s)$([regex]::Escape($customStart))(.*?)$([regex]::Escape($customEnd))") {
+                    $userEntries = $matches[0]
                 }
-            } catch { Write-Output "Could not read existing custom entries: $($_.Exception.Message)" }
-        }
-        if ([string]::IsNullOrWhiteSpace($userCustomEntries)) {
-            $userCustomEntries = "# Add your custom host entries below this line`n# 127.0.0.1    myserver.local"
+            } catch {}
         }
 
-        $defaultContent = "# Microsoft Hosts`n127.0.0.1       localhost`n::1             localhost"
-        $newContent = "$defaultContent`n`n$customSectionStart`n$userCustomEntries`n$customSectionEnd`n`n# Ad-blocking entries - Updated $(Get-Date)`n# Source: $successfulMirror`n`n$adBlockContent"
-
-        $attempt = 0
-        $success = $false
-        while (-not $success -and $attempt -lt $maxRetries) {
-            $attempt++
-            try {
-                $tempFile = [System.IO.Path]::GetTempFileName()
-                [System.IO.File]::WriteAllText($tempFile, $newContent, [System.Text.Encoding]::UTF8)
-                $tempDest = "$hostsPath.tmp"
-                $copyCommand = "@echo off`nif exist `"$hostsPath`" move /Y `"$hostsPath`" `"$tempDest`"`nmove /Y `"$tempFile`" `"$hostsPath`"`nif exist `"$tempDest`" del /F /Q `"$tempDest`""
-                $batchFile = [System.IO.Path]::GetTempFileName() + ".cmd"
-                [System.IO.File]::WriteAllText($batchFile, $copyCommand)
-                $proc = Start-Process "cmd.exe" -ArgumentList "/c `"$batchFile`"" -Wait -PassThru -WindowStyle Hidden
-                Remove-Item $batchFile -Force
-                if (Test-Path $tempFile) { Remove-Item $tempFile -Force }
-                if (Test-Path $tempDest) { Remove-Item $tempDest -Force }
-
-                if ($proc.ExitCode -eq 0) {
-                    $success = $true
-                    $entryCount = ($adBlockContent -split "`n").Count
-                    Write-Output "Successfully updated hosts file with $entryCount entries."
-                } else {
-                    Write-Output ("Attempt {0} failed (cmd exit {1})." -f $attempt, $proc.ExitCode)
-                    Start-Sleep -Seconds $retryDelay
-                }
-            } catch {
-                Write-Output ("Attempt {0} failed: {1}" -f $attempt, $_.Exception.Message)
-                if ($attempt -lt $maxRetries) { Start-Sleep -Seconds $retryDelay }
+        # 5. CONSTRUCT & WRITE
+        $finalContent = "$userEntries`r`n`r`n# UPDATED: $(Get-Date)`r`n$adBlockContent"
+        
+        try {
+            Set-Content -Path $hostsPath -Value $finalContent -Encoding UTF8 -Force
+            
+            # Simple Permission Reset
+            Start-Process icacls.exe -ArgumentList "`"$hostsPath`" /reset" -NoNewWindow -Wait
+            
+            # Validation
+            if ((Get-Item $hostsPath).Length -lt 100) { throw "Write verification failed (File empty)." }
+            
+            ipconfig /flushdns | Out-Null
+            Write-Output "Hosts file updated successfully."
+        } catch {
+            Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
+            # Restore backup if write failed
+            $latestBackup = Get-ChildItem $backupDir | Sort-Object CreationTime -Descending | Select-Object -First 1
+            if ($latestBackup) {
+                Copy-Item $latestBackup.FullName $hostsPath -Force
+                Write-GuiLog "Restored backup due to failure."
             }
         }
-
-        if (-not $success) {
-            if ($uniqueBackupPath -and (Test-Path $uniqueBackupPath)) {
-                Write-Output "Restoring original hosts from backup..."
-                try {
-                    Copy-Item $uniqueBackupPath $hostsPath -Force
-                    Write-Output "Hosts restored from $uniqueBackupPath"
-                } catch {
-                    Write-Output "Failed to restore backup: $($_.Exception.Message)"
-                }
-            }
-            throw "Failed to update hosts file after $maxRetries attempts."
-        }
-
-        try { ipconfig /flushdns | Out-Null; Write-Output "DNS cache flushed." } catch { Write-Output "Could not flush DNS cache: $($_.Exception.Message)" }
-
-        $backups = @()
-        try { $backups = Get-ChildItem -Path $backupDir -Filter "hosts_*.bak" -ErrorAction SilentlyContinue } catch {}
-        if ($backups.Count -gt 5) {
-            $cleanupPrompt = [System.Windows.MessageBox]::Show("Delete older hosts backups in $backupDir?`nFound $($backups.Count) backups. Newest 3 will be kept.", "Cleanup backups", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-            if ($cleanupPrompt -eq "Yes") {
-                $toDelete = $backups | Sort-Object CreationTime -Descending | Select-Object -Skip 3
-                foreach ($file in $toDelete) {
-                    try { Remove-Item $file.FullName -Force } catch { Write-Output "Could not delete $($file.Name): $($_.Exception.Message)" }
-                }
-                Write-Output "Old backups cleaned; newest copies kept."
-            }
-        }
-    } "Updating hosts file (with backups, retries, and custom entries)..."
+    } "Updating hosts file..."
 }
-
+# --- HOSTS EDITOR ---
+function Show-HostsEditor {
+    # 1. SETUP FORM
+    $hForm = New-Object System.Windows.Forms.Form
+    $hForm.Text = "Hosts File Editor"
+    $hForm.Size = "900, 700"
+    $hForm.StartPosition = "CenterScreen"
+    $hForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+    $hForm.KeyPreview = $true
+    
+    # Initialize Dirty Flag (False)
+    $hForm.Tag = $false
+    
+    # 2. CONTROLS
+    $txtHosts = New-Object System.Windows.Forms.RichTextBox
+    $txtHosts.Dock = "Fill"
+    $txtHosts.BackColor = [System.Drawing.Color]::FromArgb(45,45,48)
+    $txtHosts.ForeColor = "White"
+    $txtHosts.Font = "Consolas, 11"
+    $txtHosts.AcceptsTab = $true
+    $txtHosts.DetectUrls = $false
+    $hForm.Controls.Add($txtHosts)
+    
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 50
+    $hForm.Controls.Add($pnl)
+    
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "Save"
+    $btn.BackColor = "SeaGreen"
+    $btn.ForeColor = "White"
+    $btn.FlatStyle = "Flat"
+    $btn.Top = 10
+    $btn.Left = 20
+    $btn.Width = 100
+    $pnl.Controls.Add($btn)
+    
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Ctrl+S to Save"
+    $lblInfo.ForeColor = "Gray"
+    $lblInfo.AutoSize = $true
+    $lblInfo.Top = 15
+    $lblInfo.Left = 140
+    $pnl.Controls.Add($lblInfo)
+    
+    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
+    
+    # 3. LOAD FILE
+    if (Test-Path $hostsPath) {
+        $diskSize = (Get-Item $hostsPath).Length
+        $content = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
+        
+        # Safety Check
+        if ($diskSize -gt 0 -and [string]::IsNullOrWhiteSpace($content)) {
+            [System.Windows.Forms.MessageBox]::Show("Could not read Hosts file. Aborting.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            return
+        }
+        $txtHosts.Text = $content
+    }
+    
+    # 4. HIGHLIGHTING HELPER
+    $Highlight = {
+        $sel = $txtHosts.SelectionStart
+        $len = $txtHosts.SelectionLength
+        $txtHosts.SelectAll()
+        $txtHosts.SelectionColor = "White"
+        $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
+        $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
+        if ($s -ge 0 -and $e -gt $s) {
+            $txtHosts.Select($s, ($e + 33) - $s)
+            $txtHosts.SelectionColor = "Cyan"
+        }
+        $txtHosts.Select($sel, $len)
+    }
+    & $Highlight
+    
+    # 5. CHANGE TRACKING
+    $txtHosts.Add_TextChanged({
+        $hForm.Tag = $true
+        if ($hForm.Text -notmatch "\*$") {
+            $hForm.Text = "Hosts File Editor *"
+        }
+    })
+    
+    # 6. SAVE LOGIC (Modified to use local variables)
+    $SaveAction = {
+        param($FormObj, $TextBox, $FilePath, $HighlightScript)
+        
+        try {
+            if ([string]::IsNullOrWhiteSpace($TextBox.Text)) {
+                $check = [System.Windows.Forms.MessageBox]::Show(
+                    "Save EMPTY file?", 
+                    "Warning", 
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                )
+                if ($check -eq "No") { return $false }
+            }
+            
+            Set-Content -Path $FilePath -Value $TextBox.Text -Encoding UTF8 -Force
+            Start-Process icacls.exe -ArgumentList "`"$FilePath`" /reset" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            
+            if ((Get-Item $FilePath).Length -eq 0 -and $TextBox.Text.Length -gt 0) {
+                throw "Write failed (0 bytes)."
+            }
+            
+            # Reset State
+            if ($FormObj) {
+                $FormObj.Tag = $false
+                $FormObj.Text = "Hosts File Editor"
+            }
+            
+            [System.Windows.Forms.MessageBox]::Show("Saved successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            
+            # Re-apply highlighting
+            & $HighlightScript
+            
+            return $true
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show("Error saving: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            return $false
+        }
+    }
+    
+    # 7. EVENTS
+    $btn.Add_Click({
+        $null = & $SaveAction -FormObj $hForm -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+    })
+    
+    $hForm.Add_KeyDown({
+        param($sender, $e)
+        if ($e.Control -and $e.KeyCode -eq 'S') {
+            $e.SuppressKeyPress = $true
+            $null = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+        }
+    })
+    
+    # 8. CLOSE PROMPT (FIXED - Pass all required parameters)
+    $hForm.Add_FormClosing({
+        param($sender, $e)
+        
+        if ($sender.Tag -eq $true) {
+            $res = [System.Windows.Forms.MessageBox]::Show(
+                "You have unsaved changes. Save now?", 
+                "Confirm", 
+                [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, 
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            
+            if ($res -eq "Yes") {
+                # Pass all required parameters to SaveAction
+                $success = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+                if (-not $success) {
+                    $e.Cancel = $true
+                }
+            } elseif ($res -eq "Cancel") {
+                $e.Cancel = $true
+            }
+            # If "No", just close without saving
+        }
+    })
+    
+    $hForm.ShowDialog()
+}
 # --- STORAGE / SYSTEM ---
 function Invoke-ChkdskAll {
     $confirm = [System.Windows.MessageBox]::Show("Run CHKDSK /f /r on all drives? This may require a reboot and can take a while.", "Confirm CHKDSK", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
@@ -841,27 +968,6 @@ function Invoke-MASActivation {
     } "Running MAS activation..."
 }
 
-# --- HOSTS EDITOR ---
-function Show-HostsEditor {
-    $hForm = New-Object System.Windows.Forms.Form
-    $hForm.Text = "Hosts File Editor"; $hForm.Size = "900, 700"; $hForm.StartPosition = "CenterScreen"; $hForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
-    $txtHosts = New-Object System.Windows.Forms.RichTextBox; $txtHosts.Dock="Fill"; $txtHosts.BackColor=[System.Drawing.Color]::FromArgb(45,45,48); $txtHosts.ForeColor="White"; $txtHosts.Font="Consolas, 11"; $hForm.Controls.Add($txtHosts)
-    $pnl = New-Object System.Windows.Forms.Panel; $pnl.Dock="Bottom"; $pnl.Height=50; $hForm.Controls.Add($pnl)
-    $btn = New-Object System.Windows.Forms.Button; $btn.Text="Save"; $btn.BackColor="SeaGreen"; $btn.ForeColor="White"; $btn.FlatStyle="Flat"; $btn.Top=10; $btn.Left=20; $btn.Width=100; $pnl.Controls.Add($btn)
-    $tip = New-Object System.Windows.Forms.ToolTip; $tip.SetToolTip($btn, "Save changes to the Hosts file immediately")
-    $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-    $txtHosts.Text = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
-    $Highlight = {
-        $txtHosts.SelectAll(); $txtHosts.SelectionColor = "White"
-        $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
-        $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
-        if ($s -ge 0 -and $e -gt $s) { $txtHosts.Select($s, ($e+33)-$s); $txtHosts.SelectionColor="Cyan" }
-        $txtHosts.Select(0,0)
-    }; & $Highlight
-    $btn.Add_Click({ try { Set-Content $hostsPath $txtHosts.Text -NoNewline; [System.Windows.MessageBox]::Show("Saved!"); & $Highlight } catch { [System.Windows.MessageBox]::Show("Error: $_") } })
-    $hForm.ShowDialog()
-}
-
 # --- FIREWALL RULE DIALOG ---
 function Show-RuleDialog {
     param($Title, $RuleObj=$null) 
@@ -1141,7 +1247,7 @@ function Show-TaskManager {
                         <Button Name="btnSFC" Content="SFC Scan" Width="220" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDISMCheck" Content="DISM Check" Width="220" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDISMRestore" Content="DISM Restore" Width="220" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCHKDSK" Content="CHKDSK C:" Width="220" Style="{StaticResource ActionBtn}"/>
+                        <Button Name="btnCHKDSK" Content="CHKDSK" Width="220" Style="{StaticResource ActionBtn}"/>
                     </WrapPanel>
                 </StackPanel>
 
@@ -1317,7 +1423,9 @@ function Show-TaskManager {
                     </StackPanel>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
                         <TextBlock Text="- Feature Integration &amp; Updates: " Foreground="#AAA" VerticalAlignment="Center"/>
-                        <Button Name="btnCreditIos12checker" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
+                         <Button Name="btnCreditIos12checker" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
+                        <TextBlock Text=" &amp; " Foreground="#AAA" VerticalAlignment="Center"/>
+                       <Button Name="btnCreditChaythonFeatures" Content="Chaython" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
                     </StackPanel>
 
                     <TextBlock Text="License: MIT License" Foreground="#666" Margin="0,10,0,0" FontSize="10"/>
@@ -1418,13 +1526,15 @@ Set-ButtonIcon "btnInstallGpedit" "M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2
 Set-ButtonIcon "btnSFC" "M15.5,14L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5M9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14Z" "SFC Scan" "Scans system files for corruption and repairs them"
 Set-ButtonIcon "btnDISMCheck" "M22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10H22M19.5,12.5C19.5,11.1 20.6,10 22,10H8V15H19.5V12.5Z" "DISM Check" "Checks the health of the Windows Image (dism /checkhealth)"
 Set-ButtonIcon "btnDISMRestore" "M19.5,12.5C19.5,11.1 20.6,10 22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10C9.4,10 10.5,11.1 10.5,12.5C10.5,13.9 9.4,15 8,15V19H12V22H8C6.3,22 5,20.7 5,19V15C3.6,15 2.5,13.9 2.5,12.5C2.5,11.1 3.6,10 5,10V9C5,3.5 9.5,-1 15,-1C20.5,-1 25,3.5 25,9V10C26.4,10 27.5,11.1 27.5,12.5C27.5,13.9 26.4,15 25,15V19C25,20.7 23.7,22 22,22H17V19H22V15C20.6,15 19.5,13.9 19.5,12.5Z" "DISM Restore" "Attempts to repair the Windows Image (dism /restorehealth)"
-Set-ButtonIcon "btnCHKDSK" "M18,17L23,12L18,7M1,12H17" "CHKDSK C:" "Scans the C: drive for filesystem errors (requires reboot)"
+Set-ButtonIcon "btnCHKDSK" "M6,2H18C19.1,2 20,2.9 20,4V20C20,21.1 19.1,22 18,22H6C4.9,22 4,21.1 4,20V4C4,2.9 4.9,2 6,2M6,4V20H18V4H6M11,17C11,17.55 11.45,18 12,18C12.55,18 13,17.55 13,17C13,16.45 12.55,16 12,16C11.45,16 11,16.45 11,17M7,17C7,17.55 7.45,18 8,18C8.55,18 9,17.55 9,17C9,16.45 8.55,16 8,16C7.45,16 7,16.45 7,17M15,17C15,17.55 15.45,18 16,18C16.55,18 17,17.55 17,17C17,16.45 16.55,16 16,16C15.45,16 15,16.45 15,17Z" "Check Disk" "Scans all drives for filesystem errors (requires reboot)"
 Set-ButtonIcon "btnFlushDNS" "M2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2A10,10 0 0,0 2,12M4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12M10,17L15,12L10,7V17Z" "Flush DNS" "Clears the client DNS resolver cache"
 Set-ButtonIcon "btnNetInfo" "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" "Show IP Config" "Displays full IP configuration for all adapters"
 Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Restart Wi-Fi" "Disables and Re-Enables Wi-Fi adapters"
 Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
 Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
 Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
+(Get-Ctrl "btnWingetFind").Width = 80
+Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Find" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
@@ -1552,6 +1662,7 @@ $btnDonate = Get-Ctrl "btnDonate"
 $btnCreditLilBattiCLI = Get-Ctrl "btnCreditLilBattiCLI"
 $btnCreditChaythonCLI = Get-Ctrl "btnCreditChaythonCLI"
 $btnCreditChaythonGUI = Get-Ctrl "btnCreditChaythonGUI"
+$btnCreditChaythonFeatures = Get-Ctrl "btnCreditChaythonFeatures"
 $btnCreditIos12checker = Get-Ctrl "btnCreditIos12checker"
 
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
@@ -1579,13 +1690,84 @@ foreach ($btnName in $TabButtons) {
 # --- GLOBAL SEARCH ---
 $SearchIndex = @{}
 function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b=Get-Ctrl $BtnName; if($b){ $SearchIndex[$Desc]=@{Button=$b;Tab=$ParentTab} } }
-Add-SearchIndexEntry "btnWingetScan" "Winget Updates" "btnTabUpdates"
-Add-SearchIndexEntry "btnSFC" "SFC Scan" "btnTabHealth"
-Add-SearchIndexEntry "btnCleanDisk" "Disk Cleanup" "btnTabCleanup"
-Add-SearchIndexEntry "btnNetRepair" "Network Repair" "btnTabNetwork"
-Add-SearchIndexEntry "btnUpdateRepair" "Update Repair" "btnTabUtils"
-Add-SearchIndexEntry "btnTaskManager" "Task Scheduler" "btnTabUtils"
-Add-SearchIndexEntry "btnInstallGpedit" "Install Group Policy" "btnTabUtils"
+# --- GLOBAL SEARCH INDEX ---
+
+# 1. Updates (Winget)
+Add-SearchIndexEntry "btnWingetScan"        "Check for Updates (Winget)"      "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
+
+# 2. System Health
+Add-SearchIndexEntry "btnSFC"               "SFC Scan (System File Checker)"  "btnTabHealth"
+Add-SearchIndexEntry "btnDISMCheck"         "DISM Check Health"               "btnTabHealth"
+Add-SearchIndexEntry "btnDISMRestore"       "DISM Restore Health"             "btnTabHealth"
+Add-SearchIndexEntry "btnCHKDSK"            "CHKDSK (Check Disk)"             "btnTabHealth"
+
+# 3. Network & DNS
+Add-SearchIndexEntry "btnNetInfo"           "Show IP Config / Network Info"   "btnTabNetwork"
+Add-SearchIndexEntry "btnFlushDNS"          "Flush DNS Cache"                 "btnTabNetwork"
+Add-SearchIndexEntry "btnResetWifi"         "Restart Wi-Fi Adapter"           "btnTabNetwork"
+Add-SearchIndexEntry "btnNetRepair"         "Full Network Repair (Reset IP)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnRouteTable"        "Save Routing Table"              "btnTabNetwork"
+Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "btnTabNetwork"
+
+# DNS Presets
+Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
+
+# DNS Encryption & Hosts
+Add-SearchIndexEntry "btnDohAuto"           "Enable DoH (DNS over HTTPS)"     "btnTabNetwork"
+Add-SearchIndexEntry "btnDohDisable"        "Disable DoH"                     "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
+Add-SearchIndexEntry "btnHostsRestore"      "Restore Hosts File"              "btnTabNetwork"
+
+# 4. Firewall
+Add-SearchIndexEntry "btnFwRefresh"         "Refresh Firewall Rules"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwAdd"             "Add New Firewall Rule"           "btnTabFirewall"
+Add-SearchIndexEntry "btnFwEdit"            "Edit/Modify Firewall Rule"       "btnTabFirewall"
+Add-SearchIndexEntry "btnFwExport"          "Export Firewall Policy"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwImport"          "Import Firewall Policy"          "btnTabFirewall"
+Add-SearchIndexEntry "btnFwDefaults"        "Restore Default Firewall Rules"  "btnTabFirewall"
+Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
+
+# 5. Drivers
+Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvDisableWU"      "Disable Driver Updates"          "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvEnableWU"       "Enable Driver Updates"           "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvDisableMeta"    "Disable Device Metadata"         "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvEnableMeta"     "Enable Device Metadata"          "btnTabDrivers"
+
+# 6. Cleanup
+Add-SearchIndexEntry "btnCleanDisk"         "Disk Cleanup Tool"               "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanTemp"         "Clean Temporary Files"           "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanShortcuts"    "Fix Broken Shortcuts"            "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanReg"          "Registry Cleanup & Backup"       "btnTabCleanup"
+Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "btnTabCleanup"
+
+# 7. Utilities
+Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
+Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
+Add-SearchIndexEntry "btnUtilMas"           "MAS Activation"                  "btnTabUtils"
+Add-SearchIndexEntry "btnUpdateRepair"      "Reset Windows Update Components" "btnTabUtils"
+Add-SearchIndexEntry "btnUpdateServices"    "Restart Update Services"         "btnTabUtils"
+Add-SearchIndexEntry "btnDotNetEnable"      "Set .NET RollForward"            "btnTabUtils"
+Add-SearchIndexEntry "btnDotNetDisable"     "Reset .NET RollForward"          "btnTabUtils"
+Add-SearchIndexEntry "btnTaskManager"       "Task Scheduler Manager"          "btnTabUtils"
+Add-SearchIndexEntry "btnInstallGpedit"     "Install Group Policy (Home)"     "btnTabUtils"
+
+# 8. Support
+Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
+Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
 
 $txtGlobalSearch.Add_TextChanged({
     $q = $txtGlobalSearch.Text
@@ -1714,12 +1896,13 @@ $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
 $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
 $btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" })
 $btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" })
+$btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
 $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
 
-$btnSFC.Add_Click({ Invoke-UiCommand { sfc /scannow } "Running SFC..." })
+$btnSFC.Add_Click({ Start-Process cmd.exe -ArgumentList "/k sfc /scannow" })
 $btnDISMCheck.Add_Click({ Invoke-UiCommand { dism /online /cleanup-image /checkhealth } "Running DISM CheckHealth..." })
 $btnDISMRestore.Add_Click({ Invoke-UiCommand { dism /online /cleanup-image /restorehealth } "Running DISM RestoreHealth..." })
 $btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
