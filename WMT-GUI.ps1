@@ -409,13 +409,18 @@ function Invoke-HostsUpdate {
 }
 # --- HOSTS EDITOR ---
 function Show-HostsEditor {
+    # 1. SETUP FORM
     $hForm = New-Object System.Windows.Forms.Form
     $hForm.Text = "Hosts File Editor"
     $hForm.Size = "900, 700"
     $hForm.StartPosition = "CenterScreen"
     $hForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
-    $hForm.KeyPreview = $true # Essential for Ctrl+S
-
+    $hForm.KeyPreview = $true
+    
+    # Initialize Dirty Flag (False)
+    $hForm.Tag = $false
+    
+    # 2. CONTROLS
     $txtHosts = New-Object System.Windows.Forms.RichTextBox
     $txtHosts.Dock = "Fill"
     $txtHosts.BackColor = [System.Drawing.Color]::FromArgb(45,45,48)
@@ -424,65 +429,147 @@ function Show-HostsEditor {
     $txtHosts.AcceptsTab = $true
     $txtHosts.DetectUrls = $false
     $hForm.Controls.Add($txtHosts)
-
-    $pnl = New-Object System.Windows.Forms.Panel; $pnl.Dock="Bottom"; $pnl.Height=50; $hForm.Controls.Add($pnl)
-    $btn = New-Object System.Windows.Forms.Button; $btn.Text="Save"; $btn.BackColor="SeaGreen"; $btn.ForeColor="White"; $btn.FlatStyle="Flat"; $btn.Top=10; $btn.Left=20; $btn.Width=100; $pnl.Controls.Add($btn)
-    $lblInfo = New-Object System.Windows.Forms.Label; $lblInfo.Text="Ctrl+S to Save"; $lblInfo.ForeColor="Gray"; $lblInfo.AutoSize=$true; $lblInfo.Top=15; $lblInfo.Left=140; $pnl.Controls.Add($lblInfo)
-
+    
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 50
+    $hForm.Controls.Add($pnl)
+    
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "Save"
+    $btn.BackColor = "SeaGreen"
+    $btn.ForeColor = "White"
+    $btn.FlatStyle = "Flat"
+    $btn.Top = 10
+    $btn.Left = 20
+    $btn.Width = 100
+    $pnl.Controls.Add($btn)
+    
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Ctrl+S to Save"
+    $lblInfo.ForeColor = "Gray"
+    $lblInfo.AutoSize = $true
+    $lblInfo.Top = 15
+    $lblInfo.Left = 140
+    $pnl.Controls.Add($lblInfo)
+    
     $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-
-    # Load File
+    
+    # 3. LOAD FILE
     if (Test-Path $hostsPath) {
-        $txtHosts.Text = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
-        $txtHosts.Modified = $false
+        $diskSize = (Get-Item $hostsPath).Length
+        $content = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
+        
+        # Safety Check
+        if ($diskSize -gt 0 -and [string]::IsNullOrWhiteSpace($content)) {
+            [System.Windows.Forms.MessageBox]::Show("Could not read Hosts file. Aborting.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            return
+        }
+        $txtHosts.Text = $content
     }
-
+    
+    # 4. HIGHLIGHTING HELPER
     $Highlight = {
-        $sel = $txtHosts.SelectionStart; $len = $txtHosts.SelectionLength
-        $txtHosts.SelectAll(); $txtHosts.SelectionColor = "White"
+        $sel = $txtHosts.SelectionStart
+        $len = $txtHosts.SelectionLength
+        $txtHosts.SelectAll()
+        $txtHosts.SelectionColor = "White"
         $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
         $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
-        if ($s -ge 0 -and $e -gt $s) { $txtHosts.Select($s, ($e+33)-$s); $txtHosts.SelectionColor="Cyan" }
+        if ($s -ge 0 -and $e -gt $s) {
+            $txtHosts.Select($s, ($e + 33) - $s)
+            $txtHosts.SelectionColor = "Cyan"
+        }
         $txtHosts.Select($sel, $len)
     }
     & $Highlight
-
+    
+    # 5. CHANGE TRACKING
+    $txtHosts.Add_TextChanged({
+        $hForm.Tag = $true
+        if ($hForm.Text -notmatch "\*$") {
+            $hForm.Text = "Hosts File Editor *"
+        }
+    })
+    
+    # 6. SAVE LOGIC (Modified to use local variables)
     $SaveAction = {
+        param($FormObj, $TextBox, $FilePath, $HighlightScript)
+        
         try {
-            if ([string]::IsNullOrWhiteSpace($txtHosts.Text)) {
-                if ([System.Windows.Forms.MessageBox]::Show("File is empty. Save anyway?", "Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "No") { return }
+            if ([string]::IsNullOrWhiteSpace($TextBox.Text)) {
+                $check = [System.Windows.Forms.MessageBox]::Show(
+                    "Save EMPTY file?", 
+                    "Warning", 
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                )
+                if ($check -eq "No") { return $false }
             }
             
-            Set-Content -Path $hostsPath -Value $txtHosts.Text -Encoding UTF8 -Force
-            Start-Process icacls.exe -ArgumentList "`"$hostsPath`" /reset" -NoNewWindow -Wait
+            Set-Content -Path $FilePath -Value $TextBox.Text -Encoding UTF8 -Force
+            Start-Process icacls.exe -ArgumentList "`"$FilePath`" /reset" -NoNewWindow -Wait -ErrorAction SilentlyContinue
             
-            $txtHosts.Modified = $false
-            [System.Windows.Forms.MessageBox]::Show("Saved successfully!")
-            & $Highlight
+            if ((Get-Item $FilePath).Length -eq 0 -and $TextBox.Text.Length -gt 0) {
+                throw "Write failed (0 bytes)."
+            }
+            
+            # Reset State
+            if ($FormObj) {
+                $FormObj.Tag = $false
+                $FormObj.Text = "Hosts File Editor"
+            }
+            
+            [System.Windows.Forms.MessageBox]::Show("Saved successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            
+            # Re-apply highlighting
+            & $HighlightScript
+            
+            return $true
         } catch {
-            [System.Windows.Forms.MessageBox]::Show("Error saving: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxImage]::Error)
+            [System.Windows.Forms.MessageBox]::Show("Error saving: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            return $false
         }
     }
-
-    $btn.Add_Click($SaveAction)
-
-    $hForm.Add_KeyDown({ 
-        param($s, $e)
+    
+    # 7. EVENTS
+    $btn.Add_Click({
+        $null = & $SaveAction -FormObj $hForm -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+    })
+    
+    $hForm.Add_KeyDown({
+        param($sender, $e)
         if ($e.Control -and $e.KeyCode -eq 'S') {
             $e.SuppressKeyPress = $true
-            & $SaveAction
+            $null = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
         }
     })
-
+    
+    # 8. CLOSE PROMPT (FIXED - Pass all required parameters)
     $hForm.Add_FormClosing({
-        param($s, $e)
-        if ($txtHosts.Modified) {
-            $res = [System.Windows.Forms.MessageBox]::Show("Unsaved changes. Save now?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, [System.Windows.Forms.MessageBoxImage]::Warning)
-            if ($res -eq "Yes") { & $SaveAction }
-            elseif ($res -eq "Cancel") { $e.Cancel = $true }
+        param($sender, $e)
+        
+        if ($sender.Tag -eq $true) {
+            $res = [System.Windows.Forms.MessageBox]::Show(
+                "You have unsaved changes. Save now?", 
+                "Confirm", 
+                [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, 
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            
+            if ($res -eq "Yes") {
+                # Pass all required parameters to SaveAction
+                $success = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+                if (-not $success) {
+                    $e.Cancel = $true
+                }
+            } elseif ($res -eq "Cancel") {
+                $e.Cancel = $true
+            }
+            # If "No", just close without saving
         }
     })
-
+    
     $hForm.ShowDialog()
 }
 # --- STORAGE / SYSTEM ---
