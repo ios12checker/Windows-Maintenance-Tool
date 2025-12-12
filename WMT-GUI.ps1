@@ -5,13 +5,14 @@
     GUI thanks to https://github.com/Chaython
     Imported and integrated from Lil_Batti (author) with contributions from Chaython
 #>
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$OutputEncoding = [System.Text.Encoding]::UTF8
+
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.2"
+$AppVersion = "4.3"
 $ErrorActionPreference = "SilentlyContinue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 # HIDE CONSOLE
 $t = '[DllImport("user32.dll")] public static extern bool ShowWindow(int handle, int state);'
@@ -67,6 +68,41 @@ function Get-DataPath {
     return $dataPath
 }
 $script:DataDir = Get-DataPath
+
+# Simple modal text viewer (read-only)
+function Show-TextDialog {
+    param(
+        [string]$Title = "Output",
+        [string]$Text = ""
+    )
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = $Title
+    $f.Size = "800,600"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+    $f.ForeColor = [System.Drawing.Color]::White
+
+    $tb = New-Object System.Windows.Forms.RichTextBox
+    $tb.Dock = "Fill"
+    $tb.ReadOnly = $true
+    $tb.BackColor = [System.Drawing.Color]::FromArgb(20,20,20)
+    $tb.ForeColor = [System.Drawing.Color]::White
+    $tb.Font = New-Object System.Drawing.Font("Consolas", 10)
+    $tb.Text = $Text
+    $tb.WordWrap = $false
+    $f.Controls.Add($tb)
+
+    $btn = New-Object System.Windows.Forms.Button
+    $btn.Text = "Close"
+    $btn.Dock = "Bottom"
+    $btn.Height = 35
+    $btn.BackColor = "DimGray"
+    $btn.ForeColor = "White"
+    $btn.Add_Click({ $f.Close() })
+    $f.Controls.Add($btn)
+
+    $f.ShowDialog() | Out-Null
+}
 
 # --- UPDATE CHECKER ---
 function Invoke-UpdateCheck {
@@ -297,6 +333,12 @@ function Enable-AllDoh {
             if ($svc.Status -eq "Running" -and $svc.StartType -ne "Disabled") { Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue }
         } catch {}
         Write-Output "Applied DoH templates to $applied server(s)."
+
+        if ($applied -gt 0) {
+            [System.Windows.MessageBox]::Show("Enabled DoH for $applied server(s).", "Enable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show("Failed to enable DoH. Check the log for details.", "Enable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        }
     } "Enabling DoH for known DNS providers..."
 }
 
@@ -318,6 +360,11 @@ function Disable-AllDoh {
         }
         try { ipconfig /flushdns | Out-Null } catch {}
         Write-Output "Removed $removed DoH entries."
+        if ($removed -gt 0) {
+            [System.Windows.MessageBox]::Show("Removed $removed DoH entries.", "Disable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show("No DoH entries were removed. Check the log for details.", "Disable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+        }
     } "Disabling DoH entries..."
 }
 # --- Hosts Adblock ---
@@ -327,6 +374,12 @@ function Invoke-HostsUpdate {
         $hostsPath = "$env:windir\System32\drivers\etc\hosts"
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+
+        # Capture original ACL to preserve permissions (e.g., Users read access)
+        $origAcl = $null
+        if (Test-Path $hostsPath) {
+            try { $origAcl = Get-Acl -Path $hostsPath } catch {}
+        }
 
         # 2. DOWNLOAD HOSTS FILE
         $mirrors = @(
@@ -388,9 +441,22 @@ function Invoke-HostsUpdate {
         
         try {
             Set-Content -Path $hostsPath -Value $finalContent -Encoding UTF8 -Force
-            
-            # Simple Permission Reset
-            Start-Process icacls.exe -ArgumentList "`"$hostsPath`" /reset" -NoNewWindow -Wait
+
+            # Re-apply original ACL or ensure Users has read access
+            try {
+                if ($origAcl) {
+                    Set-Acl -Path $hostsPath -AclObject $origAcl
+                    Write-Output "Restored original permissions on hosts file."
+                } else {
+                    $fs = Get-Acl -Path $hostsPath
+                    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Users","ReadAndExecute","Allow")
+                    $fs.SetAccessRule($rule)
+                    Set-Acl -Path $hostsPath -AclObject $fs
+                    Write-Output "Applied Users read permission to hosts file."
+                }
+            } catch {
+                Write-Output "Warning: Could not reapply permissions: $($_.Exception.Message)"
+            }
             
             # Validation
             if ((Get-Item $hostsPath).Length -lt 100) { throw "Write verification failed (File empty)." }
@@ -539,18 +605,18 @@ function Show-HostsEditor {
     })
     
     $hForm.Add_KeyDown({
-        param($sender, $e)
+        param($src, $e)
         if ($e.Control -and $e.KeyCode -eq 'S') {
             $e.SuppressKeyPress = $true
-            $null = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+            $null = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
         }
     })
     
     # 8. CLOSE PROMPT (FIXED - Pass all required parameters)
     $hForm.Add_FormClosing({
-        param($sender, $e)
+        param($src, $e)
         
-        if ($sender.Tag -eq $true) {
+        if ($src.Tag -eq $true) {
             $res = [System.Windows.Forms.MessageBox]::Show(
                 "You have unsaved changes. Save now?", 
                 "Confirm", 
@@ -560,7 +626,7 @@ function Show-HostsEditor {
             
             if ($res -eq "Yes") {
                 # Pass all required parameters to SaveAction
-                $success = & $SaveAction -FormObj $sender -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+                $success = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
                 if (-not $success) {
                     $e.Cancel = $true
                 }
@@ -762,12 +828,125 @@ function Invoke-DriverReport {
     } "Creating driver report..."
 }
 
-function Invoke-RemoveGhostDevices {
+function Invoke-ExportDrivers {
     Invoke-UiCommand {
-        $hidden = Get-PnpDevice | Where-Object { $_.Status -eq 'Unknown' }
-        if (-not $hidden) { Write-Output "No hidden/ghost devices found."; return }
-        foreach ($d in $hidden) { pnputil /remove-device $d.InstanceId | Out-Null; Write-Output "Removed $($d.InstanceId)" }
-    } "Removing hidden devices..."
+        $path = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+        New-Item -ItemType Directory -Path $path -Force | Out-Null
+        $proc = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$path""" -NoNewWindow -Wait -PassThru
+        if ($proc.ExitCode -eq 0) {
+            Write-Output "Drivers exported to $path"
+            [System.Windows.MessageBox]::Show("Drivers exported to:`n$path","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            Write-Output "Export failed (pnputil exit $($proc.ExitCode))."
+            [System.Windows.MessageBox]::Show("Export failed (pnputil exit $($proc.ExitCode)).","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    } "Exporting drivers to data folder..."
+}
+
+function Show-GhostDevicesDialog {
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Ghost Devices"
+    $f.Size = "800, 500"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Top"
+    $dg.Height = 380
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+    $dg.ColumnHeadersHeight = 28
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $f.Controls.Add($dg)
+
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 80
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnl)
+
+    function New-GDButton($text,$x,$color=$null){
+        $b=New-Object System.Windows.Forms.Button
+        $b.Text=$text
+        $b.Left=$x; $b.Top=20; $b.Width=120; $b.Height=35
+        $b.FlatStyle="Flat"
+        $b.FlatAppearance.BorderSize=1
+        $b.FlatAppearance.BorderColor=[System.Drawing.ColorTranslator]::FromHtml("#444444")
+        $b.ForeColor=[System.Drawing.Color]::White
+        if($color){
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml($color)
+            $b.FlatAppearance.MouseOverBackColor=[System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+        } else {
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+            $b.FlatAppearance.MouseOverBackColor=[System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
+        }
+        $pnl.Controls.Add($b); return $b
+    }
+
+    $btnRefresh = New-GDButton "Refresh" 20
+    $btnRemoveSel = New-GDButton "Remove Selected" 160 "#802020"
+    $btnRemoveAll = New-GDButton "Remove All" 320 "#A04040"
+    $btnClose = New-GDButton "Close" 480
+
+    $Load = {
+        $items = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Unknown' }
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("InstanceId")
+        $dt.Columns.Add("Class")
+        $dt.Columns.Add("FriendlyName")
+        foreach($d in $items){
+            $r=$dt.NewRow()
+            $r["InstanceId"]=$d.InstanceId
+            $r["Class"]=$d.Class
+            $r["FriendlyName"]=$d.FriendlyName
+            $dt.Rows.Add($r)
+        }
+        $dg.DataSource=$dt
+        $dg.ClearSelection()
+        if(-not $items -or $items.Count -eq 0){
+            [System.Windows.MessageBox]::Show("No hidden/ghost devices found.","Ghost Devices",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    }
+
+    $btnRefresh.Add_Click({ & $Load })
+    $btnRemoveSel.Add_Click({
+        if($dg.SelectedRows.Count -eq 0){ return }
+        foreach($row in $dg.SelectedRows){
+            $id = $row.Cells["InstanceId"].Value
+            if($id){ pnputil /remove-device $id | Out-Null }
+        }
+        & $Load
+    })
+    $btnRemoveAll.Add_Click({
+        if($dg.Rows.Count -eq 0){ return }
+        foreach($row in $dg.Rows){
+            $id = $row.Cells["InstanceId"].Value
+            if($id){ pnputil /remove-device $id | Out-Null }
+        }
+        & $Load
+    })
+    $btnClose.Add_Click({ $f.Close() })
+
+    & $Load
+    $f.ShowDialog() | Out-Null
 }
 
 function Invoke-DriverUpdates {
@@ -852,14 +1031,313 @@ function Invoke-CleanOldDrivers {
     } "Cleaning old drivers..."
 }
 
+# GUI dialog to review and clean old drivers
+function Show-DriverCleanupDialog {
+    # 1) Gather candidates
+    $rawOutput = pnputil.exe /enum-drivers 2>&1
+    $drivers = @()
+    $current = $null
+    foreach ($line in $rawOutput) {
+        $line = $line.ToString().Trim()
+        if ($line -match 'Published Name:\s*(oem\d+\.inf)$') {
+            if ($current) { $drivers += [PSCustomObject]$current }
+            $current = [ordered]@{ PublishedName=$matches[1]; OriginalName=$null; Provider="Unknown"; Version=[Version]"0.0.0.0"; Date=[DateTime]::MinValue }
+        } elseif ($current -and $line -match 'Original Name:\s*([\w\-.]+\.inf)$') {
+            if ($matches[1] -notmatch '^oem\d+\.inf$') { $current.OriginalName = $matches[1] }
+        } elseif ($current -and $line -match 'Provider.*:\s+(.+)$') {
+            $current.Provider = $matches[1]
+        } elseif ($current -and $line -match 'Driver Version:\s*(\d{1,5}(\.\d{1,5}){1,3})$') {
+            try { $current.Version = [Version]$matches[1] } catch {}
+        } elseif ($current -and $line -match 'Date.*:\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})') {
+            try { $current.Date = [DateTime]$matches[1] } catch {}
+        }
+    }
+    if ($current) { $drivers += [PSCustomObject]$current }
+
+    $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
+    $toDelete = @()
+    foreach ($group in $grouped) {
+        if ($group.Count -gt 1) {
+            $sorted = $group.Group | Sort-Object Date, Version -Descending
+            $toDelete += $sorted | Select-Object -Skip 1
+        }
+    }
+
+    if (-not $toDelete -or $toDelete.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Driver store is already clean. No duplicates found.", "Clean Old Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        return
+    }
+
+    # Offer export before proceeding
+    $exportPrompt = [System.Windows.MessageBox]::Show(
+        "Export current drivers to the data folder before cleaning?`n(Recommended)",
+        "Clean Old Drivers",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+    if ($exportPrompt -eq "Yes") {
+        $expPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
+        New-Item -Path $expPath -ItemType Directory -Force | Out-Null
+        $expProc = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$expPath""" -NoNewWindow -Wait -PassThru
+        if ($expProc.ExitCode -eq 0) {
+            [System.Windows.MessageBox]::Show("Drivers exported to:`n$expPath","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show("Export failed (pnputil exit $($expProc.ExitCode)).","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
+    }
+
+    # 2) Build dialog
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Clean Old Drivers"
+    $f.Size = "900, 520"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Top"
+    $dg.Height = 400
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
+    $dg.ColumnHeadersHeight = 28
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
+    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $f.Controls.Add($dg)
+
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 80
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnl)
+
+    function New-DrvBtn($text,$x,$color=$null){
+        $b=New-Object System.Windows.Forms.Button
+        $b.Text=$text; $b.Left=$x; $b.Top=20; $b.Width=150; $b.Height=35
+        $b.FlatStyle="Flat"; $b.FlatAppearance.BorderSize=1
+        $b.FlatAppearance.BorderColor=[System.Drawing.ColorTranslator]::FromHtml("#444444")
+        $b.ForeColor=[System.Drawing.Color]::White
+        if($color){
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml($color)
+            $b.FlatAppearance.MouseOverBackColor=[System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+        } else {
+            $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+            $b.FlatAppearance.MouseOverBackColor=[System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
+        }
+        $pnl.Controls.Add($b); return $b
+    }
+
+    $btnBackupClean = New-DrvBtn "Backup && Remove All" 20 "#006600"
+    $btnRemoveSel   = New-DrvBtn "Remove Selected" 190 "#802020"
+    $btnClose       = New-DrvBtn "Close" 360
+
+    $LoadGrid = {
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("PublishedName")
+        $dt.Columns.Add("OriginalName")
+        $dt.Columns.Add("Provider")
+        $dt.Columns.Add("Version")
+        $dt.Columns.Add("Date")
+        foreach($d in $toDelete){
+            $r=$dt.NewRow()
+            $r["PublishedName"]=$d.PublishedName
+            $r["OriginalName"]=$d.OriginalName
+            $r["Provider"]=$d.Provider
+            $r["Version"]=$d.Version.ToString()
+            $r["Date"]=$d.Date.ToShortDateString()
+            $dt.Rows.Add($r)
+        }
+        $dg.DataSource=$dt
+        $dg.ClearSelection()
+    }
+
+    $DoRemove = {
+        param($items)
+        if(-not $items -or $items.Count -eq 0){ return }
+        $count = $items.Count
+        $confirm = [System.Windows.MessageBox]::Show("Backup then remove $count driver(s)?","Driver Cleanup",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+        if ($confirm -ne "Yes") { return }
+        # Backup first
+        $bkPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
+        New-Item -Path $bkPath -ItemType Directory -Force | Out-Null
+        $export = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$bkPath""" -NoNewWindow -Wait -PassThru
+        if ($export.ExitCode -ne 0) {
+            [System.Windows.MessageBox]::Show("Backup failed (pnputil exit $($export.ExitCode)). Aborting.","Driver Cleanup",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+            return
+        }
+        $deleted=0; $failed=0
+        foreach($item in $items){
+            $name = $item.PublishedName
+            $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+        }
+        [System.Windows.MessageBox]::Show("Deleted: $deleted`nFailed: $failed`nBackup: $bkPath","Driver Cleanup",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+        # Refresh grid removing deleted items
+        if ($deleted -gt 0) {
+            $global:toDelete = $toDelete | Where-Object { $items -notcontains $_ }
+            $dg.DataSource = $null
+            $LoadGrid.Invoke()
+        }
+    }
+
+    $btnBackupClean.Add_Click({
+        $DoRemove.Invoke($toDelete)
+    })
+    $btnRemoveSel.Add_Click({
+        if($dg.SelectedRows.Count -eq 0){ return }
+        $selected = @()
+        foreach($row in $dg.SelectedRows){
+            $pub = $row.Cells["PublishedName"].Value
+            $match = $toDelete | Where-Object { $_.PublishedName -eq $pub } | Select-Object -First 1
+            if($match){ $selected += $match }
+        }
+        $DoRemove.Invoke($selected)
+    })
+    $btnClose.Add_Click({ $f.Close() })
+
+    $LoadGrid.Invoke()
+    $f.ShowDialog() | Out-Null
+}
+
 function Invoke-RestoreDrivers {
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Select DriverBackup folder"
-    if ($dlg.ShowDialog() -ne "OK") { return }
+    $dataPath = Get-DataPath
+    $backups = @()
+    try {
+        $backups = Get-ChildItem -Path $dataPath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^DriverBackup_' -or $_.Name -match '^Drivers_Backup_' }
+    } catch {}
+
+    $selectedPath = $null
+    if ($backups -and $backups.Count -gt 0) {
+        $backups = $backups | Sort-Object LastWriteTime -Descending
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = "Select Driver Backup"
+        $form.Size = "600,400"
+        $form.StartPosition = "CenterScreen"
+        $form.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+        $form.ForeColor = "White"
+
+        $lst = New-Object System.Windows.Forms.ListBox
+        $lst.Dock = "Top"
+        $lst.Height = 280
+        $lst.BackColor = [System.Drawing.Color]::FromArgb(20,20,20)
+        $lst.ForeColor = "White"
+        $lst.BorderStyle = "FixedSingle"
+        $items = @()
+        foreach ($b in $backups) {
+            $items += [PSCustomObject]@{
+                Name = $b.Name
+                Path = $b.FullName
+                Display = "{0}  (modified {1})" -f $b.Name, $b.LastWriteTime
+            }
+        }
+        $lst.DisplayMember = "Display"
+        $lst.ValueMember = "Path"
+        $lst.DataSource = $items
+        $form.Controls.Add($lst)
+
+        $pnl = New-Object System.Windows.Forms.Panel
+        $pnl.Dock = "Bottom"
+        $pnl.Height = 60
+        $pnl.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+        $form.Controls.Add($pnl)
+
+        $btnUse = New-Object System.Windows.Forms.Button
+        $btnUse.Text = "Use Selected"
+        $btnUse.Left = 20; $btnUse.Top = 15; $btnUse.Width = 140
+        $btnUse.BackColor = "SeaGreen"; $btnUse.ForeColor = "White"
+        $btnUse.FlatStyle = "Flat"
+        $btnUse.Add_Click({
+            if ($lst.SelectedItem) {
+                $form.Tag = $lst.SelectedItem.Path
+                $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+                $form.Close()
+            }
+        })
+        $pnl.Controls.Add($btnUse)
+
+        $btnBrowse = New-Object System.Windows.Forms.Button
+        $btnBrowse.Text = "Browse..."
+        $btnBrowse.Left = 180; $btnBrowse.Top = 15; $btnBrowse.Width = 120
+        $btnBrowse.BackColor = "DimGray"; $btnBrowse.ForeColor = "White"
+        $btnBrowse.FlatStyle = "Flat"
+        $btnBrowse.Add_Click({
+            $form.Tag = "BROWSE"
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Retry
+            $form.Close()
+        })
+        $pnl.Controls.Add($btnBrowse)
+
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = "Cancel"
+        $btnCancel.Left = 320; $btnCancel.Top = 15; $btnCancel.Width = 120
+        $btnCancel.BackColor = "Gray"; $btnCancel.ForeColor = "White"
+        $btnCancel.FlatStyle = "Flat"
+        $btnCancel.Add_Click({
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+            $form.Close()
+        })
+        $pnl.Controls.Add($btnCancel)
+
+        $res = $form.ShowDialog()
+        if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $form.Tag) {
+            $selectedPath = $form.Tag
+        } elseif ($res -eq [System.Windows.Forms.DialogResult]::Retry) {
+            # fall through to browse
+            $selectedPath = $null
+        } else {
+            return
+        }
+    }
+
+    if (-not $selectedPath) {
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = "Select DriverBackup folder"
+        if (Test-Path $dataPath) { $dlg.SelectedPath = $dataPath }
+        if ($dlg.ShowDialog() -ne "OK") { return }
+        $selectedPath = $dlg.SelectedPath
+    }
+
     Invoke-UiCommand {
         param($Path)
-        $proc = Start-Process pnputil.exe -ArgumentList "/add-driver ""$Path\\*.inf"" /subdirs" -NoNewWindow -Wait -PassThru
-        if ($proc.ExitCode -eq 0) { Write-Output "Drivers restored from $Path" } else { Write-Output "Restore failed (exit $($proc.ExitCode))." }
+        if (-not (Test-Path $Path)) {
+            Write-Output "Restore failed: path not found $Path"
+            [System.Windows.MessageBox]::Show("Restore failed: path not found.`n$Path","Restore Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+            return
+        }
+
+        $infFiles = Get-ChildItem -Path $Path -Filter *.inf -Recurse -ErrorAction SilentlyContinue
+        if (-not $infFiles -or $infFiles.Count -eq 0) {
+            Write-Output "Restore aborted: no INF files found in $Path"
+            [System.Windows.MessageBox]::Show("No INF files found in:`n$Path","Restore Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Warning) | Out-Null
+            return
+        }
+
+        $output = pnputil.exe /add-driver "$Path\*.inf" /subdirs 2>&1
+        $code = $LASTEXITCODE
+        Write-Output $output
+        if ($code -eq 0 -or $code -eq 3010) {
+            Write-Output "Drivers restored from $Path"
+            [System.Windows.MessageBox]::Show("Drivers restored from:`n$Path","Restore Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            Write-Output "Restore failed (exit $code)."
+            $msg = "Restore failed (exit $code)." + "`n`nOutput:`n" + ($output | Out-String)
+            [System.Windows.MessageBox]::Show($msg,"Restore Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+        }
     } "Restoring drivers..."
 }
 
@@ -902,13 +1380,19 @@ function Invoke-SystemReports {
 
 function Invoke-UpdateServiceReset {
     Invoke-UiCommand {
-        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
-        Stop-Service -Name cryptsvc -Force -ErrorAction SilentlyContinue
-        Start-Service -Name appidsvc -ErrorAction SilentlyContinue
-        Start-Service -Name wuauserv -ErrorAction SilentlyContinue
-        Start-Service -Name cryptsvc -ErrorAction SilentlyContinue
-        Start-Service -Name bits -ErrorAction SilentlyContinue
-        Write-Output "Restarted Windows Update related services."
+        try {
+            $script:UpdateSvcResult = "OK"
+            Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+            Stop-Service -Name cryptsvc -Force -ErrorAction SilentlyContinue
+            Start-Service -Name appidsvc -ErrorAction SilentlyContinue
+            Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+            Start-Service -Name cryptsvc -ErrorAction SilentlyContinue
+            Start-Service -Name bits -ErrorAction SilentlyContinue
+            Write-Output "Restarted Windows Update related services."
+        } catch {
+            $script:UpdateSvcResult = "ERR: $($_.Exception.Message)"
+            throw
+        }
     } "Restarting Windows Update services..."
 }
 
@@ -1099,8 +1583,7 @@ function Show-TaskManager {
 # ==========================================
 # 3. XAML GUI
 # ==========================================
-[xml]$xaml = @" 
-<?xml version="1.0" encoding="utf-8"?>
+[xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Maintenance Tool v$AppVersion" Height="850" Width="1200"
@@ -1364,6 +1847,7 @@ function Show-TaskManager {
                     <TextBlock Text="Drivers" FontSize="24" Margin="0,0,0,20"/>
                     <WrapPanel>
                         <Button Name="btnDrvReport" Content="Generate Driver Report" Width="200" Style="{StaticResource ActionBtn}"/>
+                        <Button Name="btnDrvBackup" Content="Export Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDrvGhost" Content="Remove Ghost Devices" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDrvClean" Content="Clean Old Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDrvRestore" Content="Restore Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
@@ -1568,6 +2052,7 @@ Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0
 Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
 Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
 Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
+Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
 Set-ButtonIcon "btnDrvClean" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Clean Old Drivers" "Removes obsolete drivers from the Windows Driver Store"
 Set-ButtonIcon "btnDrvRestore" "M12,2L3,7V17L12,22L21,17V7L12,2M12,4.3L18.5,8L12,11.7L5.5,8L12,4.3M5,9.85L12,14L19,9.85V16.15L12,20.3L5,16.15V9.85M7,11H9V14H7V11M15,11H17V14H15V11Z" "Restore Drivers" "Imports drivers from a DriverBackup folder"
 Set-ButtonIcon "btnDrvDisableWU" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H15V15H9V13Z" "Disable Driver Updates" "Turn off automatic driver updates"
@@ -1633,6 +2118,7 @@ $txtFwSearch = Get-Ctrl "txtFwSearch"
 $lblFwStatus = Get-Ctrl "lblFwStatus"
 
 $btnDrvReport = Get-Ctrl "btnDrvReport"
+$btnDrvBackup = Get-Ctrl "btnDrvBackup"
 $btnDrvGhost = Get-Ctrl "btnDrvGhost"
 $btnDrvClean = Get-Ctrl "btnDrvClean"
 $btnDrvRestore = Get-Ctrl "btnDrvRestore"
@@ -1741,6 +2227,7 @@ Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "b
 
 # 5. Drivers
 Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
+Add-SearchIndexEntry "btnDrvBackup"         "Export Drivers"                  "btnTabDrivers"
 Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
 Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
 Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
@@ -1785,24 +2272,19 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
+
 $btnWingetScan.Add_Click({
     $lblWingetTitle.Text = "Available Updates"
     $lblWingetStatus.Text = "Scanning..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Visible"; $btnWingetInstall.Visibility = "Collapsed"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    
-    # --- DIRECT RAM CAPTURE START ---
-    try {
-        # This captures the output directly into the $lines array
-        $lines = & winget list --upgrade-available --accept-source-agreements
-    } catch {
-        $lines = @()
-    }
-    # --- DIRECT RAM CAPTURE END ---
-
+    $tempOut = Join-Path $env:TEMP "winget_upd.txt"
+    $psCmd = "chcp 65001 >`$null; winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
+    $proc.WaitForExit()
+    $lines = Get-Content $tempOut -Encoding UTF8
     foreach ($line in $lines) {
-        # The Regex logic remains the same
         if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
             if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
                [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
@@ -1812,6 +2294,7 @@ $btnWingetScan.Add_Click({
     $lblWingetStatus.Visibility = "Hidden"
     Write-GuiLog "Found $($lstWinget.Items.Count) updates."
 })
+
 $btnWingetFind.Add_Click({
     if ($txtWingetSearch.Text -eq "" -or $txtWingetSearch.Text -eq "Search new packages...") { return }
     $lblWingetTitle.Text = "Search Results: " + $txtWingetSearch.Text
@@ -1819,16 +2302,11 @@ $btnWingetFind.Add_Click({
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    
-    # --- DIRECT RAM CAPTURE START ---
-    try {
-        # Captures search results directly
-        $lines = & winget search "$($txtWingetSearch.Text)" --accept-source-agreements
-    } catch {
-        $lines = @()
-    }
-    # --- DIRECT RAM CAPTURE END ---
-
+    $tempOut = Join-Path $env:TEMP "winget_search.txt"
+    $psCmd = "chcp 65001 >`$null; winget search `"$($txtWingetSearch.Text)`" --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
+    $proc.WaitForExit()
+    $lines = Get-Content $tempOut -Encoding UTF8
     foreach ($line in $lines) {
         if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
             if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
@@ -1838,22 +2316,86 @@ $btnWingetFind.Add_Click({
     }
     $lblWingetStatus.Visibility = "Hidden"
 })
+
 $btnWingetUpdateSel.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget upgrade --id $item.Id --accept-package-agreements --accept-source-agreements } "Updating $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 $btnWingetInstall.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget install --id $item.Id --accept-package-agreements --accept-source-agreements } "Installing $($item.Name)..." } })
 $btnWingetUninstall.Add_Click({ if ($lstWinget.SelectedItems.Count -gt 0) { if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget uninstall --id $item.Id } "Uninstalling $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } } })
 
 # --- NETWORK ---
-$btnNetInfo.Add_Click({ Invoke-UiCommand { ipconfig /all } "Showing IP configuration..." })
-$btnFlushDNS.Add_Click({ Invoke-UiCommand { ipconfig /flushdns } "Flushing DNS cache..." })
-$btnResetWifi.Add_Click({ Invoke-UiCommand { Get-NetAdapter | Where-Object { $_.InterfaceDescription -match "Wi-Fi|Wireless" } | Restart-NetAdapter } "Restarting Wi-Fi adapters..." })
+$btnNetInfo.Add_Click({
+    Invoke-UiCommand {
+        $out = ipconfig /all 2>&1
+        $txt = ($out | Out-String)
+        Write-Output $txt
+        Show-TextDialog -Title "IP Configuration" -Text $txt
+    } "Showing IP configuration..."
+})
+$btnFlushDNS.Add_Click({
+    Invoke-UiCommand {
+        $out = ipconfig /flushdns 2>&1
+        $txt = ($out | Out-String).Trim()
+        if ($txt) { Write-Output $txt }
+        [System.Windows.MessageBox]::Show("DNS cache flushed.", "Flush DNS", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    } "Flushing DNS cache..."
+})
+$btnResetWifi.Add_Click({
+    Invoke-UiCommand {
+        $wifi = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -match "Wi-Fi|Wireless" }
+        $eth  = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notmatch "Wi-Fi|Wireless" -and $_.InterfaceDescription -notmatch "Bluetooth" }
+
+        if (-not $wifi) {
+            $msg = "No active Wi-Fi adapters found."
+            if ($eth) {
+                $ethNames = $eth | Select-Object -ExpandProperty Name
+                $msg += "`nYou appear to be on Ethernet: " + ($ethNames -join ", ")
+            }
+            [System.Windows.MessageBox]::Show($msg, "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            Write-Output $msg
+            return
+        }
+
+        $names = $wifi | Select-Object -ExpandProperty Name
+        foreach ($n in $names) {
+            Restart-NetAdapter -Name $n -Confirm:$false -ErrorAction SilentlyContinue
+            Write-Output "Restarted Wi-Fi adapter: $n"
+        }
+
+        [System.Windows.MessageBox]::Show("Restarted Wi-Fi adapter(s): " + ($names -join ", "), "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    } "Restarting Wi-Fi adapters..."
+})
 $btnNetRepair.Add_Click({ Start-NetRepair })
 $btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
-$btnRouteView.Add_Click({ Invoke-UiCommand { route print } "Routing table" })
+$btnRouteView.Add_Click({
+    Invoke-UiCommand {
+        $out = route print 2>&1
+        $txt = ($out | Out-String)
+        Write-Output $txt
+        Show-TextDialog -Title "Route Table" -Text $txt
+    } "Routing table"
+})
 
-$btnDnsGoogle.Add_Click({ Set-DnsAddresses -Addresses @("8.8.8.8","8.8.4.4") -Label "Google DNS" })
-$btnDnsCloudflare.Add_Click({ Set-DnsAddresses -Addresses @("1.1.1.1","1.0.0.1") -Label "Cloudflare DNS" })
-$btnDnsQuad9.Add_Click({ Set-DnsAddresses -Addresses @("9.9.9.9","149.112.112.112") -Label "Quad9 DNS" })
-$btnDnsAuto.Add_Click({ Invoke-UiCommand { Get-ActiveAdapters | Select-Object -ExpandProperty Name | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_ -ResetServerAddresses } ; Write-Output "DNS reset to automatic (DHCP)." } "Resetting DNS..." })
+$btnDnsGoogle.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Set DNS to Google (8.8.8.8 / 8.8.4.4) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Set-DnsAddresses -Addresses @("8.8.8.8","8.8.4.4") -Label "Google DNS"
+})
+$btnDnsCloudflare.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Set DNS to Cloudflare (1.1.1.1 / 1.0.0.1) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Set-DnsAddresses -Addresses @("1.1.1.1","1.0.0.1") -Label "Cloudflare DNS"
+})
+$btnDnsQuad9.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Set DNS to Quad9 (9.9.9.9 / 149.112.112.112) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Set-DnsAddresses -Addresses @("9.9.9.9","149.112.112.112") -Label "Quad9 DNS"
+})
+$btnDnsAuto.Add_Click({
+    Invoke-UiCommand {
+        Get-ActiveAdapters | Select-Object -ExpandProperty Name | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_ -ResetServerAddresses }
+        Write-Output "DNS reset to automatic (DHCP)."
+        [System.Windows.MessageBox]::Show("DNS reset to automatic (DHCP).", "DNS Reset", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    } "Resetting DNS..."
+})
 $btnDnsCustom.Add_Click({
     $dnsInput = [Microsoft.VisualBasic.Interaction]::InputBox("Enter DNS addresses (comma separated)", "Custom DNS", "1.1.1.1,8.8.8.8")
     if (-not $dnsInput) { return }
@@ -1866,6 +2408,17 @@ $btnDnsCustom.Add_Click({
 
 $btnDohAuto.Add_Click({ Enable-AllDoh })
 $btnDohDisable.Add_Click({ Disable-AllDoh })
+$btnNetRepair.Add_Click({
+    $msg = "Full Network Repair will:" +
+           "`n- Release/Renew IP" +
+           "`n- Flush DNS cache" +
+           "`n- Reset Winsock" +
+           "`n- Reset IP stack" +
+           "`n`nAdapters may briefly disconnect. Continue?"
+    $res = [System.Windows.MessageBox]::Show($msg, "Full Network Repair", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Start-NetRepair
+})
 
 # --- FIREWALL ---
 $AllFw = @()
@@ -1903,7 +2456,10 @@ $btnHostsRestore.Add_Click({
     $o.Filter="*.bak;*.txt|*.bak;*.txt"
     if($o.ShowDialog()-eq"OK"){
         $restoreFile = $o.FileName
+        $res = [System.Windows.MessageBox]::Show("Restore hosts file from:`n$restoreFile`n`nThis will overwrite the current hosts file. Continue?","Restore Hosts",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+        if ($res -ne "Yes") { return }
         Invoke-UiCommand{ Copy-Item $restoreFile "$env:windir\System32\drivers\etc\hosts" -Force } "Restored hosts file from $restoreFile"
+        [System.Windows.MessageBox]::Show("Hosts file restored from:`n$restoreFile","Restore Hosts",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
     }
 })
 $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
@@ -1916,13 +2472,86 @@ $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
 $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
 $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
 
-$btnSFC.Add_Click({ Start-Process cmd -ArgumentList "/k sfc /scannow" })
-$btnDISMCheck.Add_Click({Start-Process cmd "/c dism /online /cleanup-image /checkhealth&&pause"})
-$btnDISMRestore.Add_Click({Start-Process cmd "/c dism /online /cleanup-image /restorehealth&&pause"})
+$btnSFC.Add_Click({
+    # Run SFC in PowerShell (keep window open for output)
+    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "sfc /scannow"' -Verb RunAs -WindowStyle Normal
+})
+$btnDISMCheck.Add_Click({
+    Invoke-UiCommand {
+        $output = dism /online /cleanup-image /checkhealth 2>&1
+        $text = ($output | Out-String).Trim()
+        if ($text) { Write-Output $text }
+
+        $message = "DISM Check completed."
+        $needsRepair = $false
+        if ($text -match "No component store corruption detected") {
+            $message = "DISM Check: no corruption detected."
+        } elseif ($text -match "component store is repairable") {
+            $message = "DISM Check: corruption detected (repairable)."
+            $needsRepair = $true
+        } elseif ($text -match "The operation completed successfully") {
+            $message = "DISM Check: completed successfully."
+        }
+        [System.Windows.MessageBox]::Show($message, "DISM CheckHealth", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+
+        if ($needsRepair) {
+            $prompt = [System.Windows.MessageBox]::Show(
+                "DISM found repairable corruption.`n`nRun DISM RestoreHealth now?",
+                "DISM CheckHealth",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Question
+            )
+            if ($prompt -eq "Yes") {
+                Write-Output "Launching DISM RestoreHealth..."
+                Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth"' -Verb RunAs -WindowStyle Normal
+            }
+        }
+    } "Running DISM CheckHealth..."
+})
+$btnDISMRestore.Add_Click({
+    # Run DISM RestoreHealth in PowerShell (keep window open for output)
+    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth"' -Verb RunAs -WindowStyle Normal
+})
 $btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
-$btnCleanShortcuts.Add_Click({ Invoke-ShortcutFix })
+$btnCleanShortcuts.Add_Click({
+    Invoke-UiCommand {
+        $sb = [System.Text.StringBuilder]::new()
+        $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
+        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
+        $updated = 0; $deleted = 0
+        function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
+        foreach ($path in $paths) {
+            Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $target = Get-ShortcutTarget $_.FullName
+                if ($systemShortcuts -contains $_.Name -or ($target -and ($target -match '^shell:' -or $target -match '^\s*::{')) ) { return }
+                if (-not $target -or -not (Test-Path $target)) {
+                    $peer = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $_.FullName } | Select-Object -First 1
+                    $guess = $null
+                    if ($peer) {
+                        $pt = Get-ShortcutTarget $peer.FullName
+                        if ($pt) { $guess = Join-Path (Split-Path $pt -Parent) "$($_.BaseName).exe" }
+                    }
+                    if ($guess -and (Test-Path $guess)) {
+                        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName); $sc.TargetPath = $guess; $sc.Save(); $updated++
+                        [void]$sb.AppendLine("Updated: $($_.FullName) -> $guess")
+                    } else {
+                        Remove-Item $_.FullName -Force; $deleted++; [void]$sb.AppendLine("Deleted broken shortcut: $($_.FullName)")
+                    }
+                }
+            }
+        }
+        $result = "Shortcut scan complete. Updated: $updated | Deleted: $deleted"
+        Write-Output ($sb.ToString().TrimEnd())
+        Write-Output $result
+        if ($deleted -gt 0 -or $updated -gt 0) {
+            [System.Windows.MessageBox]::Show($result, "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        } else {
+            [System.Windows.MessageBox]::Show("No broken shortcuts found.", "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    } "Scanning and fixing shortcuts..."
+})
 $btnCleanReg.Add_Click({
     $form = New-Object System.Windows.Forms.Form
     $form.Text="Registry Cleanup"; $form.Size="420,240"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
@@ -1947,8 +2576,21 @@ $btnCleanXbox.Add_Click({
     if ([System.Windows.MessageBox]::Show("Delete stored Xbox credentials? This signs you out of Xbox services.", "Xbox Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning) -eq "Yes") { Start-XboxClean }
 })
 $btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
-$btnUpdateServices.Add_Click({ Invoke-UpdateServiceReset })
+$btnUpdateServices.Add_Click({
+    $confirm = [System.Windows.MessageBox]::Show("Restart Windows Update related services (wuauserv/cryptsvc/bits/appidsvc)?","Restart Update Services",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+    if ($confirm -ne "Yes") { return }
+    $script:UpdateSvcResult = $null
+    Invoke-UpdateServiceReset
+    if ($script:UpdateSvcResult -and $script:UpdateSvcResult -like "OK*") {
+        [System.Windows.MessageBox]::Show("Update services restarted successfully.","Restart Update Services",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+    } else {
+        $msg = if ($script:UpdateSvcResult) { $script:UpdateSvcResult } else { "Unknown error. Check log output." }
+        [System.Windows.MessageBox]::Show("Failed to restart update services.`n$msg","Restart Update Services",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
+    }
+})
 $btnDotNetEnable.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Set .NET roll-forward? This forces apps to use the latest installed .NET version (depending on selection).","Set .NET RollForward",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
     $form = New-Object System.Windows.Forms.Form
     $form.Text="Set .NET RollForward"; $form.Size="320,210"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
     $opts = @("Runtime","SDK","Both")
@@ -1958,21 +2600,46 @@ $btnDotNetEnable.Add_Click({
     $ok=New-Object System.Windows.Forms.Button; $ok.Text="Apply"; $ok.DialogResult="OK"; $ok.Left=20; $ok.Top=120; $ok.Width=260; $ok.BackColor="SeaGreen"; $ok.ForeColor="White"; $form.Controls.Add($ok); $form.AcceptButton=$ok
     if ($form.ShowDialog() -eq "OK") { $choice = ($radios | Where-Object { $_.Checked }).Tag; if ($choice) { Invoke-UiCommand { Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." } }
 })
-$btnDotNetDisable.Add_Click({ Invoke-UiCommand { Set-DotNetRollForward -Mode "Disable" } "Removing .NET roll-forward..." })
+$btnDotNetDisable.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Remove .NET roll-forward and revert to default .NET selection?","Reset .NET RollForward",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Invoke-UiCommand { Set-DotNetRollForward -Mode "Disable" } "Removing .NET roll-forward..."
+})
 $btnTaskManager.Add_Click({ Show-TaskManager })
 $btnInstallGpedit.Add_Click({ Start-GpeditInstall })
-$btnUtilTrim.Add_Click({ Invoke-SSDTrim })
+$btnUtilTrim.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Run SSD Trim/ReTrim now? This will optimize all detected SSD volumes.","Trim SSD",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "Get-PhysicalDisk | Where-Object MediaType -eq ''SSD'' | ForEach-Object { Get-Disk | Where-Object { $_.FriendlyName -eq $_.FriendlyName } | Get-Partition | Get-Volume | Where-Object DriveLetter -ne $null | ForEach-Object { Optimize-Volume -DriveLetter $_.DriveLetter -ReTrim -Verbose } }"' -Verb RunAs -WindowStyle Normal
+})
 $btnUtilSysInfo.Add_Click({ Invoke-SystemReports })
 $btnUtilMas.Add_Click({ Invoke-MASActivation })
 
 $btnDrvReport.Add_Click({ Invoke-DriverReport })
-$btnDrvGhost.Add_Click({ Invoke-RemoveGhostDevices })
-$btnDrvClean.Add_Click({ Invoke-CleanOldDrivers })
+$btnDrvBackup.Add_Click({ Invoke-ExportDrivers })
+$btnDrvGhost.Add_Click({ Show-GhostDevicesDialog })
+$btnDrvClean.Add_Click({ Show-DriverCleanupDialog })
 $btnDrvRestore.Add_Click({ Invoke-RestoreDrivers })
-$btnDrvDisableWU.Add_Click({ Invoke-DriverUpdates -Enable:$false })
-$btnDrvEnableWU.Add_Click({ Invoke-DriverUpdates -Enable:$true })
-$btnDrvDisableMeta.Add_Click({ Invoke-DeviceMetadata -Enable:$false })
-$btnDrvEnableMeta.Add_Click({ Invoke-DeviceMetadata -Enable:$true })
+$btnDrvDisableWU.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Invoke-DriverUpdates -Enable:$false
+})
+$btnDrvEnableWU.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Enable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Invoke-DriverUpdates -Enable:$true
+})
+$btnDrvDisableMeta.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Disable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Invoke-DeviceMetadata -Enable:$false
+})
+$btnDrvEnableMeta.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Enable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Invoke-DeviceMetadata -Enable:$true
+})
 
 # --- LAUNCH ---
 Invoke-UpdateCheck
