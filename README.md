@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v4.1-green)
+![Version](https://img.shields.io/badge/version-v4.3-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -9,7 +9,8 @@ All-in-one Windows maintenance toolkit in PowerShell + Batch. Runs locally.
 ---
 
 ## 📸 Screenshots
-<img width="1181" height="837" alt="2025-12-11 17_21_37-NVIDIA GeForce Overlay DT" src="https://github.com/user-attachments/assets/9980b0b8-1b6f-49a3-b0e6-54a1dbe9cbc9" />
+<img width="1177" height="836" alt="2025-12-12 21_16_37-Windows Maintenance Tool v4 3" src="https://github.com/user-attachments/assets/12dbc714-a1a3-45f4-8137-65ed860063fa" />
+
 
 ---
 
