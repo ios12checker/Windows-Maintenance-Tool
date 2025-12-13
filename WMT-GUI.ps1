@@ -2408,6 +2408,48 @@ $btnWingetUpdateSel.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { In
 $btnWingetInstall.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget install --id $item.Id --accept-package-agreements --accept-source-agreements } "Installing $($item.Name)..." } })
 $btnWingetUninstall.Add_Click({ if ($lstWinget.SelectedItems.Count -gt 0) { if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget uninstall --id $item.Id } "Uninstalling $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } } })
 
+# --- System Health ---
+$btnSFC.Add_Click({
+    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "sfc /scannow; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
+})
+$btnDISMCheck.Add_Click({
+    Invoke-UiCommand {
+        $output = dism /online /cleanup-image /checkhealth 2>&1
+        $text = ($output | Out-String).Trim()
+        if ($text) { Write-Output $text }
+
+        $message = "DISM Check completed."
+        $needsRepair = $false
+        if ($text -match "No component store corruption detected") {
+            $message = "DISM Check: no corruption detected."
+        } elseif ($text -match "component store is repairable") {
+            $message = "DISM Check: corruption detected (repairable)."
+            $needsRepair = $true
+        } elseif ($text -match "The operation completed successfully") {
+            $message = "DISM Check: completed successfully."
+        }
+        [System.Windows.MessageBox]::Show($message, "DISM CheckHealth", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+
+        if ($needsRepair) {
+            $prompt = [System.Windows.MessageBox]::Show(
+                "DISM found repairable corruption.`n`nRun DISM RestoreHealth now?",
+                "DISM CheckHealth",
+                [System.Windows.MessageBoxButton]::YesNo,
+                [System.Windows.MessageBoxImage]::Question
+            )
+            if ($prompt -eq "Yes") {
+                Write-Output "Launching DISM RestoreHealth..."
+                # Run DISM Restore (nested): Fixed newline issue
+                Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
+            }
+        }
+    } "Running DISM CheckHealth..."
+})
+$btnDISMRestore.Add_Click({
+    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
+})
+$btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
+
 # --- NETWORK ---
 $btnNetInfo.Add_Click({
     Invoke-UiCommand {
@@ -2449,6 +2491,17 @@ $btnResetWifi.Add_Click({
 
         [System.Windows.MessageBox]::Show("Restarted Wi-Fi adapter(s): " + ($names -join ", "), "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
     } "Restarting Wi-Fi adapters..."
+})
+$btnNetRepair.Add_Click({
+    $msg = "Full Network Repair will:" +
+           "`n- Release/Renew IP" +
+           "`n- Flush DNS cache" +
+           "`n- Reset Winsock" +
+           "`n- Reset IP stack" +
+           "`n`nAdapters may briefly disconnect. Continue?"
+    $res = [System.Windows.MessageBox]::Show($msg, "Full Network Repair", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Start-NetRepair
 })
 $btnNetRepair.Add_Click({ Start-NetRepair })
 $btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
@@ -2495,16 +2548,20 @@ $btnDnsCustom.Add_Click({
 
 $btnDohAuto.Add_Click({ Enable-AllDoh })
 $btnDohDisable.Add_Click({ Disable-AllDoh })
-$btnNetRepair.Add_Click({
-    $msg = "Full Network Repair will:" +
-           "`n- Release/Renew IP" +
-           "`n- Flush DNS cache" +
-           "`n- Reset Winsock" +
-           "`n- Reset IP stack" +
-           "`n`nAdapters may briefly disconnect. Continue?"
-    $res = [System.Windows.MessageBox]::Show($msg, "Full Network Repair", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-    if ($res -ne "Yes") { return }
-    Start-NetRepair
+
+$btnHostsUpdate.Add_Click({ Invoke-HostsUpdate })
+$btnHostsEdit.Add_Click({ Show-HostsEditor })
+$btnHostsBackup.Add_Click({ Invoke-UiCommand { $dest = Join-Path (Get-DataPath) ("hosts_bk_{0}.bak" -f (Get-Date -Format "yyyyMMdd_HHmmss")); Copy-Item "$env:windir\System32\drivers\etc\hosts" $dest; "Backup saved to $dest" } "Backing up hosts file..." })
+$btnHostsRestore.Add_Click({
+    $o=New-Object System.Windows.Forms.OpenFileDialog
+    $o.Filter="*.bak;*.txt|*.bak;*.txt"
+    if($o.ShowDialog()-eq"OK"){
+        $restoreFile = $o.FileName
+        $res = [System.Windows.MessageBox]::Show("Restore hosts file from:`n$restoreFile`n`nThis will overwrite the current hosts file. Continue?","Restore Hosts",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+        if ($res -ne "Yes") { return }
+        Invoke-UiCommand{ Copy-Item $restoreFile "$env:windir\System32\drivers\etc\hosts" -Force } "Restored hosts file from $restoreFile"
+        [System.Windows.MessageBox]::Show("Hosts file restored from:`n$restoreFile","Restore Hosts",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
+    }
 })
 
 # --- FIREWALL ---
@@ -2534,73 +2591,34 @@ $btnFwImport.Add_Click({ Invoke-FirewallImport; $btnFwRefresh.RaiseEvent((New-Ob
 $btnFwDefaults.Add_Click({ Invoke-FirewallDefaults; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 $btnFwPurge.Add_Click({ Invoke-FirewallPurge; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 
-# --- CLEANUP & UTIL ---
-$btnHostsEdit.Add_Click({ Show-HostsEditor })
-$btnHostsUpdate.Add_Click({ Invoke-HostsUpdate })
-$btnHostsBackup.Add_Click({ Invoke-UiCommand { $dest = Join-Path (Get-DataPath) ("hosts_bk_{0}.bak" -f (Get-Date -Format "yyyyMMdd_HHmmss")); Copy-Item "$env:windir\System32\drivers\etc\hosts" $dest; "Backup saved to $dest" } "Backing up hosts file..." })
-$btnHostsRestore.Add_Click({
-    $o=New-Object System.Windows.Forms.OpenFileDialog
-    $o.Filter="*.bak;*.txt|*.bak;*.txt"
-    if($o.ShowDialog()-eq"OK"){
-        $restoreFile = $o.FileName
-        $res = [System.Windows.MessageBox]::Show("Restore hosts file from:`n$restoreFile`n`nThis will overwrite the current hosts file. Continue?","Restore Hosts",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
-        if ($res -ne "Yes") { return }
-        Invoke-UiCommand{ Copy-Item $restoreFile "$env:windir\System32\drivers\etc\hosts" -Force } "Restored hosts file from $restoreFile"
-        [System.Windows.MessageBox]::Show("Hosts file restored from:`n$restoreFile","Restore Hosts",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
-    }
+# --- Drivers ---
+$btnDrvReport.Add_Click({ Invoke-DriverReport })
+$btnDrvBackup.Add_Click({ Invoke-ExportDrivers })
+$btnDrvGhost.Add_Click({ Show-GhostDevicesDialog })
+$btnDrvClean.Add_Click({ Show-DriverCleanupDialog })
+$btnDrvRestore.Add_Click({ Invoke-RestoreDrivers })
+$btnDrvDisableWU.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Invoke-DriverUpdates -Enable:$false
 })
-$btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
-$btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
-$btnNavDownloads.Add_Click({ Show-DownloadStats })
-$btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" })
-$btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" })
-$btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
-$btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
+$btnDrvEnableWU.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Enable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Invoke-DriverUpdates -Enable:$true
+})
+$btnDrvDisableMeta.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Disable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    if ($res -ne "Yes") { return }
+    Invoke-DeviceMetadata -Enable:$false
+})
+$btnDrvEnableMeta.Add_Click({
+    $res = [System.Windows.MessageBox]::Show("Enable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+    Invoke-DeviceMetadata -Enable:$true
+})
 
-$btnSFC.Add_Click({
-    # Run SFC in PowerShell (keep window open for output)
-    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "sfc /scannow"' -Verb RunAs -WindowStyle Normal
-})
-$btnDISMCheck.Add_Click({
-    Invoke-UiCommand {
-        $output = dism /online /cleanup-image /checkhealth 2>&1
-        $text = ($output | Out-String).Trim()
-        if ($text) { Write-Output $text }
-
-        $message = "DISM Check completed."
-        $needsRepair = $false
-        if ($text -match "No component store corruption detected") {
-            $message = "DISM Check: no corruption detected."
-        } elseif ($text -match "component store is repairable") {
-            $message = "DISM Check: corruption detected (repairable)."
-            $needsRepair = $true
-        } elseif ($text -match "The operation completed successfully") {
-            $message = "DISM Check: completed successfully."
-        }
-        [System.Windows.MessageBox]::Show($message, "DISM CheckHealth", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-
-        if ($needsRepair) {
-            $prompt = [System.Windows.MessageBox]::Show(
-                "DISM found repairable corruption.`n`nRun DISM RestoreHealth now?",
-                "DISM CheckHealth",
-                [System.Windows.MessageBoxButton]::YesNo,
-                [System.Windows.MessageBoxImage]::Question
-            )
-            if ($prompt -eq "Yes") {
-                Write-Output "Launching DISM RestoreHealth..."
-                Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth"' -Verb RunAs -WindowStyle Normal
-            }
-        }
-    } "Running DISM CheckHealth..."
-})
-$btnDISMRestore.Add_Click({
-    # Run DISM RestoreHealth in PowerShell (keep window open for output)
-    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth"' -Verb RunAs -WindowStyle Normal
-})
-$btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
+# --- Cleanup ---
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
 $btnCleanShortcuts.Add_Click({
@@ -2663,7 +2681,8 @@ $btnCleanReg.Add_Click({
 $btnCleanXbox.Add_Click({
     if ([System.Windows.MessageBox]::Show("Delete stored Xbox credentials? This signs you out of Xbox services.", "Xbox Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning) -eq "Yes") { Start-XboxClean }
 })
-$btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
+
+# --- Utilities ---
 $btnUpdateServices.Add_Click({
     $confirm = [System.Windows.MessageBox]::Show("Restart Windows Update related services (wuauserv/cryptsvc/bits/appidsvc)?","Restart Update Services",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
     if ($confirm -ne "Yes") { return }
@@ -2702,32 +2721,21 @@ $btnUtilTrim.Add_Click({
 })
 $btnUtilSysInfo.Add_Click({ Invoke-SystemReports })
 $btnUtilMas.Add_Click({ Invoke-MASActivation })
+$btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
 
-$btnDrvReport.Add_Click({ Invoke-DriverReport })
-$btnDrvBackup.Add_Click({ Invoke-ExportDrivers })
-$btnDrvGhost.Add_Click({ Show-GhostDevicesDialog })
-$btnDrvClean.Add_Click({ Show-DriverCleanupDialog })
-$btnDrvRestore.Add_Click({ Invoke-RestoreDrivers })
-$btnDrvDisableWU.Add_Click({
-    $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-    if ($res -ne "Yes") { return }
-    Invoke-DriverUpdates -Enable:$false
-})
-$btnDrvEnableWU.Add_Click({
-    $res = [System.Windows.MessageBox]::Show("Enable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-    if ($res -ne "Yes") { return }
-    Invoke-DriverUpdates -Enable:$true
-})
-$btnDrvDisableMeta.Add_Click({
-    $res = [System.Windows.MessageBox]::Show("Disable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-    if ($res -ne "Yes") { return }
-    Invoke-DeviceMetadata -Enable:$false
-})
-$btnDrvEnableMeta.Add_Click({
-    $res = [System.Windows.MessageBox]::Show("Enable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-    if ($res -ne "Yes") { return }
-    Invoke-DeviceMetadata -Enable:$true
-})
+
+# --- Support ---
+$btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
+$btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
+$btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" })
+$btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" })
+$btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" })
+$btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
+$btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
+$btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
+$btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
+
+$btnNavDownloads.Add_Click({ Show-DownloadStats })
 
 # --- LAUNCH ---
 Invoke-UpdateCheck
