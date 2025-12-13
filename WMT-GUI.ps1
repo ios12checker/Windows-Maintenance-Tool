@@ -1000,90 +1000,87 @@ function Invoke-DeviceMetadata {
     } "Updating device metadata policy..."
 }
 
-function Invoke-CleanOldDrivers {
-    $confirm = [System.Windows.MessageBox]::Show("Backup drivers and remove older duplicates from Driver Store?", "Driver Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-    if ($confirm -ne "Yes") { return }
-    Invoke-UiCommand {
-        Write-Output "Scanning Driver Store (fast mode)..."
-        $rawOutput = pnputil.exe /enum-drivers 2>&1
-        $drivers = @()
-        $current = $null
-
-        foreach ($line in $rawOutput) {
-            $line = $line.ToString().Trim()
-            if ($line -match 'Published Name:\\s*(oem\\d+\\.inf)$') {
-                if ($current) { $drivers += [PSCustomObject]$current }
-                $current = [ordered]@{ PublishedName=$matches[1]; OriginalName=$null; Provider="Unknown"; Version=[Version]"0.0.0.0"; Date=[DateTime]::MinValue }
-            }
-            elseif ($current -and $line -match 'Original Name:\\s*([\\w\\-\\.]+\\.inf)$') {
-                if ($matches[1] -notmatch '^oem\\d+\\.inf$') { $current.OriginalName = $matches[1] }
-            }
-            elseif ($current -and $line -match 'Provider.*:\\s+(.+)$') { $current.Provider = $matches[1] }
-            elseif ($current -and $line -match 'Driver Version:\\s*(\\d{1,5}(\\.\\d{1,5}){1,3})$') { try { $current.Version = [Version]$matches[1] } catch {} }
-            elseif ($current -and $line -match 'Date.*:\\s+(\\d{1,2}[\\/\\.\\-]\\d{1,2}[\\/\\.\\-]\\d{2,4})') { try { $current.Date = [DateTime]$matches[1] } catch {} }
-        }
-        if ($current) { $drivers += [PSCustomObject]$current }
-
-        $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
-        $toDelete = @()
-        foreach ($group in $grouped) {
-            if ($group.Count -gt 1) {
-                $sorted = $group.Group | Sort-Object Date, Version -Descending
-                $toDelete += $sorted | Select-Object -Skip 1
-            }
-        }
-        if (-not $toDelete) { Write-Output "Driver store already clean."; return }
-
-        $count = $toDelete.Count
-        $bkPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
-        Write-Output "Backing up drivers to: $bkPath"
-        New-Item -Path $bkPath -ItemType Directory -Force | Out-Null
-        $export = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$bkPath""" -NoNewWindow -Wait -PassThru
-        if ($export.ExitCode -ne 0) {
-            Write-Output "Backup failed (pnputil exit $($export.ExitCode)). Cleanup aborted."
-            return
-        }
-
-        Write-Output "--- Deleting $count old driver(s) ---"
-        $deleted = 0; $failed = 0
-        foreach ($item in $toDelete) {
-            $info = "$($item.OriginalName) (v$($item.Version))"
-            Write-Output "Removing: $info..."
-            $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $($item.PublishedName) /uninstall /force" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
-        }
-        Write-Output "Done. Deleted: $deleted | Failed: $failed | Backup: $bkPath"
-    } "Cleaning old drivers..."
-}
-
-# GUI dialog to review and clean old drivers
 function Show-DriverCleanupDialog {
-    # 1) Gather candidates
+    # 1. SCANNING PHASE
     $rawOutput = pnputil.exe /enum-drivers 2>&1
     $drivers = @()
     $current = $null
+
     foreach ($line in $rawOutput) {
         $line = $line.ToString().Trim()
-        if ($line -match 'Published Name:\s*(oem\d+\.inf)$') {
-            if ($current) { $drivers += [PSCustomObject]$current }
-            $current = [ordered]@{ PublishedName=$matches[1]; OriginalName=$null; Provider="Unknown"; Version=[Version]"0.0.0.0"; Date=[DateTime]::MinValue }
-        } elseif ($current -and $line -match 'Original Name:\s*([\w\-.]+\.inf)$') {
-            if ($matches[1] -notmatch '^oem\d+\.inf$') { $current.OriginalName = $matches[1] }
-        } elseif ($current -and $line -match 'Provider.*:\s+(.+)$') {
-            $current.Provider = $matches[1]
-        } elseif ($current -and $line -match 'Driver Version:\s*(\d{1,5}(\.\d{1,5}){1,3})$') {
-            try { $current.Version = [Version]$matches[1] } catch {}
-        } elseif ($current -and $line -match 'Date.*:\s+(\d{1,2}[\/\.\-]\d{1,2}[\/\.\-]\d{2,4})') {
-            try { $current.Date = [DateTime]$matches[1] } catch {}
+        
+        if ($line.Contains(":")) {
+            $parts = $line -split ":", 2
+            $key   = $parts[0].Trim()
+            $val   = $parts[1].Trim()
+            
+            # 1. Check for Published Name (Start of new driver block)
+            if ($val -match '^(oem\d+\.inf)$') {
+                if ($current) { $drivers += [PSCustomObject]$current }
+                $current = [ordered]@{ 
+                    PublishedName = $val
+                    OriginalName  = $null
+                    Provider      = "Unknown"
+                    Version       = [Version]"0.0.0.0"
+                    DisplayVer    = "Unknown"
+                    SortDate      = [DateTime]::MinValue
+                    DisplayDate   = "Unknown"
+                }
+            }
+            elseif ($current) {
+                # 2. Parse by Label with Regex Extraction
+                if ($key -match "Original Name") {
+                    if ($val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
+                }
+                elseif ($key -match "Provider") {
+                    $current.Provider = $val
+                }
+                elseif ($key -match "Version") {
+                    # EXTRACT Version Number (e.g. 2.2.0.134)
+                    if ($val -match '(\d+(\.\d+){1,3})') {
+                        $vStr = $matches[1]
+                        $current.DisplayVer = $vStr
+                        try { $current.Version = [Version]$vStr } catch {}
+                    } else {
+                        $current.DisplayVer = $val 
+                    }
+
+                    # Check if line ALSO contains a Date
+                    if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})') {
+                        $dStr = $matches[1]
+                        if ($dStr -as [DateTime]) {
+                             $current.DisplayDate = $dStr
+                             $current.SortDate = [DateTime]$dStr
+                        }
+                    }
+                }
+                elseif ($key -match "Date") {
+                    if ($val -as [DateTime]) {
+                        $current.DisplayDate = $val
+                        $current.SortDate = [DateTime]$val
+                    } elseif ($val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})') {
+                        $dStr = $matches[1]
+                        $current.DisplayDate = $dStr
+                        if ($dStr -as [DateTime]) { $current.SortDate = [DateTime]$dStr }
+                    }
+                }
+
+                # 3. Fallback
+                elseif ($current.OriginalName -eq $null -and $val -match '\.inf$') {
+                    $current.OriginalName = $val
+                }
+            }
         }
     }
     if ($current) { $drivers += [PSCustomObject]$current }
 
+    # 2. FILTERING DUPLICATES
     $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
     $toDelete = @()
+
     foreach ($group in $grouped) {
         if ($group.Count -gt 1) {
-            $sorted = $group.Group | Sort-Object Date, Version -Descending
+            $sorted = $group.Group | Sort-Object SortDate, Version -Descending
             $toDelete += $sorted | Select-Object -Skip 1
         }
     }
@@ -1093,35 +1090,24 @@ function Show-DriverCleanupDialog {
         return
     }
 
-    # Offer export before proceeding
-    $exportPrompt = [System.Windows.MessageBox]::Show(
-        "Export current drivers to the data folder before cleaning?`n(Recommended)",
-        "Clean Old Drivers",
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-    if ($exportPrompt -eq "Yes") {
-        $expPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
-        New-Item -Path $expPath -ItemType Directory -Force | Out-Null
-        $expProc = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$expPath""" -NoNewWindow -Wait -PassThru
-        if ($expProc.ExitCode -eq 0) {
-            [System.Windows.MessageBox]::Show("Drivers exported to:`n$expPath","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show("Export failed (pnputil exit $($expProc.ExitCode)).","Export Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
-        }
-    }
-
-    # 2) Build dialog
+    # 3. GUI SETUP (THEMED)
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Clean Old Drivers"
-    $f.Size = "900, 520"
+    $f.Size = "950, 600"
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.ForeColor = [System.Drawing.Color]::White
 
+    # Initialize ToolTip provider
+    $tip = New-Object System.Windows.Forms.ToolTip
+    $tip.AutoPopDelay = 5000
+    $tip.InitialDelay = 500
+    $tip.ReshowDelay = 500
+    $tip.ShowAlways = $true
+
     $dg = New-Object System.Windows.Forms.DataGridView
     $dg.Dock = "Top"
-    $dg.Height = 400
+    $dg.Height = 470
     $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $dg.ForeColor = [System.Drawing.Color]::White
     $dg.AutoSizeColumnsMode = "Fill"
@@ -1131,18 +1117,24 @@ function Show-DriverCleanupDialog {
     $dg.RowHeadersVisible = $false
     $dg.AllowUserToAddRows = $false
     $dg.BorderStyle = "None"
+    $dg.CellBorderStyle = "SingleHorizontal"
+    
+    # Header Styling
     $dg.EnableHeadersVisualStyles = $false
     $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
     $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 6)
     $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $dg.ColumnHeadersHeight = 28
+    $dg.ColumnHeadersHeight = 35
+    
+    # Row Styling
     $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
     $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    
     $f.Controls.Add($dg)
 
     $pnl = New-Object System.Windows.Forms.Panel
@@ -1151,9 +1143,10 @@ function Show-DriverCleanupDialog {
     $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.Controls.Add($pnl)
 
-    function New-DrvBtn($text,$x,$color=$null){
+    # Helper for Themed Buttons with Tooltips
+    function New-DrvBtn($text, $x, $color=$null, $tooltipText=""){
         $b=New-Object System.Windows.Forms.Button
-        $b.Text=$text; $b.Left=$x; $b.Top=20; $b.Width=150; $b.Height=35
+        $b.Text=$text; $b.Left=$x; $b.Top=20; $b.Width=160; $b.Height=35
         $b.FlatStyle="Flat"; $b.FlatAppearance.BorderSize=1
         $b.FlatAppearance.BorderColor=[System.Drawing.ColorTranslator]::FromHtml("#444444")
         $b.ForeColor=[System.Drawing.Color]::White
@@ -1164,12 +1157,20 @@ function Show-DriverCleanupDialog {
             $b.BackColor=[System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
             $b.FlatAppearance.MouseOverBackColor=[System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
         }
+        
+        if ($tooltipText) {
+            $tip.SetToolTip($b, $tooltipText)
+        }
+
         $pnl.Controls.Add($b); return $b
     }
 
-    $btnBackupClean = New-DrvBtn "Backup && Remove All" 20 "#006600"
-    $btnRemoveSel   = New-DrvBtn "Remove Selected" 190 "#802020"
-    $btnClose       = New-DrvBtn "Close" 360
+    $btnBackupClean = New-DrvBtn "Backup && Remove All" 20 "#006600" "Safely backs up all listed drivers to the data folder, then attempts to delete them."
+    $btnRemoveSel   = New-DrvBtn "Remove Selected" 200 "#802020" "Removes only the currently highlighted driver(s) from the list."
+    $btnClose       = New-DrvBtn "Close" 380 $null "Close this window."
+
+    # 4. DATA BINDING
+    $script:CurrentList = $toDelete
 
     $LoadGrid = {
         $dt = New-Object System.Data.DataTable
@@ -1178,67 +1179,125 @@ function Show-DriverCleanupDialog {
         $dt.Columns.Add("Provider")
         $dt.Columns.Add("Version")
         $dt.Columns.Add("Date")
-        foreach($d in $toDelete){
+
+        foreach($d in $script:CurrentList){
             $r=$dt.NewRow()
-            $r["PublishedName"]=$d.PublishedName
-            $r["OriginalName"]=$d.OriginalName
-            $r["Provider"]=$d.Provider
-            $r["Version"]=$d.Version.ToString()
-            $r["Date"]=$d.Date.ToShortDateString()
+            $r["PublishedName"] = $d.PublishedName
+            $r["OriginalName"]  = $d.OriginalName
+            $r["Provider"]      = $d.Provider
+            $r["Version"]       = $d.DisplayVer
+            $r["Date"]          = $d.DisplayDate
             $dt.Rows.Add($r)
         }
-        $dg.DataSource=$dt
+        $dg.DataSource = $dt
         $dg.ClearSelection()
     }
 
+    # 5. ACTION LOGIC
     $DoRemove = {
-        param($items)
+        param($items, $CloseWindow)
+        
         if(-not $items -or $items.Count -eq 0){ return }
         $count = $items.Count
-        $confirm = [System.Windows.MessageBox]::Show("Backup then remove $count driver(s)?","Driver Cleanup",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
+        
+        $msg = "Processing $count driver(s).`n`n" +
+               "1. Selected drivers will be backed up.`n" +
+               "2. Attempts safe deletion.`n" +
+               "3. Offers FORCE delete on failure."
+               
+        $confirm = [System.Windows.MessageBox]::Show($msg, "Driver Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
         if ($confirm -ne "Yes") { return }
-        # Backup first
-        $bkPath = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -f 'yyyyMMdd_HHmm'))
-        New-Item -Path $bkPath -ItemType Directory -Force | Out-Null
-        $export = Start-Process pnputil.exe -ArgumentList "/export-driver","*","""$bkPath""" -NoNewWindow -Wait -PassThru
-        if ($export.ExitCode -ne 0) {
-            [System.Windows.MessageBox]::Show("Backup failed (pnputil exit $($export.ExitCode)). Aborting.","Driver Cleanup",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
-            return
+
+        # A. BACKUP
+        $timestamp = Get-Date -f 'yyyyMMdd_HHmm'
+        $mainBkPath = Join-Path (Get-DataPath) "Drivers_Backup_$timestamp"
+        if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
+        
+        $backupCount = 0
+        $prog = 1
+        foreach($item in $items) {
+            $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
+            $f.Update()
+            
+            $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
+            $drvPath = Join-Path $mainBkPath $folderName
+            New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
+
+            $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
+            if ($proc.ExitCode -eq 0) { $backupCount++ }
+            $prog++
         }
-        $deleted=0; $failed=0
+        $f.Text = "Processing Deletions..."
+        $f.Update()
+
+        # B. DELETION
+        $deleted = 0
+        $failed = 0
+        
         foreach($item in $items){
             $name = $item.PublishedName
-            $proc = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0 -or $proc.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+            
+            $p = New-Object System.Diagnostics.Process
+            $p.StartInfo.FileName = "pnputil.exe"
+            $p.StartInfo.Arguments = "/delete-driver $name /uninstall"
+            $p.StartInfo.RedirectStandardOutput = $true
+            $p.StartInfo.RedirectStandardError = $true
+            $p.StartInfo.UseShellExecute = $false
+            $p.StartInfo.CreateNoWindow = $true
+            $p.Start() | Out-Null
+            $stdOut = $p.StandardOutput.ReadToEnd()
+            $stdErr = $p.StandardError.ReadToEnd()
+            $p.WaitForExit()
+            
+            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
+                $deleted++
+            } else {
+                # Force Prompt
+                $fullLog = "$stdOut`n$stdErr".Trim()
+                $warnMsg = "Driver: $($item.OriginalName) ($name)`n`nError:`n$fullLog`n`nForce Delete?"
+                $forceDec = [System.Windows.MessageBox]::Show($warnMsg, "Deletion Failed", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Error)
+                
+                if ($forceDec -eq "Yes") {
+                    $procForce = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
+                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+                } else {
+                    $failed++
+                }
+            }
         }
-        [System.Windows.MessageBox]::Show("Deleted: $deleted`nFailed: $failed`nBackup: $bkPath","Driver Cleanup",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Information) | Out-Null
-        # Refresh grid removing deleted items
+
+        # C. REPORT & REFRESH
+        [System.Windows.MessageBox]::Show("Done.`nDeleted: $deleted`nBackups: $backupCount`nPath: $mainBkPath", "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+
         if ($deleted -gt 0) {
-            $global:toDelete = $toDelete | Where-Object { $items -notcontains $_ }
+            # Remove deleted items from the current list
+            $script:CurrentList = $script:CurrentList | Where-Object { 
+                $obj = $_; -not ($items | Where-Object { $_.PublishedName -eq $obj.PublishedName })
+            }
             $dg.DataSource = $null
             $LoadGrid.Invoke()
         }
+        
+        $f.Text = "Clean Old Drivers"
+        if ($CloseWindow) { $f.Close() }
     }
 
-    $btnBackupClean.Add_Click({
-        $DoRemove.Invoke($toDelete)
-    })
+    $btnBackupClean.Add_Click({ $DoRemove.Invoke($script:CurrentList, $true) })
     $btnRemoveSel.Add_Click({
         if($dg.SelectedRows.Count -eq 0){ return }
         $selected = @()
         foreach($row in $dg.SelectedRows){
             $pub = $row.Cells["PublishedName"].Value
-            $match = $toDelete | Where-Object { $_.PublishedName -eq $pub } | Select-Object -First 1
+            $match = $script:CurrentList | Where-Object { $_.PublishedName -eq $pub } | Select-Object -First 1
             if($match){ $selected += $match }
         }
-        $DoRemove.Invoke($selected)
+        $DoRemove.Invoke($selected, $false)
     })
     $btnClose.Add_Click({ $f.Close() })
 
     $LoadGrid.Invoke()
     $f.ShowDialog() | Out-Null
 }
-
 function Invoke-RestoreDrivers {
     $dataPath = Get-DataPath
     $backups = @()
