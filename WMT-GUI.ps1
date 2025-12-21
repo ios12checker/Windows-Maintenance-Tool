@@ -1066,10 +1066,10 @@ function Show-DriverCleanupDialog {
                 }
 
                 # 3. Fallback
-                elseif ($current.OriginalName -eq $null -and $val -match '\.inf$') {
+                elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') {
                     $current.OriginalName = $val
                 }
-            }
+            }   
         }
     }
     if ($current) { $drivers += [PSCustomObject]$current }
@@ -2360,39 +2360,102 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
-# Helper to run Winget actions immediately in background
+# 1. SETUP TIMER FOR BACKGROUND POLLING
+$script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+
+$script:WingetTimer.Add_Tick({
+    if ($script:WingetJob) {
+        # Fetch available output from the background job
+        $results = Receive-Job -Job $script:WingetJob
+        
+        if ($results) {
+            foreach ($line in $results) {
+                # Basic cleanup of empty lines
+                if (-not [string]::IsNullOrWhiteSpace($line)) {
+                    Write-GuiLog $line
+                }
+            }
+        }
+        
+        # Check if the job has finished
+        if ($script:WingetJob.State -in 'Completed', 'Failed', 'Stopped') {
+            $script:WingetTimer.Stop()
+            Remove-Job -Job $script:WingetJob -Force
+            $script:WingetJob = $null
+            
+            # Unlock UI
+            $btnWingetScan.IsEnabled = $true
+            $btnWingetUpdateSel.IsEnabled = $true
+            $btnWingetInstall.IsEnabled = $true
+            $btnWingetUninstall.IsEnabled = $true
+            $lblWingetStatus.Visibility = "Hidden"
+            Write-GuiLog "--- Operation Complete ---"
+            
+            # Auto-refresh list if we modified something
+            if ($script:WingetRefreshNeeded) {
+                Write-GuiLog "Refreshing list..."
+                $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                $script:WingetRefreshNeeded = $false
+            }
+        }
+    }
+})
+
+# 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
-
-    # 1. Log to GUI (No Popup)
-    Write-GuiLog "Starting $ActionName for $($ListItems.Count) app(s) in background window..."
-
-    # 2. Build Background Script
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine("Write-Host 'Windows Maintenance Tool - $ActionName' -ForegroundColor Cyan")
-    [void]$sb.AppendLine("Write-Host '----------------------------------------' -ForegroundColor Gray")
     
-    foreach ($item in $ListItems) {
-        $id = $item.Id
-        $name = $item.Name -replace "'", "''" # Escape single quotes
-        $cmd = $CmdTemplate -f $id
+    # Lock UI to prevent double-clicking
+    $btnWingetScan.IsEnabled = $false
+    $btnWingetUpdateSel.IsEnabled = $false
+    $btnWingetInstall.IsEnabled = $false
+    $btnWingetUninstall.IsEnabled = $false
+    
+    $lblWingetStatus.Text = "$ActionName in progress..."
+    $lblWingetStatus.Visibility = "Visible"
+    
+    # Flag to trigger a refresh after updates/uninstalls
+    $script:WingetRefreshNeeded = ($ActionName -match "Update|Uninstall")
+    
+    Write-GuiLog " "
+    Write-GuiLog "=== STARTING $ActionName ($($ListItems.Count) Items) ==="
+    
+    # Prepare arguments to pass into the background job
+    $jobArgs = @{
+        Items = $ListItems | Select-Object Name, Id
+        Template = $CmdTemplate
+    }
+
+    # Start the Background Job
+    $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
+        param($ArgsDict)
+        $items = $ArgsDict.Items
+        $tmpl = $ArgsDict.Template
         
-        [void]$sb.AppendLine("Write-Host 'Processing: $name' -ForegroundColor Yellow")
-        [void]$sb.AppendLine($cmd)
-        [void]$sb.AppendLine("Write-Host '----------------------------------------'")
+        # Force UTF8 to avoid garbled text
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+        foreach ($item in $items) {
+            Write-Output "Processing: $($item.Name)..."
+            $cmd = $tmpl -f $item.Id
+            
+            # Run command and capture StdOut and StdErr
+            # We explicitly accept agreements to avoid hanging on hidden prompts
+            $expr = "$cmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            
+            Invoke-Expression $expr | Out-String -Stream
+            Write-Output "--------------------------------"
+        }
     }
     
-    [void]$sb.AppendLine("Write-Host 'Operation complete.' -ForegroundColor Green")
-    [void]$sb.AppendLine("Write-Host 'You may close this window and refresh the list in the main tool.' -ForegroundColor Gray")
-    [void]$sb.AppendLine("Read-Host 'Press Enter to exit...'")
-
-    # 3. Launch Detached Process Immediately
-    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($sb.ToString()))
-    Start-Process powershell.exe -ArgumentList "-NoProfile -EncodedCommand $encoded"
+    # Start the timer to listen for output
+    $script:WingetTimer.Start()
 }
 
+# 3. EVENT HANDLERS
 $btnWingetScan.Add_Click({
     $lblWingetTitle.Text = "Available Updates"
     $lblWingetStatus.Text = "Scanning..."; $lblWingetStatus.Visibility = "Visible"
@@ -2400,6 +2463,7 @@ $btnWingetScan.Add_Click({
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
+    # We keep scanning synchronous (but fast) because it populates the Object List
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
     $psCmd = "chcp 65001 >`$null; winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
     
@@ -2419,7 +2483,7 @@ $btnWingetScan.Add_Click({
     }
     
     $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Found $($lstWinget.Items.Count) updates."
+    Write-GuiLog "Scan complete. Found $($lstWinget.Items.Count) updates."
 })
 
 $btnWingetFind.Add_Click({
@@ -2451,13 +2515,11 @@ $btnWingetFind.Add_Click({
 })
 
 $btnWingetUpdateSel.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update" -CmdTemplate "winget upgrade --id {0} --accept-package-agreements --accept-source-agreements"
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update" -CmdTemplate "winget upgrade --id {0}"
 })
 
 $btnWingetInstall.Add_Click({ 
-    foreach ($item in $lstWinget.SelectedItems) {
-        & $Script:StartWingetAction -ListItems @($item) -ActionName "Install" -CmdTemplate "winget install --id {0} --accept-package-agreements --accept-source-agreements"
-    }
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install" -CmdTemplate "winget install --id {0}"
 })
 
 $btnWingetUninstall.Add_Click({ 
