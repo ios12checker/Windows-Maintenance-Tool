@@ -58,6 +58,32 @@ function Invoke-UiCommand {
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
+function Start-GuiJob {
+    param(
+        [scriptblock]$ScriptBlock, 
+        [string]$JobName, 
+        [scriptblock]$CompletedAction,
+        [object[]]$Arguments = @()   # <--- ADDED THIS
+    )
+    
+    # Pass arguments into the background job
+    $job = Start-Job -ScriptBlock $ScriptBlock -ArgumentList $Arguments
+    
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $timer.Add_Tick({
+        if ($job.State -ne 'Running') {
+            $timer.Stop()
+            $result = Receive-Job -Job $job
+            Remove-Job -Job $job
+            
+            # Execute completion logic (Back on the UI thread)
+            & $CompletedAction $result
+        }
+    })
+    $timer.Start()
+}
+
 # Centralized data path for exports (in repo folder)
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
