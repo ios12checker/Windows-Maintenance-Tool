@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.4"
+$AppVersion = "4.5"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -2360,24 +2360,64 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
+# Helper to run Winget actions immediately in background
+$Script:StartWingetAction = {
+    param($ListItems, $ActionName, $CmdTemplate)
+    
+    if (-not $ListItems -or $ListItems.Count -eq 0) { return }
+
+    # 1. Log to GUI (No Popup)
+    Write-GuiLog "Starting $ActionName for $($ListItems.Count) app(s) in background window..."
+
+    # 2. Build Background Script
+    $sb = [System.Text.StringBuilder]::new()
+    [void]$sb.AppendLine("Write-Host 'Windows Maintenance Tool - $ActionName' -ForegroundColor Cyan")
+    [void]$sb.AppendLine("Write-Host '----------------------------------------' -ForegroundColor Gray")
+    
+    foreach ($item in $ListItems) {
+        $id = $item.Id
+        $name = $item.Name -replace "'", "''" # Escape single quotes
+        $cmd = $CmdTemplate -f $id
+        
+        [void]$sb.AppendLine("Write-Host 'Processing: $name' -ForegroundColor Yellow")
+        [void]$sb.AppendLine($cmd)
+        [void]$sb.AppendLine("Write-Host '----------------------------------------'")
+    }
+    
+    [void]$sb.AppendLine("Write-Host 'Operation complete.' -ForegroundColor Green")
+    [void]$sb.AppendLine("Write-Host 'You may close this window and refresh the list in the main tool.' -ForegroundColor Gray")
+    [void]$sb.AppendLine("Read-Host 'Press Enter to exit...'")
+
+    # 3. Launch Detached Process Immediately
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($sb.ToString()))
+    Start-Process powershell.exe -ArgumentList "-NoProfile -EncodedCommand $encoded"
+}
+
 $btnWingetScan.Add_Click({
     $lblWingetTitle.Text = "Available Updates"
     $lblWingetStatus.Text = "Scanning..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Visible"; $btnWingetInstall.Visibility = "Collapsed"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
+    
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
     $psCmd = "chcp 65001 >`$null; winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
     $proc.WaitForExit()
-    $lines = Get-Content $tempOut -Encoding UTF8
-    foreach ($line in $lines) {
-        if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
-            if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
-               [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
+    
+    if (Test-Path $tempOut) {
+        $lines = Get-Content $tempOut -Encoding UTF8
+        foreach ($line in $lines) {
+            if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
+                if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
+                   [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
+                }
             }
         }
+        Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
+    
     $lblWingetStatus.Visibility = "Hidden"
     Write-GuiLog "Found $($lstWinget.Items.Count) updates."
 })
@@ -2389,25 +2429,44 @@ $btnWingetFind.Add_Click({
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
+    
     $tempOut = Join-Path $env:TEMP "winget_search.txt"
     $psCmd = "chcp 65001 >`$null; winget search `"$($txtWingetSearch.Text)`" --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
     $proc.WaitForExit()
-    $lines = Get-Content $tempOut -Encoding UTF8
-    foreach ($line in $lines) {
-        if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
-            if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
-                 [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available="-"; Source="winget" })
+    
+    if (Test-Path $tempOut) {
+        $lines = Get-Content $tempOut -Encoding UTF8
+        foreach ($line in $lines) {
+            if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
+                if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
+                     [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available="-"; Source="winget" })
+                }
             }
         }
+        Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
+    
     $lblWingetStatus.Visibility = "Hidden"
 })
 
-$btnWingetUpdateSel.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget upgrade --id $item.Id --accept-package-agreements --accept-source-agreements } "Updating $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
-$btnWingetInstall.Add_Click({ foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget install --id $item.Id --accept-package-agreements --accept-source-agreements } "Installing $($item.Name)..." } })
-$btnWingetUninstall.Add_Click({ if ($lstWinget.SelectedItems.Count -gt 0) { if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { foreach ($item in $lstWinget.SelectedItems) { Invoke-UiCommand { winget uninstall --id $item.Id } "Uninstalling $($item.Name)..." }; $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } } })
+$btnWingetUpdateSel.Add_Click({ 
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update" -CmdTemplate "winget upgrade --id {0} --accept-package-agreements --accept-source-agreements"
+})
 
+$btnWingetInstall.Add_Click({ 
+    foreach ($item in $lstWinget.SelectedItems) {
+        & $Script:StartWingetAction -ListItems @($item) -ActionName "Install" -CmdTemplate "winget install --id {0} --accept-package-agreements --accept-source-agreements"
+    }
+})
+
+$btnWingetUninstall.Add_Click({ 
+    if ($lstWinget.SelectedItems.Count -gt 0) { 
+        if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected items?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { 
+            & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Uninstall" -CmdTemplate "winget uninstall --id {0}"
+        } 
+    } 
+})
 # --- System Health ---
 $btnSFC.Add_Click({
     Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "sfc /scannow; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
