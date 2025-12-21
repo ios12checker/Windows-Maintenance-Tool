@@ -28,7 +28,7 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
 }
 
 Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
-
+[System.Windows.Forms.Application]::EnableVisualStyles()
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
