@@ -2491,7 +2491,9 @@ $btnWingetScan.Add_Click({
     
     # We keep scanning synchronous (but fast) because it populates the Object List
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
-    $psCmd = "chcp 65001 >`$null; winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    
+    # FIX 1: Set BufferSize to 300 to prevent line wrapping on long version numbers
+    $psCmd = "chcp 65001 >`$null; `$host.ui.RawUI.BufferSize = New-Object Management.Automation.Host.Size(300, 3000); winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
     
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
     $proc.WaitForExit()
@@ -2499,7 +2501,9 @@ $btnWingetScan.Add_Click({
     if (Test-Path $tempOut) {
         $lines = Get-Content $tempOut -Encoding UTF8
         foreach ($line in $lines) {
-            if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
+            # FIX 2: Relaxed Regex
+            # Changed `^(\S.{0,30}?)` to `^(.+?)` to allow any name length
+            if ($line -match '^(.+?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
                 if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
                    [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
                 }
