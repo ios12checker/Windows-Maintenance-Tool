@@ -2384,6 +2384,12 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
+$txtWingetSearch.Add_TextChanged({
+    # If the user starts typing and the only item is our status message, clear it
+    if ($lstWinget.Items.Count -eq 1 -and $lstWinget.Items[0].Name -eq "No updates available") {
+        $lstWinget.Items.Clear()
+    }
+})
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
 # 1. SETUP TIMER FOR BACKGROUND POLLING
@@ -2567,13 +2573,12 @@ $btnWingetScan.Add_Click({
             $line = $line.Trim()
             
             # --- FILTERS ---
-            # Skip empty lines, headers, and the "X upgrades available" footer
+            # Added filter for "No installed package found" to prevent it being parsed as an app
             if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
             # STRATEGY: Greedy Match from Right-to-Left
-            # We assume ID, Version, Source never have spaces. Name DOES have spaces.
             
             # Case A: 5 Columns (Name, Id, Version, Available, Source)
             if ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
@@ -2597,8 +2602,15 @@ $btnWingetScan.Add_Click({
         Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
     
+    # Check if list is empty and add placeholder message
+    if ($lstWinget.Items.Count -eq 0) {
+        [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+            Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
+        })
+    }
+    
     $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Scan complete. Found $($lstWinget.Items.Count) updates."
+    Write-GuiLog "Scan complete. Found $($lstWinget.Items.Count) items."
 })
 
 $btnWingetFind.Add_Click({
