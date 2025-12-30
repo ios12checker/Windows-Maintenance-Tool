@@ -1818,7 +1818,7 @@ function Show-TaskManager {
                         </Grid>
                     </Grid>
 
-                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="White" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended">
+                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" Width="300" DisplayMemberBinding="{Binding Name}"/>
@@ -2572,9 +2572,15 @@ $btnWingetScan.Add_Click({
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            # --- FILTERS ---
-            # Added filter for "No installed package found" to prevent it being parsed as an app
+            # --- FILTERS (UPDATED) ---
+            # 1. Skip headers, separators, and standard messages
             if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
+            
+            # 2. Skip Progress Bars (Block characters like █, ▒, etc.)
+            if ($line -match "[\u2580-\u259F]") { continue }
+
+            # 3. Skip Download Status lines (e.g., "10.5 MB / 10.5 MB")
+            if ($line -match "\d+\s*(KB|MB|GB|TB)") { continue }
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
@@ -2593,7 +2599,8 @@ $btnWingetScan.Add_Click({
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
             }
 
-            if ($name) {
+            # Final Safety Check: Ensure ID doesn't look like a leftover file size unit
+            if ($name -and $id -notmatch "^(KB|MB|GB|/)$") {
                 [void]$lstWinget.Items.Add([PSCustomObject]@{ 
                     Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
                 })
