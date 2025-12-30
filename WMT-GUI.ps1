@@ -2428,13 +2428,12 @@ $script:WingetTimer.Add_Tick({
     }
 })
 
-# 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
     
-    # Lock UI to prevent double-clicking
+    # Lock UI
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
     $btnWingetInstall.IsEnabled = $false
@@ -2442,42 +2441,73 @@ $Script:StartWingetAction = {
     
     $lblWingetStatus.Text = "$ActionName in progress..."
     $lblWingetStatus.Visibility = "Visible"
-    
-    # Flag to trigger a refresh after updates/uninstalls
     $script:WingetRefreshNeeded = ($ActionName -match "Update|Uninstall")
     
     Write-GuiLog " "
     Write-GuiLog "=== STARTING $ActionName ($($ListItems.Count) Items) ==="
     
-    # Prepare arguments to pass into the background job
     $jobArgs = @{
         Items = $ListItems | Select-Object Name, Id
         Template = $CmdTemplate
     }
 
-    # Start the Background Job
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
         param($ArgsDict)
+        Add-Type -AssemblyName System.Windows.Forms
+        
         $items = $ArgsDict.Items
         $tmpl = $ArgsDict.Template
-        
-        # Force UTF8 to avoid garbled text
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
         foreach ($item in $items) {
             Write-Output "Processing: $($item.Name)..."
-            $cmd = $tmpl -f $item.Id
+            $baseCmd = $tmpl -f $item.Id
             
-            # Run command and capture StdOut and StdErr
-            # We explicitly accept agreements to avoid hanging on hidden prompts
-            $expr = "$cmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            # 1. Attempt Silent Install First
+            $expr = "$baseCmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            $failed = $false
             
-            Invoke-Expression $expr | Out-String -Stream
+            Invoke-Expression $expr | ForEach-Object {
+                $line = $_
+                
+                # FILTER: Skip progress spinner lines (- \ | /)
+                if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                
+                Write-Output $line
+                
+                if ($line -match "Installer failed" -or $line -match "exit code:") {
+                    $failed = $true
+                }
+            }
+            
+            # 2. If Silent Install Failed, Prompt for Interactive Mode
+            if ($failed) {
+                $msg = "The update for '$($item.Name)' failed silently (likely blocked by open apps).`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Update Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
+                
+                if ($choice -eq "Yes") {
+                    Write-Output " "
+                    Write-Output ">> Launching Interactive Mode..."
+                    Write-Output ">> A new window should be open. Please complete the setup there."
+                    Write-Output " "
+                    
+                    # Run interactively, but still filter the spinner logs
+                    $exprInteractive = "$baseCmd --accept-source-agreements --accept-package-agreements --interactive"
+                    
+                    Invoke-Expression $exprInteractive | ForEach-Object {
+                        $line = $_
+                        if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                        Write-Output $line
+                    }
+                } else {
+                    Write-Output ">> Skipped by user."
+                }
+            }
+            
             Write-Output "--------------------------------"
         }
     }
     
-    # Start the timer to listen for output
     $script:WingetTimer.Start()
 }
 
