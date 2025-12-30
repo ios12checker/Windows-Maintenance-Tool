@@ -2603,14 +2603,17 @@ $btnWingetScan.Add_Click({
     }
     
     # Check if list is empty and add placeholder message
-    if ($lstWinget.Items.Count -eq 0) {
+    $logCount = $lstWinget.Items.Count
+    
+    if ($logCount -eq 0) {
         [void]$lstWinget.Items.Add([PSCustomObject]@{ 
             Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
         })
+        $logCount = 0 # Correct the log count for the placeholder
     }
     
     $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Scan complete. Found $($lstWinget.Items.Count) items."
+    Write-GuiLog "Scan complete. Found $logCount updates."
 })
 
 $btnWingetFind.Add_Click({
