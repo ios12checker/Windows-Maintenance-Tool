@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.5"
+$AppVersion = "4.6"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -2489,24 +2489,46 @@ $btnWingetScan.Add_Click({
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
-    # We keep scanning synchronous (but fast) because it populates the Object List
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
     
-    # FIX 1: Set BufferSize to 300 to prevent line wrapping on long version numbers
-    $psCmd = "chcp 65001 >`$null; `$host.ui.RawUI.BufferSize = New-Object Management.Automation.Host.Size(300, 3000); winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    # Capture output
+    $psCmd = "chcp 65001 >`$null; `$host.ui.RawUI.BufferSize = New-Object Management.Automation.Host.Size(300, 3000); winget list --upgrade-available --accept-source-agreements 2>&1 | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
     
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
     $proc.WaitForExit()
     
     if (Test-Path $tempOut) {
         $lines = Get-Content $tempOut -Encoding UTF8
+        
         foreach ($line in $lines) {
-            # FIX 2: Relaxed Regex
-            # Changed `^(\S.{0,30}?)` to `^(.+?)` to allow any name length
-            if ($line -match '^(.+?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
-                if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
-                   [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
-                }
+            $line = $line.Trim()
+            
+            # --- FILTERS ---
+            # Skip empty lines, headers, and the "X upgrades available" footer
+            if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available") { continue }
+
+            $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
+
+            # STRATEGY: Greedy Match from Right-to-Left
+            # We assume ID, Version, Source never have spaces. Name DOES have spaces.
+            
+            # Case A: 5 Columns (Name, Id, Version, Available, Source)
+            if ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
+            }
+            # Case B: 4 Columns (Name, Id, Version, Source) - "Available" missing
+            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
+            }
+            # Case C: 3 Columns (Name, Id, Version) - "Available" and "Source" missing
+            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
+            }
+
+            if ($name) {
+                [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+                    Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
+                })
             }
         }
         Remove-Item $tempOut -ErrorAction SilentlyContinue
