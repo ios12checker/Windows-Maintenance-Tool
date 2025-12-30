@@ -2466,33 +2466,65 @@ $Script:StartWingetAction = {
             
             # 1. Attempt Silent Install First
             $expr = "$baseCmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            
             $failed = $false
+            $adminBlocked = $false
             
             Invoke-Expression $expr | ForEach-Object {
                 $line = $_
                 
-                # FILTER: Skip progress spinner lines (- \ | /)
+                # FILTER: Skip spinner animation lines
                 if ($line -match '^\s*[\-\\|/]\s*$') { return }
                 
                 Write-Output $line
                 
+                # Check for Generic Failures
                 if ($line -match "Installer failed" -or $line -match "exit code:") {
                     $failed = $true
                 }
+                
+                # FIX: Broader Regex to catch "run" OR "installed" from admin context
+                if ($line -match "cannot be .* from an admin.* context" -or $line -match "run this installer as a normal user") {
+                    $failed = $true
+                    $adminBlocked = $true
+                }
             }
             
-            # 2. If Silent Install Failed, Prompt for Interactive Mode
+            # 2. Handle Admin Context Error (De-Elevation)
+            if ($adminBlocked) {
+                $msg = "The installer for '$($item.Name)' refuses to run as Administrator.`n`nDo you want to launch it as a Standard User (via Windows Explorer)?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Admin Context Blocked", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                
+                if ($choice -eq "Yes") {
+                    Write-Output ">> Preparing to launch as Standard User..."
+                    
+                    # Create a temporary batch file
+                    $tempCmd = Join-Path $env:TEMP "WMT_DeElevate_Install.cmd"
+                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd --accept-source-agreements --accept-package-agreements`npause`ndel `"%~f0`" & exit"
+                    Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
+                    
+                    # Launch via Explorer to strip Admin token
+                    $explorer = Join-Path $env:WinDir "explorer.exe"
+                    Start-Process $explorer -ArgumentList "`"$tempCmd`""
+                    
+                    Write-Output ">> A new terminal window has opened for this installation."
+                    $failed = $false # Handled
+                } else {
+                    Write-Output ">> Skipped by user."
+                    $failed = $false # Prevent second popup
+                }
+            }
+            
+            # 3. Handle Generic Silent Failure (Switch to Interactive)
             if ($failed) {
-                $msg = "The update for '$($item.Name)' failed silently (likely blocked by open apps).`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
+                $msg = "The update for '$($item.Name)' failed silently.`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
                 $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Update Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
                 
                 if ($choice -eq "Yes") {
                     Write-Output " "
                     Write-Output ">> Launching Interactive Mode..."
-                    Write-Output ">> A new window should be open. Please complete the setup there."
-                    Write-Output " "
+                    Write-Output ">> A new window should be open..."
                     
-                    # Run interactively, but still filter the spinner logs
                     $exprInteractive = "$baseCmd --accept-source-agreements --accept-package-agreements --interactive"
                     
                     Invoke-Expression $exprInteractive | ForEach-Object {
