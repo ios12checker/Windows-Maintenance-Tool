@@ -2428,6 +2428,7 @@ $script:WingetTimer.Add_Tick({
     }
 })
 
+# 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
     
