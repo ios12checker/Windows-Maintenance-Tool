@@ -2568,7 +2568,7 @@ $btnWingetScan.Add_Click({
             
             # --- FILTERS ---
             # Skip empty lines, headers, and the "X upgrades available" footer
-            if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available") { continue }
+            if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
