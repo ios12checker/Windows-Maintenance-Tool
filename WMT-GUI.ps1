@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.5"
+$AppVersion = "4.6"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -1818,7 +1818,7 @@ function Show-TaskManager {
                         </Grid>
                     </Grid>
 
-                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="White" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended">
+                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" Width="300" DisplayMemberBinding="{Binding Name}"/>
@@ -2384,6 +2384,12 @@ $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $
 
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
+$txtWingetSearch.Add_TextChanged({
+    # If the user starts typing and the only item is our status message, clear it
+    if ($lstWinget.Items.Count -eq 1 -and $lstWinget.Items[0].Name -eq "No updates available") {
+        $lstWinget.Items.Clear()
+    }
+})
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
 # 1. SETUP TIMER FOR BACKGROUND POLLING
@@ -2434,7 +2440,7 @@ $Script:StartWingetAction = {
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
     
-    # Lock UI to prevent double-clicking
+    # Lock UI
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
     $btnWingetInstall.IsEnabled = $false
@@ -2442,42 +2448,105 @@ $Script:StartWingetAction = {
     
     $lblWingetStatus.Text = "$ActionName in progress..."
     $lblWingetStatus.Visibility = "Visible"
-    
-    # Flag to trigger a refresh after updates/uninstalls
     $script:WingetRefreshNeeded = ($ActionName -match "Update|Uninstall")
     
     Write-GuiLog " "
     Write-GuiLog "=== STARTING $ActionName ($($ListItems.Count) Items) ==="
     
-    # Prepare arguments to pass into the background job
     $jobArgs = @{
         Items = $ListItems | Select-Object Name, Id
         Template = $CmdTemplate
     }
 
-    # Start the Background Job
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
         param($ArgsDict)
+        Add-Type -AssemblyName System.Windows.Forms
+        
         $items = $ArgsDict.Items
         $tmpl = $ArgsDict.Template
-        
-        # Force UTF8 to avoid garbled text
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
         foreach ($item in $items) {
             Write-Output "Processing: $($item.Name)..."
-            $cmd = $tmpl -f $item.Id
+            $baseCmd = $tmpl -f $item.Id
             
-            # Run command and capture StdOut and StdErr
-            # We explicitly accept agreements to avoid hanging on hidden prompts
-            $expr = "$cmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            # 1. Attempt Silent Install First
+            $expr = "$baseCmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
             
-            Invoke-Expression $expr | Out-String -Stream
+            $failed = $false
+            $adminBlocked = $false
+            
+            Invoke-Expression $expr | ForEach-Object {
+                $line = $_
+                
+                # FILTER: Skip spinner animation lines
+                if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                
+                Write-Output $line
+                
+                # Check for Generic Failures
+                if ($line -match "Installer failed" -or $line -match "exit code:") {
+                    $failed = $true
+                }
+                
+                # FIX: Broader Regex to catch "run" OR "installed" from admin context
+                if ($line -match "cannot be .* from an admin.* context" -or $line -match "run this installer as a normal user") {
+                    $failed = $true
+                    $adminBlocked = $true
+                }
+            }
+            
+            # 2. Handle Admin Context Error (De-Elevation)
+            if ($adminBlocked) {
+                $msg = "The installer for '$($item.Name)' refuses to run as Administrator.`n`nDo you want to launch it as a Standard User (via Windows Explorer)?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Admin Context Blocked", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+                
+                if ($choice -eq "Yes") {
+                    Write-Output ">> Preparing to launch as Standard User..."
+                    
+                    # Create a temporary batch file
+                    $tempCmd = Join-Path $env:TEMP "WMT_DeElevate_Install.cmd"
+                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd --accept-source-agreements --accept-package-agreements`npause`ndel `"%~f0`" & exit"
+                    Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
+                    
+                    # Launch via Explorer to strip Admin token
+                    $explorer = Join-Path $env:WinDir "explorer.exe"
+                    Start-Process $explorer -ArgumentList "`"$tempCmd`""
+                    
+                    Write-Output ">> A new terminal window has opened for this installation."
+                    $failed = $false # Handled
+                } else {
+                    Write-Output ">> Skipped by user."
+                    $failed = $false # Prevent second popup
+                }
+            }
+            
+            # 3. Handle Generic Silent Failure (Switch to Interactive)
+            if ($failed) {
+                $msg = "The update for '$($item.Name)' failed silently.`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Update Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
+                
+                if ($choice -eq "Yes") {
+                    Write-Output " "
+                    Write-Output ">> Launching Interactive Mode..."
+                    Write-Output ">> A new window should be open..."
+                    
+                    $exprInteractive = "$baseCmd --accept-source-agreements --accept-package-agreements --interactive"
+                    
+                    Invoke-Expression $exprInteractive | ForEach-Object {
+                        $line = $_
+                        if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                        Write-Output $line
+                    }
+                } else {
+                    Write-Output ">> Skipped by user."
+                }
+            }
+            
             Write-Output "--------------------------------"
         }
     }
     
-    # Start the timer to listen for output
     $script:WingetTimer.Start()
 }
 
@@ -2489,27 +2558,69 @@ $btnWingetScan.Add_Click({
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
-    # We keep scanning synchronous (but fast) because it populates the Object List
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
-    $psCmd = "chcp 65001 >`$null; winget list --upgrade-available --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
+    
+    # Capture output
+    $psCmd = "chcp 65001 >`$null; `$host.ui.RawUI.BufferSize = New-Object Management.Automation.Host.Size(300, 3000); winget list --upgrade-available --accept-source-agreements 2>&1 | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
     
     $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
     $proc.WaitForExit()
     
     if (Test-Path $tempOut) {
         $lines = Get-Content $tempOut -Encoding UTF8
+        
         foreach ($line in $lines) {
-            if ($line -match '^(\S.{0,30}?)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)\s{2,}(\S+)') {
-                if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
-                   [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available=$matches[4].Trim(); Source=$matches[5].Trim() })
-                }
+            $line = $line.Trim()
+            
+            # --- FILTERS (UPDATED) ---
+            # 1. Skip headers, separators, and standard messages
+            if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
+            
+            # 2. Skip Progress Bars (Block characters like █, ▒, etc.)
+            if ($line -match "[\u2580-\u259F]") { continue }
+
+            # 3. Skip Download Status lines (e.g., "10.5 MB / 10.5 MB")
+            if ($line -match "\d+\s*(KB|MB|GB|TB)") { continue }
+
+            $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
+
+            # STRATEGY: Greedy Match from Right-to-Left
+            
+            # Case A: 5 Columns (Name, Id, Version, Available, Source)
+            if ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
+            }
+            # Case B: 4 Columns (Name, Id, Version, Source) - "Available" missing
+            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
+            }
+            # Case C: 3 Columns (Name, Id, Version) - "Available" and "Source" missing
+            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
+            }
+
+            # Final Safety Check: Ensure ID doesn't look like a leftover file size unit
+            if ($name -and $id -notmatch "^(KB|MB|GB|/)$") {
+                [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+                    Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
+                })
             }
         }
         Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
     
+    # Check if list is empty and add placeholder message
+    $logCount = $lstWinget.Items.Count
+    
+    if ($logCount -eq 0) {
+        [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+            Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
+        })
+        $logCount = 0 # Correct the log count for the placeholder
+    }
+    
     $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Scan complete. Found $($lstWinget.Items.Count) updates."
+    Write-GuiLog "Scan complete. Found $logCount updates."
 })
 
 $btnWingetFind.Add_Click({
