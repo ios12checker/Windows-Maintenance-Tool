@@ -817,7 +817,7 @@ function Invoke-SSDTrim {
 function Invoke-ShortcutFix {
     Invoke-UiCommand {
         $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
+        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk","computer.lnk")
         $updated = 0; $deleted = 0
         function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
         foreach ($path in $paths) {
@@ -2883,7 +2883,7 @@ $btnCleanShortcuts.Add_Click({
     Invoke-UiCommand {
         $sb = [System.Text.StringBuilder]::new()
         $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
+        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk","computer.lnk")
         $updated = 0; $deleted = 0
         function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
         foreach ($path in $paths) {
