@@ -2456,6 +2456,7 @@ $Script:StartWingetAction = {
     $jobArgs = @{
         Items = $ListItems | Select-Object Name, Id
         Template = $CmdTemplate
+        IsUninstall = ($ActionName -eq "Uninstall") # Flag to detect uninstall mode
     }
 
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
@@ -2464,14 +2465,22 @@ $Script:StartWingetAction = {
         
         $items = $ArgsDict.Items
         $tmpl = $ArgsDict.Template
+        $isUninstall = $ArgsDict.IsUninstall
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
         foreach ($item in $items) {
             Write-Output "Processing: $($item.Name)..."
             $baseCmd = $tmpl -f $item.Id
             
-            # 1. Attempt Silent Install First
-            $expr = "$baseCmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            # --- BUILD ARGUMENTS ---
+            # 'accept-package-agreements' is NOT valid for uninstall and causes errors
+            $commonFlags = "--accept-source-agreements"
+            if (-not $isUninstall) {
+                $commonFlags += " --accept-package-agreements"
+            }
+
+            # 1. Attempt Silent Execution First
+            $expr = "$baseCmd $commonFlags --disable-interactivity"
             
             $failed = $false
             $adminBlocked = $false
@@ -2484,12 +2493,15 @@ $Script:StartWingetAction = {
                 
                 Write-Output $line
                 
-                # Check for Generic Failures
+                # Check for Failures
                 if ($line -match "Installer failed" -or $line -match "exit code:") {
                     $failed = $true
                 }
+                if ($line -match "Argument name was not recognized") {
+                    $failed = $true
+                }
                 
-                # FIX: Broader Regex to catch "run" OR "installed" from admin context
+                # Check for Admin Context blocks
                 if ($line -match "cannot be .* from an admin.* context" -or $line -match "run this installer as a normal user") {
                     $failed = $true
                     $adminBlocked = $true
@@ -2504,39 +2516,46 @@ $Script:StartWingetAction = {
                 if ($choice -eq "Yes") {
                     Write-Output ">> Preparing to launch as Standard User..."
                     
-                    # Create a temporary batch file
                     $tempCmd = Join-Path $env:TEMP "WMT_DeElevate_Install.cmd"
-                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd --accept-source-agreements --accept-package-agreements`npause`ndel `"%~f0`" & exit"
+                    # We use the filtered $commonFlags here too
+                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd $commonFlags`npause`ndel `"%~f0`" & exit"
                     Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
                     
-                    # Launch via Explorer to strip Admin token
-                    $explorer = Join-Path $env:WinDir "explorer.exe"
-                    Start-Process $explorer -ArgumentList "`"$tempCmd`""
+                    Start-Process (Join-Path $env:WinDir "explorer.exe") -ArgumentList "`"$tempCmd`""
                     
-                    Write-Output ">> A new terminal window has opened for this installation."
+                    Write-Output ">> A new terminal window has opened for this operation."
                     $failed = $false # Handled
                 } else {
                     Write-Output ">> Skipped by user."
-                    $failed = $false # Prevent second popup
+                    $failed = $false
                 }
             }
             
-            # 3. Handle Generic Silent Failure (Switch to Interactive)
+            # 3. Handle Generic Failure (Switch to Interactive)
             if ($failed) {
-                $msg = "The update for '$($item.Name)' failed silently.`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
-                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Update Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
+                $msg = "The operation for '$($item.Name)' failed silently.`n`nWould you like to launch it INTERACTIVELY so you can handle the error manually?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Operation Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
                 
                 if ($choice -eq "Yes") {
-                    Write-Output " "
-                    Write-Output ">> Launching Interactive Mode..."
-                    Write-Output ">> A new window should be open..."
+                    # A. NOTIFY USER
+                    [System.Windows.Forms.MessageBox]::Show("The interactive installer will now open.`n`nPlease follow the prompts in the new window to complete the process.`n`nThis tool will wait until you are finished.", "Launching Interactive Mode", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
                     
-                    $exprInteractive = "$baseCmd --accept-source-agreements --accept-package-agreements --interactive"
+                    Write-Output ">> Launching Interactive Mode... Waiting for user completion..."
                     
-                    Invoke-Expression $exprInteractive | ForEach-Object {
-                        $line = $_
-                        if ($line -match '^\s*[\-\\|/]\s*$') { return }
-                        Write-Output $line
+                    # B. PREPARE ARGUMENTS
+                    # Strip 'winget ' from the start to get raw arguments for Start-Process
+                    $argString = $baseCmd -replace "^winget\s+", ""
+                    # Add necessary flags
+                    $finalArgs = "$argString $commonFlags --interactive"
+                    
+                    # C. EXECUTE WITH WAIT
+                    # -Wait forces the script to pause until the installer closes
+                    $proc = Start-Process -FilePath "winget" -ArgumentList $finalArgs -Wait -PassThru -NoNewWindow
+                    
+                    if ($proc.ExitCode -eq 0) {
+                        Write-Output ">> Interactive process finished successfully."
+                    } else {
+                        Write-Output ">> Interactive process finished (Exit Code: $($proc.ExitCode))."
                     }
                 } else {
                     Write-Output ">> Skipped by user."
@@ -2660,12 +2679,21 @@ $btnWingetInstall.Add_Click({
 })
 
 $btnWingetUninstall.Add_Click({ 
-    if ($lstWinget.SelectedItems.Count -gt 0) { 
-        if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected items?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { 
-            & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Uninstall" -CmdTemplate "winget uninstall --id {0}"
+    # 1. Capture selected items immediately to a standard array
+    $selected = @($lstWinget.SelectedItems)
+
+    if ($selected.Count -gt 0) { 
+        # 2. Confirm action
+        $msg = "Are you sure you want to uninstall $($selected.Count) application(s)?"
+        $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Uninstall", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") { 
+            # 3. Pass the array to the action handler with quoted ID template
+            & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall" -CmdTemplate "winget uninstall --id `"{0}`""
         } 
     } 
 })
+
 # --- System Health ---
 $btnSFC.Add_Click({
     Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "sfc /scannow; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
