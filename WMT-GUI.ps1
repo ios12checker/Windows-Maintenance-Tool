@@ -727,32 +727,231 @@ function Show-CleanupOptions {
     return ($radios | Where-Object { $_.Checked }).Tag
 }
 
+function Show-AdvancedCleanupSelection {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    # 1. SETUP FORM
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Advanced Cleanup Selection"
+    $form.Size = New-Object System.Drawing.Size(450, 550)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+    $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $form.ForeColor = "White"
+
+    # 2. MAIN SCROLLABLE PANEL
+    $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $mainPanel.FlowDirection = "TopDown"
+    $mainPanel.WrapContents = $false
+    $mainPanel.AutoScroll = $true
+    $mainPanel.Dock = "Top"
+    $mainPanel.Height = 440
+    $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $form.Controls.Add($mainPanel)
+
+    # 3. BUTTON PANEL
+    $btnPanel = New-Object System.Windows.Forms.Panel
+    $btnPanel.Dock = "Bottom"
+    $btnPanel.Height = 60
+    $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+    $form.Controls.Add($btnPanel)
+
+    $btnClean = New-Object System.Windows.Forms.Button
+    $btnClean.Text = "Clean Selected"
+    $btnClean.Size = New-Object System.Drawing.Size(140, 35)
+    $btnClean.Location = New-Object System.Drawing.Point(280, 12)
+    $btnClean.BackColor = "SeaGreen"
+    $btnClean.ForeColor = "White"
+    $btnClean.FlatStyle = "Flat"
+    $btnClean.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $btnPanel.Controls.Add($btnClean)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Size = New-Object System.Drawing.Size(100, 35)
+    $btnCancel.Location = New-Object System.Drawing.Point(170, 12)
+    $btnCancel.BackColor = "DimGray"
+    $btnCancel.ForeColor = "White"
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnPanel.Controls.Add($btnCancel)
+
+    # 4. DATA DEFINITION (Categories and Items)
+    $cleanupData = [ordered]@{
+        "System" = @(
+            @{ Name="Temporary Files";      Key="TempFiles";    Desc="User and System Temp folders" },
+            @{ Name="Recycle Bin";          Key="RecycleBin";   Desc="Empties the Recycle Bin" },
+            @{ Name="Windows Error Logs";   Key="WER";          Desc="Crash dumps and error reports" },
+            @{ Name="DNS Cache";            Key="DNS";          Desc="Flushes network DNS resolver cache" },
+            @{ Name="Thumbnail Cache";      Key="Thumbnails";   Desc="Windows Explorer thumbnail database" }
+        )
+        "Explorer & Privacy" = @(
+            @{ Name="Recent Items (Safe)";  Key="Recent";       Desc="Clears Recent list but keeps Quick Access pins" },
+            @{ Name="Run History";          Key="RunMRU";       Desc="Run dialog command history" },
+            @{ Name="Address Bar History";  Key="TypedPaths";   Desc="Explorer address bar history" },
+            @{ Name="User Assist";          Key="UserAssist";   Desc="Logs of programs executed (ROT13 encoded)" }
+        )
+        "Browsers" = @(
+            @{ Name="Edge Cache";           Key="Edge";         Desc="Microsoft Edge temporary internet files" },
+            @{ Name="Chrome Cache";         Key="Chrome";       Desc="Google Chrome temporary internet files" },
+            @{ Name="Firefox Cache";        Key="Firefox";      Desc="Mozilla Firefox temporary internet files" }
+        )
+    }
+
+    # 5. UI GENERATOR HELPER
+    $global:checkboxes = @{} # Store references to retrieve values later
+
+    foreach ($category in $cleanupData.Keys) {
+        # A. Category Header (Select All)
+        $catPanel = New-Object System.Windows.Forms.Panel
+        $catPanel.Size = New-Object System.Drawing.Size(400, 30)
+        $catPanel.Margin = New-Object System.Windows.Forms.Padding(10, 10, 0, 0)
+        
+        $catChk = New-Object System.Windows.Forms.CheckBox
+        $catChk.Text = $category
+        $catChk.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
+        $catChk.AutoSize = $true
+        $catChk.Location = New-Object System.Drawing.Point(5, 5)
+        $catPanel.Controls.Add($catChk)
+        $mainPanel.Controls.Add($catPanel)
+
+        # B. Items Container
+        $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $itemFlow.FlowDirection = "TopDown"
+        $itemFlow.AutoSize = $true
+        $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0) # Indent
+
+        $childChecks = @()
+
+        foreach ($item in $cleanupData[$category]) {
+            $chk = New-Object System.Windows.Forms.CheckBox
+            $chk.Text = $item.Name
+            $chk.Tag  = $item.Key
+            $chk.AutoSize = $true
+            $chk.ForeColor = "White"
+            $chk.Checked = $true # Default Checked
+            
+            # Tooltip for description
+            $tt = New-Object System.Windows.Forms.ToolTip
+            $tt.SetToolTip($chk, $item.Desc)
+
+            $itemFlow.Controls.Add($chk)
+            $global:checkboxes[$item.Key] = $chk
+            $childChecks += $chk
+        }
+        
+        $mainPanel.Controls.Add($itemFlow)
+
+        # C. Event Wiring (Select All Logic)
+        $catChk.Checked = $true
+        $catChk.Add_Click({ 
+            param($sender, $e)
+            foreach ($c in $childChecks) { $c.Checked = $sender.Checked }
+        })
+    }
+
+    $form.AcceptButton = $btnClean
+    $form.CancelButton = $btnCancel
+
+    # 6. SHOW AND RETURN
+    $result = $form.ShowDialog()
+
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        $selectedKeys = @()
+        foreach ($key in $global:checkboxes.Keys) {
+            if ($global:checkboxes[$key].Checked) { $selectedKeys += $key }
+        }
+        return $selectedKeys
+    }
+    return $null
+}
 function Invoke-TempCleanup {
-    $mode = Show-CleanupOptions
-    if (-not $mode) { return }
+    # 1. Open the BleachBit-style UI
+    $selections = Show-AdvancedCleanupSelection
+    
+    # If user cancelled or selected nothing, exit
+    if (-not $selections -or $selections.Count -eq 0) { return }
+
     Invoke-UiCommand {
-        param($mode)
-        $paths = @($env:TEMP,"C:\Windows\Temp") | Select-Object -Unique
-        $deleted = 0; $skipped = 0
-        foreach ($path in $paths) {
-            if (-not (Test-Path $path)) { Write-Output "Missing: $path"; continue }
-            Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                try { Remove-Item $_.FullName -Force -Recurse -ErrorAction Stop; $deleted++ } catch { $skipped++; Write-Output "Skipped $($_.FullName): $($_.Exception.Message)" }
+        param($selections)
+        $deleted = 0
+        $log = @()
+
+        # --- SYSTEM CATEGORY ---
+        if ($selections -contains "TempFiles") {
+            Write-Output "Cleaning Temp Files..."
+            $paths = @($env:TEMP, "C:\Windows\Temp") | Select-Object -Unique
+            foreach ($path in $paths) {
+                if (Test-Path $path) {
+                    Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try { Remove-Item $_.FullName -Force -Recurse -ErrorAction Stop; $deleted++ } catch {}
+                    }
+                }
             }
         }
-        if ($mode -in @("DeleteAndEmpty","PrivacyCleanup")) {
-            try { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin",'OnlyErrorDialogs','DeletePermanently'); Write-Output "Recycle Bin emptied." } catch { Write-Output "Recycle Bin cleanup failed: $($_.Exception.Message)" }
-        }
-        if ($mode -eq "PrivacyCleanup") {
-            try { reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f | Out-Null } catch {}
-            try { Remove-Item "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -Recurse -ErrorAction SilentlyContinue } catch {}
-            try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue } catch {}
-            try { wevtutil cl Microsoft-Windows-Diagnostics-Performance/Operational 2>&1 | Out-Null } catch {}
-        }
-        Write-Output "Cleanup complete. Deleted $deleted item(s), skipped $skipped."
-    } "Cleaning temporary files..."
-}
 
+        if ($selections -contains "RecycleBin") {
+            try { 
+                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently')
+                Write-Output "Recycle Bin emptied."
+            } catch { Write-Output "Recycle Bin cleanup skipped (empty or locked)." }
+        }
+
+        if ($selections -contains "WER") {
+            try { Remove-Item "C:\ProgramData\Microsoft\Windows\WER\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Cleared Windows Error Reporting logs." } catch {}
+        }
+
+        if ($selections -contains "DNS") {
+            try { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output "DNS Cache flushed." } catch {}
+        }
+
+        if ($selections -contains "Thumbnails") {
+            try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue; Write-Output "Thumbnail cache cleared." } catch {}
+        }
+
+        # --- EXPLORER & PRIVACY ---
+        if ($selections -contains "Recent") {
+            try { 
+                # Protect CustomDestinations (Quick Access pins)
+                Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Force -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Name -ne "CustomDestinations" -and $_.Name -ne "AutomaticDestinations" } | 
+                Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 
+                Write-Output "Recent Items cleared (Quick Access preserved)."
+            } catch {}
+        }
+
+        if ($selections -contains "RunMRU") {
+            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue; Write-Output "Run dialog history cleared." } catch {}
+        }
+
+        if ($selections -contains "TypedPaths") {
+            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths" -Name * -ErrorAction SilentlyContinue; Write-Output "Address bar history cleared." } catch {}
+        }
+
+        if ($selections -contains "UserAssist") {
+             try { reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f | Out-Null; Write-Output "UserAssist history cleared." } catch {}
+        }
+
+        # --- BROWSERS ---
+        if ($selections -contains "Edge") {
+             try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Edge cache cleared." } catch {}
+        }
+        if ($selections -contains "Chrome") {
+             try { Remove-Item "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Chrome cache cleared." } catch {}
+        }
+        if ($selections -contains "Firefox") {
+             try { Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*" -Directory | ForEach-Object { 
+                Remove-Item "$($_.FullName)\cache2\entries\*" -Recurse -Force -ErrorAction SilentlyContinue 
+            }; Write-Output "Firefox cache cleared." } catch {}
+        }
+
+        Write-Output "Cleanup complete. Deleted $deleted files."
+
+    } "Running advanced cleanup..." -ArgumentList $selections
+}
 function Invoke-RegistryTask {
     param([string]$Action)
     switch ($Action) {
