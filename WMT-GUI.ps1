@@ -822,10 +822,9 @@ function Show-AdvancedCleanupSelection {
         $mainPanel.Controls.Add($itemFlow)
 
         # C. Event Wiring (Select All Logic)
-        $catChk.Checked = $true
         $catChk.Add_Click({ 
-            param($sender, $e)
-            foreach ($c in $childChecks) { $c.Checked = $sender.Checked }
+            param($src, $e) # Changed $sender to $src
+            foreach ($c in $childChecks) { $c.Checked = $src.Checked }
         })
     }
 
@@ -854,7 +853,6 @@ function Invoke-TempCleanup {
     Invoke-UiCommand {
         param($selections)
         $deleted = 0
-        $log = @()
 
         # --- SYSTEM CATEGORY ---
         if ($selections -contains "TempFiles") {
@@ -1038,14 +1036,15 @@ function Show-BrokenShortcuts {
     $pnl.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $f.Controls.Add($pnl)
 
+    # --- CHANGED: Delete Button ---
     $btnDelete = New-Object System.Windows.Forms.Button
-    $btnDelete.Text = "Mark for Delete"
+    $btnDelete.Text = "Delete Selected"
     $btnDelete.Location = "20, 20"; $btnDelete.Width = 150; $btnDelete.Height = 35
     $btnDelete.BackColor = "IndianRed"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
     $pnl.Controls.Add($btnDelete)
 
     $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Apply Actions"
+    $btnApply.Text = "Apply Fixes" # Renamed slightly to be clearer
     $btnApply.Location = "780, 20"; $btnApply.Width = 150; $btnApply.Height = 35
     $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"
     $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
@@ -1095,7 +1094,6 @@ function Show-BrokenShortcuts {
         $row = $dg.SelectedRows[0]
         $obj = $row.DataBoundItem
         
-        # A. Determine what file we are looking for
         $searchName = $null
         $shell = New-Object -ComObject WScript.Shell
         try {
@@ -1105,13 +1103,11 @@ function Show-BrokenShortcuts {
             }
         } catch {}
 
-        # Fallback: If target is empty, guess based on Shortcut Name (e.g. Firefox.lnk -> Firefox.exe)
         if (-not $searchName) {
             $base = [System.IO.Path]::GetFileNameWithoutExtension($obj.Shortcut)
             $searchName = "$base.exe"
         }
 
-        # B. Warning Dialog
         $warnMsg = "This will scan ALL local hard drives for:`n`n'$searchName'`n`nDepending on your drive size, this can take 5-10+ minutes.`nDuring this time, the application may appear frozen.`n`nDo you want to continue?"
         $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
         
@@ -1121,8 +1117,6 @@ function Show-BrokenShortcuts {
             $f.Update()
 
             $foundPath = $null
-            
-            # C. Get Fixed Drives Only (Avoid Network/USB to prevent hangs)
             $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' }
             
             foreach ($d in $drives) {
@@ -1130,14 +1124,9 @@ function Show-BrokenShortcuts {
                 $root = $d.RootDirectory.FullName
                 $lblStatus.Text = "Scanning drive $root for '$searchName'..."
                 $f.Update()
-                
                 try {
-                    # Fast-ish recursion using legacy Get-ChildItem with error suppression
-                    # We look for the FIRST match to stop early
                     $match = Get-ChildItem -Path $root -Filter $searchName -Recurse -ErrorAction SilentlyContinue -Force | Select-Object -First 1
-                    if ($match) {
-                        $foundPath = $match.FullName
-                    }
+                    if ($match) { $foundPath = $match.FullName }
                 } catch {}
             }
 
@@ -1160,7 +1149,7 @@ function Show-BrokenShortcuts {
     $ctx.Items.Add( (New-Object System.Windows.Forms.ToolStripSeparator) )
 
     # --- Unmark ---
-    $itemUnmark = $ctx.Items.Add("Unmark (Do Nothing)")
+    $itemUnmark = $ctx.Items.Add("Unmark / Cancel Action")
     $itemUnmark.Add_Click({
         foreach ($row in $dg.SelectedRows) {
             $obj = $row.DataBoundItem
@@ -1172,14 +1161,34 @@ function Show-BrokenShortcuts {
     })
     $dg.ContextMenuStrip = $ctx
 
-    # DELETE MARKER LOGIC
+    # --- CHANGED: DELETE BUTTON LOGIC ---
     $btnDelete.Add_Click({
-        foreach ($row in $dg.SelectedRows) {
-            $obj = $row.DataBoundItem
-            $obj.Action = "Delete"
-            $obj.Details = "Marked for deletion"
-            $dg.Refresh()
-            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::IndianRed
+        $count = $dg.SelectedRows.Count
+        if ($count -eq 0) { return }
+
+        $res = [System.Windows.Forms.MessageBox]::Show("Permanently delete $count selected shortcut(s)?`n`nThis action is immediate.", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") {
+            $rows = @($dg.SelectedRows) # Copy collection to avoid modification errors
+            $deletedCount = 0
+            
+            foreach ($row in $rows) {
+                try {
+                    # Get FullPath from the hidden column we added
+                    $path = $row.Cells["FullPath"].Value
+                    
+                    if ($path -and (Test-Path $path)) {
+                        Remove-Item -Path $path -Force -ErrorAction Stop
+                    }
+                    
+                    # Remove from UI
+                    $dg.Rows.Remove($row)
+                    $deletedCount++
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Could not delete: $path`n$($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                }
+            }
+            $lblStatus.Text = "Deleted $deletedCount shortcuts."
         }
     })
 
@@ -1200,7 +1209,6 @@ function Show-BrokenShortcuts {
             "$env:USERPROFILE\OneDrive\Desktop"
         ) | Select-Object -Unique | Where-Object { $_ -and (Test-Path $_) }
 
-        # --- SYSTEM SHORTCUT RESTORATION MAP ---
         $knownFixes = @{
             "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
             "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
@@ -1212,56 +1220,33 @@ function Show-BrokenShortcuts {
         $shell = New-Object -ComObject WScript.Shell
         
         $tempList = @()
-        $scannedCount = 0
-
+        
         foreach ($path in $paths) {
             Get-ChildItem -Path $path -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                $scannedCount++
                 $lnkPath = $_.FullName
                 try {
                     $sc = $shell.CreateShortcut($lnkPath)
                     $target = $sc.TargetPath
-                } catch {
-                    $tempList += [PSCustomObject]@{ Shortcut=$_.Name; Folder=(Split-Path $_.DirectoryName -Leaf); Action="Skip"; Details="Error reading"; NewTarget=$null; FullPath=$lnkPath }
-                    return
-                }
+                } catch { return }
 
-                # Ignore "Real" System Shortcuts
                 if ($target -match '^shell:' -or $target -match '^\s*::{') { return }
-                
-                # Ignore specific Installer Advertised Shortcuts (grayed out targets)
                 if ($target -match '^\s*$' -or $target.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return }
 
                 if (-not (Test-Path $target)) {
-                    $action = "None"
-                    $details = "Review Needed"
-                    $newT = $null
-                    
+                    $action = "None"; $details = "Review Needed"; $newT = $null
                     $baseName = $_.BaseName
 
-                    # A. CHECK KNOWN SYSTEM FIXES
                     if ($knownFixes.ContainsKey($baseName)) {
-                        $action = "Fix"
-                        $details = "Restore System Path"
-                        $newT = $knownFixes[$baseName]
-                    } 
-                    else {
-                        # B. AUTO-FIX SEARCH (Same Folder Peers)
+                        $action = "Fix"; $details = "Restore System Path"; $newT = $knownFixes[$baseName]
+                    } else {
                         $guessName = if ($target) { Split-Path $target -Leaf } else { ($baseName + ".exe") }
                         $peers = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $lnkPath }
-                        
                         foreach ($p in $peers) {
                             try {
                                 $pt = $shell.CreateShortcut($p.FullName).TargetPath
                                 if ($pt -and (Test-Path $pt)) {
-                                    $parent = Split-Path $pt -Parent
-                                    $candidate = Join-Path $parent $guessName
-                                    if (Test-Path $candidate) {
-                                        $action = "Fix"
-                                        $details = "Auto-Found: $parent"
-                                        $newT = $candidate
-                                        break
-                                    }
+                                    $parent = Split-Path $pt -Parent; $candidate = Join-Path $parent $guessName
+                                    if (Test-Path $candidate) { $action = "Fix"; $details = "Auto-Found: $parent"; $newT = $candidate; break }
                                 }
                             } catch {}
                         }
@@ -1281,9 +1266,9 @@ function Show-BrokenShortcuts {
 
         # 6. BIND
         $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("Shortcut"); $dt.Columns.Add("Folder"); $dt.Columns.Add("Action"); $dt.Columns.Add("Details"); $dt.Columns.Add("NewTarget")
-        $script:ScanResults = $tempList
-
+        # Added 'FullPath' column to the DataTable so we can access it for deletion
+        $dt.Columns.Add("Shortcut"); $dt.Columns.Add("Folder"); $dt.Columns.Add("Action"); $dt.Columns.Add("Details"); $dt.Columns.Add("NewTarget"); $dt.Columns.Add("FullPath")
+        
         foreach ($item in $tempList) {
             $row = $dt.NewRow()
             $row["Shortcut"]  = $item.Shortcut
@@ -1291,17 +1276,21 @@ function Show-BrokenShortcuts {
             $row["Action"]    = $item.Action
             $row["Details"]   = $item.Details
             $row["NewTarget"] = $item.NewTarget
+            $row["FullPath"]  = $item.FullPath
             $dt.Rows.Add($row)
         }
         $dg.DataSource = $dt
         $dg.ClearSelection()
+        
+        # Hide FullPath from view
+        if ($dg.Columns["FullPath"]) { $dg.Columns["FullPath"].Visible = $false }
 
         # 7. COLORS
         for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
             $row = $dg.Rows[$i]
-            $item = $tempList[$i]
-            if ($item.Action -eq "Fix") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen; $row.Selected = $true }
-            elseif ($item.Action -eq "None") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange }
+            $act = $row.Cells["Action"].Value
+            if ($act -eq "Fix") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen; $row.Selected = $true }
+            elseif ($act -eq "None") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange }
             else { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray }
         }
         
@@ -1314,7 +1303,22 @@ function Show-BrokenShortcuts {
         }
     })
 
-    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $script:ScanResults }
+    # Return Logic: Rebuild list from whatever is left in the grid to avoid processing deleted items
+    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { 
+        $finalList = @()
+        foreach ($row in $dg.Rows) {
+            # Map DataRowView back to object
+            $finalList += [PSCustomObject]@{
+                Shortcut  = $row.Cells["Shortcut"].Value
+                Folder    = $row.Cells["Folder"].Value
+                Action    = $row.Cells["Action"].Value
+                Details   = $row.Cells["Details"].Value
+                NewTarget = $row.Cells["NewTarget"].Value
+                FullPath  = $row.Cells["FullPath"].Value
+            }
+        }
+        return $finalList
+    }
     return $null
 }
 function Invoke-ShortcutFix {
@@ -1324,7 +1328,6 @@ function Invoke-ShortcutFix {
     # 1. ANALYZE PLANNED ACTIONS
     $toFix = $items | Where-Object { $_.Action -eq "Fix" }
     $toDel = $items | Where-Object { $_.Action -eq "Delete" }
-    $toSkip = $items | Where-Object { $_.Action -ne "Fix" -and $_.Action -ne "Delete" }
 
     if ($toFix.Count -eq 0 -and $toDel.Count -eq 0) {
         [System.Windows.Forms.MessageBox]::Show("No actions were selected.`n`n(Tip: Select rows and click 'Mark for Delete' or Browse to fix them.)", "No Action", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information)
@@ -3010,11 +3013,13 @@ $Script:StartWingetAction = {
             $failed = $false
             $adminBlocked = $false
             
-            Invoke-Expression $expr | ForEach-Object {
-                $line = $_
+            # Capture output first to maintain variable scope in the loop
+            $output = Invoke-Expression $expr 
+            
+            foreach ($line in $output) {
                 
                 # FILTER: Skip spinner animation lines
-                if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                if ($line -match '^\s*[\-\\|/]\s*$') { continue }
                 
                 Write-Output $line
                 
