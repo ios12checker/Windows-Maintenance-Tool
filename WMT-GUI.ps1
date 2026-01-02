@@ -1152,11 +1152,43 @@ function Invoke-RegistryTask {
         }
 
         "DeepClean" {
-            # 1. SCANNING PHASE
+            # 1. WARN USER
+            $warnMsg = "Deep Registry Scan takes time.`n`nThe application window may appear frozen or unresponsive during this process. Please do not close it.`n`nContinue?"
+            $warnRes = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Scan Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($warnRes -eq "No") { return }
+
+            # 2. SETUP PROGRESS FORM
+            $pForm = New-Object System.Windows.Forms.Form
+            $pForm.Text = "Scanning Registry..."
+            $pForm.Size = "450, 120"
+            $pForm.StartPosition = "CenterScreen"
+            $pForm.FormBorderStyle = "FixedDialog"
+            $pForm.ControlBox = $false # Prevent closing mid-scan
+            $pForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+            $pForm.ForeColor = "White"
+
+            $pLabel = New-Object System.Windows.Forms.Label
+            $pLabel.Location = "20, 15"
+            $pLabel.AutoSize = $true
+            $pLabel.Text = "Initializing..."
+            $pLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+            $pForm.Controls.Add($pLabel)
+
+            $pBar = New-Object System.Windows.Forms.ProgressBar
+            $pBar.Location = "20, 45"
+            $pBar.Size = "390, 20"
+            $pBar.Style = "Continuous"
+            $pBar.Maximum = 100
+            $pForm.Controls.Add($pBar)
+
+            $pForm.Show()
+            [System.Windows.Forms.Application]::DoEvents()
+
+            # 3. SCANNING PHASE
             $findings = New-Object System.Collections.Generic.List[PSObject]
 
-            Invoke-UiCommand {
-                Write-Output "Scanning registry (Ultra Deep Mode)..."
+            try {
+                Write-GuiLog "Starting Registry Ultra Deep Mode..."
                 
                 # HELPER: Checks if we have permission to delete this key
                 function Test-IsDeletable($Path) {
@@ -1169,7 +1201,10 @@ function Invoke-RegistryTask {
                     } catch { return $false }
                 }
 
-                # --- A. App Paths (Missing EXEs) ---
+                # --- STEP 1: App Paths ---
+                $pLabel.Text = "1/9: Scanning App Paths..."
+                $pBar.Value = 10; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $appPaths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
                 $subKeys = Get-ChildItem $appPaths -ErrorAction SilentlyContinue
                 foreach ($key in $subKeys) {
@@ -1181,7 +1216,10 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- B. SharedDLLs ---
+                # --- STEP 2: SharedDLLs ---
+                $pLabel.Text = "2/9: Scanning Shared DLLs..."
+                $pBar.Value = 20; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $dllLocs = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDLLs")
                 foreach ($dllPath in $dllLocs) {
                     if (Test-Path $dllPath) {
@@ -1196,12 +1234,20 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- C. ActiveX / COM Issues ---
+                # --- STEP 3: ActiveX / COM ---
+                $pLabel.Text = "3/9: Scanning ActiveX/COM (This is slow)..."
+                $pBar.Value = 30; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $comLocations = @("HKLM:\SOFTWARE\Classes\CLSID", "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID")
                 foreach ($root in $comLocations) {
                     if (Test-Path $root) {
                         $clsids = Get-ChildItem $root -ErrorAction SilentlyContinue
+                        # Break heavy loops with DoEvents occasionally
+                        $counter = 0
                         foreach ($clsid in $clsids) {
+                            $counter++
+                            if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+
                             $srv = Join-Path $clsid.PSPath "InProcServer32"
                             if (Test-Path $srv) {
                                 $dll = (Get-ItemProperty $srv)."(default)"
@@ -1215,7 +1261,10 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- D. Application Classes (Expanded to HKCU) ---
+                # --- STEP 4: Applications ---
+                $pLabel.Text = "4/9: Scanning Application Associations..."
+                $pBar.Value = 50; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications", "HKCU:\Software\Classes\Applications")
                 foreach ($root in $appRoots) {
                      if (Test-Path $root) {
@@ -1236,7 +1285,10 @@ function Invoke-RegistryTask {
                      }
                 }
 
-                # --- E. Installer Folders ---
+                # --- STEP 5: Installer Folders ---
+                $pLabel.Text = "5/9: Scanning Installer Folders..."
+                $pBar.Value = 60; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $instPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
                 if (Test-Path $instPath) {
                     $folders = Get-ItemProperty $instPath
@@ -1249,7 +1301,10 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- F. MuiCache & Compatibility ---
+                # --- STEP 6: MuiCache ---
+                $pLabel.Text = "6/9: Scanning MuiCache..."
+                $pBar.Value = 70; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache", "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store")
                 foreach ($path in $userKeys) {
                     if (Test-Path $path) {
@@ -1263,7 +1318,10 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- G. Invalid Firewall Rules ---
+                # --- STEP 7: Firewall Rules ---
+                $pLabel.Text = "7/9: Scanning Firewall Rules..."
+                $pBar.Value = 80; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $fwPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
                 if (Test-Path $fwPath) {
                     $rules = Get-ItemProperty $fwPath
@@ -1283,7 +1341,10 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- H. Startup Items (NEW) ---
+                # --- STEP 8: Startup Items ---
+                $pLabel.Text = "8/9: Scanning Startup Items..."
+                $pBar.Value = 90; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $runKeys = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
                 foreach ($runKey in $runKeys) {
                     if (Test-Path $runKey) {
@@ -1301,14 +1362,19 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- I. Unused File Extensions (NEW) ---
-                # Scans HKLM and HKCU Classes for extensions that are empty/useless
+                # --- STEP 9: Unused Extensions ---
+                $pLabel.Text = "9/9: Scanning File Extensions..."
+                $pBar.Value = 95; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+
                 $classRoots = @("HKLM:\SOFTWARE\Classes", "HKCU:\Software\Classes")
                 foreach ($root in $classRoots) {
                     if (Test-Path $root) {
-                        # Get only keys starting with "."
                         $exts = Get-ChildItem $root -Name | Where-Object { $_.StartsWith(".") }
+                        $counter = 0
                         foreach ($ext in $exts) {
+                            $counter++
+                            if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+
                             $path = Join-Path $root $ext
                             # Check if key is effectively empty (No subkeys, No default value)
                             $subkeys = Get-ChildItem $path -ErrorAction SilentlyContinue
@@ -1324,14 +1390,24 @@ function Invoke-RegistryTask {
                     }
                 }
                 
-                Write-Output "Scan complete. Found $($findings.Count) actionable issues."
-            } "Scanning Registry (Ultra Mode)..."
+                Write-GuiLog "Scan complete. Found $($findings.Count) actionable issues."
 
-            # 2. GUI PHASE
+            } catch {
+                $pForm.Close()
+                Write-GuiLog "ERROR during scan: $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("Error during scan: $($_.Exception.Message)", "Error", "OK", "Error")
+                return
+            }
+            
+            # Close Progress Bar
+            $pForm.Close()
+            $pForm.Dispose()
+
+            # 4. GUI RESULTS PHASE
             $toDelete = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
             if (-not $toDelete) { return }
 
-            # 3. FIXING PHASE
+            # 5. FIXING PHASE
             Invoke-UiCommand {
                 $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 $fixedCount = 0
