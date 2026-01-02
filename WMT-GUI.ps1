@@ -3808,6 +3808,83 @@ $btnHostsRestore.Add_Click({
 })
 
 # --- FIREWALL ---
+# --- FIREWALL DOUBLE-CLICK MODIFY ---
+$lstFw.Add_MouseDoubleClick({
+    $rule = $lstFw.SelectedItem
+    if ($null -eq $rule) { return }
+
+    # 1. Open existing dialog with the selected rule
+    $result = Show-RuleDialog "Edit Firewall Rule" $rule
+
+    # 2. If user clicked 'Save' (result is not null)
+    if ($result) {
+        try {
+            # 3. Apply changes using the Name (ID) from the original object
+            Set-NetFirewallRule -Name $rule.Name `
+                -Direction $result.Direction `
+                -Action $result.Action `
+                -Protocol $result.Protocol `
+                -LocalPort $result.Port `
+                -ErrorAction Stop
+
+            # 4. Refresh the list to show changes
+            $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+        catch {
+            [System.Windows.MessageBox]::Show("Failed to update rule:`n$($_.Exception.Message)", "Error", "OK", "Error")
+        }
+    }
+})
+# --- FIREWALL CONTEXT MENU ---
+$fwCtxMenu = New-Object System.Windows.Controls.ContextMenu
+
+# 1. Option: Copy Rule Name
+$mniCopyName = New-Object System.Windows.Controls.MenuItem
+$mniCopyName.Header = "Copy Rule Name"
+$mniCopyName.Add_Click({
+    if ($lstFw.SelectedItem) {
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($lstFw.SelectedItem.Name)
+        } catch { 
+            # Fallback if clipboard is busy
+        }
+    }
+})
+
+# 2. Option: Copy Port/Protocol
+$mniCopyPort = New-Object System.Windows.Controls.MenuItem
+$mniCopyPort.Header = "Copy Port/Protocol"
+$mniCopyPort.Add_Click({
+    if ($lstFw.SelectedItem) {
+        $info = "$($lstFw.SelectedItem.Protocol) : $($lstFw.SelectedItem.LocalPort)"
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($info)
+        } catch {}
+    }
+})
+
+# 3. Option: Copy Full Details
+$mniCopyAll = New-Object System.Windows.Controls.MenuItem
+$mniCopyAll.Header = "Copy Full Details"
+$mniCopyAll.Add_Click({
+    if ($lstFw.SelectedItem) {
+        # Create a nice string representation of the rule
+        $rule = $lstFw.SelectedItem
+        $text = "Name: $($rule.Name)`nEnabled: $($rule.Enabled)`nAction: $($rule.Action)`nDirection: $($rule.Direction)`nProtocol: $($rule.Protocol)`nPort: $($rule.LocalPort)"
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($text)
+        } catch {}
+    }
+})
+
+# Add items to the menu
+[void]$fwCtxMenu.Items.Add($mniCopyName)
+[void]$fwCtxMenu.Items.Add($mniCopyPort)
+[void]$fwCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+[void]$fwCtxMenu.Items.Add($mniCopyAll)
+
+# Attach to the ListView
+$lstFw.ContextMenu = $fwCtxMenu
 $AllFw = @()
 $btnFwRefresh.Add_Click({
     $lblFwStatus.Visibility="Visible"; $lstFw.Items.Clear(); [System.Windows.Forms.Application]::DoEvents()
