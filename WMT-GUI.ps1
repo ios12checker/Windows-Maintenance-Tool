@@ -1091,23 +1091,108 @@ function Invoke-RegistryTask {
     $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
     if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
 
-    # --- HELPER: Appends a specific key to a master .reg file ---
+    # --- HELPER: Unified Manual Backup (No reg.exe dependency) ---
     function Backup-RegKey {
-        param($KeyPath, $FilePath)
-        $temp = [System.IO.Path]::GetTempFileName()
-        # Export specific key to temp
-        reg export $KeyPath $temp /y 2>$null
+        param($ItemObj, $FilePath)
         
-        if ((Get-Item $temp).Length -gt 0) {
-            if (-not (Test-Path $FilePath)) {
-                # New file: Write content with correct Unicode encoding (required for .reg)
-                Get-Content $temp -Raw | Set-Content $FilePath -Encoding Unicode
-            } else {
-                # Existing file: Skip header line and append
-                Get-Content $temp -ReadCount 0 | Select-Object -Skip 1 | Add-Content $FilePath -Encoding Unicode
+        $path = $ItemObj.RegPath
+        $targetValue = $ItemObj.ValueName
+        $type = $ItemObj.Type
+
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+
+        # 1. TRANSLATE PATH (PowerShell -> Registry Format)
+        $regKeyPath = $path
+        if ($regKeyPath -match "::") { $regKeyPath = ($regKeyPath -split "::")[-1] }
+        
+        if ($regKeyPath -match "^HKLM:?\\") { $regKeyPath = $regKeyPath -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\" }
+        elseif ($regKeyPath -match "^HKCU:?\\") { $regKeyPath = $regKeyPath -replace "^HKCU:?\\", "HKEY_CURRENT_USER\" }
+        elseif ($regKeyPath -match "^HKCR:?\\") { $regKeyPath = $regKeyPath -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\" }
+        elseif ($regKeyPath -match "^HKU:?\\")   { $regKeyPath = $regKeyPath -replace "^HKU:?\\",   "HKEY_USERS\" }
+
+        # 2. GATHER VALUES TO EXPORT
+        $valuesToExport = @()
+        
+        try {
+            if ($type -eq "Value" -and $targetValue) {
+                # Case A: Specific Value Only
+                $valuesToExport += Get-ItemProperty -Path $path -Name $targetValue -ErrorAction Stop
+            }
+            elseif ($type -eq "Key") {
+                # Case B: Entire Key (All Values)
+                # We need to get the object that contains ALL properties
+                $propObj = Get-ItemProperty -Path $path -ErrorAction Stop
+                
+                # If there are no properties other than system ones, we still want to export the key header
+                # so we pass the object even if empty of custom values.
+                $valuesToExport += $propObj
+            }
+        } catch {
+            Write-GuiLog "Backup Warning: Access denied or path missing '$path'"
+            return
+        }
+
+        # 3. BUILD REG FILE CONTENT
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.AppendLine("[$regKeyPath]")  # <--- FIXED: Added [void]
+
+        foreach ($obj in $valuesToExport) {
+            # Iterate through all properties on the object (excluding PS metadata)
+            foreach ($prop in $obj.PSObject.Properties) {
+                $pName = $prop.Name
+                $pVal  = $prop.Value
+                
+                # Skip PowerShell Internal Properties
+                if ($pName -match "^PS" -or $pName -match "^Domain" -or $pName -match "^Adsi") { continue }
+
+                # Handle Property Name formatting
+                # (default) property in PS corresponds to @ in .reg files
+                $regName = if ($pName -eq "(default)") { "@" } else { "`"$pName`"" }
+                
+                # Specific filtering: If we are in "Value" mode, only export the matching value name
+                if ($type -eq "Value" -and $targetValue -ne $null -and $pName -ne $targetValue) { continue }
+
+                # Handle Data formatting
+                $regData = ""
+                
+                if ($pVal -is [string]) {
+                    # Escape slashes and quotes
+                    $cleanStr = $pVal -replace '\\', '\\' -replace '"', '\"'
+                    $regData = "`"$cleanStr`""
+                }
+                elseif ($pVal -is [int] -or $pVal -is [int32] -or $pVal -is [int64]) {
+                    $regData = "dword:{0:x8}" -f $pVal
+                }
+                elseif ($null -eq $pVal) {
+                    # Empty string for nulls usually
+                    $regData = "`"`""
+                }
+                else {
+                    continue 
+                }
+
+                if ($regData) {
+                    [void]$sb.AppendLine("$regName=$regData") # <--- FIXED: Added [void]
+                }
             }
         }
-        Remove-Item $temp -ErrorAction SilentlyContinue
+        [void]$sb.AppendLine("") # <--- FIXED: Added [void]
+
+        # 4. WRITE TO FILE
+        $finalContent = $sb.ToString()
+        
+        try {
+            if (-not (Test-Path $FilePath)) {
+                # New File: BOM + Header + Content
+                $header = "Windows Registry Editor Version 5.00`r`n`r`n"
+                Set-Content -Path $FilePath -Value ($header + $finalContent) -Encoding Unicode
+            } else {
+                # Append: Content only
+                Add-Content -Path $FilePath -Value $finalContent -Encoding Unicode
+            }
+        } catch {
+            Write-GuiLog "File Write Error: $_"
+        }
     }
 
     switch ($Action) {
@@ -1125,10 +1210,10 @@ function Invoke-RegistryTask {
 
                 # A. Clean Obsolete Uninstall Keys
                 $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
-                
                 if ($keys) {
                     foreach ($k in $keys) {
-                        Backup-RegKey -KeyPath $k.Name -FilePath $bkFile
+                        $obj = [PSCustomObject]@{ RegPath=$k.PSPath; ValueName=$null; Type="Key" }
+                        Backup-RegKey -ItemObj $obj -FilePath $bkFile
                         try { Remove-Item $k.PSPath -Recurse -Force -ErrorAction Stop; Write-Output "Removed: $($k.PSChildName)"; $count++ } catch { Write-Output "Failed: $($k.PSChildName)" }
                     }
                 }
@@ -1136,7 +1221,8 @@ function Invoke-RegistryTask {
                 # B. Clean MuiCache
                 $muiPath = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
                 if (Test-Path $muiPath) {
-                    Backup-RegKey -KeyPath "HKEY_CURRENT_USER\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache" -FilePath $bkFile
+                    $obj = [PSCustomObject]@{ RegPath=$muiPath; ValueName=$null; Type="Key" }
+                    Backup-RegKey -ItemObj $obj -FilePath $bkFile
                     $items = Get-ItemProperty $muiPath
                     foreach ($name in $items.PSObject.Properties.Name) {
                         if ($name -match '^[a-zA-Z]:\\' -and -not (Test-Path $name -ErrorAction SilentlyContinue)) {
@@ -1147,7 +1233,6 @@ function Invoke-RegistryTask {
                 }
                 
                 if ($count -gt 0) { Write-Output "Cleaned $count items. Backup saved: $bkFile" } else { Write-Output "Nothing found to clean." }
-
             } "Smart cleaning keys..."
         }
 
@@ -1163,7 +1248,7 @@ function Invoke-RegistryTask {
             $pForm.Size = "450, 120"
             $pForm.StartPosition = "CenterScreen"
             $pForm.FormBorderStyle = "FixedDialog"
-            $pForm.ControlBox = $false # Prevent closing mid-scan
+            $pForm.ControlBox = $false
             $pForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
             $pForm.ForeColor = "White"
 
@@ -1190,7 +1275,6 @@ function Invoke-RegistryTask {
             try {
                 Write-GuiLog "Starting Registry Ultra Deep Mode..."
                 
-                # HELPER: Checks if we have permission to delete this key
                 function Test-IsDeletable($Path) {
                     try {
                         if (-not (Test-Path $Path)) { return $false }
@@ -1201,10 +1285,10 @@ function Invoke-RegistryTask {
                     } catch { return $false }
                 }
 
-                # --- STEP 1: App Paths ---
+                # --- SCAN STEPS (Same as before) ---
+                # 1. App Paths
                 $pLabel.Text = "1/9: Scanning App Paths..."
                 $pBar.Value = 10; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $appPaths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
                 $subKeys = Get-ChildItem $appPaths -ErrorAction SilentlyContinue
                 foreach ($key in $subKeys) {
@@ -1216,10 +1300,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 2: SharedDLLs ---
+                # 2. SharedDLLs
                 $pLabel.Text = "2/9: Scanning Shared DLLs..."
                 $pBar.Value = 20; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $dllLocs = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDLLs")
                 foreach ($dllPath in $dllLocs) {
                     if (Test-Path $dllPath) {
@@ -1234,20 +1317,17 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 3: ActiveX / COM ---
-                $pLabel.Text = "3/9: Scanning ActiveX/COM (This is slow)..."
+                # 3. ActiveX / COM
+                $pLabel.Text = "3/9: Scanning ActiveX/COM..."
                 $pBar.Value = 30; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $comLocations = @("HKLM:\SOFTWARE\Classes\CLSID", "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID")
                 foreach ($root in $comLocations) {
                     if (Test-Path $root) {
                         $clsids = Get-ChildItem $root -ErrorAction SilentlyContinue
-                        # Break heavy loops with DoEvents occasionally
                         $counter = 0
                         foreach ($clsid in $clsids) {
                             $counter++
                             if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
-
                             $srv = Join-Path $clsid.PSPath "InProcServer32"
                             if (Test-Path $srv) {
                                 $dll = (Get-ItemProperty $srv)."(default)"
@@ -1261,10 +1341,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 4: Applications ---
-                $pLabel.Text = "4/9: Scanning Application Associations..."
+                # 4. Applications
+                $pLabel.Text = "4/9: Scanning App Associations..."
                 $pBar.Value = 50; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications", "HKCU:\Software\Classes\Applications")
                 foreach ($root in $appRoots) {
                      if (Test-Path $root) {
@@ -1274,7 +1353,6 @@ function Invoke-RegistryTask {
                             if (Test-Path $openCmd) {
                                 $cmd = (Get-ItemProperty $openCmd)."(default)"
                                 if ($cmd -match '"([^"]+)"') { $cmdPath = $matches[1] } else { $cmdPath = $cmd.Split(" ")[0] }
-                                
                                 if ($cmdPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cmdPath -ErrorAction SilentlyContinue)) {
                                     if (Test-IsDeletable $app.PSPath) {
                                         $findings.Add([PSCustomObject]@{ Problem="Invalid App Association"; Data=$cmdPath; DisplayKey=$app.PSChildName; RegPath=$app.PSPath; ValueName=$null; Type="Key" })
@@ -1285,10 +1363,9 @@ function Invoke-RegistryTask {
                      }
                 }
 
-                # --- STEP 5: Installer Folders ---
+                # 5. Installer Folders
                 $pLabel.Text = "5/9: Scanning Installer Folders..."
                 $pBar.Value = 60; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $instPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
                 if (Test-Path $instPath) {
                     $folders = Get-ItemProperty $instPath
@@ -1301,10 +1378,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 6: MuiCache ---
+                # 6. MuiCache
                 $pLabel.Text = "6/9: Scanning MuiCache..."
                 $pBar.Value = 70; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache", "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store")
                 foreach ($path in $userKeys) {
                     if (Test-Path $path) {
@@ -1318,10 +1394,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 7: Firewall Rules ---
+                # 7. Firewall Rules
                 $pLabel.Text = "7/9: Scanning Firewall Rules..."
                 $pBar.Value = 80; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $fwPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
                 if (Test-Path $fwPath) {
                     $rules = Get-ItemProperty $fwPath
@@ -1341,10 +1416,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 8: Startup Items ---
+                # 8. Startup Items
                 $pLabel.Text = "8/9: Scanning Startup Items..."
                 $pBar.Value = 90; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $runKeys = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
                 foreach ($runKey in $runKeys) {
                     if (Test-Path $runKey) {
@@ -1352,7 +1426,6 @@ function Invoke-RegistryTask {
                         foreach ($name in $items.PSObject.Properties.Name) {
                             $val = $items.$name
                             if ($val -is [string] -and $val -match '^[a-zA-Z]:\\') {
-                                # Clean args (e.g. "C:\Program Files\App.exe" /min)
                                 if ($val -match '"([^"]+)"') { $exe = $matches[1] } else { $exe = $val.Split(" ")[0] }
                                 if (-not (Test-Path $exe -ErrorAction SilentlyContinue)) {
                                     $findings.Add([PSCustomObject]@{ Problem="Broken Startup Item"; Data=$exe; DisplayKey=$runKey; RegPath=$runKey; ValueName=$name; Type="Value" })
@@ -1362,10 +1435,9 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- STEP 9: Unused Extensions ---
+                # 9. Unused Extensions
                 $pLabel.Text = "9/9: Scanning File Extensions..."
                 $pBar.Value = 95; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
-
                 $classRoots = @("HKLM:\SOFTWARE\Classes", "HKCU:\Software\Classes")
                 foreach ($root in $classRoots) {
                     if (Test-Path $root) {
@@ -1374,13 +1446,10 @@ function Invoke-RegistryTask {
                         foreach ($ext in $exts) {
                             $counter++
                             if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
-
                             $path = Join-Path $root $ext
-                            # Check if key is effectively empty (No subkeys, No default value)
                             $subkeys = Get-ChildItem $path -ErrorAction SilentlyContinue
                             $props = Get-ItemProperty $path -ErrorAction SilentlyContinue
                             $def = $props."(default)"
-                            
                             if ($subkeys.Count -eq 0 -and ([string]::IsNullOrEmpty($def))) {
                                 if (Test-IsDeletable $path) {
                                     $findings.Add([PSCustomObject]@{ Problem="Unused File Ext"; Data=$ext; DisplayKey=$path; RegPath=$path; ValueName=$null; Type="Key" })
@@ -1399,7 +1468,6 @@ function Invoke-RegistryTask {
                 return
             }
             
-            # Close Progress Bar
             $pForm.Close()
             $pForm.Dispose()
 
@@ -1412,17 +1480,24 @@ function Invoke-RegistryTask {
                 $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 $fixedCount = 0
                 $skippedCount = 0
+                $backedUpKeys = @()
 
                 foreach ($item in $toDelete) {
-                    if ($item.Type -eq "Key") {
-                        Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
-                        Remove-Item $item.RegPath -Recurse -Force -ErrorAction SilentlyContinue
-                        if (Test-Path $item.RegPath) { $skippedCount++ } else { $fixedCount++ }
-                    }
-                    elseif ($item.Type -eq "Value") {
-                        Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
-                        Remove-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue
-                        if (Get-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue) { $skippedCount++ } else { $fixedCount++ }
+                    if ($item.RegPath) {
+                        $uniqueId = "$($item.RegPath):$($item.ValueName)"
+                        if ($uniqueId -notin $backedUpKeys) {
+                            Backup-RegKey -ItemObj $item -FilePath $bkFile
+                            $backedUpKeys += $uniqueId
+                        }
+                        
+                        if ($item.Type -eq "Key") {
+                            Remove-Item $item.RegPath -Recurse -Force -ErrorAction SilentlyContinue
+                            if (Test-Path $item.RegPath) { $skippedCount++ } else { $fixedCount++ }
+                        }
+                        elseif ($item.Type -eq "Value") {
+                            Remove-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue
+                            if (Get-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue) { $skippedCount++ } else { $fixedCount++ }
+                        }
                     }
                 }
                 
