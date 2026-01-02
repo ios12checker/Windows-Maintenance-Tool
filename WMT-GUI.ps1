@@ -928,40 +928,153 @@ function Invoke-TempCleanup {
 }
 function Invoke-RegistryTask {
     param([string]$Action)
+
+    $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
+    if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
+
+    # --- HELPER: Appends a specific key to a master .reg file ---
+    function Backup-RegKey {
+        param($KeyPath, $FilePath)
+        $temp = [System.IO.Path]::GetTempFileName()
+        # Export specific key to temp
+        reg export $KeyPath $temp /y 2>$null
+        
+        if ((Get-Item $temp).Length -gt 0) {
+            if (-not (Test-Path $FilePath)) {
+                # New file: Write content with correct Unicode encoding (required for .reg)
+                Get-Content $temp -Raw | Set-Content $FilePath -Encoding Unicode
+            } else {
+                # Existing file: Skip header line and append
+                Get-Content $temp -ReadCount 0 | Select-Object -Skip 1 | Add-Content $FilePath -Encoding Unicode
+            }
+        }
+        Remove-Item $temp -ErrorAction SilentlyContinue
+    }
+
     switch ($Action) {
         "List" {
-            Invoke-UiCommand { Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' } | Select-Object -ExpandProperty PSChildName } "Listing removable uninstall keys..."
+            Invoke-UiCommand { 
+                $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' } 
+                if ($keys) { $keys | Select-Object -ExpandProperty PSChildName | Out-String } else { "No obsolete Uninstall keys found." }
+            } "Listing removable keys..."
         }
+        
         "Delete" {
             Invoke-UiCommand {
-                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
-                if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
-                $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
-                reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $bkFile /y | Out-Null
+                $bkFile = Join-Path $bkDir ("SmartClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                $count = 0
+
+                # A. Clean Obsolete Uninstall Keys
                 $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
-                foreach ($k in $keys) { try { Remove-Item $k.PSPath -Recurse -Force -ErrorAction Stop; Write-Output "Removed: $($k.PSChildName)" } catch { Write-Output "Failed: $($k.PSChildName) -> $($_.Exception.Message)" } }
-                Write-Output "Backup saved to $bkFile"
-            } "Deleting obsolete uninstall keys..."
+                
+                if ($keys) {
+                    foreach ($k in $keys) {
+                        Backup-RegKey -KeyPath $k.Name -FilePath $bkFile
+                        try { Remove-Item $k.PSPath -Recurse -Force -ErrorAction Stop; Write-Output "Removed: $($k.PSChildName)"; $count++ } catch { Write-Output "Failed: $($k.PSChildName)" }
+                    }
+                }
+
+                # B. Clean MuiCache
+                $muiPath = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
+                if (Test-Path $muiPath) {
+                    Backup-RegKey -KeyPath "HKEY_CURRENT_USER\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache" -FilePath $bkFile
+                    $items = Get-ItemProperty $muiPath
+                    foreach ($name in $items.PSObject.Properties.Name) {
+                        if ($name -match '^[a-zA-Z]:\\' -and -not (Test-Path $name -ErrorAction SilentlyContinue)) {
+                            Remove-ItemProperty -Path $muiPath -Name $name -ErrorAction SilentlyContinue
+                            $count++
+                        }
+                    }
+                }
+                
+                if ($count -gt 0) { Write-Output "Cleaned $count items. Backup saved: $bkFile" } else { Write-Output "Nothing found to clean." }
+
+            } "Smart cleaning keys..."
         }
+
+        "DeepClean" {
+            $msg = "Deep Clean scans for Registry entries pointing to missing files (App Paths & SharedDLLs).`n`nIt will create a safety backup of these lists BEFORE making any changes.`n`nContinue?"
+            $res = [System.Windows.Forms.MessageBox]::Show($msg, "Deep Registry Clean", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($res -ne "Yes") { return }
+
+            Invoke-UiCommand {
+                $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                $deleted = 0
+
+                # 1. App Paths
+                Write-Output "Scanning App Paths..."
+                $appPaths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+                $subKeys = Get-ChildItem $appPaths -ErrorAction SilentlyContinue
+                
+                foreach ($key in $subKeys) {
+                    $exePath = (Get-ItemProperty $key.PSPath)."(default)"
+                    if ($exePath -and ($exePath -match '^[a-zA-Z]:\\') -and -not (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                        Backup-RegKey -KeyPath $key.Name -FilePath $bkFile
+                        Remove-Item $key.PSPath -Recurse -Force
+                        Write-Output "Removed App Path: $($key.PSChildName)"
+                        $deleted++
+                    }
+                }
+
+                # 2. SharedDLLs
+                Write-Output "Scanning SharedDLLs..."
+                $dllPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs"
+                if (Test-Path $dllPath) {
+                    # Safety Backup of the list
+                    Backup-RegKey -KeyPath "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs" -FilePath $bkFile
+                    
+                    $props = Get-ItemProperty $dllPath
+                    foreach ($dll in $props.PSObject.Properties.Name) {
+                        if ($dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
+                            Remove-ItemProperty -Path $dllPath -Name $dll
+                            Write-Output "Removed SharedDLL: $dll"
+                            $deleted++
+                        }
+                    }
+                }
+                
+                # --- NEW NOTIFICATION LOGIC ---
+                if ($deleted -gt 0) {
+                    $resMsg = "Deep Clean Complete.`n`nRemoved: $deleted invalid entries.`nSafety Backup created at:`n$bkFile"
+                    [System.Windows.Forms.MessageBox]::Show($resMsg, "Deep Clean Result", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                    Write-Output "Deep clean complete. Removed $deleted entries. Backup: $bkFile"
+                } else {
+                    $resMsg = "Scan Complete.`n`nNo invalid entries were found.`n`nA safety backup of your current SharedDLLs list was created anyway at:`n$bkFile"
+                    [System.Windows.Forms.MessageBox]::Show($resMsg, "Deep Clean Result", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+                    Write-Output "Scan complete. No invalid entries found. Safety backup saved to: $bkFile"
+                }
+
+            } "Running Deep Registry Clean..."
+        }
+
         "BackupHKLM" {
             Invoke-UiCommand {
-                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
-                if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
-                $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
+                $bkFile = Join-Path $bkDir ("Full_HKLM_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 reg export HKLM $bkFile /y | Out-Null
                 Write-Output "Full HKLM backup created: $bkFile"
             } "Backing up HKLM..."
         }
+
         "Restore" {
             $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.InitialDirectory = $bkDir
             $dlg.Filter = "Registry Backup (*.reg)|*.reg"
             if ($dlg.ShowDialog() -eq "OK") {
                 $restoreFile = $dlg.FileName
-                Invoke-UiCommand { reg import $restoreFile } "Restoring registry from $restoreFile..."
+                Invoke-UiCommand { 
+                    Start-Process reg -ArgumentList "import `"$restoreFile`"" -Wait -NoNewWindow
+                    Write-Output "Restored: $restoreFile"
+                } "Restoring registry..."
             }
         }
+
         "Scan" {
-            Invoke-UiCommand { sfc /scannow; dism /online /cleanup-image /checkhealth } "Scanning registry/system files..."
+            Invoke-UiCommand { 
+                Write-Output "Starting System File Checker..."
+                sfc /scannow
+                Write-Output "`nStarting DISM Health Check..."
+                dism /online /cleanup-image /checkhealth 
+            } "Scanning system files..."
         }
     }
 }
@@ -3440,12 +3553,13 @@ $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
 $btnCleanShortcuts.Add_Click({ Invoke-ShortcutFix })
 $btnCleanReg.Add_Click({
     $form = New-Object System.Windows.Forms.Form
-    $form.Text="Registry Cleanup"; $form.Size="420,240"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
-    $actions = @{
-        "List Safe Keys"="List"
-        "Delete Safe Keys (with backup)"="Delete"
-        "Backup HKLM"="BackupHKLM"
-        "Restore Backup"="Restore"
+    $form.Text="Registry Cleanup"; $form.Size="420,290"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
+    $actions = [ordered]@{
+        "List Safe Keys (Obsolete)"="List"
+        "Delete Safe Keys (Obsolete)"="Delete"
+        "Deep Clean (Invalid Paths)"="DeepClean"  # <--- NEW OPTION
+        "Backup HKLM Hive"="BackupHKLM"
+        "Restore Registry Backup"="Restore"
         "Run SFC/DISM Scan"="Scan"
     }
     $y=10
