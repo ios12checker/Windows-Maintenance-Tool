@@ -926,6 +926,156 @@ function Invoke-TempCleanup {
 
     } "Running advanced cleanup..." -ArgumentList $selections
 }
+
+function Show-RegistryCleaner {
+    param($ScanResults) # Array of objects with: Problem, Data, Key, Hive, Path, Name
+
+    # 1. SETUP FORM
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Deep Registry Cleaner"
+    $f.Size = "1000, 600"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+    
+    # 2. HEADER PANEL
+    $pnlHead = New-Object System.Windows.Forms.Panel
+    $pnlHead.Dock = "Top"; $pnlHead.Height = 40
+    $pnlHead.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $f.Controls.Add($pnlHead)
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Scan Complete. Issues found: $($ScanResults.Count)"
+    $lblStatus.AutoSize = $true; $lblStatus.Top = 10; $lblStatus.Left = 10
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $pnlHead.Controls.Add($lblStatus)
+
+    # 3. DATAGRIDVIEW
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Fill"
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $dg.BorderStyle = "None"
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.AllowUserToResizeRows = $false
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.AutoSizeColumnsMode = "Fill"
+    
+    # Headers Style
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersHeight = 30
+    $dg.ColumnHeadersBorderStyle = "Single"
+
+    # Row Style
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = "White"
+    
+    $f.Controls.Add($dg)
+
+    # 4. COLUMNS
+    # Checkbox Column
+    $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $colChk.HeaderText = " "
+    $colChk.Width = 30
+    $colChk.Name = "Check"
+    $colChk.TrueValue = $true; $colChk.FalseValue = $false
+    $dg.Columns.Add($colChk) | Out-Null
+
+    # Text Columns
+    $dg.Columns.Add("Problem", "Problem") | Out-Null
+    $dg.Columns["Problem"].Width = 200
+    $dg.Columns.Add("Data", "Data (Path/Value)") | Out-Null
+    $dg.Columns["Data"].Width = 450
+    $dg.Columns.Add("Key", "Registry Key") | Out-Null
+    
+    # Hidden columns for logic
+    $dg.Columns.Add("FullPath", "FullPath"); $dg.Columns["FullPath"].Visible = $false
+    $dg.Columns.Add("ValueName", "ValueName"); $dg.Columns["ValueName"].Visible = $false
+    $dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false # 'Key' or 'Value'
+
+    # 5. POPULATE GRID
+    foreach ($item in $ScanResults) {
+        $row = $dg.Rows.Add()
+        $dg.Rows[$row].Cells["Check"].Value = $true # Default checked
+        $dg.Rows[$row].Cells["Problem"].Value = $item.Problem
+        $dg.Rows[$row].Cells["Data"].Value = $item.Data
+        $dg.Rows[$row].Cells["Key"].Value = $item.DisplayKey
+        $dg.Rows[$row].Cells["FullPath"].Value = $item.RegPath
+        $dg.Rows[$row].Cells["ValueName"].Value = $item.ValueName
+        $dg.Rows[$row].Cells["Type"].Value = $item.Type
+    }
+
+    # 6. BOTTOM PANEL
+    $pnlBot = New-Object System.Windows.Forms.Panel
+    $pnlBot.Dock = "Bottom"; $pnlBot.Height = 60
+    $pnlBot.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnlBot)
+
+    $btnFix = New-Object System.Windows.Forms.Button
+    $btnFix.Text = "Review selected Issues..." # Matches CCleaner text roughly
+    $btnFix.Width = 200; $btnFix.Height = 35
+    $btnFix.Top = 12; $btnFix.Left = 760
+    $btnFix.FlatStyle = "Flat"
+    $btnFix.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC") # Blue like CCleaner
+    $btnFix.ForeColor = "White"
+    $btnFix.FlatAppearance.BorderSize = 0
+    $pnlBot.Controls.Add($btnFix)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Close"
+    $btnCancel.Width = 100; $btnCancel.Height = 35
+    $btnCancel.Top = 12; $btnCancel.Left = 20
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $btnCancel.ForeColor = "White"
+    $btnCancel.FlatAppearance.BorderSize = 0
+    $btnCancel.Add_Click({ $f.Close() })
+    $pnlBot.Controls.Add($btnCancel)
+
+    # 7. LOGIC: FIX CLICK
+    $btnFix.Add_Click({
+        $toFix = @()
+        foreach ($row in $dg.Rows) {
+            if ($row.Cells["Check"].Value -eq $true) {
+                $toFix += [PSCustomObject]@{
+                    RegPath   = $row.Cells["FullPath"].Value
+                    ValueName = $row.Cells["ValueName"].Value
+                    Type      = $row.Cells["Type"].Value
+                }
+            }
+        }
+
+        if ($toFix.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("No issues selected.", "Registry Cleaner", "OK", "Information")
+            return
+        }
+
+        # Confirmation & Backup Prompt (Mimic CCleaner flow)
+        $res = [System.Windows.Forms.MessageBox]::Show("Do you want to fix $($toFix.Count) selected registry issues?`n`nA backup will be created automatically.", "Registry Cleaner", "YesNo", "Question")
+        if ($res -eq "Yes") {
+            $f.Tag = $toFix # Pass results back to caller
+            $f.DialogResult = "OK"
+            $f.Close()
+        }
+    })
+
+    if ($ScanResults.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No issues found!", "Registry Cleaner", "OK", "Information")
+        return $null
+    }
+
+    $f.ShowDialog() | Out-Null
+    return $f.Tag
+}
+
 function Invoke-RegistryTask {
     param([string]$Action)
 
@@ -993,58 +1143,176 @@ function Invoke-RegistryTask {
         }
 
         "DeepClean" {
-            $msg = "Deep Clean scans for Registry entries pointing to missing files (App Paths & SharedDLLs).`n`nIt will create a safety backup of these lists BEFORE making any changes.`n`nContinue?"
-            $res = [System.Windows.Forms.MessageBox]::Show($msg, "Deep Registry Clean", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($res -ne "Yes") { return }
+            # 1. SCANNING PHASE
+            $findings = New-Object System.Collections.Generic.List[PSObject]
 
             Invoke-UiCommand {
-                $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
-                $deleted = 0
+                Write-Output "Scanning registry (Deep Filtered Mode)..."
+                
+                # HELPER: Checks if we have permission to delete this key
+                function Test-IsDeletable($Path) {
+                    try {
+                        if (-not (Test-Path $Path)) { return $false }
+                        
+                        $acl = Get-Acl -Path $Path -ErrorAction SilentlyContinue
+                        if (-not $acl) { return $true } # If we can't read ACL, try anyway
+                        
+                        # Filter out keys owned by Windows System accounts
+                        if ($acl.Owner -match "TrustedInstaller" -or $acl.Owner -match "SYSTEM") { 
+                            return $false 
+                        }
+                        return $true
+                    } catch { return $false }
+                }
 
-                # 1. App Paths
-                Write-Output "Scanning App Paths..."
+                # --- A. App Paths (Missing EXEs) ---
                 $appPaths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
                 $subKeys = Get-ChildItem $appPaths -ErrorAction SilentlyContinue
-                
                 foreach ($key in $subKeys) {
                     $exePath = (Get-ItemProperty $key.PSPath)."(default)"
                     if ($exePath -and ($exePath -match '^[a-zA-Z]:\\') -and -not (Test-Path $exePath -ErrorAction SilentlyContinue)) {
-                        Backup-RegKey -KeyPath $key.Name -FilePath $bkFile
-                        Remove-Item $key.PSPath -Recurse -Force
-                        Write-Output "Removed App Path: $($key.PSChildName)"
-                        $deleted++
+                        if (Test-IsDeletable $key.PSPath) {
+                            $findings.Add([PSCustomObject]@{ Problem="Missing App Path"; Data=$exePath; DisplayKey=$key.PSChildName; RegPath=$key.PSPath; ValueName=$null; Type="Key" })
+                        }
                     }
                 }
 
-                # 2. SharedDLLs
-                Write-Output "Scanning SharedDLLs..."
-                $dllPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs"
-                if (Test-Path $dllPath) {
-                    # Safety Backup of the list
-                    Backup-RegKey -KeyPath "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs" -FilePath $bkFile
-                    
-                    $props = Get-ItemProperty $dllPath
-                    foreach ($dll in $props.PSObject.Properties.Name) {
-                        if ($dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
-                            Remove-ItemProperty -Path $dllPath -Name $dll
-                            Write-Output "Removed SharedDLL: $dll"
-                            $deleted++
+                # --- B. SharedDLLs ---
+                $dllLocs = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDLLs")
+                foreach ($dllPath in $dllLocs) {
+                    if (Test-Path $dllPath) {
+                        $props = Get-ItemProperty $dllPath
+                        foreach ($dll in $props.PSObject.Properties.Name) {
+                            if ($dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
+                                if (Test-IsDeletable $dllPath) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Missing Shared DLL"; Data=$dll; DisplayKey=$(Split-Path $dllPath -Leaf); RegPath=$dllPath; ValueName=$dll; Type="Value" })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # --- C. ActiveX / COM Issues (Protected Key Filter Added) ---
+                $comLocations = @("HKLM:\SOFTWARE\Classes\CLSID", "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID")
+                foreach ($root in $comLocations) {
+                    if (Test-Path $root) {
+                        $clsids = Get-ChildItem $root -ErrorAction SilentlyContinue
+                        foreach ($clsid in $clsids) {
+                            $srv = Join-Path $clsid.PSPath "InProcServer32"
+                            if (Test-Path $srv) {
+                                $dll = (Get-ItemProperty $srv)."(default)"
+                                if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
+                                    # This check will catch msdaora.dll
+                                    if (Test-IsDeletable $clsid.PSPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="ActiveX/COM Issue"; Data=$dll; DisplayKey=$clsid.PSChildName; RegPath=$srv; ValueName=$null; Type="Key" })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # --- D. Application Classes ---
+                $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications")
+                foreach ($root in $appRoots) {
+                     $apps = Get-ChildItem $root -ErrorAction SilentlyContinue
+                     foreach ($app in $apps) {
+                        $openCmd = Join-Path $app.PSPath "shell\open\command"
+                        if (Test-Path $openCmd) {
+                            $cmd = (Get-ItemProperty $openCmd)."(default)"
+                            if ($cmd -match '"([^"]+)"') { $cmdPath = $matches[1] } else { $cmdPath = $cmd.Split(" ")[0] }
+                            
+                            if ($cmdPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cmdPath -ErrorAction SilentlyContinue)) {
+                                if (Test-IsDeletable $app.PSPath) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Invalid App Association"; Data=$cmdPath; DisplayKey=$app.PSChildName; RegPath=$app.PSPath; ValueName=$null; Type="Key" })
+                                }
+                            }
+                        }
+                     }
+                }
+
+                # --- E. Installer Folders ---
+                $instPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
+                if (Test-Path $instPath) {
+                    $folders = Get-ItemProperty $instPath
+                    foreach ($f in $folders.PSObject.Properties.Name) {
+                        if ($f -match '^[a-zA-Z]:\\' -and -not (Test-Path $f -ErrorAction SilentlyContinue)) {
+                             if (Test-IsDeletable $instPath) {
+                                $findings.Add([PSCustomObject]@{ Problem="Missing Installer Folder"; Data=$f; DisplayKey="Installer\Folders"; RegPath=$instPath; ValueName=$f; Type="Value" })
+                             }
+                        }
+                    }
+                }
+
+                # --- F. MuiCache ---
+                $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache")
+                foreach ($path in $userKeys) {
+                    if (Test-Path $path) {
+                        $items = Get-ItemProperty $path
+                        foreach ($name in $items.PSObject.Properties.Name) {
+                            $cleanPath = $name -replace '\.(FriendlyAppName|ApplicationCompany)$', ''
+                            if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cleanPath -ErrorAction SilentlyContinue)) {
+                                $findings.Add([PSCustomObject]@{ Problem="Obsolete User Ref"; Data=$cleanPath; DisplayKey=$(Split-Path $path -Leaf); RegPath=$path; ValueName=$name; Type="Value" })
+                            }
+                        }
+                    }
+                }
+
+                # --- G. Invalid Firewall Rules ---
+                $fwPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+                if (Test-Path $fwPath) {
+                    $rules = Get-ItemProperty $fwPath
+                    foreach ($ruleName in $rules.PSObject.Properties.Name) {
+                        $ruleData = $rules.$ruleName
+                        if ($ruleData -is [string] -and $ruleData -match "App=([^|]+)") {
+                            $rawApp = $matches[1]
+                            try {
+                                $expanded = [Environment]::ExpandEnvironmentVariables($rawApp)
+                                if ($expanded -match '^[a-zA-Z]:\\' -and -not (Test-Path $expanded -ErrorAction SilentlyContinue)) {
+                                    if (Test-IsDeletable $fwPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="Invalid Firewall Rule"; Data=$expanded; DisplayKey=$ruleName; RegPath=$fwPath; ValueName=$ruleName; Type="Value" })
+                                    }
+                                }
+                            } catch {}
                         }
                     }
                 }
                 
-                # --- NEW NOTIFICATION LOGIC ---
-                if ($deleted -gt 0) {
-                    $resMsg = "Deep Clean Complete.`n`nRemoved: $deleted invalid entries.`nSafety Backup created at:`n$bkFile"
-                    [System.Windows.Forms.MessageBox]::Show($resMsg, "Deep Clean Result", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-                    Write-Output "Deep clean complete. Removed $deleted entries. Backup: $bkFile"
-                } else {
-                    $resMsg = "Scan Complete.`n`nNo invalid entries were found.`n`nA safety backup of your current SharedDLLs list was created anyway at:`n$bkFile"
-                    [System.Windows.Forms.MessageBox]::Show($resMsg, "Deep Clean Result", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-                    Write-Output "Scan complete. No invalid entries found. Safety backup saved to: $bkFile"
-                }
+                Write-Output "Scan complete. Found $($findings.Count) actionable issues."
+            } "Scanning Registry (Filtered)..."
 
-            } "Running Deep Registry Clean..."
+            # 2. GUI PHASE
+            $toDelete = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
+            if (-not $toDelete) { return }
+
+            # 3. FIXING PHASE (With Verification)
+            Invoke-UiCommand {
+                $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                $fixedCount = 0
+                $skippedCount = 0
+
+                foreach ($item in $toDelete) {
+                    if ($item.Type -eq "Key") {
+                        Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
+                        Remove-Item $item.RegPath -Recurse -Force -ErrorAction SilentlyContinue
+                        
+                        # VERIFY
+                        if (Test-Path $item.RegPath) { $skippedCount++ } else { $fixedCount++ }
+                    }
+                    elseif ($item.Type -eq "Value") {
+                        Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
+                        Remove-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue
+                        
+                        # VERIFY
+                        if (Get-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue) { $skippedCount++ } else { $fixedCount++ }
+                    }
+                }
+                
+                $msg = "Cleanup Complete.`n`nFixed: $fixedCount`nSkipped (Protected): $skippedCount`nBackup: $bkFile"
+                Write-Output "Fixed: $fixedCount. Skipped: $skippedCount."
+                [System.Windows.Forms.MessageBox]::Show($msg, "Registry Cleaner", "OK", "Information") | Out-Null
+
+            } "Fixing selected issues..."
         }
 
         "BackupHKLM" {
