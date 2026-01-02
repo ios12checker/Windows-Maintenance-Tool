@@ -9,13 +9,13 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.6"
+$AppVersion = "4.7"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
 # HIDE CONSOLE
-$t = '[DllImport("user32.dll")] public static extern bool ShowWindow(int handle, int state);'
+$t = '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int state);'
 $w = Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions -PassThru
 $null = $w::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0)
 
@@ -703,92 +703,843 @@ function Invoke-ChkdskAll {
     } "Running CHKDSK on all drives..."
 }
 
-function Show-CleanupOptions {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Choose Cleanup Option"; $f.Size = "380,240"; $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(40,40,40); $f.ForeColor = "White"
-    $options = @(
-        @{Key="DeleteOnly";Text="Delete temporary files"},
-        @{Key="DeleteAndEmpty";Text="Delete temp + empty Recycle Bin"},
-        @{Key="PrivacyCleanup";Text="Temp + privacy traces (Recent/Thumbcache)"}
-    )
-    $y = 20; $group = New-Object System.Windows.Forms.GroupBox; $group.Text="Select Option"; $group.Width=340; $group.Height=120; $group.Left=10; $group.Top=10; $group.ForeColor="White"; $group.BackColor=[System.Drawing.Color]::FromArgb(30,30,30); $f.Controls.Add($group)
-    $radios = @()
-    foreach ($opt in $options) {
-        $rb = New-Object System.Windows.Forms.RadioButton
-        $rb.Text = $opt.Text; $rb.Tag = $opt.Key; $rb.Left=15; $rb.Top=$y; $rb.Width=300; $rb.ForeColor="White"; $rb.BackColor=$group.BackColor
-        $group.Controls.Add($rb); $radios += $rb; $y += 30
-    }
-    $radios[0].Checked = $true
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text="Run Cleanup"; $ok.DialogResult="OK"; $ok.Width=340; $ok.Left=10; $ok.Top=150; $ok.BackColor="SeaGreen"; $ok.ForeColor="White"; $f.Controls.Add($ok)
-    $f.AcceptButton = $ok
-    $result = $f.ShowDialog()
-    if ($result -ne "OK") { return $null }
-    return ($radios | Where-Object { $_.Checked }).Tag
-}
+function Show-AdvancedCleanupSelection {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
 
+    # 1. SETUP FORM
+    $form = New-Object System.Windows.Forms.Form
+    $form.Text = "Advanced Cleanup Selection"
+    $form.Size = New-Object System.Drawing.Size(450, 550)
+    $form.StartPosition = "CenterScreen"
+    $form.FormBorderStyle = 'FixedDialog'
+    $form.MaximizeBox = $false
+    $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $form.ForeColor = "White"
+
+    # 2. MAIN SCROLLABLE PANEL
+    $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $mainPanel.FlowDirection = "TopDown"
+    $mainPanel.WrapContents = $false
+    $mainPanel.AutoScroll = $true
+    $mainPanel.Dock = "Top"
+    $mainPanel.Height = 440
+    $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $form.Controls.Add($mainPanel)
+
+    # 3. BUTTON PANEL
+    $btnPanel = New-Object System.Windows.Forms.Panel
+    $btnPanel.Dock = "Bottom"
+    $btnPanel.Height = 60
+    $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+    $form.Controls.Add($btnPanel)
+
+    $btnClean = New-Object System.Windows.Forms.Button
+    $btnClean.Text = "Clean Selected"
+    $btnClean.Size = New-Object System.Drawing.Size(140, 35)
+    $btnClean.Location = New-Object System.Drawing.Point(280, 12)
+    $btnClean.BackColor = "SeaGreen"
+    $btnClean.ForeColor = "White"
+    $btnClean.FlatStyle = "Flat"
+    $btnClean.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $btnPanel.Controls.Add($btnClean)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.Size = New-Object System.Drawing.Size(100, 35)
+    $btnCancel.Location = New-Object System.Drawing.Point(170, 12)
+    $btnCancel.BackColor = "DimGray"
+    $btnCancel.ForeColor = "White"
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnPanel.Controls.Add($btnCancel)
+
+    # 4. DATA DEFINITION (Categories and Items)
+    $cleanupData = [ordered]@{
+        "System" = @(
+            @{ Name="Temporary Files";      Key="TempFiles";    Desc="User and System Temp folders" },
+            @{ Name="Recycle Bin";          Key="RecycleBin";   Desc="Empties the Recycle Bin" },
+            @{ Name="Windows Error Logs";   Key="WER";          Desc="Crash dumps and error reports" },
+            @{ Name="DNS Cache";            Key="DNS";          Desc="Flushes network DNS resolver cache" },
+            @{ Name="Thumbnail Cache";      Key="Thumbnails";   Desc="Windows Explorer thumbnail database" }
+        )
+        "Explorer & Privacy" = @(
+            @{ Name="Recent Items (Safe)";  Key="Recent";       Desc="Clears Recent list but keeps Quick Access pins" },
+            @{ Name="Run History";          Key="RunMRU";       Desc="Run dialog command history" },
+            @{ Name="Address Bar History";  Key="TypedPaths";   Desc="Explorer address bar history" },
+            @{ Name="User Assist";          Key="UserAssist";   Desc="Logs of programs executed (ROT13 encoded)" }
+        )
+        "Browsers" = @(
+            @{ Name="Edge Cache";           Key="Edge";         Desc="Microsoft Edge temporary internet files" },
+            @{ Name="Chrome Cache";         Key="Chrome";       Desc="Google Chrome temporary internet files" },
+            @{ Name="Firefox Cache";        Key="Firefox";      Desc="Mozilla Firefox temporary internet files" }
+        )
+    }
+
+    # 5. UI GENERATOR HELPER
+    $global:checkboxes = @{} # Store references to retrieve values later
+
+    foreach ($category in $cleanupData.Keys) {
+        # A. Category Header (Select All)
+        $catPanel = New-Object System.Windows.Forms.Panel
+        $catPanel.Size = New-Object System.Drawing.Size(400, 30)
+        $catPanel.Margin = New-Object System.Windows.Forms.Padding(10, 10, 0, 0)
+        
+        $catChk = New-Object System.Windows.Forms.CheckBox
+        $catChk.Text = $category
+        $catChk.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+        $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
+        $catChk.AutoSize = $true
+        $catChk.Location = New-Object System.Drawing.Point(5, 5)
+        
+        # --- FIX: Default the Header to Checked ---
+        $catChk.Checked = $true 
+
+        $catPanel.Controls.Add($catChk)
+        $mainPanel.Controls.Add($catPanel)
+
+        # B. Items Container
+        $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+        $itemFlow.FlowDirection = "TopDown"
+        $itemFlow.AutoSize = $true
+        $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0) # Indent
+
+        $childChecks = @()
+
+        foreach ($item in $cleanupData[$category]) {
+            $chk = New-Object System.Windows.Forms.CheckBox
+            $chk.Text = $item.Name
+            $chk.Tag  = $item.Key
+            $chk.AutoSize = $true
+            $chk.ForeColor = "White"
+            $chk.Checked = $true # Default Checked
+            
+            # Tooltip for description
+            $tt = New-Object System.Windows.Forms.ToolTip
+            $tt.SetToolTip($chk, $item.Desc)
+
+            $itemFlow.Controls.Add($chk)
+            $global:checkboxes[$item.Key] = $chk
+            $childChecks += $chk
+        }
+        
+        $mainPanel.Controls.Add($itemFlow)
+
+        # C. Event Wiring (Select All Logic)
+        $catChk.Add_Click({ 
+            param($src, $e) 
+            foreach ($c in $childChecks) { $c.Checked = $src.Checked }
+        }.GetNewClosure())
+    }
+
+    $form.AcceptButton = $btnClean
+    $form.CancelButton = $btnCancel
+
+    # 6. SHOW AND RETURN
+    $result = $form.ShowDialog()
+
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+        $selectedKeys = @()
+        foreach ($key in $global:checkboxes.Keys) {
+            if ($global:checkboxes[$key].Checked) { $selectedKeys += $key }
+        }
+        return $selectedKeys
+    }
+    return $null
+}
 function Invoke-TempCleanup {
-    $mode = Show-CleanupOptions
-    if (-not $mode) { return }
+    # 1. Open the BleachBit-style UI
+    $selections = Show-AdvancedCleanupSelection
+    
+    # If user cancelled or selected nothing, exit
+    if (-not $selections -or $selections.Count -eq 0) { return }
+
     Invoke-UiCommand {
-        param($mode)
-        $paths = @($env:TEMP,"C:\Windows\Temp") | Select-Object -Unique
-        $deleted = 0; $skipped = 0
-        foreach ($path in $paths) {
-            if (-not (Test-Path $path)) { Write-Output "Missing: $path"; continue }
-            Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                try { Remove-Item $_.FullName -Force -Recurse -ErrorAction Stop; $deleted++ } catch { $skipped++; Write-Output "Skipped $($_.FullName): $($_.Exception.Message)" }
+        param($selections)
+        $deleted = 0
+
+        # --- SYSTEM CATEGORY ---
+        if ($selections -contains "TempFiles") {
+            Write-Output "Cleaning Temp Files..."
+            $paths = @($env:TEMP, "C:\Windows\Temp") | Select-Object -Unique
+            foreach ($path in $paths) {
+                if (Test-Path $path) {
+                    Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                        try { Remove-Item $_.FullName -Force -Recurse -ErrorAction Stop; $deleted++ } catch {}
+                    }
+                }
             }
         }
-        if ($mode -in @("DeleteAndEmpty","PrivacyCleanup")) {
-            try { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin",'OnlyErrorDialogs','DeletePermanently'); Write-Output "Recycle Bin emptied." } catch { Write-Output "Recycle Bin cleanup failed: $($_.Exception.Message)" }
+
+        if ($selections -contains "RecycleBin") {
+            try { 
+                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently')
+                Write-Output "Recycle Bin emptied."
+            } catch { Write-Output "Recycle Bin cleanup skipped (empty or locked)." }
         }
-        if ($mode -eq "PrivacyCleanup") {
-            try { reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f | Out-Null } catch {}
-            try { Remove-Item "$env:APPDATA\Microsoft\Windows\Recent\*" -Force -Recurse -ErrorAction SilentlyContinue } catch {}
-            try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue } catch {}
-            try { wevtutil cl Microsoft-Windows-Diagnostics-Performance/Operational 2>&1 | Out-Null } catch {}
+
+        if ($selections -contains "WER") {
+            try { Remove-Item "C:\ProgramData\Microsoft\Windows\WER\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Cleared Windows Error Reporting logs." } catch {}
         }
-        Write-Output "Cleanup complete. Deleted $deleted item(s), skipped $skipped."
-    } "Cleaning temporary files..."
+
+        if ($selections -contains "DNS") {
+            try { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output "DNS Cache flushed." } catch {}
+        }
+
+        if ($selections -contains "Thumbnails") {
+            try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue; Write-Output "Thumbnail cache cleared." } catch {}
+        }
+
+        # --- EXPLORER & PRIVACY ---
+        if ($selections -contains "Recent") {
+            try { 
+                # Protect CustomDestinations (Quick Access pins)
+                Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Force -ErrorAction SilentlyContinue | 
+                Where-Object { $_.Name -ne "CustomDestinations" -and $_.Name -ne "AutomaticDestinations" } | 
+                Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 
+                Write-Output "Recent Items cleared (Quick Access preserved)."
+            } catch {}
+        }
+
+        if ($selections -contains "RunMRU") {
+            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue; Write-Output "Run dialog history cleared." } catch {}
+        }
+
+        if ($selections -contains "TypedPaths") {
+            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths" -Name * -ErrorAction SilentlyContinue; Write-Output "Address bar history cleared." } catch {}
+        }
+
+        if ($selections -contains "UserAssist") {
+             try { reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f | Out-Null; Write-Output "UserAssist history cleared." } catch {}
+        }
+
+        # --- BROWSERS ---
+        if ($selections -contains "Edge") {
+             try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Edge cache cleared." } catch {}
+        }
+        if ($selections -contains "Chrome") {
+             try { Remove-Item "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Chrome cache cleared." } catch {}
+        }
+        if ($selections -contains "Firefox") {
+             try { Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*" -Directory | ForEach-Object { 
+                Remove-Item "$($_.FullName)\cache2\entries\*" -Recurse -Force -ErrorAction SilentlyContinue 
+            }; Write-Output "Firefox cache cleared." } catch {}
+        }
+
+        Write-Output "Cleanup complete. Deleted $deleted files."
+
+    } "Running advanced cleanup..." -ArgumentList $selections
+}
+
+function Show-RegistryCleaner {
+    param($ScanResults)
+
+    # 1. SETUP FORM
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Deep Registry Cleaner"
+    $f.Size = "1100, 600"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.ForeColor = [System.Drawing.Color]::White
+    
+    # 2. HEADER PANEL
+    $pnlHead = New-Object System.Windows.Forms.Panel
+    $pnlHead.Dock = "Top"; $pnlHead.Height = 60
+    $pnlHead.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $f.Controls.Add($pnlHead)
+
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Scan Complete. Issues found: $($ScanResults.Count)"
+    $lblStatus.AutoSize = $true; $lblStatus.Top = 18; $lblStatus.Left = 15
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+    $pnlHead.Controls.Add($lblStatus)
+
+    # 3. DATAGRIDVIEW
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Fill"
+    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.ForeColor = [System.Drawing.Color]::White
+    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $dg.BorderStyle = "None"
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.AllowUserToResizeRows = $false
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    
+    # Headers Style
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersHeight = 35
+    $dg.ColumnHeadersBorderStyle = "Single"
+
+    # Row Style
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $dg.DefaultCellStyle.SelectionForeColor = "White"
+    
+    $f.Controls.Add($dg)
+    $dg.BringToFront()
+
+    # 4. COLUMNS
+    # Checkbox - Fixed Tiny
+    $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
+    $colChk.HeaderText = " "
+    $colChk.Width = 30
+    $colChk.Name = "Check"
+    $colChk.TrueValue = $true; $colChk.FalseValue = $false
+    $colChk.Resizable = [System.Windows.Forms.DataGridViewTriState]::False
+    $dg.Columns.Add($colChk) | Out-Null
+
+    # Problem - Fixed Width
+    $dg.Columns.Add("Problem", "Problem") | Out-Null
+    $dg.Columns["Problem"].Width = 200
+
+    # Data - FILL (Shares space)
+    $dg.Columns.Add("Data", "Data (Path/Value)") | Out-Null
+    $dg.Columns["Data"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+    $dg.Columns["Data"].FillWeight = 50 # 50% of remaining space
+
+    # Key - FILL (Shares space)
+    $dg.Columns.Add("Key", "Registry Key") | Out-Null
+    $dg.Columns["Key"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+    $dg.Columns["Key"].FillWeight = 50 # 50% of remaining space
+    
+    # Hidden columns
+    $dg.Columns.Add("FullPath", "FullPath"); $dg.Columns["FullPath"].Visible = $false
+    $dg.Columns.Add("ValueName", "ValueName"); $dg.Columns["ValueName"].Visible = $false
+    $dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false
+
+    # 5. POPULATE GRID
+    foreach ($item in $ScanResults) {
+        $row = $dg.Rows.Add()
+        $dg.Rows[$row].Cells["Check"].Value = $true
+        $dg.Rows[$row].Cells["Problem"].Value = $item.Problem
+        $dg.Rows[$row].Cells["Data"].Value = $item.Data
+        $dg.Rows[$row].Cells["Key"].Value = $item.DisplayKey
+        $dg.Rows[$row].Cells["FullPath"].Value = $item.RegPath
+        $dg.Rows[$row].Cells["ValueName"].Value = $item.ValueName
+        $dg.Rows[$row].Cells["Type"].Value = $item.Type
+    }
+
+    # 6. BOTTOM PANEL
+    $pnlBot = New-Object System.Windows.Forms.Panel
+    $pnlBot.Dock = "Bottom"; $pnlBot.Height = 60
+    $pnlBot.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    $f.Controls.Add($pnlBot)
+
+    $btnFix = New-Object System.Windows.Forms.Button
+    $btnFix.Text = "Fix Selected Issues..."
+    $btnFix.Width = 200; $btnFix.Height = 35
+    $btnFix.Top = 12; $btnFix.Left = 860
+    $btnFix.Anchor = [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
+    $btnFix.FlatStyle = "Flat"
+    $btnFix.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
+    $btnFix.ForeColor = "White"
+    $btnFix.FlatAppearance.BorderSize = 0
+    $pnlBot.Controls.Add($btnFix)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Close"
+    $btnCancel.Width = 100; $btnCancel.Height = 35
+    $btnCancel.Top = 12; $btnCancel.Left = 20
+    $btnCancel.FlatStyle = "Flat"
+    $btnCancel.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    $btnCancel.ForeColor = "White"
+    $btnCancel.FlatAppearance.BorderSize = 0
+    $btnCancel.Add_Click({ $f.Close() })
+    $pnlBot.Controls.Add($btnCancel)
+
+    # 7. LOGIC
+    $btnFix.Add_Click({
+        $toFix = @()
+        foreach ($row in $dg.Rows) {
+            if ($row.Cells["Check"].Value -eq $true) {
+                $toFix += [PSCustomObject]@{
+                    RegPath   = $row.Cells["FullPath"].Value
+                    ValueName = $row.Cells["ValueName"].Value
+                    Type      = $row.Cells["Type"].Value
+                    DisplayKey= $row.Cells["Key"].Value
+                }
+            }
+        }
+
+        if ($toFix.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("No issues selected.", "Registry Cleaner", "OK", "Information")
+            return
+        }
+
+        $res = [System.Windows.Forms.MessageBox]::Show("Do you want to fix $($toFix.Count) selected registry issues?`n`nA backup will be created automatically.", "Registry Cleaner", "YesNo", "Question")
+        if ($res -eq "Yes") {
+            $f.Tag = $toFix
+            $f.DialogResult = "OK"
+            $f.Close()
+        }
+    })
+
+    if ($ScanResults.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No issues found!", "Registry Cleaner", "OK", "Information")
+        return $null
+    }
+
+    $f.ShowDialog() | Out-Null
+    return $f.Tag
 }
 
 function Invoke-RegistryTask {
     param([string]$Action)
+
+    $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
+    if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
+
+    # --- HELPER: Unified Manual Backup (No reg.exe dependency) ---
+    function Backup-RegKey {
+        param($ItemObj, $FilePath)
+        
+        $path = $ItemObj.RegPath
+        $targetValue = $ItemObj.ValueName
+        $type = $ItemObj.Type
+
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+
+        # 1. TRANSLATE PATH (PowerShell -> Registry Format)
+        $regKeyPath = $path
+        if ($regKeyPath -match "::") { $regKeyPath = ($regKeyPath -split "::")[-1] }
+        
+        if ($regKeyPath -match "^HKLM:?\\") { $regKeyPath = $regKeyPath -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\" }
+        elseif ($regKeyPath -match "^HKCU:?\\") { $regKeyPath = $regKeyPath -replace "^HKCU:?\\", "HKEY_CURRENT_USER\" }
+        elseif ($regKeyPath -match "^HKCR:?\\") { $regKeyPath = $regKeyPath -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\" }
+        elseif ($regKeyPath -match "^HKU:?\\")   { $regKeyPath = $regKeyPath -replace "^HKU:?\\",   "HKEY_USERS\" }
+
+        # 2. GATHER VALUES TO EXPORT
+        $valuesToExport = @()
+        
+        try {
+            if ($type -eq "Value" -and $targetValue) {
+                # Case A: Specific Value Only
+                $valuesToExport += Get-ItemProperty -Path $path -Name $targetValue -ErrorAction Stop
+            }
+            elseif ($type -eq "Key") {
+                # Case B: Entire Key (All Values)
+                # We need to get the object that contains ALL properties
+                $propObj = Get-ItemProperty -Path $path -ErrorAction Stop
+                
+                # If there are no properties other than system ones, we still want to export the key header
+                # so we pass the object even if empty of custom values.
+                $valuesToExport += $propObj
+            }
+        } catch {
+            Write-GuiLog "Backup Warning: Access denied or path missing '$path'"
+            return
+        }
+
+        # 3. BUILD REG FILE CONTENT
+        $sb = [System.Text.StringBuilder]::new()
+        [void]$sb.AppendLine("[$regKeyPath]")  # <--- FIXED: Added [void]
+
+        foreach ($obj in $valuesToExport) {
+            # Iterate through all properties on the object (excluding PS metadata)
+            foreach ($prop in $obj.PSObject.Properties) {
+                $pName = $prop.Name
+                $pVal  = $prop.Value
+                
+                # Skip PowerShell Internal Properties
+                if ($pName -match "^PS" -or $pName -match "^Domain" -or $pName -match "^Adsi") { continue }
+
+                # Handle Property Name formatting
+                # (default) property in PS corresponds to @ in .reg files
+                $regName = if ($pName -eq "(default)") { "@" } else { "`"$pName`"" }
+                
+                # Specific filtering: If we are in "Value" mode, only export the matching value name
+                if ($type -eq "Value" -and $targetValue -ne $null -and $pName -ne $targetValue) { continue }
+
+                # Handle Data formatting
+                $regData = ""
+                
+                if ($pVal -is [string]) {
+                    # Escape slashes and quotes
+                    $cleanStr = $pVal -replace '\\', '\\' -replace '"', '\"'
+                    $regData = "`"$cleanStr`""
+                }
+                elseif ($pVal -is [int] -or $pVal -is [int32] -or $pVal -is [int64]) {
+                    $regData = "dword:{0:x8}" -f $pVal
+                }
+                elseif ($null -eq $pVal) {
+                    # Empty string for nulls usually
+                    $regData = "`"`""
+                }
+                else {
+                    continue 
+                }
+
+                if ($regData) {
+                    [void]$sb.AppendLine("$regName=$regData") # <--- FIXED: Added [void]
+                }
+            }
+        }
+        [void]$sb.AppendLine("") # <--- FIXED: Added [void]
+
+        # 4. WRITE TO FILE
+        $finalContent = $sb.ToString()
+        
+        try {
+            if (-not (Test-Path $FilePath)) {
+                # New File: BOM + Header + Content
+                $header = "Windows Registry Editor Version 5.00`r`n`r`n"
+                Set-Content -Path $FilePath -Value ($header + $finalContent) -Encoding Unicode
+            } else {
+                # Append: Content only
+                Add-Content -Path $FilePath -Value $finalContent -Encoding Unicode
+            }
+        } catch {
+            Write-GuiLog "File Write Error: $_"
+        }
+    }
+
     switch ($Action) {
         "List" {
-            Invoke-UiCommand { Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' } | Select-Object -ExpandProperty PSChildName } "Listing removable uninstall keys..."
+            Invoke-UiCommand { 
+                $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' } 
+                if ($keys) { $keys | Select-Object -ExpandProperty PSChildName | Out-String } else { "No obsolete Uninstall keys found." }
+            } "Listing removable keys..."
         }
+        
         "Delete" {
             Invoke-UiCommand {
-                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
-                if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
-                $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
-                reg export "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall" $bkFile /y | Out-Null
+                $bkFile = Join-Path $bkDir ("SmartClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                $count = 0
+
+                # A. Clean Obsolete Uninstall Keys
                 $keys = Get-ChildItem HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall | Where-Object { $_.PSChildName -match 'IE40|IE4Data|DirectDrawEx|DXM_Runtime|SchedulingAgent' }
-                foreach ($k in $keys) { try { Remove-Item $k.PSPath -Recurse -Force -ErrorAction Stop; Write-Output "Removed: $($k.PSChildName)" } catch { Write-Output "Failed: $($k.PSChildName) -> $($_.Exception.Message)" } }
-                Write-Output "Backup saved to $bkFile"
-            } "Deleting obsolete uninstall keys..."
+                if ($keys) {
+                    foreach ($k in $keys) {
+                        $obj = [PSCustomObject]@{ RegPath=$k.PSPath; ValueName=$null; Type="Key" }
+                        Backup-RegKey -ItemObj $obj -FilePath $bkFile
+                        try { Remove-Item $k.PSPath -Recurse -Force -ErrorAction Stop; Write-Output "Removed: $($k.PSChildName)"; $count++ } catch { Write-Output "Failed: $($k.PSChildName)" }
+                    }
+                }
+
+                # B. Clean MuiCache
+                $muiPath = "HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
+                if (Test-Path $muiPath) {
+                    $obj = [PSCustomObject]@{ RegPath=$muiPath; ValueName=$null; Type="Key" }
+                    Backup-RegKey -ItemObj $obj -FilePath $bkFile
+                    $items = Get-ItemProperty $muiPath
+                    foreach ($name in $items.PSObject.Properties.Name) {
+                        if ($name -match '^[a-zA-Z]:\\' -and -not (Test-Path $name -ErrorAction SilentlyContinue)) {
+                            Remove-ItemProperty -Path $muiPath -Name $name -ErrorAction SilentlyContinue
+                            $count++
+                        }
+                    }
+                }
+                
+                if ($count -gt 0) { Write-Output "Cleaned $count items. Backup saved: $bkFile" } else { Write-Output "Nothing found to clean." }
+            } "Smart cleaning keys..."
         }
+
+        "DeepClean" {
+            # 1. WARN USER
+            $warnMsg = "Deep Registry Scan takes time.`n`nThe application window may appear frozen or unresponsive during this process. Please do not close it.`n`nContinue?"
+            $warnRes = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Scan Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            if ($warnRes -eq "No") { return }
+
+            # 2. SETUP PROGRESS FORM
+            $pForm = New-Object System.Windows.Forms.Form
+            $pForm.Text = "Scanning Registry..."
+            $pForm.Size = "450, 120"
+            $pForm.StartPosition = "CenterScreen"
+            $pForm.FormBorderStyle = "FixedDialog"
+            $pForm.ControlBox = $false
+            $pForm.BackColor = [System.Drawing.Color]::FromArgb(30,30,30)
+            $pForm.ForeColor = "White"
+
+            $pLabel = New-Object System.Windows.Forms.Label
+            $pLabel.Location = "20, 15"
+            $pLabel.AutoSize = $true
+            $pLabel.Text = "Initializing..."
+            $pLabel.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+            $pForm.Controls.Add($pLabel)
+
+            $pBar = New-Object System.Windows.Forms.ProgressBar
+            $pBar.Location = "20, 45"
+            $pBar.Size = "390, 20"
+            $pBar.Style = "Continuous"
+            $pBar.Maximum = 100
+            $pForm.Controls.Add($pBar)
+
+            $pForm.Show()
+            [System.Windows.Forms.Application]::DoEvents()
+
+            # 3. SCANNING PHASE
+            $findings = New-Object System.Collections.Generic.List[PSObject]
+
+            try {
+                Write-GuiLog "Starting Registry Ultra Deep Mode..."
+                
+                function Test-IsDeletable($Path) {
+                    try {
+                        if (-not (Test-Path $Path)) { return $false }
+                        $acl = Get-Acl -Path $Path -ErrorAction SilentlyContinue
+                        if (-not $acl) { return $true }
+                        if ($acl.Owner -match "TrustedInstaller" -or $acl.Owner -match "SYSTEM") { return $false }
+                        return $true
+                    } catch { return $false }
+                }
+
+                # --- SCAN STEPS (Same as before) ---
+                # 1. App Paths
+                $pLabel.Text = "1/9: Scanning App Paths..."
+                $pBar.Value = 10; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $appPaths = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+                $subKeys = Get-ChildItem $appPaths -ErrorAction SilentlyContinue
+                foreach ($key in $subKeys) {
+                    $exePath = (Get-ItemProperty $key.PSPath)."(default)"
+                    if ($exePath -and ($exePath -match '^[a-zA-Z]:\\') -and -not (Test-Path $exePath -ErrorAction SilentlyContinue)) {
+                        if (Test-IsDeletable $key.PSPath) {
+                            $findings.Add([PSCustomObject]@{ Problem="Missing App Path"; Data=$exePath; DisplayKey=$key.PSChildName; RegPath=$key.PSPath; ValueName=$null; Type="Key" })
+                        }
+                    }
+                }
+
+                # 2. SharedDLLs
+                $pLabel.Text = "2/9: Scanning Shared DLLs..."
+                $pBar.Value = 20; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $dllLocs = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDLLs", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDLLs")
+                foreach ($dllPath in $dllLocs) {
+                    if (Test-Path $dllPath) {
+                        $props = Get-ItemProperty $dllPath
+                        foreach ($dll in $props.PSObject.Properties.Name) {
+                            if ($dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
+                                if (Test-IsDeletable $dllPath) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Missing Shared DLL"; Data=$dll; DisplayKey=$(Split-Path $dllPath -Leaf); RegPath=$dllPath; ValueName=$dll; Type="Value" })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # 3. ActiveX / COM
+                $pLabel.Text = "3/9: Scanning ActiveX/COM..."
+                $pBar.Value = 30; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $comLocations = @("HKLM:\SOFTWARE\Classes\CLSID", "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID")
+                foreach ($root in $comLocations) {
+                    if (Test-Path $root) {
+                        $clsids = Get-ChildItem $root -ErrorAction SilentlyContinue
+                        $counter = 0
+                        foreach ($clsid in $clsids) {
+                            $counter++
+                            if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+                            $srv = Join-Path $clsid.PSPath "InProcServer32"
+                            if (Test-Path $srv) {
+                                $dll = (Get-ItemProperty $srv)."(default)"
+                                if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
+                                    if (Test-IsDeletable $clsid.PSPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="ActiveX/COM Issue"; Data=$dll; DisplayKey=$clsid.PSChildName; RegPath=$srv; ValueName=$null; Type="Key" })
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # 4. Applications
+                $pLabel.Text = "4/9: Scanning App Associations..."
+                $pBar.Value = 50; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications", "HKCU:\Software\Classes\Applications")
+                foreach ($root in $appRoots) {
+                     if (Test-Path $root) {
+                         $apps = Get-ChildItem $root -ErrorAction SilentlyContinue
+                         foreach ($app in $apps) {
+                            $openCmd = Join-Path $app.PSPath "shell\open\command"
+                            if (Test-Path $openCmd) {
+                                $cmd = (Get-ItemProperty $openCmd)."(default)"
+                                if ($cmd -match '"([^"]+)"') { $cmdPath = $matches[1] } else { $cmdPath = $cmd.Split(" ")[0] }
+                                if ($cmdPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cmdPath -ErrorAction SilentlyContinue)) {
+                                    if (Test-IsDeletable $app.PSPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="Invalid App Association"; Data=$cmdPath; DisplayKey=$app.PSChildName; RegPath=$app.PSPath; ValueName=$null; Type="Key" })
+                                    }
+                                }
+                            }
+                         }
+                     }
+                }
+
+                # 5. Installer Folders
+                $pLabel.Text = "5/9: Scanning Installer Folders..."
+                $pBar.Value = 60; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $instPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
+                if (Test-Path $instPath) {
+                    $folders = Get-ItemProperty $instPath
+                    foreach ($f in $folders.PSObject.Properties.Name) {
+                        if ($f -match '^[a-zA-Z]:\\' -and -not (Test-Path $f -ErrorAction SilentlyContinue)) {
+                             if (Test-IsDeletable $instPath) {
+                                $findings.Add([PSCustomObject]@{ Problem="Missing Installer Folder"; Data=$f; DisplayKey="Installer\Folders"; RegPath=$instPath; ValueName=$f; Type="Value" })
+                             }
+                        }
+                    }
+                }
+
+                # 6. MuiCache
+                $pLabel.Text = "6/9: Scanning MuiCache..."
+                $pBar.Value = 70; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache", "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store")
+                foreach ($path in $userKeys) {
+                    if (Test-Path $path) {
+                        $items = Get-ItemProperty $path
+                        foreach ($name in $items.PSObject.Properties.Name) {
+                            $cleanPath = $name -replace '\.(FriendlyAppName|ApplicationCompany)$', ''
+                            if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cleanPath -ErrorAction SilentlyContinue)) {
+                                $findings.Add([PSCustomObject]@{ Problem="Obsolete User Ref"; Data=$cleanPath; DisplayKey=$(Split-Path $path -Leaf); RegPath=$path; ValueName=$name; Type="Value" })
+                            }
+                        }
+                    }
+                }
+
+                # 7. Firewall Rules
+                $pLabel.Text = "7/9: Scanning Firewall Rules..."
+                $pBar.Value = 80; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $fwPath = "HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+                if (Test-Path $fwPath) {
+                    $rules = Get-ItemProperty $fwPath
+                    foreach ($ruleName in $rules.PSObject.Properties.Name) {
+                        $ruleData = $rules.$ruleName
+                        if ($ruleData -is [string] -and $ruleData -match "App=([^|]+)") {
+                            $rawApp = $matches[1]
+                            try {
+                                $expanded = [Environment]::ExpandEnvironmentVariables($rawApp)
+                                if ($expanded -match '^[a-zA-Z]:\\' -and -not (Test-Path $expanded -ErrorAction SilentlyContinue)) {
+                                    if (Test-IsDeletable $fwPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="Invalid Firewall Rule"; Data=$expanded; DisplayKey=$ruleName; RegPath=$fwPath; ValueName=$ruleName; Type="Value" })
+                                    }
+                                }
+                            } catch {}
+                        }
+                    }
+                }
+
+                # 8. Startup Items
+                $pLabel.Text = "8/9: Scanning Startup Items..."
+                $pBar.Value = 90; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $runKeys = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
+                foreach ($runKey in $runKeys) {
+                    if (Test-Path $runKey) {
+                        $items = Get-ItemProperty $runKey
+                        foreach ($name in $items.PSObject.Properties.Name) {
+                            $val = $items.$name
+                            if ($val -is [string] -and $val -match '^[a-zA-Z]:\\') {
+                                if ($val -match '"([^"]+)"') { $exe = $matches[1] } else { $exe = $val.Split(" ")[0] }
+                                if (-not (Test-Path $exe -ErrorAction SilentlyContinue)) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Broken Startup Item"; Data=$exe; DisplayKey=$runKey; RegPath=$runKey; ValueName=$name; Type="Value" })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # 9. Unused Extensions
+                $pLabel.Text = "9/9: Scanning File Extensions..."
+                $pBar.Value = 95; $pForm.Refresh(); [System.Windows.Forms.Application]::DoEvents()
+                $classRoots = @("HKLM:\SOFTWARE\Classes", "HKCU:\Software\Classes")
+                foreach ($root in $classRoots) {
+                    if (Test-Path $root) {
+                        $exts = Get-ChildItem $root -Name | Where-Object { $_.StartsWith(".") }
+                        $counter = 0
+                        foreach ($ext in $exts) {
+                            $counter++
+                            if ($counter % 200 -eq 0) { [System.Windows.Forms.Application]::DoEvents() }
+                            $path = Join-Path $root $ext
+                            $subkeys = Get-ChildItem $path -ErrorAction SilentlyContinue
+                            $props = Get-ItemProperty $path -ErrorAction SilentlyContinue
+                            $def = $props."(default)"
+                            if ($subkeys.Count -eq 0 -and ([string]::IsNullOrEmpty($def))) {
+                                if (Test-IsDeletable $path) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Unused File Ext"; Data=$ext; DisplayKey=$path; RegPath=$path; ValueName=$null; Type="Key" })
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                Write-GuiLog "Scan complete. Found $($findings.Count) actionable issues."
+
+            } catch {
+                $pForm.Close()
+                Write-GuiLog "ERROR during scan: $($_.Exception.Message)"
+                [System.Windows.Forms.MessageBox]::Show("Error during scan: $($_.Exception.Message)", "Error", "OK", "Error")
+                return
+            }
+            
+            $pForm.Close()
+            $pForm.Dispose()
+
+            # 4. GUI RESULTS PHASE
+            $toDelete = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
+            if (-not $toDelete) { return }
+
+            # 5. FIXING PHASE
+            Invoke-UiCommand {
+                $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                $fixedCount = 0
+                $skippedCount = 0
+                $backedUpKeys = @()
+
+                foreach ($item in $toDelete) {
+                    if ($item.RegPath) {
+                        $uniqueId = "$($item.RegPath):$($item.ValueName)"
+                        if ($uniqueId -notin $backedUpKeys) {
+                            Backup-RegKey -ItemObj $item -FilePath $bkFile
+                            $backedUpKeys += $uniqueId
+                        }
+                        
+                        if ($item.Type -eq "Key") {
+                            Remove-Item $item.RegPath -Recurse -Force -ErrorAction SilentlyContinue
+                            if (Test-Path $item.RegPath) { $skippedCount++ } else { $fixedCount++ }
+                        }
+                        elseif ($item.Type -eq "Value") {
+                            Remove-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue
+                            if (Get-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue) { $skippedCount++ } else { $fixedCount++ }
+                        }
+                    }
+                }
+                
+                $msg = "Cleanup Complete.`n`nFixed: $fixedCount`nSkipped (Protected): $skippedCount`nBackup: $bkFile"
+                Write-Output "Fixed: $fixedCount. Skipped: $skippedCount."
+                [System.Windows.Forms.MessageBox]::Show($msg, "Registry Cleaner", "OK", "Information") | Out-Null
+
+            } "Fixing selected issues..."
+        }
+
         "BackupHKLM" {
             Invoke-UiCommand {
-                $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
-                if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
-                $bkFile = Join-Path $bkDir ("RegistryBackup_{0}.reg" -f (Get-Date -Format "yyyy-MM-dd_HH-mm"))
+                $bkFile = Join-Path $bkDir ("Full_HKLM_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 reg export HKLM $bkFile /y | Out-Null
                 Write-Output "Full HKLM backup created: $bkFile"
             } "Backing up HKLM..."
         }
+
         "Restore" {
             $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.InitialDirectory = $bkDir
             $dlg.Filter = "Registry Backup (*.reg)|*.reg"
             if ($dlg.ShowDialog() -eq "OK") {
                 $restoreFile = $dlg.FileName
-                Invoke-UiCommand { reg import $restoreFile } "Restoring registry from $restoreFile..."
+                Invoke-UiCommand { 
+                    Start-Process reg -ArgumentList "import `"$restoreFile`"" -Wait -NoNewWindow
+                    Write-Output "Restored: $restoreFile"
+                } "Restoring registry..."
             }
         }
+
         "Scan" {
-            Invoke-UiCommand { sfc /scannow; dism /online /cleanup-image /checkhealth } "Scanning registry/system files..."
+            Invoke-UiCommand { 
+                Write-Output "Starting System File Checker..."
+                sfc /scannow
+                Write-Output "`nStarting DISM Health Check..."
+                dism /online /cleanup-image /checkhealth 
+            } "Scanning system files..."
         }
     }
 }
@@ -813,35 +1564,390 @@ function Invoke-SSDTrim {
         Write-Output "SSD optimization complete. Log: $log"
     } "Running SSD Trim/ReTrim..."
 }
+function Show-BrokenShortcuts {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
 
-function Invoke-ShortcutFix {
-    Invoke-UiCommand {
-        $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
-        $updated = 0; $deleted = 0
-        function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
-        foreach ($path in $paths) {
-            Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                $target = Get-ShortcutTarget $_.FullName
-                if ($systemShortcuts -contains $_.Name -or ($target -and ($target -match '^shell:' -or $target -match '^\s*::{')) ) { continue }
-                if (-not $target -or -not (Test-Path $target)) {
-                    $peer = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $_.FullName } | Select-Object -First 1
-                    $guess = $null
-                    if ($peer) {
-                        $pt = Get-ShortcutTarget $peer.FullName
-                        if ($pt) { $guess = Join-Path (Split-Path $pt -Parent) "$($_.BaseName).exe" }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Broken Shortcut Manager"
+    $f.Size = "1100, 650"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $f.ForeColor = "White"
+
+    # 1. SETUP GRID
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Top"; $dg.Height = 480
+    $dg.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $dg.ForeColor = "Black"
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 50)
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersHeight = 35
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
+    $dg.DefaultCellStyle.SelectionForeColor = "White"
+
+    $f.Controls.Add($dg)
+
+    # 2. STATUS
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Initializing..."
+    $lblStatus.AutoSize = $true
+    $lblStatus.ForeColor = "Yellow"
+    $lblStatus.Location = "20, 490"
+    $f.Controls.Add($lblStatus)
+
+    # 3. BUTTONS
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"; $pnl.Height = 80
+    $pnl.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $f.Controls.Add($pnl)
+
+    # --- CHANGED: Delete Button ---
+    $btnDelete = New-Object System.Windows.Forms.Button
+    $btnDelete.Text = "Delete Selected"
+    $btnDelete.Location = "20, 20"; $btnDelete.Width = 150; $btnDelete.Height = 35
+    $btnDelete.BackColor = "IndianRed"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
+    $pnl.Controls.Add($btnDelete)
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = "Apply Fixes" # Renamed slightly to be clearer
+    $btnApply.Location = "780, 20"; $btnApply.Width = 150; $btnApply.Height = 35
+    $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"
+    $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $pnl.Controls.Add($btnApply)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Close"
+    $btnCancel.Location = "950, 20"; $btnCancel.Width = 100; $btnCancel.Height = 35
+    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $pnl.Controls.Add($btnCancel)
+    
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Right-click for Deep Search or Manual Browse."
+    $lblInfo.AutoSize = $true; $lblInfo.ForeColor = "Gray"
+    $lblInfo.Location = "200, 30"
+    $pnl.Controls.Add($lblInfo)
+
+    # 4. CONTEXT MENU
+    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+    
+    # --- Manual Browse ---
+    $itemBrowse = $ctx.Items.Add("Browse for target...")
+    $itemBrowse.Add_Click({
+        if ($dg.SelectedRows.Count -eq 1) {
+            $row = $dg.SelectedRows[0]
+            $obj = $row.DataBoundItem
+            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
+            if ($dlg.ShowDialog() -eq "OK") {
+                $obj.Action = "Fix"
+                $obj.NewTarget = $dlg.FileName
+                $obj.Details = "Manual fix: $($dlg.FileName)"
+                $dg.Refresh()
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
+            }
+        }
+    })
+
+    # --- Deep Search ---
+    $itemDeep = $ctx.Items.Add("Deep Search (Slow - Scan All Drives)")
+    $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $itemDeep.ForeColor = [System.Drawing.Color]::DarkBlue
+    
+    $itemDeep.Add_Click({
+        if ($dg.SelectedRows.Count -ne 1) { return }
+        $row = $dg.SelectedRows[0]
+        $obj = $row.DataBoundItem
+        
+        $searchName = $null
+        $shell = New-Object -ComObject WScript.Shell
+        try {
+            $sc = $shell.CreateShortcut($obj.FullPath)
+            if ($sc.TargetPath) {
+                $searchName = Split-Path $sc.TargetPath -Leaf
+            }
+        } catch {}
+
+        if (-not $searchName) {
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($obj.Shortcut)
+            $searchName = "$base.exe"
+        }
+
+        $warnMsg = "This will scan ALL local hard drives for:`n`n'$searchName'`n`nDepending on your drive size, this can take 5-10+ minutes.`nDuring this time, the application may appear frozen.`n`nDo you want to continue?"
+        $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") {
+            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+            $lblStatus.Text = "Deep Searching for '$searchName'..."
+            $f.Update()
+
+            $foundPath = $null
+            $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' }
+            
+            foreach ($d in $drives) {
+                if ($foundPath) { break }
+                $root = $d.RootDirectory.FullName
+                $lblStatus.Text = "Scanning drive $root for '$searchName'..."
+                $f.Update()
+                try {
+                    $match = Get-ChildItem -Path $root -Filter $searchName -Recurse -ErrorAction SilentlyContinue -Force | Select-Object -First 1
+                    if ($match) { $foundPath = $match.FullName }
+                } catch {}
+            }
+
+            if ($foundPath) {
+                $obj.Action = "Fix"
+                $obj.NewTarget = $foundPath
+                $obj.Details = "Deep Search: $foundPath"
+                $dg.Refresh()
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
+                $lblStatus.Text = "Found: $foundPath"
+                [System.Windows.Forms.MessageBox]::Show("File found!`n`n$foundPath", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            } else {
+                $lblStatus.Text = "Deep Search failed."
+                [System.Windows.Forms.MessageBox]::Show("Could not find '$searchName' on any local drive.", "Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        }
+    })
+
+    $ctx.Items.Add( (New-Object System.Windows.Forms.ToolStripSeparator) )
+
+    # --- Unmark ---
+    $itemUnmark = $ctx.Items.Add("Unmark / Cancel Action")
+    $itemUnmark.Add_Click({
+        foreach ($row in $dg.SelectedRows) {
+            $obj = $row.DataBoundItem
+            $obj.Action = "None"
+            $obj.Details = "Review Needed"
+            $dg.Refresh()
+            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange
+        }
+    })
+    $dg.ContextMenuStrip = $ctx
+
+    # --- CHANGED: DELETE BUTTON LOGIC ---
+    $btnDelete.Add_Click({
+        $count = $dg.SelectedRows.Count
+        if ($count -eq 0) { return }
+
+        $res = [System.Windows.Forms.MessageBox]::Show("Permanently delete $count selected shortcut(s)?`n`nThis action is immediate.", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") {
+            $rows = @($dg.SelectedRows) # Copy collection to avoid modification errors
+            $deletedCount = 0
+            
+            foreach ($row in $rows) {
+                try {
+                    # Get FullPath from the hidden column we added
+                    $path = $row.Cells["FullPath"].Value
+                    
+                    if ($path -and (Test-Path $path)) {
+                        Remove-Item -Path $path -Force -ErrorAction Stop
                     }
-                    if ($guess -and (Test-Path $guess)) {
-                        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName); $sc.TargetPath = $guess; $sc.Save(); $updated++
-                        Write-Output "Updated: $($_.FullName) -> $guess"
+                    
+                    # Remove from UI
+                    $dg.Rows.Remove($row)
+                    $deletedCount++
+                } catch {
+                    [System.Windows.Forms.MessageBox]::Show("Could not delete: $path`n$($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                }
+            }
+            $lblStatus.Text = "Deleted $deletedCount shortcuts."
+        }
+    })
+
+    $script:ScanResults = @()
+
+    # 5. SCAN LOGIC
+    $f.Add_Shown({
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        $lblStatus.Text = "Scanning shortcuts... Please wait."
+        $f.Text = "Broken Shortcut Manager - Scanning..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $paths = @(
+            "C:\ProgramData\Microsoft\Windows\Start Menu", 
+            "$env:APPDATA\Microsoft\Windows\Start Menu",
+            "$env:USERPROFILE\Desktop",
+            "C:\Users\Public\Desktop",
+            "$env:USERPROFILE\OneDrive\Desktop"
+        ) | Select-Object -Unique | Where-Object { $_ -and (Test-Path $_) }
+
+        $knownFixes = @{
+            "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+            "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+            "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
+            "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
+            "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
+        }
+
+        $shell = New-Object -ComObject WScript.Shell
+        
+        $tempList = @()
+        
+        foreach ($path in $paths) {
+            Get-ChildItem -Path $path -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $lnkPath = $_.FullName
+                try {
+                    $sc = $shell.CreateShortcut($lnkPath)
+                    $target = $sc.TargetPath
+                } catch { return }
+
+                if ($target -match '^shell:' -or $target -match '^\s*::{') { return }
+                if ($target -match '^\s*$' -or $target.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return }
+
+                if (-not (Test-Path $target)) {
+                    $action = "None"; $details = "Review Needed"; $newT = $null
+                    $baseName = $_.BaseName
+
+                    if ($knownFixes.ContainsKey($baseName)) {
+                        $action = "Fix"; $details = "Restore System Path"; $newT = $knownFixes[$baseName]
                     } else {
-                        Remove-Item $_.FullName -Force; $deleted++; Write-Output "Deleted broken shortcut: $($_.FullName)"
+                        $guessName = if ($target) { Split-Path $target -Leaf } else { ($baseName + ".exe") }
+                        $peers = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $lnkPath }
+                        foreach ($p in $peers) {
+                            try {
+                                $pt = $shell.CreateShortcut($p.FullName).TargetPath
+                                if ($pt -and (Test-Path $pt)) {
+                                    $parent = Split-Path $pt -Parent; $candidate = Join-Path $parent $guessName
+                                    if (Test-Path $candidate) { $action = "Fix"; $details = "Auto-Found: $parent"; $newT = $candidate; break }
+                                }
+                            } catch {}
+                        }
+                    }
+
+                    $tempList += [PSCustomObject]@{
+                        Shortcut  = $_.Name
+                        Folder    = (Split-Path $_.DirectoryName -Leaf)
+                        Action    = $action
+                        Details   = $details
+                        NewTarget = $newT
+                        FullPath  = $lnkPath
                     }
                 }
             }
         }
-        Write-Output "Shortcut scan complete. Updated: $updated | Deleted: $deleted"
-    } "Scanning and fixing shortcuts..."
+
+        # 6. BIND
+        $dt = New-Object System.Data.DataTable
+        # Added 'FullPath' column to the DataTable so we can access it for deletion
+        $dt.Columns.Add("Shortcut"); $dt.Columns.Add("Folder"); $dt.Columns.Add("Action"); $dt.Columns.Add("Details"); $dt.Columns.Add("NewTarget"); $dt.Columns.Add("FullPath")
+        
+        foreach ($item in $tempList) {
+            $row = $dt.NewRow()
+            $row["Shortcut"]  = $item.Shortcut
+            $row["Folder"]    = $item.Folder
+            $row["Action"]    = $item.Action
+            $row["Details"]   = $item.Details
+            $row["NewTarget"] = $item.NewTarget
+            $row["FullPath"]  = $item.FullPath
+            $dt.Rows.Add($row)
+        }
+        $dg.DataSource = $dt
+        $dg.ClearSelection()
+        
+        # Hide FullPath from view
+        if ($dg.Columns["FullPath"]) { $dg.Columns["FullPath"].Visible = $false }
+
+        # 7. COLORS
+        for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
+            $row = $dg.Rows[$i]
+            $act = $row.Cells["Action"].Value
+            if ($act -eq "Fix") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen; $row.Selected = $true }
+            elseif ($act -eq "None") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange }
+            else { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray }
+        }
+        
+        $lblStatus.Text = "Scan Complete. Found $($tempList.Count) broken shortcuts."
+        $f.Text = "Broken Shortcut Manager"
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+
+        if ($tempList.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Scan complete. No broken shortcuts found.", "All Clean", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    })
+
+    # Return Logic: Rebuild list from whatever is left in the grid to avoid processing deleted items
+    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { 
+        $finalList = @()
+        foreach ($row in $dg.Rows) {
+            # Map DataRowView back to object
+            $finalList += [PSCustomObject]@{
+                Shortcut  = $row.Cells["Shortcut"].Value
+                Folder    = $row.Cells["Folder"].Value
+                Action    = $row.Cells["Action"].Value
+                Details   = $row.Cells["Details"].Value
+                NewTarget = $row.Cells["NewTarget"].Value
+                FullPath  = $row.Cells["FullPath"].Value
+            }
+        }
+        return $finalList
+    }
+    return $null
+}
+function Invoke-ShortcutFix {
+    $items = Show-BrokenShortcuts
+    if (-not $items -or $items.Count -eq 0) { return }
+
+    # 1. ANALYZE PLANNED ACTIONS
+    $toFix = $items | Where-Object { $_.Action -eq "Fix" }
+    $toDel = $items | Where-Object { $_.Action -eq "Delete" }
+
+    if ($toFix.Count -eq 0 -and $toDel.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No actions were selected.`n`n(Tip: Select rows and click 'Mark for Delete' or Browse to fix them.)", "No Action", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information)
+        return
+    }
+
+    # 2. CONFIRMATION PROMPT
+    $msg = "You are about to apply the following actions:`n`n"
+    if ($toFix.Count -gt 0) { $msg += "• Fix: $($toFix.Count) shortcut(s)`n" }
+    if ($toDel.Count -gt 0) { $msg += "• DELETE: $($toDel.Count) shortcut(s)`n" }
+    $msg += "`nAre you sure you want to continue?"
+
+    $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButton]::YesNo, [System.Windows.Forms.MessageBoxImage]::Warning)
+    
+    if ($confirm -ne "Yes") { return }
+
+    # 3. EXECUTE
+    Invoke-UiCommand {
+        param($toFix, $toDel)
+        $shell = New-Object -ComObject WScript.Shell
+        
+        # Apply Fixes
+        foreach ($item in $toFix) {
+            try {
+                $sc = $shell.CreateShortcut($item.FullPath)
+                $sc.TargetPath = $item.NewTarget
+                $sc.Save()
+                Write-Output "Fixed: $($item.Shortcut)"
+            } catch { Write-Output "Failed to fix $($item.Shortcut): $($_.Exception.Message)" }
+        }
+
+        # Apply Deletes
+        foreach ($item in $toDel) {
+            try {
+                Remove-Item $item.FullPath -Force -ErrorAction Stop
+                Write-Output "Deleted: $($item.Shortcut)"
+            } catch { Write-Output "Failed to delete $($item.Shortcut): $($_.Exception.Message)" }
+        }
+
+        Write-Output "Operation complete."
+
+    } "Applying shortcut fixes..." -ArgumentList $toFix, $toDel
 }
 
 # --- FIREWALL TOOLS ---
@@ -2138,7 +3244,7 @@ Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "I
 Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
 Set-ButtonIcon "btnSupportDiscord" "M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09c-.01-.02-.04-.03-.07-.03c-1.5.26-2.93.71-4.27 1.33c-.01 0-.02.01-.03.02c-2.72 4.07-3.47 8.03-3.1 11.95c0 .02.01.04.03.05c1.8 1.32 3.53 2.12 5.2 2.65c.03.01.06 0 .07-.02c.4-.55.76-1.13 1.07-1.74c.02-.04 0-.08-.04-.09c-.57-.22-1.11-.48-1.64-.78c-.04-.02-.04-.08.01-.11c.11-.08.22-.17.33-.25c.02-.02.05-.02.07-.01c3.44 1.57 7.15 1.57 10.55 0c.02-.01.05-.01.07.01c.11.09.22.17.33.26c.04.03.04.09-.01.11c-.52.31-1.07.56-1.64.78c-.04.01-.05.06-.04.09c.32.61.68 1.19 1.07 1.74c.03.01.06.02.09.01c1.67-.53 3.4-1.33 5.2-2.65c.02-.01.03-.03.03-.05c.44-4.53-.73-8.46-3.1-11.95c-.01-.01-.02-.02-.04-.02z" "Join Discord" "Opens the community support Discord server"
 Set-ButtonIcon "btnSupportIssue" "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" "Report Issue" "Opens the GitHub Issues page to report bugs"
-Set-ButtonIcon "btnSupportDownloads" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,6H13V12H11V6M11,14H13V16H11V14Z" "Release Downloads" "Show latest release download counts"
+Set-ButtonIcon "btnNavDownloads" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,6H13V12H11V6M11,14H13V16H11V14Z" "Release Downloads" "Show latest release download counts"
 Set-ButtonIcon "btnDonateIos12" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Lil_Batti" "Support Lil_Batti via GitHub Sponsors" "#00FF00"
 Set-ButtonIcon "btnDonate" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Chaython" "Support Chaython via GitHub Sponsors" "#00FF00"
 Set-ButtonIcon "btnDnsGoogle" "M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" "Google" "Sets DNS to 8.8.8.8 & 8.8.4.4"
@@ -2456,6 +3562,7 @@ $Script:StartWingetAction = {
     $jobArgs = @{
         Items = $ListItems | Select-Object Name, Id
         Template = $CmdTemplate
+        IsUninstall = ($ActionName -eq "Uninstall") # Flag to detect uninstall mode
     }
 
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
@@ -2464,32 +3571,45 @@ $Script:StartWingetAction = {
         
         $items = $ArgsDict.Items
         $tmpl = $ArgsDict.Template
+        $isUninstall = $ArgsDict.IsUninstall
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
         foreach ($item in $items) {
             Write-Output "Processing: $($item.Name)..."
             $baseCmd = $tmpl -f $item.Id
             
-            # 1. Attempt Silent Install First
-            $expr = "$baseCmd --accept-source-agreements --accept-package-agreements --disable-interactivity"
+            # --- BUILD ARGUMENTS ---
+            # 'accept-package-agreements' is NOT valid for uninstall and causes errors
+            $commonFlags = "--accept-source-agreements"
+            if (-not $isUninstall) {
+                $commonFlags += " --accept-package-agreements"
+            }
+
+            # 1. Attempt Silent Execution First
+            $expr = "$baseCmd $commonFlags --disable-interactivity"
             
             $failed = $false
             $adminBlocked = $false
             
-            Invoke-Expression $expr | ForEach-Object {
-                $line = $_
+            # Capture output first to maintain variable scope in the loop
+            $output = Invoke-Expression $expr 
+            
+            foreach ($line in $output) {
                 
                 # FILTER: Skip spinner animation lines
-                if ($line -match '^\s*[\-\\|/]\s*$') { return }
+                if ($line -match '^\s*[\-\\|/]\s*$') { continue }
                 
                 Write-Output $line
                 
-                # Check for Generic Failures
+                # Check for Failures
                 if ($line -match "Installer failed" -or $line -match "exit code:") {
                     $failed = $true
                 }
+                if ($line -match "Argument name was not recognized") {
+                    $failed = $true
+                }
                 
-                # FIX: Broader Regex to catch "run" OR "installed" from admin context
+                # Check for Admin Context blocks
                 if ($line -match "cannot be .* from an admin.* context" -or $line -match "run this installer as a normal user") {
                     $failed = $true
                     $adminBlocked = $true
@@ -2504,39 +3624,46 @@ $Script:StartWingetAction = {
                 if ($choice -eq "Yes") {
                     Write-Output ">> Preparing to launch as Standard User..."
                     
-                    # Create a temporary batch file
                     $tempCmd = Join-Path $env:TEMP "WMT_DeElevate_Install.cmd"
-                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd --accept-source-agreements --accept-package-agreements`npause`ndel `"%~f0`" & exit"
+                    # We use the filtered $commonFlags here too
+                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd $commonFlags`npause`ndel `"%~f0`" & exit"
                     Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
                     
-                    # Launch via Explorer to strip Admin token
-                    $explorer = Join-Path $env:WinDir "explorer.exe"
-                    Start-Process $explorer -ArgumentList "`"$tempCmd`""
+                    Start-Process (Join-Path $env:WinDir "explorer.exe") -ArgumentList "`"$tempCmd`""
                     
-                    Write-Output ">> A new terminal window has opened for this installation."
+                    Write-Output ">> A new terminal window has opened for this operation."
                     $failed = $false # Handled
                 } else {
                     Write-Output ">> Skipped by user."
-                    $failed = $false # Prevent second popup
+                    $failed = $false
                 }
             }
             
-            # 3. Handle Generic Silent Failure (Switch to Interactive)
+            # 3. Handle Generic Failure (Switch to Interactive)
             if ($failed) {
-                $msg = "The update for '$($item.Name)' failed silently.`n`nWould you like to launch the installer INTERACTIVELY so you can handle the error manually?"
-                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Update Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
+                $msg = "The operation for '$($item.Name)' failed silently.`n`nWould you like to launch it INTERACTIVELY so you can handle the error manually?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Operation Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
                 
                 if ($choice -eq "Yes") {
-                    Write-Output " "
-                    Write-Output ">> Launching Interactive Mode..."
-                    Write-Output ">> A new window should be open..."
+                    # A. NOTIFY USER
+                    [System.Windows.Forms.MessageBox]::Show("The interactive installer will now open.`n`nPlease follow the prompts in the new window to complete the process.`n`nThis tool will wait until you are finished.", "Launching Interactive Mode", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
                     
-                    $exprInteractive = "$baseCmd --accept-source-agreements --accept-package-agreements --interactive"
+                    Write-Output ">> Launching Interactive Mode... Waiting for user completion..."
                     
-                    Invoke-Expression $exprInteractive | ForEach-Object {
-                        $line = $_
-                        if ($line -match '^\s*[\-\\|/]\s*$') { return }
-                        Write-Output $line
+                    # B. PREPARE ARGUMENTS
+                    # Strip 'winget ' from the start to get raw arguments for Start-Process
+                    $argString = $baseCmd -replace "^winget\s+", ""
+                    # Add necessary flags
+                    $finalArgs = "$argString $commonFlags --interactive"
+                    
+                    # C. EXECUTE WITH WAIT
+                    # -Wait forces the script to pause until the installer closes
+                    $proc = Start-Process -FilePath "winget" -ArgumentList $finalArgs -Wait -PassThru -NoNewWindow
+                    
+                    if ($proc.ExitCode -eq 0) {
+                        Write-Output ">> Interactive process finished successfully."
+                    } else {
+                        Write-Output ">> Interactive process finished (Exit Code: $($proc.ExitCode))."
                     }
                 } else {
                     Write-Output ">> Skipped by user."
@@ -2660,12 +3787,21 @@ $btnWingetInstall.Add_Click({
 })
 
 $btnWingetUninstall.Add_Click({ 
-    if ($lstWinget.SelectedItems.Count -gt 0) { 
-        if ([System.Windows.Forms.MessageBox]::Show("Uninstall selected items?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo) -eq "Yes") { 
-            & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Uninstall" -CmdTemplate "winget uninstall --id {0}"
+    # 1. Capture selected items immediately to a standard array
+    $selected = @($lstWinget.SelectedItems)
+
+    if ($selected.Count -gt 0) { 
+        # 2. Confirm action
+        $msg = "Are you sure you want to uninstall $($selected.Count) application(s)?"
+        $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Uninstall", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") { 
+            # 3. Pass the array to the action handler with quoted ID template
+            & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall" -CmdTemplate "winget uninstall --id `"{0}`""
         } 
     } 
 })
+
 # --- System Health ---
 $btnSFC.Add_Click({
     Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "sfc /scannow; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
@@ -2750,6 +3886,7 @@ $btnResetWifi.Add_Click({
         [System.Windows.MessageBox]::Show("Restarted Wi-Fi adapter(s): " + ($names -join ", "), "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
     } "Restarting Wi-Fi adapters..."
 })
+
 $btnNetRepair.Add_Click({
     $msg = "Full Network Repair will:" +
            "`n- Release/Renew IP" +
@@ -2757,11 +3894,14 @@ $btnNetRepair.Add_Click({
            "`n- Reset Winsock" +
            "`n- Reset IP stack" +
            "`n`nAdapters may briefly disconnect. Continue?"
+
     $res = [System.Windows.MessageBox]::Show($msg, "Full Network Repair", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-    if ($res -ne "Yes") { return }
-    Start-NetRepair
+    
+    if ($res -eq "Yes") {
+        Start-NetRepair
+    }
 })
-$btnNetRepair.Add_Click({ Start-NetRepair })
+
 $btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
 $btnRouteView.Add_Click({
     Invoke-UiCommand {
@@ -2823,6 +3963,83 @@ $btnHostsRestore.Add_Click({
 })
 
 # --- FIREWALL ---
+# --- FIREWALL DOUBLE-CLICK MODIFY ---
+$lstFw.Add_MouseDoubleClick({
+    $rule = $lstFw.SelectedItem
+    if ($null -eq $rule) { return }
+
+    # 1. Open existing dialog with the selected rule
+    $result = Show-RuleDialog "Edit Firewall Rule" $rule
+
+    # 2. If user clicked 'Save' (result is not null)
+    if ($result) {
+        try {
+            # 3. Apply changes using the Name (ID) from the original object
+            Set-NetFirewallRule -Name $rule.Name `
+                -Direction $result.Direction `
+                -Action $result.Action `
+                -Protocol $result.Protocol `
+                -LocalPort $result.Port `
+                -ErrorAction Stop
+
+            # 4. Refresh the list to show changes
+            $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+        catch {
+            [System.Windows.MessageBox]::Show("Failed to update rule:`n$($_.Exception.Message)", "Error", "OK", "Error")
+        }
+    }
+})
+# --- FIREWALL CONTEXT MENU ---
+$fwCtxMenu = New-Object System.Windows.Controls.ContextMenu
+
+# 1. Option: Copy Rule Name
+$mniCopyName = New-Object System.Windows.Controls.MenuItem
+$mniCopyName.Header = "Copy Rule Name"
+$mniCopyName.Add_Click({
+    if ($lstFw.SelectedItem) {
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($lstFw.SelectedItem.Name)
+        } catch { 
+            # Fallback if clipboard is busy
+        }
+    }
+})
+
+# 2. Option: Copy Port/Protocol
+$mniCopyPort = New-Object System.Windows.Controls.MenuItem
+$mniCopyPort.Header = "Copy Port/Protocol"
+$mniCopyPort.Add_Click({
+    if ($lstFw.SelectedItem) {
+        $info = "$($lstFw.SelectedItem.Protocol) : $($lstFw.SelectedItem.LocalPort)"
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($info)
+        } catch {}
+    }
+})
+
+# 3. Option: Copy Full Details
+$mniCopyAll = New-Object System.Windows.Controls.MenuItem
+$mniCopyAll.Header = "Copy Full Details"
+$mniCopyAll.Add_Click({
+    if ($lstFw.SelectedItem) {
+        # Create a nice string representation of the rule
+        $rule = $lstFw.SelectedItem
+        $text = "Name: $($rule.Name)`nEnabled: $($rule.Enabled)`nAction: $($rule.Action)`nDirection: $($rule.Direction)`nProtocol: $($rule.Protocol)`nPort: $($rule.LocalPort)"
+        try {
+            [System.Windows.Forms.Clipboard]::SetText($text)
+        } catch {}
+    }
+})
+
+# Add items to the menu
+[void]$fwCtxMenu.Items.Add($mniCopyName)
+[void]$fwCtxMenu.Items.Add($mniCopyPort)
+[void]$fwCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+[void]$fwCtxMenu.Items.Add($mniCopyAll)
+
+# Attach to the ListView
+$lstFw.ContextMenu = $fwCtxMenu
 $AllFw = @()
 $btnFwRefresh.Add_Click({
     $lblFwStatus.Visibility="Visible"; $lstFw.Items.Clear(); [System.Windows.Forms.Application]::DoEvents()
@@ -2879,51 +4096,16 @@ $btnDrvEnableMeta.Add_Click({
 # --- Cleanup ---
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
-$btnCleanShortcuts.Add_Click({
-    Invoke-UiCommand {
-        $sb = [System.Text.StringBuilder]::new()
-        $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
-        $updated = 0; $deleted = 0
-        function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
-        foreach ($path in $paths) {
-            Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                $target = Get-ShortcutTarget $_.FullName
-                if ($systemShortcuts -contains $_.Name -or ($target -and ($target -match '^shell:' -or $target -match '^\s*::{')) ) { return }
-                if (-not $target -or -not (Test-Path $target)) {
-                    $peer = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $_.FullName } | Select-Object -First 1
-                    $guess = $null
-                    if ($peer) {
-                        $pt = Get-ShortcutTarget $peer.FullName
-                        if ($pt) { $guess = Join-Path (Split-Path $pt -Parent) "$($_.BaseName).exe" }
-                    }
-                    if ($guess -and (Test-Path $guess)) {
-                        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName); $sc.TargetPath = $guess; $sc.Save(); $updated++
-                        [void]$sb.AppendLine("Updated: $($_.FullName) -> $guess")
-                    } else {
-                        Remove-Item $_.FullName -Force; $deleted++; [void]$sb.AppendLine("Deleted broken shortcut: $($_.FullName)")
-                    }
-                }
-            }
-        }
-        $result = "Shortcut scan complete. Updated: $updated | Deleted: $deleted"
-        Write-Output ($sb.ToString().TrimEnd())
-        Write-Output $result
-        if ($deleted -gt 0 -or $updated -gt 0) {
-            [System.Windows.MessageBox]::Show($result, "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show("No broken shortcuts found.", "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        }
-    } "Scanning and fixing shortcuts..."
-})
+$btnCleanShortcuts.Add_Click({ Invoke-ShortcutFix })
 $btnCleanReg.Add_Click({
     $form = New-Object System.Windows.Forms.Form
-    $form.Text="Registry Cleanup"; $form.Size="420,240"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
-    $actions = @{
-        "List Safe Keys"="List"
-        "Delete Safe Keys (with backup)"="Delete"
-        "Backup HKLM"="BackupHKLM"
-        "Restore Backup"="Restore"
+    $form.Text="Registry Cleanup"; $form.Size="420,290"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
+    $actions = [ordered]@{
+        "List Safe Keys (Obsolete)"="List"
+        "Delete Safe Keys (Obsolete)"="Delete"
+        "Deep Clean (Invalid Paths)"="DeepClean"  # <--- NEW OPTION
+        "Backup HKLM Hive"="BackupHKLM"
+        "Restore Registry Backup"="Restore"
         "Run SFC/DISM Scan"="Scan"
     }
     $y=10
