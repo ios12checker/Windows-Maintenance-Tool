@@ -928,26 +928,26 @@ function Invoke-TempCleanup {
 }
 
 function Show-RegistryCleaner {
-    param($ScanResults) # Array of objects with: Problem, Data, Key, Hive, Path, Name
+    param($ScanResults)
 
     # 1. SETUP FORM
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Deep Registry Cleaner"
-    $f.Size = "1000, 600"
+    $f.Size = "1100, 600"
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.ForeColor = [System.Drawing.Color]::White
     
     # 2. HEADER PANEL
     $pnlHead = New-Object System.Windows.Forms.Panel
-    $pnlHead.Dock = "Top"; $pnlHead.Height = 40
+    $pnlHead.Dock = "Top"; $pnlHead.Height = 60
     $pnlHead.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
     $f.Controls.Add($pnlHead)
 
     $lblStatus = New-Object System.Windows.Forms.Label
     $lblStatus.Text = "Scan Complete. Issues found: $($ScanResults.Count)"
-    $lblStatus.AutoSize = $true; $lblStatus.Top = 10; $lblStatus.Left = 10
-    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
+    $lblStatus.AutoSize = $true; $lblStatus.Top = 18; $lblStatus.Left = 15
+    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
     $pnlHead.Controls.Add($lblStatus)
 
     # 3. DATAGRIDVIEW
@@ -962,14 +962,13 @@ function Show-RegistryCleaner {
     $dg.AllowUserToResizeRows = $false
     $dg.SelectionMode = "FullRowSelect"
     $dg.MultiSelect = $true
-    $dg.AutoSizeColumnsMode = "Fill"
     
     # Headers Style
     $dg.EnableHeadersVisualStyles = $false
     $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
     $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
     $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersHeight = 30
+    $dg.ColumnHeadersHeight = 35
     $dg.ColumnHeadersBorderStyle = "Single"
 
     # Row Style
@@ -979,32 +978,41 @@ function Show-RegistryCleaner {
     $dg.DefaultCellStyle.SelectionForeColor = "White"
     
     $f.Controls.Add($dg)
+    $dg.BringToFront()
 
     # 4. COLUMNS
-    # Checkbox Column
+    # Checkbox - Fixed Tiny
     $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
     $colChk.HeaderText = " "
     $colChk.Width = 30
     $colChk.Name = "Check"
     $colChk.TrueValue = $true; $colChk.FalseValue = $false
+    $colChk.Resizable = [System.Windows.Forms.DataGridViewTriState]::False
     $dg.Columns.Add($colChk) | Out-Null
 
-    # Text Columns
+    # Problem - Fixed Width
     $dg.Columns.Add("Problem", "Problem") | Out-Null
     $dg.Columns["Problem"].Width = 200
+
+    # Data - FILL (Shares space)
     $dg.Columns.Add("Data", "Data (Path/Value)") | Out-Null
-    $dg.Columns["Data"].Width = 450
+    $dg.Columns["Data"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+    $dg.Columns["Data"].FillWeight = 50 # 50% of remaining space
+
+    # Key - FILL (Shares space)
     $dg.Columns.Add("Key", "Registry Key") | Out-Null
+    $dg.Columns["Key"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+    $dg.Columns["Key"].FillWeight = 50 # 50% of remaining space
     
-    # Hidden columns for logic
+    # Hidden columns
     $dg.Columns.Add("FullPath", "FullPath"); $dg.Columns["FullPath"].Visible = $false
     $dg.Columns.Add("ValueName", "ValueName"); $dg.Columns["ValueName"].Visible = $false
-    $dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false # 'Key' or 'Value'
+    $dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false
 
     # 5. POPULATE GRID
     foreach ($item in $ScanResults) {
         $row = $dg.Rows.Add()
-        $dg.Rows[$row].Cells["Check"].Value = $true # Default checked
+        $dg.Rows[$row].Cells["Check"].Value = $true
         $dg.Rows[$row].Cells["Problem"].Value = $item.Problem
         $dg.Rows[$row].Cells["Data"].Value = $item.Data
         $dg.Rows[$row].Cells["Key"].Value = $item.DisplayKey
@@ -1020,11 +1028,12 @@ function Show-RegistryCleaner {
     $f.Controls.Add($pnlBot)
 
     $btnFix = New-Object System.Windows.Forms.Button
-    $btnFix.Text = "Review selected Issues..." # Matches CCleaner text roughly
+    $btnFix.Text = "Fix Selected Issues..."
     $btnFix.Width = 200; $btnFix.Height = 35
-    $btnFix.Top = 12; $btnFix.Left = 760
+    $btnFix.Top = 12; $btnFix.Left = 860
+    $btnFix.Anchor = [System.Windows.Forms.AnchorStyles]::Right -bor [System.Windows.Forms.AnchorStyles]::Bottom
     $btnFix.FlatStyle = "Flat"
-    $btnFix.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC") # Blue like CCleaner
+    $btnFix.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
     $btnFix.ForeColor = "White"
     $btnFix.FlatAppearance.BorderSize = 0
     $pnlBot.Controls.Add($btnFix)
@@ -1040,7 +1049,7 @@ function Show-RegistryCleaner {
     $btnCancel.Add_Click({ $f.Close() })
     $pnlBot.Controls.Add($btnCancel)
 
-    # 7. LOGIC: FIX CLICK
+    # 7. LOGIC
     $btnFix.Add_Click({
         $toFix = @()
         foreach ($row in $dg.Rows) {
@@ -1049,6 +1058,7 @@ function Show-RegistryCleaner {
                     RegPath   = $row.Cells["FullPath"].Value
                     ValueName = $row.Cells["ValueName"].Value
                     Type      = $row.Cells["Type"].Value
+                    DisplayKey= $row.Cells["Key"].Value
                 }
             }
         }
@@ -1058,10 +1068,9 @@ function Show-RegistryCleaner {
             return
         }
 
-        # Confirmation & Backup Prompt (Mimic CCleaner flow)
         $res = [System.Windows.Forms.MessageBox]::Show("Do you want to fix $($toFix.Count) selected registry issues?`n`nA backup will be created automatically.", "Registry Cleaner", "YesNo", "Question")
         if ($res -eq "Yes") {
-            $f.Tag = $toFix # Pass results back to caller
+            $f.Tag = $toFix
             $f.DialogResult = "OK"
             $f.Close()
         }
@@ -1147,20 +1156,15 @@ function Invoke-RegistryTask {
             $findings = New-Object System.Collections.Generic.List[PSObject]
 
             Invoke-UiCommand {
-                Write-Output "Scanning registry (Deep Filtered Mode)..."
+                Write-Output "Scanning registry (Ultra Deep Mode)..."
                 
                 # HELPER: Checks if we have permission to delete this key
                 function Test-IsDeletable($Path) {
                     try {
                         if (-not (Test-Path $Path)) { return $false }
-                        
                         $acl = Get-Acl -Path $Path -ErrorAction SilentlyContinue
-                        if (-not $acl) { return $true } # If we can't read ACL, try anyway
-                        
-                        # Filter out keys owned by Windows System accounts
-                        if ($acl.Owner -match "TrustedInstaller" -or $acl.Owner -match "SYSTEM") { 
-                            return $false 
-                        }
+                        if (-not $acl) { return $true }
+                        if ($acl.Owner -match "TrustedInstaller" -or $acl.Owner -match "SYSTEM") { return $false }
                         return $true
                     } catch { return $false }
                 }
@@ -1192,7 +1196,7 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- C. ActiveX / COM Issues (Protected Key Filter Added) ---
+                # --- C. ActiveX / COM Issues ---
                 $comLocations = @("HKLM:\SOFTWARE\Classes\CLSID", "HKLM:\SOFTWARE\WOW6432Node\Classes\CLSID")
                 foreach ($root in $comLocations) {
                     if (Test-Path $root) {
@@ -1202,7 +1206,6 @@ function Invoke-RegistryTask {
                             if (Test-Path $srv) {
                                 $dll = (Get-ItemProperty $srv)."(default)"
                                 if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-Path $dll -ErrorAction SilentlyContinue)) {
-                                    # This check will catch msdaora.dll
                                     if (Test-IsDeletable $clsid.PSPath) {
                                         $findings.Add([PSCustomObject]@{ Problem="ActiveX/COM Issue"; Data=$dll; DisplayKey=$clsid.PSChildName; RegPath=$srv; ValueName=$null; Type="Key" })
                                     }
@@ -1212,22 +1215,24 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- D. Application Classes ---
-                $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications")
+                # --- D. Application Classes (Expanded to HKCU) ---
+                $appRoots = @("HKLM:\SOFTWARE\Classes\Applications", "HKLM:\SOFTWARE\WOW6432Node\Classes\Applications", "HKCU:\Software\Classes\Applications")
                 foreach ($root in $appRoots) {
-                     $apps = Get-ChildItem $root -ErrorAction SilentlyContinue
-                     foreach ($app in $apps) {
-                        $openCmd = Join-Path $app.PSPath "shell\open\command"
-                        if (Test-Path $openCmd) {
-                            $cmd = (Get-ItemProperty $openCmd)."(default)"
-                            if ($cmd -match '"([^"]+)"') { $cmdPath = $matches[1] } else { $cmdPath = $cmd.Split(" ")[0] }
-                            
-                            if ($cmdPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cmdPath -ErrorAction SilentlyContinue)) {
-                                if (Test-IsDeletable $app.PSPath) {
-                                    $findings.Add([PSCustomObject]@{ Problem="Invalid App Association"; Data=$cmdPath; DisplayKey=$app.PSChildName; RegPath=$app.PSPath; ValueName=$null; Type="Key" })
+                     if (Test-Path $root) {
+                         $apps = Get-ChildItem $root -ErrorAction SilentlyContinue
+                         foreach ($app in $apps) {
+                            $openCmd = Join-Path $app.PSPath "shell\open\command"
+                            if (Test-Path $openCmd) {
+                                $cmd = (Get-ItemProperty $openCmd)."(default)"
+                                if ($cmd -match '"([^"]+)"') { $cmdPath = $matches[1] } else { $cmdPath = $cmd.Split(" ")[0] }
+                                
+                                if ($cmdPath -match '^[a-zA-Z]:\\' -and -not (Test-Path $cmdPath -ErrorAction SilentlyContinue)) {
+                                    if (Test-IsDeletable $app.PSPath) {
+                                        $findings.Add([PSCustomObject]@{ Problem="Invalid App Association"; Data=$cmdPath; DisplayKey=$app.PSChildName; RegPath=$app.PSPath; ValueName=$null; Type="Key" })
+                                    }
                                 }
                             }
-                        }
+                         }
                      }
                 }
 
@@ -1244,8 +1249,8 @@ function Invoke-RegistryTask {
                     }
                 }
 
-                # --- F. MuiCache ---
-                $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache")
+                # --- F. MuiCache & Compatibility ---
+                $userKeys = @("HKCU:\Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache", "HKCU:\Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store")
                 foreach ($path in $userKeys) {
                     if (Test-Path $path) {
                         $items = Get-ItemProperty $path
@@ -1277,15 +1282,56 @@ function Invoke-RegistryTask {
                         }
                     }
                 }
+
+                # --- H. Startup Items (NEW) ---
+                $runKeys = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
+                foreach ($runKey in $runKeys) {
+                    if (Test-Path $runKey) {
+                        $items = Get-ItemProperty $runKey
+                        foreach ($name in $items.PSObject.Properties.Name) {
+                            $val = $items.$name
+                            if ($val -is [string] -and $val -match '^[a-zA-Z]:\\') {
+                                # Clean args (e.g. "C:\Program Files\App.exe" /min)
+                                if ($val -match '"([^"]+)"') { $exe = $matches[1] } else { $exe = $val.Split(" ")[0] }
+                                if (-not (Test-Path $exe -ErrorAction SilentlyContinue)) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Broken Startup Item"; Data=$exe; DisplayKey=$runKey; RegPath=$runKey; ValueName=$name; Type="Value" })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                # --- I. Unused File Extensions (NEW) ---
+                # Scans HKLM and HKCU Classes for extensions that are empty/useless
+                $classRoots = @("HKLM:\SOFTWARE\Classes", "HKCU:\Software\Classes")
+                foreach ($root in $classRoots) {
+                    if (Test-Path $root) {
+                        # Get only keys starting with "."
+                        $exts = Get-ChildItem $root -Name | Where-Object { $_.StartsWith(".") }
+                        foreach ($ext in $exts) {
+                            $path = Join-Path $root $ext
+                            # Check if key is effectively empty (No subkeys, No default value)
+                            $subkeys = Get-ChildItem $path -ErrorAction SilentlyContinue
+                            $props = Get-ItemProperty $path -ErrorAction SilentlyContinue
+                            $def = $props."(default)"
+                            
+                            if ($subkeys.Count -eq 0 -and ([string]::IsNullOrEmpty($def))) {
+                                if (Test-IsDeletable $path) {
+                                    $findings.Add([PSCustomObject]@{ Problem="Unused File Ext"; Data=$ext; DisplayKey=$path; RegPath=$path; ValueName=$null; Type="Key" })
+                                }
+                            }
+                        }
+                    }
+                }
                 
                 Write-Output "Scan complete. Found $($findings.Count) actionable issues."
-            } "Scanning Registry (Filtered)..."
+            } "Scanning Registry (Ultra Mode)..."
 
             # 2. GUI PHASE
             $toDelete = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
             if (-not $toDelete) { return }
 
-            # 3. FIXING PHASE (With Verification)
+            # 3. FIXING PHASE
             Invoke-UiCommand {
                 $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 $fixedCount = 0
@@ -1295,15 +1341,11 @@ function Invoke-RegistryTask {
                     if ($item.Type -eq "Key") {
                         Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
                         Remove-Item $item.RegPath -Recurse -Force -ErrorAction SilentlyContinue
-                        
-                        # VERIFY
                         if (Test-Path $item.RegPath) { $skippedCount++ } else { $fixedCount++ }
                     }
                     elseif ($item.Type -eq "Value") {
                         Backup-RegKey -KeyPath ($item.RegPath -replace "Microsoft.PowerShell.Core\\Registry::", "") -FilePath $bkFile
                         Remove-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue
-                        
-                        # VERIFY
                         if (Get-ItemProperty -Path $item.RegPath -Name $item.ValueName -ErrorAction SilentlyContinue) { $skippedCount++ } else { $fixedCount++ }
                     }
                 }
