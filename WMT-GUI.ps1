@@ -703,30 +703,6 @@ function Invoke-ChkdskAll {
     } "Running CHKDSK on all drives..."
 }
 
-function Show-CleanupOptions {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Choose Cleanup Option"; $f.Size = "380,240"; $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(40,40,40); $f.ForeColor = "White"
-    $options = @(
-        @{Key="DeleteOnly";Text="Delete temporary files"},
-        @{Key="DeleteAndEmpty";Text="Delete temp + empty Recycle Bin"},
-        @{Key="PrivacyCleanup";Text="Temp + privacy traces (Recent/Thumbcache)"}
-    )
-    $y = 20; $group = New-Object System.Windows.Forms.GroupBox; $group.Text="Select Option"; $group.Width=340; $group.Height=120; $group.Left=10; $group.Top=10; $group.ForeColor="White"; $group.BackColor=[System.Drawing.Color]::FromArgb(30,30,30); $f.Controls.Add($group)
-    $radios = @()
-    foreach ($opt in $options) {
-        $rb = New-Object System.Windows.Forms.RadioButton
-        $rb.Text = $opt.Text; $rb.Tag = $opt.Key; $rb.Left=15; $rb.Top=$y; $rb.Width=300; $rb.ForeColor="White"; $rb.BackColor=$group.BackColor
-        $group.Controls.Add($rb); $radios += $rb; $y += 30
-    }
-    $radios[0].Checked = $true
-    $ok = New-Object System.Windows.Forms.Button; $ok.Text="Run Cleanup"; $ok.DialogResult="OK"; $ok.Width=340; $ok.Left=10; $ok.Top=150; $ok.BackColor="SeaGreen"; $ok.ForeColor="White"; $f.Controls.Add($ok)
-    $f.AcceptButton = $ok
-    $result = $f.ShowDialog()
-    if ($result -ne "OK") { return $null }
-    return ($radios | Where-Object { $_.Checked }).Tag
-}
-
 function Show-AdvancedCleanupSelection {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
@@ -1012,35 +988,385 @@ function Invoke-SSDTrim {
         Write-Output "SSD optimization complete. Log: $log"
     } "Running SSD Trim/ReTrim..."
 }
+function Show-BrokenShortcuts {
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
 
-function Invoke-ShortcutFix {
-    Invoke-UiCommand {
-        $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
-        $updated = 0; $deleted = 0
-        function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
-        foreach ($path in $paths) {
-            Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                $target = Get-ShortcutTarget $_.FullName
-                if ($systemShortcuts -contains $_.Name -or ($target -and ($target -match '^shell:' -or $target -match '^\s*::{')) ) { continue }
-                if (-not $target -or -not (Test-Path $target)) {
-                    $peer = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $_.FullName } | Select-Object -First 1
-                    $guess = $null
-                    if ($peer) {
-                        $pt = Get-ShortcutTarget $peer.FullName
-                        if ($pt) { $guess = Join-Path (Split-Path $pt -Parent) "$($_.BaseName).exe" }
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Broken Shortcut Manager"
+    $f.Size = "1100, 650"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $f.ForeColor = "White"
+
+    # 1. SETUP GRID
+    $dg = New-Object System.Windows.Forms.DataGridView
+    $dg.Dock = "Top"; $dg.Height = 480
+    $dg.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $dg.ForeColor = "Black"
+    $dg.AutoSizeColumnsMode = "Fill"
+    $dg.SelectionMode = "FullRowSelect"
+    $dg.MultiSelect = $true
+    $dg.ReadOnly = $true
+    $dg.RowHeadersVisible = $false
+    $dg.AllowUserToAddRows = $false
+    $dg.BorderStyle = "None"
+    
+    $dg.EnableHeadersVisualStyles = $false
+    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 50)
+    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
+    $dg.ColumnHeadersHeight = 35
+    $dg.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
+    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
+    $dg.DefaultCellStyle.SelectionForeColor = "White"
+
+    $f.Controls.Add($dg)
+
+    # 2. STATUS
+    $lblStatus = New-Object System.Windows.Forms.Label
+    $lblStatus.Text = "Initializing..."
+    $lblStatus.AutoSize = $true
+    $lblStatus.ForeColor = "Yellow"
+    $lblStatus.Location = "20, 490"
+    $f.Controls.Add($lblStatus)
+
+    # 3. BUTTONS
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"; $pnl.Height = 80
+    $pnl.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $f.Controls.Add($pnl)
+
+    $btnDelete = New-Object System.Windows.Forms.Button
+    $btnDelete.Text = "Mark for Delete"
+    $btnDelete.Location = "20, 20"; $btnDelete.Width = 150; $btnDelete.Height = 35
+    $btnDelete.BackColor = "IndianRed"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
+    $pnl.Controls.Add($btnDelete)
+
+    $btnApply = New-Object System.Windows.Forms.Button
+    $btnApply.Text = "Apply Actions"
+    $btnApply.Location = "780, 20"; $btnApply.Width = 150; $btnApply.Height = 35
+    $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"
+    $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $pnl.Controls.Add($btnApply)
+
+    $btnCancel = New-Object System.Windows.Forms.Button
+    $btnCancel.Text = "Close"
+    $btnCancel.Location = "950, 20"; $btnCancel.Width = 100; $btnCancel.Height = 35
+    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $pnl.Controls.Add($btnCancel)
+    
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Right-click for Deep Search or Manual Browse."
+    $lblInfo.AutoSize = $true; $lblInfo.ForeColor = "Gray"
+    $lblInfo.Location = "200, 30"
+    $pnl.Controls.Add($lblInfo)
+
+    # 4. CONTEXT MENU
+    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+    
+    # --- Manual Browse ---
+    $itemBrowse = $ctx.Items.Add("Browse for target...")
+    $itemBrowse.Add_Click({
+        if ($dg.SelectedRows.Count -eq 1) {
+            $row = $dg.SelectedRows[0]
+            $obj = $row.DataBoundItem
+            $dlg = New-Object System.Windows.Forms.OpenFileDialog
+            $dlg.Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
+            if ($dlg.ShowDialog() -eq "OK") {
+                $obj.Action = "Fix"
+                $obj.NewTarget = $dlg.FileName
+                $obj.Details = "Manual fix: $($dlg.FileName)"
+                $dg.Refresh()
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
+            }
+        }
+    })
+
+    # --- Deep Search ---
+    $itemDeep = $ctx.Items.Add("Deep Search (Slow - Scan All Drives)")
+    $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $itemDeep.ForeColor = [System.Drawing.Color]::DarkBlue
+    
+    $itemDeep.Add_Click({
+        if ($dg.SelectedRows.Count -ne 1) { return }
+        $row = $dg.SelectedRows[0]
+        $obj = $row.DataBoundItem
+        
+        # A. Determine what file we are looking for
+        $searchName = $null
+        $shell = New-Object -ComObject WScript.Shell
+        try {
+            $sc = $shell.CreateShortcut($obj.FullPath)
+            if ($sc.TargetPath) {
+                $searchName = Split-Path $sc.TargetPath -Leaf
+            }
+        } catch {}
+
+        # Fallback: If target is empty, guess based on Shortcut Name (e.g. Firefox.lnk -> Firefox.exe)
+        if (-not $searchName) {
+            $base = [System.IO.Path]::GetFileNameWithoutExtension($obj.Shortcut)
+            $searchName = "$base.exe"
+        }
+
+        # B. Warning Dialog
+        $warnMsg = "This will scan ALL local hard drives for:`n`n'$searchName'`n`nDepending on your drive size, this can take 5-10+ minutes.`nDuring this time, the application may appear frozen.`n`nDo you want to continue?"
+        $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        
+        if ($res -eq "Yes") {
+            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+            $lblStatus.Text = "Deep Searching for '$searchName'..."
+            $f.Update()
+
+            $foundPath = $null
+            
+            # C. Get Fixed Drives Only (Avoid Network/USB to prevent hangs)
+            $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' }
+            
+            foreach ($d in $drives) {
+                if ($foundPath) { break }
+                $root = $d.RootDirectory.FullName
+                $lblStatus.Text = "Scanning drive $root for '$searchName'..."
+                $f.Update()
+                
+                try {
+                    # Fast-ish recursion using legacy Get-ChildItem with error suppression
+                    # We look for the FIRST match to stop early
+                    $match = Get-ChildItem -Path $root -Filter $searchName -Recurse -ErrorAction SilentlyContinue -Force | Select-Object -First 1
+                    if ($match) {
+                        $foundPath = $match.FullName
                     }
-                    if ($guess -and (Test-Path $guess)) {
-                        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName); $sc.TargetPath = $guess; $sc.Save(); $updated++
-                        Write-Output "Updated: $($_.FullName) -> $guess"
-                    } else {
-                        Remove-Item $_.FullName -Force; $deleted++; Write-Output "Deleted broken shortcut: $($_.FullName)"
+                } catch {}
+            }
+
+            if ($foundPath) {
+                $obj.Action = "Fix"
+                $obj.NewTarget = $foundPath
+                $obj.Details = "Deep Search: $foundPath"
+                $dg.Refresh()
+                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
+                $lblStatus.Text = "Found: $foundPath"
+                [System.Windows.Forms.MessageBox]::Show("File found!`n`n$foundPath", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            } else {
+                $lblStatus.Text = "Deep Search failed."
+                [System.Windows.Forms.MessageBox]::Show("Could not find '$searchName' on any local drive.", "Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            }
+            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        }
+    })
+
+    $ctx.Items.Add( (New-Object System.Windows.Forms.ToolStripSeparator) )
+
+    # --- Unmark ---
+    $itemUnmark = $ctx.Items.Add("Unmark (Do Nothing)")
+    $itemUnmark.Add_Click({
+        foreach ($row in $dg.SelectedRows) {
+            $obj = $row.DataBoundItem
+            $obj.Action = "None"
+            $obj.Details = "Review Needed"
+            $dg.Refresh()
+            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange
+        }
+    })
+    $dg.ContextMenuStrip = $ctx
+
+    # DELETE MARKER LOGIC
+    $btnDelete.Add_Click({
+        foreach ($row in $dg.SelectedRows) {
+            $obj = $row.DataBoundItem
+            $obj.Action = "Delete"
+            $obj.Details = "Marked for deletion"
+            $dg.Refresh()
+            $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::IndianRed
+        }
+    })
+
+    $script:ScanResults = @()
+
+    # 5. SCAN LOGIC
+    $f.Add_Shown({
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+        $lblStatus.Text = "Scanning shortcuts... Please wait."
+        $f.Text = "Broken Shortcut Manager - Scanning..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $paths = @(
+            "C:\ProgramData\Microsoft\Windows\Start Menu", 
+            "$env:APPDATA\Microsoft\Windows\Start Menu",
+            "$env:USERPROFILE\Desktop",
+            "C:\Users\Public\Desktop",
+            "$env:USERPROFILE\OneDrive\Desktop"
+        ) | Select-Object -Unique | Where-Object { $_ -and (Test-Path $_) }
+
+        # --- SYSTEM SHORTCUT RESTORATION MAP ---
+        $knownFixes = @{
+            "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+            "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+            "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
+            "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
+            "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
+        }
+
+        $shell = New-Object -ComObject WScript.Shell
+        
+        $tempList = @()
+        $scannedCount = 0
+
+        foreach ($path in $paths) {
+            Get-ChildItem -Path $path -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $scannedCount++
+                $lnkPath = $_.FullName
+                try {
+                    $sc = $shell.CreateShortcut($lnkPath)
+                    $target = $sc.TargetPath
+                } catch {
+                    $tempList += [PSCustomObject]@{ Shortcut=$_.Name; Folder=(Split-Path $_.DirectoryName -Leaf); Action="Skip"; Details="Error reading"; NewTarget=$null; FullPath=$lnkPath }
+                    return
+                }
+
+                # Ignore "Real" System Shortcuts
+                if ($target -match '^shell:' -or $target -match '^\s*::{') { return }
+                
+                # Ignore specific Installer Advertised Shortcuts (grayed out targets)
+                if ($target -match '^\s*$' -or $target.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return }
+
+                if (-not (Test-Path $target)) {
+                    $action = "None"
+                    $details = "Review Needed"
+                    $newT = $null
+                    
+                    $baseName = $_.BaseName
+
+                    # A. CHECK KNOWN SYSTEM FIXES
+                    if ($knownFixes.ContainsKey($baseName)) {
+                        $action = "Fix"
+                        $details = "Restore System Path"
+                        $newT = $knownFixes[$baseName]
+                    } 
+                    else {
+                        # B. AUTO-FIX SEARCH (Same Folder Peers)
+                        $guessName = if ($target) { Split-Path $target -Leaf } else { ($baseName + ".exe") }
+                        $peers = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $lnkPath }
+                        
+                        foreach ($p in $peers) {
+                            try {
+                                $pt = $shell.CreateShortcut($p.FullName).TargetPath
+                                if ($pt -and (Test-Path $pt)) {
+                                    $parent = Split-Path $pt -Parent
+                                    $candidate = Join-Path $parent $guessName
+                                    if (Test-Path $candidate) {
+                                        $action = "Fix"
+                                        $details = "Auto-Found: $parent"
+                                        $newT = $candidate
+                                        break
+                                    }
+                                }
+                            } catch {}
+                        }
+                    }
+
+                    $tempList += [PSCustomObject]@{
+                        Shortcut  = $_.Name
+                        Folder    = (Split-Path $_.DirectoryName -Leaf)
+                        Action    = $action
+                        Details   = $details
+                        NewTarget = $newT
+                        FullPath  = $lnkPath
                     }
                 }
             }
         }
-        Write-Output "Shortcut scan complete. Updated: $updated | Deleted: $deleted"
-    } "Scanning and fixing shortcuts..."
+
+        # 6. BIND
+        $dt = New-Object System.Data.DataTable
+        $dt.Columns.Add("Shortcut"); $dt.Columns.Add("Folder"); $dt.Columns.Add("Action"); $dt.Columns.Add("Details"); $dt.Columns.Add("NewTarget")
+        $script:ScanResults = $tempList
+
+        foreach ($item in $tempList) {
+            $row = $dt.NewRow()
+            $row["Shortcut"]  = $item.Shortcut
+            $row["Folder"]    = $item.Folder
+            $row["Action"]    = $item.Action
+            $row["Details"]   = $item.Details
+            $row["NewTarget"] = $item.NewTarget
+            $dt.Rows.Add($row)
+        }
+        $dg.DataSource = $dt
+        $dg.ClearSelection()
+
+        # 7. COLORS
+        for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
+            $row = $dg.Rows[$i]
+            $item = $tempList[$i]
+            if ($item.Action -eq "Fix") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen; $row.Selected = $true }
+            elseif ($item.Action -eq "None") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange }
+            else { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray }
+        }
+        
+        $lblStatus.Text = "Scan Complete. Found $($tempList.Count) broken shortcuts."
+        $f.Text = "Broken Shortcut Manager"
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+
+        if ($tempList.Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("Scan complete. No broken shortcuts found.", "All Clean", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    })
+
+    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $script:ScanResults }
+    return $null
+}
+function Invoke-ShortcutFix {
+    $items = Show-BrokenShortcuts
+    if (-not $items -or $items.Count -eq 0) { return }
+
+    # 1. ANALYZE PLANNED ACTIONS
+    $toFix = $items | Where-Object { $_.Action -eq "Fix" }
+    $toDel = $items | Where-Object { $_.Action -eq "Delete" }
+    $toSkip = $items | Where-Object { $_.Action -ne "Fix" -and $_.Action -ne "Delete" }
+
+    if ($toFix.Count -eq 0 -and $toDel.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No actions were selected.`n`n(Tip: Select rows and click 'Mark for Delete' or Browse to fix them.)", "No Action", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information)
+        return
+    }
+
+    # 2. CONFIRMATION PROMPT
+    $msg = "You are about to apply the following actions:`n`n"
+    if ($toFix.Count -gt 0) { $msg += "• Fix: $($toFix.Count) shortcut(s)`n" }
+    if ($toDel.Count -gt 0) { $msg += "• DELETE: $($toDel.Count) shortcut(s)`n" }
+    $msg += "`nAre you sure you want to continue?"
+
+    $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButton]::YesNo, [System.Windows.Forms.MessageBoxImage]::Warning)
+    
+    if ($confirm -ne "Yes") { return }
+
+    # 3. EXECUTE
+    Invoke-UiCommand {
+        param($toFix, $toDel)
+        $shell = New-Object -ComObject WScript.Shell
+        
+        # Apply Fixes
+        foreach ($item in $toFix) {
+            try {
+                $sc = $shell.CreateShortcut($item.FullPath)
+                $sc.TargetPath = $item.NewTarget
+                $sc.Save()
+                Write-Output "Fixed: $($item.Shortcut)"
+            } catch { Write-Output "Failed to fix $($item.Shortcut): $($_.Exception.Message)" }
+        }
+
+        # Apply Deletes
+        foreach ($item in $toDel) {
+            try {
+                Remove-Item $item.FullPath -Force -ErrorAction Stop
+                Write-Output "Deleted: $($item.Shortcut)"
+            } catch { Write-Output "Failed to delete $($item.Shortcut): $($_.Exception.Message)" }
+        }
+
+        Write-Output "Operation complete."
+
+    } "Applying shortcut fixes..." -ArgumentList $toFix, $toDel
 }
 
 # --- FIREWALL TOOLS ---
@@ -3106,43 +3432,7 @@ $btnDrvEnableMeta.Add_Click({
 # --- Cleanup ---
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
-$btnCleanShortcuts.Add_Click({
-    Invoke-UiCommand {
-        $sb = [System.Text.StringBuilder]::new()
-        $paths = @("C:\ProgramData\Microsoft\Windows\Start Menu","$env:APPDATA\Microsoft\Windows\Start Menu","$env:USERPROFILE\Desktop","C:\Users\Public\Desktop")
-        $systemShortcuts = @("File Explorer.lnk","Run.lnk","Recycle Bin.lnk","Control Panel.lnk")
-        $updated = 0; $deleted = 0
-        function Get-ShortcutTarget([string]$p){ try { (New-Object -ComObject WScript.Shell).CreateShortcut($p).TargetPath } catch { $null } }
-        foreach ($path in $paths) {
-            Get-ChildItem -Path $path -Filter *.lnk -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-                $target = Get-ShortcutTarget $_.FullName
-                if ($systemShortcuts -contains $_.Name -or ($target -and ($target -match '^shell:' -or $target -match '^\s*::{')) ) { return }
-                if (-not $target -or -not (Test-Path $target)) {
-                    $peer = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $_.FullName } | Select-Object -First 1
-                    $guess = $null
-                    if ($peer) {
-                        $pt = Get-ShortcutTarget $peer.FullName
-                        if ($pt) { $guess = Join-Path (Split-Path $pt -Parent) "$($_.BaseName).exe" }
-                    }
-                    if ($guess -and (Test-Path $guess)) {
-                        $sc = (New-Object -ComObject WScript.Shell).CreateShortcut($_.FullName); $sc.TargetPath = $guess; $sc.Save(); $updated++
-                        [void]$sb.AppendLine("Updated: $($_.FullName) -> $guess")
-                    } else {
-                        Remove-Item $_.FullName -Force; $deleted++; [void]$sb.AppendLine("Deleted broken shortcut: $($_.FullName)")
-                    }
-                }
-            }
-        }
-        $result = "Shortcut scan complete. Updated: $updated | Deleted: $deleted"
-        Write-Output ($sb.ToString().TrimEnd())
-        Write-Output $result
-        if ($deleted -gt 0 -or $updated -gt 0) {
-            [System.Windows.MessageBox]::Show($result, "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show("No broken shortcuts found.", "Fix Shortcuts", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        }
-    } "Scanning and fixing shortcuts..."
-})
+$btnCleanShortcuts.Add_Click({ Invoke-ShortcutFix })
 $btnCleanReg.Add_Click({
     $form = New-Object System.Windows.Forms.Form
     $form.Text="Registry Cleanup"; $form.Size="420,240"; $form.StartPosition="CenterScreen"; $form.BackColor=[System.Drawing.Color]::FromArgb(35,35,35); $form.ForeColor="White"
