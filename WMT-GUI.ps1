@@ -791,6 +791,10 @@ function Show-AdvancedCleanupSelection {
         $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
         $catChk.AutoSize = $true
         $catChk.Location = New-Object System.Drawing.Point(5, 5)
+        
+        # --- FIX: Default the Header to Checked ---
+        $catChk.Checked = $true 
+
         $catPanel.Controls.Add($catChk)
         $mainPanel.Controls.Add($catPanel)
 
@@ -823,9 +827,9 @@ function Show-AdvancedCleanupSelection {
 
         # C. Event Wiring (Select All Logic)
         $catChk.Add_Click({ 
-            param($src, $e) # Changed $sender to $src
+            param($src, $e) 
             foreach ($c in $childChecks) { $c.Checked = $src.Checked }
-        })
+        }.GetNewClosure())
     }
 
     $form.AcceptButton = $btnClean
