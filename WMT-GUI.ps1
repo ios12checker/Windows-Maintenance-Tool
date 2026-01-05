@@ -144,6 +144,48 @@ function Show-TextDialog {
     $f.ShowDialog() | Out-Null
 }
 
+# --- SETTINGS MANAGER ---
+function Get-WmtSettings {
+    $path = Join-Path (Get-DataPath) "settings.json"
+    
+    # Default Structure
+    $defaults = @{
+        TempCleanup  = @{}
+        RegistryScan = @{}
+        WingetIgnore = @() # Ready for your future feature
+    }
+    
+    if (Test-Path $path) {
+        try {
+            $json = Get-Content $path -Raw | ConvertFrom-Json
+            
+            # Safely merge JSON into defaults (handles missing keys if json is old)
+            if ($json.TempCleanup) { 
+                foreach ($p in $json.TempCleanup.PSObject.Properties) { $defaults.TempCleanup[$p.Name] = $p.Value } 
+            }
+            if ($json.RegistryScan) { 
+                foreach ($p in $json.RegistryScan.PSObject.Properties) { $defaults.RegistryScan[$p.Name] = $p.Value } 
+            }
+            if ($json.WingetIgnore) { 
+                $defaults.WingetIgnore = @($json.WingetIgnore) 
+            }
+        } catch { 
+            Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
+        }
+    }
+    return $defaults
+}
+
+function Save-WmtSettings {
+    param($Settings)
+    try {
+        $path = Join-Path (Get-DataPath) "settings.json"
+        $Settings | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding UTF8 -Force
+    } catch { 
+        Write-GuiLog "Error saving settings: $($_.Exception.Message)" 
+    }
+}
+
 function Show-DownloadStats {
     Invoke-UiCommand {
         try {
@@ -724,6 +766,10 @@ function Show-AdvancedCleanupSelection {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
+    # 1. LOAD SETTINGS
+    $currentSettings = Get-WmtSettings
+    $savedStates = $currentSettings.TempCleanup
+
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Advanced Cleanup Selection"
     $form.Size = New-Object System.Drawing.Size(450, 580)
@@ -803,7 +849,7 @@ function Show-AdvancedCleanupSelection {
         $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
         $catChk.AutoSize = $true
         $catChk.Location = New-Object System.Drawing.Point(5, 5)
-        $catChk.Checked = $true 
+        # Note: We do NOT set .Checked here yet. We calculate it below.
 
         $catPanel.Controls.Add($catChk)
         $mainPanel.Controls.Add($catPanel)
@@ -814,6 +860,11 @@ function Show-AdvancedCleanupSelection {
         $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0)
 
         $childChecks = @()
+        
+        # ### FIX CHECK LOGIC ###
+        # Start assuming the Category is checked. 
+        # If we find ANY child that is unchecked, we turn the Category off.
+        $isCatChecked = $true
 
         foreach ($item in $cleanupData[$category]) {
             $chk = New-Object System.Windows.Forms.CheckBox
@@ -821,8 +872,17 @@ function Show-AdvancedCleanupSelection {
             $chk.Tag  = $item.Key
             $chk.AutoSize = $true
             $chk.ForeColor = "White"
-            $chk.Checked = $true
             
+            # APPLY SAVED STATE (Default to True if not found in settings)
+            if ($savedStates.ContainsKey($item.Key)) {
+                $chk.Checked = $savedStates[$item.Key]
+            } else {
+                $chk.Checked = $true
+            }
+            
+            # Logic: If this item is unchecked, the parent header must be unchecked too
+            if (-not $chk.Checked) { $isCatChecked = $false }
+
             $tt = New-Object System.Windows.Forms.ToolTip
             $tt.SetToolTip($chk, $item.Desc)
 
@@ -831,8 +891,12 @@ function Show-AdvancedCleanupSelection {
             $childChecks += $chk
         }
         
+        # Apply the calculated state to the Header
+        $catChk.Checked = $isCatChecked
+        
         $mainPanel.Controls.Add($itemFlow)
 
+        # Event: Clicking Header toggles all children
         $catChk.Add_Click({ 
             param($src, $e) 
             foreach ($c in $childChecks) { $c.Checked = $src.Checked }
@@ -846,9 +910,15 @@ function Show-AdvancedCleanupSelection {
 
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
         $selectedKeys = @()
+        
+        # SAVE SETTINGS TO DISK
         foreach ($key in $global:checkboxes.Keys) {
-            if ($global:checkboxes[$key].Checked) { $selectedKeys += $key }
+            $isChecked = $global:checkboxes[$key].Checked
+            if ($isChecked) { $selectedKeys += $key }
+            $currentSettings.TempCleanup[$key] = $isChecked
         }
+        Save-WmtSettings -Settings $currentSettings
+        
         return $selectedKeys
     }
     return $null
@@ -944,7 +1014,11 @@ function Invoke-TempCleanup {
 
 # --- Registry Scan Selection UI ---
 function Show-RegScanSelection {
-    # --- 1. Form Setup ---
+    # 1. LOAD SETTINGS
+    $currentSettings = Get-WmtSettings
+    $savedStates = $currentSettings.RegistryScan
+
+    # --- Form Setup ---
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Select Registry Scan Targets"
     $f.Size = "600, 550"
@@ -954,20 +1028,19 @@ function Show-RegScanSelection {
     $f.FormBorderStyle = "FixedDialog"
     $f.MaximizeBox = $false
 
-    # --- 2. Header Label ---
+    # --- Header Label ---
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text = "Select areas to scan:"
     $lbl.AutoSize = $true; $lbl.Location = "20, 15"
     $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
     $f.Controls.Add($lbl)
 
-    # --- 3. Scrollable Panel for Checkboxes ---
+    # --- Scrollable Panel for Checkboxes ---
     $pnl = New-Object System.Windows.Forms.Panel
     $pnl.Location = "20, 50"; $pnl.Size = "550, 380"; $pnl.AutoScroll = $true
     $f.Controls.Add($pnl)
 
-    # --- 4. Define Categories ---
-    # Keys = Display Name, Values = Internal Engine Tag
+    # --- Define Categories ---
     $categories = [ordered]@{
         "Missing Shared DLLs"            = "SharedDLLs"
         "Unused File Extensions (System)"= "Ext"
@@ -987,23 +1060,32 @@ function Show-RegScanSelection {
         "Firewall Rules"                 = "Firewall"
     }
 
-    # --- 5. Generate Checkboxes Dynamically ---
+    # --- Generate Checkboxes Dynamically ---
     $chkBoxes = @(); $y = 0; $count = 0
     foreach ($key in $categories.Keys) {
+        $tag = $categories[$key]
         $chk = New-Object System.Windows.Forms.CheckBox
-        $chk.Text = $key; $chk.Tag = $categories[$key]; $chk.AutoSize = $true; $chk.Checked = $true
+        $chk.Text = $key
+        $chk.Tag = $tag
+        $chk.AutoSize = $true
+        
+        # APPLY SAVED STATE (Default to True)
+        if ($savedStates.ContainsKey($tag)) {
+            $chk.Checked = $savedStates[$tag]
+        } else {
+            $chk.Checked = $true
+        }
         
         # Grid Layout: 2 Columns
         if ($count % 2 -eq 0) { $x = 0 } else { $x = 280 }
         $chk.Location = "$x, $y"
         
-        # Move to next row every 2 items
         if ($count % 2 -ne 0) { $y += 30 }
         
         $pnl.Controls.Add($chk); $chkBoxes += $chk; $count++
     }
 
-    # --- 6. Buttons (Scan / Cancel) ---
+    # --- Buttons ---
     $btnScan = New-Object System.Windows.Forms.Button
     $btnScan.Text = "Start Deep Scan"
     $btnScan.Location = "340, 450"; $btnScan.Width = 200; $btnScan.Height = 40
@@ -1019,10 +1101,16 @@ function Show-RegScanSelection {
     
     $f.AcceptButton = $btnScan; $f.CancelButton = $btnCancel
 
-    # --- 7. Show Dialog & Return Selection ---
     if ($f.ShowDialog() -eq "OK") {
         $selected = @()
-        foreach ($c in $chkBoxes) { if ($c.Checked) { $selected += $c.Tag } }
+        
+        # SAVE SETTINGS
+        foreach ($c in $chkBoxes) { 
+            if ($c.Checked) { $selected += $c.Tag }
+            $currentSettings.RegistryScan[$c.Tag] = $c.Checked
+        }
+        Save-WmtSettings -Settings $currentSettings
+
         return $selected
     }
     return $null
