@@ -394,7 +394,7 @@ function Enable-AllDoh {
         } else {
             [System.Windows.MessageBox]::Show("Failed to enable DoH. Check the log for details.", "Enable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
         }
-    } "Enabling DoH for known DNS providers..."
+    } "Enabling DoH for known DNS providers..." -ArgumentList (,$dnsServers)
 }
 
 function Disable-AllDoh {
@@ -420,8 +420,9 @@ function Disable-AllDoh {
         } else {
             [System.Windows.MessageBox]::Show("No DoH entries were removed. Check the log for details.", "Disable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
         }
-    } "Disabling DoH entries..."
+    } "Disabling DoH entries..." -ArgumentList (,$dnsServers)
 }
+
 # --- Hosts Adblock ---
 function Invoke-HostsUpdate {
     Invoke-UiCommand {
