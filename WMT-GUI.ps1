@@ -3562,7 +3562,9 @@ $Script:StartWingetAction = {
     $jobArgs = @{
         Items = $ListItems | Select-Object Name, Id
         Template = $CmdTemplate
-        IsUninstall = ($ActionName -eq "Uninstall") # Flag to detect uninstall mode
+        IsUninstall = ($ActionName -eq "Uninstall")
+        LocalAppData = $env:LOCALAPPDATA 
+        TempDir = $env:TEMP
     }
 
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
@@ -3572,108 +3574,180 @@ $Script:StartWingetAction = {
         $items = $ArgsDict.Items
         $tmpl = $ArgsDict.Template
         $isUninstall = $ArgsDict.IsUninstall
+        $localAppData = $ArgsDict.LocalAppData
+        $tempDir = $ArgsDict.TempDir
+        
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+        # --- 1. COMPREHENSIVE ERROR CODE DATABASE ---
+        $ErrorCodes = @{
+            # Success
+            "0"          = "Success"
+            "0x0"        = "Success"
+
+            # WinGet Specific (0x8A15xxxx)
+            "0x8a150001" = "Invalid Argument (WinGet parameter error)";
+            "0x8a150002" = "Command Failed (General internal failure)";
+            "0x8a150003" = "Source Not Found (Repo missing or corrupted)";
+            "0x8a150004" = "Installer Failed (Generic installer error)";
+            "0x8a150005" = "Download Hash Mismatch (File corrupted/altered)";
+            "0x8a150006" = "No Applicable Installer (Not supported on this OS/Arch)";
+            "0x8a150007" = "Installer Failed to Start (Exe/MSI launch failed)";
+            "0x8a150008" = "Manifest Not Found (Package info missing)";
+            "0x8a150009" = "Invalid Manifest (Package data malformed)";
+            "0x8a15000a" = "Unsupported Installer Type";
+            "0x8a15000b" = "Package Not Found (ID does not exist)";
+            "0x8a15000c" = "Installer Failed (Vendor returned error)";
+            "0x8a15000d" = "Download Failed (Network/Server error)";
+            "0x8a15000e" = "Installer Hash Mismatch (Validation failed)";
+            "0x8a15000f" = "Data Missing (Source broken/outdated)";
+            "0x8a150014" = "Network Error (Server disconnected)";
+
+            # Windows System Errors (0x8007xxxx)
+            "0x80070002" = "File Not Found (System cannot find file)";
+            "0x80070003" = "Path Not Found (Cache corruption or missing file)";
+            "0x80070005" = "Access Denied (Try running as Admin)";
+            "0x80070490" = "Element Not Found (Windows Update/MSIX issue)";
+            "0x80072ee7" = "DNS Lookup Failure (Check internet)";
+            "0x80072f8f" = "SSL/TLS Certificate Error (Check Date/Time)";
+            "0x800401f5" = "Application Not Found (Ghost Registry Entry)";
+
+            # Installer / MSI Codes
+            "1603"       = "Fatal Error (Generic MSI Failure)";
+            "1618"       = "Installation in Progress (Another installer running)";
+            "1619"       = "Package Error (Could not open package)";
+            "1602"       = "Cancelled by User";
+            "1639"       = "Invalid Command Line Argument"
+        }
 
         foreach ($item in $items) {
             Write-Output "Processing: $($item.Name)..."
             $baseCmd = $tmpl -f $item.Id
             
-            # --- BUILD ARGUMENTS ---
-            # 'accept-package-agreements' is NOT valid for uninstall and causes errors
             $commonFlags = "--accept-source-agreements"
             if (-not $isUninstall) {
                 $commonFlags += " --accept-package-agreements"
             }
 
-            # 1. Attempt Silent Execution First
+            # 2. Attempt Silent Execution
             $expr = "$baseCmd $commonFlags --disable-interactivity"
+            
+            # Capture both STDOUT and STDERR merged
+            $output = Invoke-Expression "$expr 2>&1"
             
             $failed = $false
             $adminBlocked = $false
-            
-            # Capture output first to maintain variable scope in the loop
-            $output = Invoke-Expression $expr 
-            
+            $detectedLog = $null
+            $failureReason = ""
+
+            # 3. Analyze Output Line-by-Line
             foreach ($line in $output) {
+                $lineStr = $line.ToString()
+                if ($lineStr -match '^\s*[\-\\|/]\s*$') { continue }
                 
-                # FILTER: Skip spinner animation lines
-                if ($line -match '^\s*[\-\\|/]\s*$') { continue }
-                
-                Write-Output $line
-                
-                # Check for Failures
-                if ($line -match "Installer failed" -or $line -match "exit code:") {
-                    $failed = $true
+                # A. Detect Log File Paths in Output
+                if ($lineStr -match "Log file.*:\s*(.*\.log)") {
+                    $detectedLog = $matches[1].Trim()
                 }
-                if ($line -match "Argument name was not recognized") {
-                    $failed = $true
+
+                # B. Translate Error Codes
+                # Matches Hex (0x...) OR 4-digit Windows Installer codes (16xx)
+                if ($lineStr -match "(0x[0-9a-fA-F]{8}|16[0-9]{2})") {
+                    $code = $matches[1].ToLower()
+                    if ($ErrorCodes.ContainsKey($code)) {
+                        $desc = $ErrorCodes[$code]
+                        $lineStr += " < $desc >"
+                        $lineStr += "`n   [!] NOTE: This error is from WinGet or the App Installer, NOT the Windows Maintenance Tool."
+                        
+                        if ($code -ne "0" -and $code -ne "0x0") { 
+                            $failureReason = "$desc ($code)" 
+                        }
+                    }
                 }
+
+                Write-Output $lineStr
                 
-                # Check for Admin Context blocks
-                if ($line -match "cannot be .* from an admin.* context" -or $line -match "run this installer as a normal user") {
-                    $failed = $true
-                    $adminBlocked = $true
+                # C. Detect Failure Keywords
+                if ($lineStr -match "Installer failed" -or $lineStr -match "exit code:") { $failed = $true }
+                if ($lineStr -match "Argument name was not recognized") { $failed = $true }
+                if ($lineStr -match "cannot be .* from an admin.* context" -or $lineStr -match "run this installer as a normal user") {
+                    $failed = $true; $adminBlocked = $true
                 }
             }
             
-            # 2. Handle Admin Context Error (De-Elevation)
-            if ($adminBlocked) {
-                $msg = "The installer for '$($item.Name)' refuses to run as Administrator.`n`nDo you want to launch it as a Standard User (via Windows Explorer)?"
-                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Admin Context Blocked", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+            # 4. Special "Deep Scan" for Silent .NET/Burn Logs (if no log found yet)
+            if (-not $detectedLog -and ($item.Id -match "Microsoft.DotNet" -or $failed)) {
+                $logPaths = @($tempDir)
+                $wingetDir = Get-ChildItem -Path "$localAppData\Packages\Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+                if ($wingetDir) { $logPaths += "$wingetDir\LocalState\DiagOutputDir" }
                 
+                # Find recent log (last 3 mins) matching the ID or SDK pattern
+                $foundLog = Get-ChildItem -Path $logPaths -Recurse -ErrorAction SilentlyContinue | 
+                            Where-Object { 
+                                $_.LastWriteTime -gt (Get-Date).AddMinutes(-3) -and 
+                                ($_.Name -match "Microsoft.DotNet.SDK" -or $_.Name -match "WinGet")
+                            } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+                
+                if ($foundLog) {
+                    $content = Get-Content -Path $foundLog.FullName -Raw -ErrorAction SilentlyContinue
+                    # Check for the known "Pseudo Bundle" corruption
+                    if ($content -match "Error 0x80070003" -or $content -match "Failed to get size of pseudo bundle") {
+                        $failureReason = "Installer Cache Corruption (0x80070003)"
+                        $failed = $true
+                        Write-Output ">> [CRITICAL] Detected silent cache corruption in log."
+                    }
+                    $detectedLog = $foundLog.FullName
+                }
+            }
+
+            # 5. Handle Failures & User Interaction
+            
+            # Case A: Admin Context Blocked
+            if ($adminBlocked) {
+                $msg = "The installer for '$($item.Name)' refuses to run as Administrator.`n`nLaunch as Standard User?"
+                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Admin Context Blocked", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
                 if ($choice -eq "Yes") {
                     Write-Output ">> Preparing to launch as Standard User..."
-                    
-                    $tempCmd = Join-Path $env:TEMP "WMT_DeElevate_Install.cmd"
-                    # We use the filtered $commonFlags here too
+                    $tempCmd = Join-Path $tempDir "WMT_DeElevate_Install.cmd"
                     $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd $commonFlags`npause`ndel `"%~f0`" & exit"
                     Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
-                    
                     Start-Process (Join-Path $env:WinDir "explorer.exe") -ArgumentList "`"$tempCmd`""
-                    
-                    Write-Output ">> A new terminal window has opened for this operation."
-                    $failed = $false # Handled
-                } else {
-                    Write-Output ">> Skipped by user."
-                    $failed = $false
+                    $failed = $false 
                 }
             }
-            
-            # 3. Handle Generic Failure (Switch to Interactive)
-            if ($failed) {
-                $msg = "The operation for '$($item.Name)' failed silently.`n`nWould you like to launch it INTERACTIVELY so you can handle the error manually?"
-                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Operation Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Exclamation)
-                
-                if ($choice -eq "Yes") {
-                    # A. NOTIFY USER
-                    [System.Windows.Forms.MessageBox]::Show("The interactive installer will now open.`n`nPlease follow the prompts in the new window to complete the process.`n`nThis tool will wait until you are finished.", "Launching Interactive Mode", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            # Case B: General Failure (Silent or Explicit)
+            elseif ($failed) {
+                # B1. Offer Log Link (If found)
+                if ($detectedLog) {
+                    $logMsg = "The operation failed.`n"
+                    if ($failureReason) { $logMsg += "Reason: $failureReason`n" }
+                    $logMsg += "`nA log file was detected. Would you like to open it to see why?"
                     
-                    Write-Output ">> Launching Interactive Mode... Waiting for user completion..."
-                    
-                    # B. PREPARE ARGUMENTS
-                    # Strip 'winget ' from the start to get raw arguments for Start-Process
-                    $argString = $baseCmd -replace "^winget\s+", ""
-                    # Add necessary flags
-                    $finalArgs = "$argString $commonFlags --interactive"
-                    
-                    # C. EXECUTE WITH WAIT
-                    # -Wait forces the script to pause until the installer closes
-                    $proc = Start-Process -FilePath "winget" -ArgumentList $finalArgs -Wait -PassThru -NoNewWindow
-                    
-                    if ($proc.ExitCode -eq 0) {
-                        Write-Output ">> Interactive process finished successfully."
-                    } else {
-                        Write-Output ">> Interactive process finished (Exit Code: $($proc.ExitCode))."
+                    $logChoice = [System.Windows.Forms.MessageBox]::Show($logMsg, "Installation Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Error)
+                    if ($logChoice -eq "Yes") {
+                        Invoke-Item $detectedLog
                     }
-                } else {
-                    Write-Output ">> Skipped by user."
+                }
+
+                # B2. Offer Interactive Mode
+                $retryMsg = "Silent installation failed for '$($item.Name)'."
+                if ($failureReason) { $retryMsg += "`nError: $failureReason" }
+                $retryMsg += "`n`nWould you like to try running the installer INTERACTIVELY so you can see the error messages?"
+                
+                $retryChoice = [System.Windows.Forms.MessageBox]::Show($retryMsg, "Retry Interactively?", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                
+                if ($retryChoice -eq "Yes") {
+                    [System.Windows.Forms.MessageBox]::Show("The installer UI will now open.`nPlease follow the prompts manually.", "Launching Interactive Mode", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                    Write-Output ">> Launching Interactive Mode..."
+                    $argString = $baseCmd -replace "^winget\s+", ""
+                    $finalArgs = "$argString $commonFlags --interactive"
+                    $proc = Start-Process -FilePath "winget" -ArgumentList $finalArgs -Wait -PassThru -NoNewWindow
+                    Write-Output ">> Interactive process finished (Exit Code: $($proc.ExitCode))."
                 }
             }
-            
             Write-Output "--------------------------------"
         }
     }
-    
     $script:WingetTimer.Start()
 }
 
