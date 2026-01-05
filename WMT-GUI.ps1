@@ -27,6 +27,16 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     exit
 }
 
+# ENABLE HIGH-DPI AWARENESS (Fixes blurry text on 4K screens)
+if ([Environment]::OSVersion.Version.Major -ge 6) {
+    $code = @'
+    [DllImport("user32.dll")]
+    public static extern bool SetProcessDPIAware();
+'@
+    $Win32Dpi = Add-Type -MemberDefinition $code -Name "Win32Dpi" -PassThru
+    $Win32Dpi::SetProcessDPIAware() | Out-Null
+}
+
 Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
 [System.Windows.Forms.Application]::EnableVisualStyles()
 # ==========================================
