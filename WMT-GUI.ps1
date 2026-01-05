@@ -3699,7 +3699,7 @@ $btnWingetScan.Add_Click({
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            # --- FILTERS (UPDATED) ---
+            # --- FILTERS ---
             # 1. Skip headers, separators, and standard messages
             if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
             
@@ -3711,18 +3711,20 @@ $btnWingetScan.Add_Click({
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
-            # STRATEGY: Greedy Match from Right-to-Left
+            # STRATEGY: Greedy Match from Right-to-Left with Fix for '<'
+            # 1. ID column: ([^<\s]\S*) -> Ensures ID does not start with '<'
+            # 2. Version column: ((?:<\s+)?\S+) -> Captures optional '< ' prefix followed by the version string
             
             # Case A: 5 Columns (Name, Id, Version, Available, Source)
-            if ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+            if ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
             }
             # Case B: 4 Columns (Name, Id, Version, Source) - "Available" missing
-            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)\s+(\S+)$') {
+            elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
             }
             # Case C: 3 Columns (Name, Id, Version) - "Available" and "Source" missing
-            elseif ($line -match '^(.+)\s+(\S+)\s+(\S+)$') {
+            elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
             }
 
