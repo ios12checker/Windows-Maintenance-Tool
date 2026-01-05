@@ -339,7 +339,9 @@ function Set-DnsAddresses {
     if (-not $Addresses -or $Addresses.Count -eq 0) { return }
     $addrList = $Addresses
     $labelText = $Label
+    
     Invoke-UiCommand {
+        param($addrList, $labelText)
         $adapters = Get-ActiveAdapters | Select-Object -ExpandProperty Name
         if (-not $adapters) { Write-Output "No active adapters found."; return }
         foreach ($adapter in $adapters) {
@@ -350,7 +352,7 @@ function Set-DnsAddresses {
                 Write-Output "[$labelText] Failed on $adapter : $($_.Exception.Message)"
             }
         }
-    } "Applying $labelText..."
+    } "Applying $labelText..." -ArgumentList (,$addrList), $labelText
 }
 
 function Enable-AllDoh {
@@ -1744,6 +1746,8 @@ function Invoke-RegistryTask {
 
             # --- EXECUTE FIX ---
             Invoke-UiCommand {
+                param($toDelete, $bkDir) # <--- Added param
+                
                 $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
                 $fixed=0; $skipped=0; $backedUpKeys=@()
                 
@@ -1764,7 +1768,8 @@ function Invoke-RegistryTask {
                 if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (System Protected)" }
                 $finalMsg += "`n`nBackup: $bkFile"
                 [System.Windows.Forms.MessageBox]::Show($finalMsg, "Result", "OK", "Information") | Out-Null
-            } "Deep Cleaning..."
+                
+            } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir  # <--- Added Arguments
 
         } catch { $pForm.Close(); [System.Windows.Forms.MessageBox]::Show($_.Exception.Message) }
     }
@@ -2179,7 +2184,7 @@ function Invoke-ShortcutFix {
 # --- FIREWALL TOOLS ---
 function Invoke-FirewallExport {
     $target = Join-Path (Get-DataPath) ("firewall_rules_{0}.wfw" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
-    Invoke-UiCommand { netsh advfirewall export "$target" } "Exporting firewall rules..."
+    Invoke-UiCommand { param($target) netsh advfirewall export "$target" } "Exporting firewall rules..." -ArgumentList $target
 }
 
 function Invoke-FirewallImport {
@@ -2187,7 +2192,7 @@ function Invoke-FirewallImport {
     $dlg.Filter = "Windows Firewall Policy (*.wfw)|*.wfw"
     if ($dlg.ShowDialog() -ne "OK") { return }
     $file = $dlg.FileName
-    Invoke-UiCommand { netsh advfirewall import "$file" } "Importing firewall rules..."
+    Invoke-UiCommand { param($file) netsh advfirewall import "$file" } "Importing firewall rules..." -ArgumentList $file
 }
 
 function Invoke-FirewallDefaults {
@@ -2342,7 +2347,7 @@ function Invoke-DriverUpdates {
         if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
         Set-ItemProperty -Path $path -Name "SearchOrderConfig" -Value $value -Type DWord
         Write-Output $msg
-    } "Updating driver update policy..."
+    } "Updating driver update policy..." -ArgumentList $value, $msg
 }
 
 function Invoke-DeviceMetadata {
@@ -2355,7 +2360,7 @@ function Invoke-DeviceMetadata {
         if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
         Set-ItemProperty -Path $path -Name "PreventDeviceMetadataFromNetwork" -Value $value -Type DWord
         Write-Output $msg
-    } "Updating device metadata policy..."
+    } "Updating device metadata policy..." -ArgumentList $value, $msg
 }
 
 function Show-DriverCleanupDialog {
@@ -2780,7 +2785,8 @@ function Invoke-RestoreDrivers {
             $msg = "Restore failed (exit $code)." + "`n`nOutput:`n" + ($output | Out-String)
             [System.Windows.MessageBox]::Show($msg,"Restore Drivers",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
         }
-    } "Restoring drivers..."
+    # CHANGE IS HERE: Passing the argument explicitly
+    } "Restoring drivers..." -ArgumentList $selectedPath
 }
 
 # --- UPDATE / REPORT TOOLS ---
@@ -2807,6 +2813,7 @@ function Invoke-SystemReports {
     if ($dlg.ShowDialog() -ne "OK") { return }
     $outdir = Join-Path $dlg.SelectedPath ("SystemReports_{0}" -f (Get-Date -Format "yyyy-MM-dd_HHmm"))
     if (-not (Test-Path $outdir)) { New-Item -ItemType Directory -Path $outdir | Out-Null }
+    
     Invoke-UiCommand {
         param($outdir)
         $date = Get-Date -Format "yyyy-MM-dd"
@@ -2817,7 +2824,8 @@ function Invoke-SystemReports {
         ipconfig /all | Out-File -FilePath $net -Encoding UTF8
         driverquery | Out-File -FilePath $drv -Encoding UTF8
         Write-Output "Reports saved to $outdir"
-    } "Generating system reports..."
+    # CHANGE IS HERE: Passing the argument explicitly
+    } "Generating system reports..." -ArgumentList $outdir
 }
 
 function Invoke-UpdateServiceReset {
@@ -4447,7 +4455,14 @@ $btnDotNetEnable.Add_Click({
     foreach ($o in $opts) { $rb=New-Object System.Windows.Forms.RadioButton; $rb.Text=$o; $rb.Tag=$o; $rb.Left=20; $rb.Top=$y; $rb.ForeColor="White"; $rb.BackColor=$form.BackColor; $form.Controls.Add($rb); $radios+=$rb; $y+=30 }
     $radios[0].Checked=$true
     $ok=New-Object System.Windows.Forms.Button; $ok.Text="Apply"; $ok.DialogResult="OK"; $ok.Left=20; $ok.Top=120; $ok.Width=260; $ok.BackColor="SeaGreen"; $ok.ForeColor="White"; $form.Controls.Add($ok); $form.AcceptButton=$ok
-    if ($form.ShowDialog() -eq "OK") { $choice = ($radios | Where-Object { $_.Checked }).Tag; if ($choice) { Invoke-UiCommand { Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." } }
+    
+    if ($form.ShowDialog() -eq "OK") { 
+        $choice = ($radios | Where-Object { $_.Checked }).Tag; 
+        if ($choice) { 
+            # FIXED LINE BELOW: Added param block and ArgumentList
+            Invoke-UiCommand { param($choice) Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." -ArgumentList $choice
+        } 
+    }
 })
 $btnDotNetDisable.Add_Click({
     $res = [System.Windows.MessageBox]::Show("Remove .NET roll-forward and revert to default .NET selection?","Reset .NET RollForward",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Warning)
