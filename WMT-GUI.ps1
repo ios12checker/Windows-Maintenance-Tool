@@ -45,11 +45,16 @@ function Write-GuiLog {
 }
 
 function Invoke-UiCommand {
-    param([scriptblock]$Sb, $Msg="Processing...")
+    param(
+        [scriptblock]$Sb, 
+        $Msg="Processing...", 
+        [object[]]$ArgumentList = @()
+    )
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
     Write-GuiLog $Msg
     try { 
-        $res = & $Sb | Out-String
+        # Pass arguments to the scriptblock using splatting
+        $res = & $Sb @ArgumentList | Out-String
         if ($res){ Write-GuiLog $res.Trim() } 
         else { Write-GuiLog "Done." }
     } catch { 
@@ -57,7 +62,6 @@ function Invoke-UiCommand {
     }
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
-
 function Start-GuiJob {
     param(
         [scriptblock]$ScriptBlock, 
@@ -707,27 +711,24 @@ function Show-AdvancedCleanupSelection {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
-    # 1. SETUP FORM
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Advanced Cleanup Selection"
-    $form.Size = New-Object System.Drawing.Size(450, 550)
+    $form.Size = New-Object System.Drawing.Size(450, 580)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
     $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.ForeColor = "White"
 
-    # 2. MAIN SCROLLABLE PANEL
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
     $mainPanel.FlowDirection = "TopDown"
     $mainPanel.WrapContents = $false
     $mainPanel.AutoScroll = $true
     $mainPanel.Dock = "Top"
-    $mainPanel.Height = 440
+    $mainPanel.Height = 470
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.Controls.Add($mainPanel)
 
-    # 3. BUTTON PANEL
     $btnPanel = New-Object System.Windows.Forms.Panel
     $btnPanel.Dock = "Bottom"
     $btnPanel.Height = 60
@@ -754,14 +755,14 @@ function Show-AdvancedCleanupSelection {
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $btnPanel.Controls.Add($btnCancel)
 
-    # 4. DATA DEFINITION (Categories and Items)
     $cleanupData = [ordered]@{
         "System" = @(
             @{ Name="Temporary Files";      Key="TempFiles";    Desc="User and System Temp folders" },
             @{ Name="Recycle Bin";          Key="RecycleBin";   Desc="Empties the Recycle Bin" },
             @{ Name="Windows Error Logs";   Key="WER";          Desc="Crash dumps and error reports" },
             @{ Name="DNS Cache";            Key="DNS";          Desc="Flushes network DNS resolver cache" },
-            @{ Name="Thumbnail Cache";      Key="Thumbnails";   Desc="Windows Explorer thumbnail database" }
+            @{ Name="Thumbnail Cache";      Key="Thumbnails";   Desc="Windows Explorer thumbnail database" },
+            @{ Name="Package Cache";        Key="PackageCache"; Desc="Visual Studio/Installer cache (Can free GBs, safe to delete)" }
         )
         "Explorer & Privacy" = @(
             @{ Name="Recent Items (Safe)";  Key="Recent";       Desc="Clears Recent list but keeps Quick Access pins" },
@@ -776,11 +777,9 @@ function Show-AdvancedCleanupSelection {
         )
     }
 
-    # 5. UI GENERATOR HELPER
-    $global:checkboxes = @{} # Store references to retrieve values later
+    $global:checkboxes = @{}
 
     foreach ($category in $cleanupData.Keys) {
-        # A. Category Header (Select All)
         $catPanel = New-Object System.Windows.Forms.Panel
         $catPanel.Size = New-Object System.Drawing.Size(400, 30)
         $catPanel.Margin = New-Object System.Windows.Forms.Padding(10, 10, 0, 0)
@@ -791,18 +790,15 @@ function Show-AdvancedCleanupSelection {
         $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
         $catChk.AutoSize = $true
         $catChk.Location = New-Object System.Drawing.Point(5, 5)
-        
-        # --- FIX: Default the Header to Checked ---
         $catChk.Checked = $true 
 
         $catPanel.Controls.Add($catChk)
         $mainPanel.Controls.Add($catPanel)
 
-        # B. Items Container
         $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
         $itemFlow.FlowDirection = "TopDown"
         $itemFlow.AutoSize = $true
-        $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0) # Indent
+        $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0)
 
         $childChecks = @()
 
@@ -812,9 +808,8 @@ function Show-AdvancedCleanupSelection {
             $chk.Tag  = $item.Key
             $chk.AutoSize = $true
             $chk.ForeColor = "White"
-            $chk.Checked = $true # Default Checked
+            $chk.Checked = $true
             
-            # Tooltip for description
             $tt = New-Object System.Windows.Forms.ToolTip
             $tt.SetToolTip($chk, $item.Desc)
 
@@ -825,7 +820,6 @@ function Show-AdvancedCleanupSelection {
         
         $mainPanel.Controls.Add($itemFlow)
 
-        # C. Event Wiring (Select All Logic)
         $catChk.Add_Click({ 
             param($src, $e) 
             foreach ($c in $childChecks) { $c.Checked = $src.Checked }
@@ -835,7 +829,6 @@ function Show-AdvancedCleanupSelection {
     $form.AcceptButton = $btnClean
     $form.CancelButton = $btnCancel
 
-    # 6. SHOW AND RETURN
     $result = $form.ShowDialog()
 
     if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -890,6 +883,10 @@ function Invoke-TempCleanup {
             try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue; Write-Output "Thumbnail cache cleared." } catch {}
         }
 
+        if ($selections -contains "PackageCache") {
+             try { Remove-Item "$env:ProgramData\Package Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Package Cache cleared." } catch {}
+        }
+
         # --- EXPLORER & PRIVACY ---
         if ($selections -contains "Recent") {
             try { 
@@ -928,7 +925,8 @@ function Invoke-TempCleanup {
 
         Write-Output "Cleanup complete. Deleted $deleted files."
 
-    } "Running advanced cleanup..." -ArgumentList $selections
+    # FIX IS BELOW: We wrap $selections in (,$selections) to pass it as a single array object
+    } "Running advanced cleanup..." -ArgumentList (,$selections)
 }
 
 # --- Registry Scan Selection UI ---
