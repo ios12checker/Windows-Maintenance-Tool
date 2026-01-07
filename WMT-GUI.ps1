@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.8"
+$AppVersion = "4.9"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -145,6 +145,23 @@ function Show-TextDialog {
 }
 
 # --- SETTINGS MANAGER ---
+function Save-WmtSettings {
+    param($Settings)
+    $path = Join-Path (Get-DataPath) "settings.json"
+    try {
+        # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
+        $saveObj = [PSCustomObject]@{
+            TempCleanup  = $Settings.TempCleanup
+            RegistryScan = $Settings.RegistryScan
+            WingetIgnore = $Settings.WingetIgnore
+            LoadWinapp2  = [bool]$Settings.LoadWinapp2 # Ensure Boolean
+        }
+        $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
+    } catch {
+        Write-Warning "Failed to save settings: $_"
+    }
+}
+
 function Get-WmtSettings {
     $path = Join-Path (Get-DataPath) "settings.json"
     
@@ -152,38 +169,31 @@ function Get-WmtSettings {
     $defaults = @{
         TempCleanup  = @{}
         RegistryScan = @{}
-        WingetIgnore = @() # Ready for your future feature
+        WingetIgnore = @()
+        LoadWinapp2  = $false # <--- NEW SETTING
     }
     
     if (Test-Path $path) {
         try {
             $json = Get-Content $path -Raw | ConvertFrom-Json
             
-            # Safely merge JSON into defaults (handles missing keys if json is old)
             if ($json.TempCleanup) { 
                 foreach ($p in $json.TempCleanup.PSObject.Properties) { $defaults.TempCleanup[$p.Name] = $p.Value } 
             }
             if ($json.RegistryScan) { 
                 foreach ($p in $json.RegistryScan.PSObject.Properties) { $defaults.RegistryScan[$p.Name] = $p.Value } 
             }
-            if ($json.WingetIgnore) { 
-                $defaults.WingetIgnore = @($json.WingetIgnore) 
+            if ($json.WingetIgnore) { $defaults.WingetIgnore = @($json.WingetIgnore) }
+            
+            # Load persistence setting
+            if ($json.PSObject.Properties["LoadWinapp2"]) { 
+                $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2
             }
         } catch { 
             Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
         }
     }
     return $defaults
-}
-
-function Save-WmtSettings {
-    param($Settings)
-    try {
-        $path = Join-Path (Get-DataPath) "settings.json"
-        $Settings | ConvertTo-Json -Depth 5 | Set-Content -Path $path -Encoding UTF8 -Force
-    } catch { 
-        Write-GuiLog "Error saving settings: $($_.Exception.Message)" 
-    }
 }
 
 function Show-DownloadStats {
@@ -761,255 +771,634 @@ function Invoke-ChkdskAll {
         }
     } "Running CHKDSK on all drives..."
 }
+# ==========================================
+# WINAPP2.INI INTEGRATION
+# ==========================================
+
+function Expand-EnvPath {
+    param($Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Path }
+    # Expand standard vars (%AppData%, etc)
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path)
+    # Handle common Winapp2 specific variables if needed (e.g. %ProgramFiles%)
+    return $expanded
+}
+
+function Get-Winapp2Rules {
+    param([switch]$Download)
+
+    $iniUrl   = "https://raw.githubusercontent.com/MoscaDotTo/Winapp2/master/Winapp2.ini"
+    $dataPath = Get-DataPath
+    $iniPath  = Join-Path $dataPath "winapp2.ini"
+    $cachePath = Join-Path $dataPath "winapp2_cache_v11.json" # Bumped version
+
+    # --- 1. ACCELERATED DOWNLOAD ---
+    if ($Download) {
+        try {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $wc = New-Object System.Net.WebClient
+            $wc.Proxy = $null
+            $wc.DownloadFile($iniUrl, $iniPath)
+            if (Test-Path $cachePath) { Remove-Item $cachePath -Force }
+        } catch {}
+    }
+
+    # --- 2. CACHE HIT ---
+    if (-not $Download -and (Test-Path $cachePath)) {
+        try { return (Get-Content $cachePath -Raw | ConvertFrom-Json) } catch {}
+    }
+
+    # --- 3. PARSE INI ---
+    if (-not (Test-Path $iniPath)) { return @() }
+    
+    $rules = New-Object System.Collections.Generic.List[Object]
+    $currentApp = $null
+    $skipApp = $false
+    $hasDetect = $false
+    
+    $specialVars = @{ 
+        "%Documents%" = [Environment]::GetFolderPath("MyDocuments")
+        "%ProgramFiles%" = $env:ProgramFiles
+        "%ProgramFiles(x86)%" = ${env:ProgramFiles(x86)}
+        "%SystemDrive%" = $env:SystemDrive
+    }
+
+    foreach ($rawLine in [System.IO.File]::ReadLines($iniPath)) {
+        if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
+        $line = $rawLine.Trim()
+        if ($line[0] -eq ';') { continue }
+
+        if ($line[0] -eq '[') {
+            if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
+            
+            # Clean Name: Remove brackets AND trailing asterisks immediately
+            $appName = $line.Substring(1, $line.Length - 2).Trim(" *")
+            
+            $currentApp = [ordered]@{ 
+                Name = $appName
+                ID = "Winapp2_" + ($appName -replace '[^a-zA-Z0-9]','')
+                Section = "Applications"
+                AppGroup = "General"
+                Paths = New-Object System.Collections.Generic.List[Object]
+                Desc = "Clean $appName"
+                IsInternal = $false
+            }
+            $skipApp = $false; $hasDetect = $false
+            continue
+        }
+
+        $eqIndex = $line.IndexOf('=')
+        if ($eqIndex -gt 0) {
+            $key = $line.Substring(0, $eqIndex).Trim()
+            $val = $line.Substring($eqIndex + 1).Trim()
+
+            if ($key -eq "Section") { $currentApp.Section = $val }
+            elseif ($key.StartsWith("Detect")) {
+                if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true }
+                if ($val.Contains("%")) { 
+                    foreach ($k in $specialVars.Keys) { 
+                        if ($val.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            $val = $val -replace ([regex]::Escape($k)), $specialVars[$k] 
+                        }
+                    }
+                    $val = [Environment]::ExpandEnvironmentVariables($val) 
+                }
+                $pathExists = $false
+                if ($val -match "^HK") {
+                    $r = $val -replace "^(?i)HKCU", "Registry::HKEY_CURRENT_USER" `
+                              -replace "^(?i)HKLM", "Registry::HKEY_LOCAL_MACHINE" `
+                              -replace "^(?i)HKCR", "Registry::HKEY_CLASSES_ROOT"
+                    if (Test-Path $r) { $pathExists = $true }
+                } else { 
+                    if (Test-Path $val) { $pathExists = $true } 
+                }
+                if ($pathExists) { $skipApp = $false }
+            }
+            elseif ($key.StartsWith("FileKey")) {
+                $parts = $val -split "\|"
+                if ($parts.Count -ge 2) {
+                    $rawPath = $parts[0]
+                    if ($rawPath.Contains("%")) { 
+                        foreach ($k in $specialVars.Keys) { 
+                            if ($rawPath.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                                $rawPath = $rawPath -replace ([regex]::Escape($k)), $specialVars[$k] 
+                            }
+                        }
+                        $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
+                    }
+                    if (Test-Path $rawPath) { 
+                        $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } }) 
+                    }
+                }
+            }
+            elseif ($key -eq "Description") { $currentApp.Desc = $val }
+        }
+    }
+    if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
+
+    $finalList = $rules | Where-Object { $_.Paths.Count -gt 0 }
+
+    # ==========================================
+    # LOGIC: CATEGORIZATION ENGINE
+    # ==========================================
+    $prefixCounts = @{}
+    foreach ($app in $finalList) {
+        if ($app.Name -match "^([^\s]+)") {
+            $w = $matches[1]
+            if (-not $prefixCounts.ContainsKey($w)) { $prefixCounts[$w] = 0 }
+            $prefixCounts[$w]++
+        }
+    }
+
+    # Explicit Singletons: Apps that should ALWAYS be their own group, even if only 1 rule exists
+    $knownSingletons = @("Spotify", "Discord", "Steam", "Skype", "TeamViewer", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber", "Signal", "Dropbox", "OneDrive")
+
+    foreach ($app in $finalList) {
+        $rawName = $app.Name
+        $group = "General"
+        $cleanName = $rawName
+        $useSplit = $false
+
+        # A. HYPHEN SPLIT (Spotify - Songs)
+        if ($rawName -match "^(.+?)\s+-\s+(.*)$") {
+            $group = $matches[1].Trim()
+            $cleanName = $matches[2].Trim()
+            $useSplit = $true
+        }
+        # B. PREFIX SPLIT (Adobe Reader)
+        elseif ($rawName -match "^([^\s]+)\s+(.*)$") {
+            $prefix = $matches[1]
+            $suffix = $matches[2]
+            if ($prefixCounts.ContainsKey($prefix) -and $prefixCounts[$prefix] -gt 1) {
+                $group = $prefix; $cleanName = $suffix; $useSplit = $true
+            }
+        }
+        
+        # C. SINGLETON CHECK (Fixes "Spotify" disappearing into General)
+        if (-not $useSplit) {
+            if ($knownSingletons -contains $rawName -or ($prefixCounts.ContainsKey($rawName) -and $prefixCounts[$rawName] -gt 1)) {
+                $group = $rawName
+                $cleanName = "Standard Cleanup"
+                $useSplit = $true
+            }
+        }
+
+        # D. GROUP RENAMING
+        if ($group -eq "Google" -and $cleanName -match "^Chrome") { $group = "Google Chrome"; $cleanName = $cleanName -replace "^Chrome\s*", "" }
+        if ($group -eq "Microsoft" -and $cleanName -match "^Edge") { $group = "Microsoft Edge"; $cleanName = $cleanName -replace "^Edge\s*", "" }
+        if ($group -eq "Mozilla" -and $cleanName -match "^Firefox") { $group = "Mozilla Firefox"; $cleanName = $cleanName -replace "^Firefox\s*", "" }
+        if ($group -eq "Opera" -and $cleanName -match "^GX") { $group = "Opera GX"; $cleanName = $cleanName -replace "^GX\s*", "" }
+
+        $cleanName = $cleanName.Trim(" -*")
+        if ([string]::IsNullOrWhiteSpace($cleanName)) { $cleanName = "Standard Cleanup" }
+
+        # E. ASSIGN SECTION
+        $section = "Applications"
+        if ($group -in "Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "Opera GX", "Vivaldi", "Waterfox", "Tor Browser", "Chromium", "Yandex") { $section = "Browsers / Internet" }
+        elseif ($group -in "Steam", "Discord", "Skype", "TeamViewer", "Spotify", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber") { $section = "Internet & Chat" }
+        elseif ($group -match "Adobe|Microsoft|Office|LibreOffice|Foxit") { $section = "Productivity" }
+        elseif ($group -match "NVIDIA|AMD|Intel|Realtek|Driver") { $section = "System & Drivers" }
+        elseif ($group -match "Windows" -or $group -eq "Temporary Files") { $section = "System" }
+
+        $app.Section = $section
+        if ($useSplit) { $app.AppGroup = $group; $app.Name = $cleanName } 
+        else { $app.AppGroup = "General"; $app.Name = $rawName }
+    }
+
+    try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
+    
+    $finalList | Write-Output
+}
 
 function Show-AdvancedCleanupSelection {
     Add-Type -AssemblyName System.Windows.Forms
     Add-Type -AssemblyName System.Drawing
 
-    # 1. LOAD SETTINGS
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.TempCleanup
+    $isWinapp2Enabled = $currentSettings.LoadWinapp2
 
+    # --- FORM SETUP ---
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Advanced Cleanup Selection"
-    $form.Size = New-Object System.Drawing.Size(450, 580)
+    $form.Size = New-Object System.Drawing.Size(650, 850)
     $form.StartPosition = "CenterScreen"
     $form.FormBorderStyle = 'FixedDialog'
     $form.MaximizeBox = $false
     $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.ForeColor = "White"
 
-    $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-    $mainPanel.FlowDirection = "TopDown"
-    $mainPanel.WrapContents = $false
-    $mainPanel.AutoScroll = $true
-    $mainPanel.Dock = "Top"
-    $mainPanel.Height = 470
-    $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $form.Controls.Add($mainPanel)
+    # --- 1. TOP PANEL (Search) ---
+    $topPanel = New-Object System.Windows.Forms.Panel
+    $topPanel.Dock = "Top"; $topPanel.Height = 50
+    $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    # Add to form LATER to ensure docking priority, or use BringToFront
 
+    $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
+    $chkToggleWinapp2.Text = "Load Community Rules *"
+    $chkToggleWinapp2.Size = "220, 30"; $chkToggleWinapp2.Location = "15, 10"
+    $chkToggleWinapp2.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $chkToggleWinapp2.ForeColor = "White"
+    $chkToggleWinapp2.Checked = $isWinapp2Enabled
+    $tt = New-Object System.Windows.Forms.ToolTip
+    $tt.SetToolTip($chkToggleWinapp2, "Enables 1000+ extra rules from Winapp2.ini")
+    $topPanel.Controls.Add($chkToggleWinapp2)
+
+    $txtSearch = New-Object System.Windows.Forms.TextBox
+    $txtSearch.Size = "200, 25"; $txtSearch.Location = "420, 12"
+    $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
+    $txtSearch.ForeColor = "White"
+    $txtSearch.BorderStyle = "FixedSingle"
+    $topPanel.Controls.Add($txtSearch)
+    
+    $lblSearch = New-Object System.Windows.Forms.Label
+    $lblSearch.Text = "Search:"
+    $lblSearch.AutoSize = $true; $lblSearch.Location = "370, 15"
+    $topPanel.Controls.Add($lblSearch)
+
+    # --- 2. BOTTOM PANEL (Buttons) ---
     $btnPanel = New-Object System.Windows.Forms.Panel
-    $btnPanel.Dock = "Bottom"
-    $btnPanel.Height = 60
+    $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
     $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
-    $form.Controls.Add($btnPanel)
 
     $btnClean = New-Object System.Windows.Forms.Button
     $btnClean.Text = "Clean Selected"
-    $btnClean.Size = New-Object System.Drawing.Size(140, 35)
-    $btnClean.Location = New-Object System.Drawing.Point(280, 12)
-    $btnClean.BackColor = "SeaGreen"
-    $btnClean.ForeColor = "White"
-    $btnClean.FlatStyle = "Flat"
-    $btnClean.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $btnClean.Size = "140, 35"; $btnClean.Location = "470, 12"
+    $btnClean.BackColor = "SeaGreen"; $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
+    $btnClean.DialogResult = "OK"
     $btnPanel.Controls.Add($btnClean)
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
-    $btnCancel.Size = New-Object System.Drawing.Size(100, 35)
-    $btnCancel.Location = New-Object System.Drawing.Point(170, 12)
-    $btnCancel.BackColor = "DimGray"
-    $btnCancel.ForeColor = "White"
-    $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnCancel.Size = "100, 35"; $btnCancel.Location = "360, 12"
+    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = "Cancel"
     $btnPanel.Controls.Add($btnCancel)
 
-    $cleanupData = [ordered]@{
-        "System" = @(
-            @{ Name="Temporary Files";      Key="TempFiles";    Desc="User and System Temp folders" },
-            @{ Name="Recycle Bin";          Key="RecycleBin";   Desc="Empties the Recycle Bin" },
-            @{ Name="Windows Error Logs";   Key="WER";          Desc="Crash dumps and error reports" },
-            @{ Name="DNS Cache";            Key="DNS";          Desc="Flushes network DNS resolver cache" },
-            @{ Name="Thumbnail Cache";      Key="Thumbnails";   Desc="Windows Explorer thumbnail database" },
-            @{ Name="Package Cache";        Key="PackageCache"; Desc="Visual Studio/Installer cache (Can free GBs, safe to delete)" }
-        )
-        "Explorer & Privacy" = @(
-            @{ Name="Recent Items (Safe)";  Key="Recent";       Desc="Clears Recent list but keeps Quick Access pins" },
-            @{ Name="Run History";          Key="RunMRU";       Desc="Run dialog command history" },
-            @{ Name="Address Bar History";  Key="TypedPaths";   Desc="Explorer address bar history" },
-            @{ Name="User Assist";          Key="UserAssist";   Desc="Logs of programs executed (ROT13 encoded)" }
-        )
-        "Browsers" = @(
-            @{ Name="Edge Cache";           Key="Edge";         Desc="Microsoft Edge temporary internet files" },
-            @{ Name="Chrome Cache";         Key="Chrome";       Desc="Google Chrome temporary internet files" },
-            @{ Name="Firefox Cache";        Key="Firefox";      Desc="Mozilla Firefox temporary internet files" }
-        )
-    }
+    # --- 3. MAIN CONTENT PANEL ---
+    $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+    $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
+    $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
+    $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    
+    # --- FIX: ADD PADDING TO PREVENT OVERLAP ---
+    $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
-    $global:checkboxes = @{}
+    # --- CRITICAL: ADD ORDER DETERMINES DOCKING PRIORITY ---
+    # In WinForms, controls added *last* are docked *first* (conceptually) or fill remaining space.
+    # We add the Fill panel first, then the Dock panels, but use BringToFront to ensure z-order.
+    $form.Controls.Add($btnPanel)
+    $form.Controls.Add($topPanel)
+    $form.Controls.Add($mainPanel)
+    $mainPanel.BringToFront() # Ensures it sits 'inside' the Top/Bottom docks
 
-    foreach ($category in $cleanupData.Keys) {
-        $catPanel = New-Object System.Windows.Forms.Panel
-        $catPanel.Size = New-Object System.Drawing.Size(400, 30)
-        $catPanel.Margin = New-Object System.Windows.Forms.Padding(10, 10, 0, 0)
+    # --- INTERNAL RULES ---
+    $internalRules = @(
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Windows"; Name="Temporary Files"; Key="TempFiles"; Desc="User and System Temp"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Windows"; Name="Recycle Bin"; Key="RecycleBin"; Desc="Empties Recycle Bin"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Windows"; Name="Error Logs (WER)"; Key="WER"; Desc="Crash dumps"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Windows"; Name="DNS Cache"; Key="DNS"; Desc="Network cache"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Explorer"; Name="Thumbnail Cache"; Key="Thumbnails"; Desc="Explorer thumbnails"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Explorer"; Name="Recent Items"; Key="Recent"; Desc="Recent files list"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="System"; AppGroup="Explorer"; Name="Run History"; Key="RunMRU"; Desc="Run dialog history"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="Browsers / Internet"; AppGroup="Google Chrome"; Name="Cache (Internal)"; Key="Chrome"; Desc="Standard Cache"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="Browsers / Internet"; AppGroup="Microsoft Edge"; Name="Cache (Internal)"; Key="Edge"; Desc="Standard Cache"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="Browsers / Internet"; AppGroup="Mozilla Firefox"; Name="Cache (Internal)"; Key="Firefox"; Desc="Standard Cache"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="Browsers / Internet"; AppGroup="Brave"; Name="Cache (Internal)"; Key="Brave"; Desc="Standard Cache"; IsInternal=$true }
+        [PSCustomObject][ordered]@{ Section="Browsers / Internet"; AppGroup="Opera"; Name="Cache (Internal)"; Key="Opera"; Desc="Standard Cache"; IsInternal=$true }
+    )
+
+    $RenderList = {
+        param($IncludeWinapp2, $InteractiveMode)
         
-        $catChk = New-Object System.Windows.Forms.CheckBox
-        $catChk.Text = $category
-        $catChk.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-        $catChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
-        $catChk.AutoSize = $true
-        $catChk.Location = New-Object System.Drawing.Point(5, 5)
-        # Note: We do NOT set .Checked here yet. We calculate it below.
-
-        $catPanel.Controls.Add($catChk)
-        $mainPanel.Controls.Add($catPanel)
-
-        $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-        $itemFlow.FlowDirection = "TopDown"
-        $itemFlow.AutoSize = $true
-        $itemFlow.Margin = New-Object System.Windows.Forms.Padding(25, 0, 0, 0)
-
-        $childChecks = @()
+        $mainPanel.SuspendLayout()
+        $mainPanel.Controls.Clear()
         
-        # ### FIX CHECK LOGIC ###
-        # Start assuming the Category is checked. 
-        # If we find ANY child that is unchecked, we turn the Category off.
-        $isCatChecked = $true
+        $allRules = @($internalRules)
 
-        foreach ($item in $cleanupData[$category]) {
-            $chk = New-Object System.Windows.Forms.CheckBox
-            $chk.Text = $item.Name
-            $chk.Tag  = $item.Key
-            $chk.AutoSize = $true
-            $chk.ForeColor = "White"
-            
-            # APPLY SAVED STATE (Default to True if not found in settings)
-            if ($savedStates.ContainsKey($item.Key)) {
-                $chk.Checked = $savedStates[$item.Key]
-            } else {
-                $chk.Checked = $true
-            }
-            
-            # Logic: If this item is unchecked, the parent header must be unchecked too
-            if (-not $chk.Checked) { $isCatChecked = $false }
+        if ($IncludeWinapp2) {
+            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Loading..."; $lbl.ForeColor = "Yellow"; $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
+            $mainPanel.Controls.Add($lbl); $form.Update()
 
-            $tt = New-Object System.Windows.Forms.ToolTip
-            $tt.SetToolTip($chk, $item.Desc)
+            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+            $shouldDownload = $false
+            if (Test-Path $iniPath) {
+                if ((Get-Item $iniPath).LastWriteTime -lt (Get-Date).AddDays(-7) -and $InteractiveMode) {
+                   if ([System.Windows.Forms.MessageBox]::Show("Update Rules?", "Update", "YesNo") -eq "Yes") { $shouldDownload = $true }
+                }
+            } elseif ($InteractiveMode) { $shouldDownload = $true }
 
-            $itemFlow.Controls.Add($chk)
-            $global:checkboxes[$item.Key] = $chk
-            $childChecks += $chk
+            try { $winRules = Get-Winapp2Rules -Download:$shouldDownload; $allRules += $winRules } catch {}
+            if ($mainPanel.Controls.Count -gt 0) { $mainPanel.Controls.RemoveAt(0) }
         }
-        
-        # Apply the calculated state to the Header
-        $catChk.Checked = $isCatChecked
-        
-        $mainPanel.Controls.Add($itemFlow)
 
-        # Event: Clicking Header toggles all children
-        $catChk.Add_Click({ 
-            param($src, $e) 
-            foreach ($c in $childChecks) { $c.Checked = $src.Checked }
-        }.GetNewClosure())
+        $global:checkboxes = @{}
+        $global:sections = @()
+
+        $sections = $allRules | Select-Object -ExpandProperty Section -Unique | Sort-Object
+
+        foreach ($sec in $sections) {
+            $secPanel = New-Object System.Windows.Forms.Panel
+            $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
+            $secPanel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+            $secPanel.Tag = "HEADER"
+            
+            $secChk = New-Object System.Windows.Forms.CheckBox
+            $secChk.Text = $sec
+            $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+            $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
+            $secChk.AutoSize = $true; $secChk.Location = "5, 5"
+            $secPanel.Controls.Add($secChk)
+            $mainPanel.Controls.Add($secPanel)
+            
+            $global:sections += $secPanel
+
+            $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+            $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
+            $itemFlow.Margin = "25, 0, 0, 0"
+            $itemFlow.Tag = "FLOW"
+
+            $secItems = $allRules | Where-Object { $_.Section -eq $sec } | Sort-Object AppGroup, Name
+            $childChecks = @()
+            $currentGroup = $null
+            $isSecChecked = $true
+
+            foreach ($item in $secItems) {
+                if ($item.AppGroup -ne $currentGroup) {
+                    $currentGroup = $item.AppGroup
+                    $grpLbl = New-Object System.Windows.Forms.Label
+                    $grpLbl.Text = $currentGroup
+                    $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+                    $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
+                    $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
+                    $grpLbl.Tag = "GROUPHEADER"
+                    $itemFlow.Controls.Add($grpLbl)
+                }
+
+                $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
+                $chk = New-Object System.Windows.Forms.CheckBox
+                
+                if ($item.IsInternal) {
+                    $chk.Text = $item.Name
+                } else {
+                    $cleanName = $item.Name.Trim(" *")
+                    $chk.Text = "$cleanName (*)"
+                    $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
+                }
+                
+                $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
+                $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
+                
+                if ($savedStates.ContainsKey($itemKey)) { $chk.Checked = $savedStates[$itemKey] }
+                else { $chk.Checked = ($item.IsInternal -eq $true) }
+                
+                if (-not $chk.Checked) { $isSecChecked = $false }
+                if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
+
+                $itemFlow.Controls.Add($chk)
+                $global:checkboxes[$itemKey] = $chk
+                $childChecks += $chk
+            }
+
+            $secChk.Checked = $isSecChecked
+            $mainPanel.Controls.Add($itemFlow)
+            $secChk.Add_Click({ param($s,$e) foreach ($c in $childChecks) { $c.Checked = $s.Checked } }.GetNewClosure())
+        }
+        $mainPanel.ResumeLayout()
     }
+
+    & $RenderList -IncludeWinapp2 $isWinapp2Enabled -InteractiveMode $false
+
+    # --- SEARCH LOGIC ---
+    $txtSearch.Add_TextChanged({
+        $q = $txtSearch.Text.ToLower()
+        $mainPanel.SuspendLayout()
+        
+        for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
+            $ctrl = $mainPanel.Controls[$i]
+            
+            if ($ctrl.Tag -eq "FLOW") {
+                $hasVisibleChildren = $false
+                foreach ($child in $ctrl.Controls) {
+                    if ($child -is [System.Windows.Forms.CheckBox]) {
+                        if ($child.Text.ToLower().Contains($q)) {
+                            $child.Visible = $true
+                            $hasVisibleChildren = $true
+                        } else {
+                            $child.Visible = $false
+                        }
+                    } 
+                    elseif ($child.Tag -eq "GROUPHEADER") {
+                        # Hide group headers during search to save space
+                        $child.Visible = ($q.Length -eq 0) 
+                    }
+                }
+                $ctrl.Visible = $hasVisibleChildren
+                # Toggle SECTION Header
+                if ($i -gt 0) { $mainPanel.Controls[$i-1].Visible = $hasVisibleChildren }
+            }
+        }
+        $mainPanel.ResumeLayout()
+    })
+
+    $chkToggleWinapp2.Add_Click({
+        $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
+        Save-WmtSettings -Settings $currentSettings
+        & $RenderList -IncludeWinapp2 $chkToggleWinapp2.Checked -InteractiveMode $true
+    })
 
     $form.AcceptButton = $btnClean
     $form.CancelButton = $btnCancel
 
-    $result = $form.ShowDialog()
-
-    if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-        $selectedKeys = @()
-        
-        # SAVE SETTINGS TO DISK
+    if ($form.ShowDialog() -eq "OK") {
+        $selectedItems = @()
         foreach ($key in $global:checkboxes.Keys) {
-            $isChecked = $global:checkboxes[$key].Checked
-            if ($isChecked) { $selectedKeys += $key }
-            $currentSettings.TempCleanup[$key] = $isChecked
+            $cb = $global:checkboxes[$key]
+            # Use Visible -and Checked to ensure user intended to clean what they saw
+            if ($cb.Visible -and $cb.Checked) { $selectedItems += $cb.Tag }
+            $currentSettings.TempCleanup[$key] = $cb.Checked
         }
+        $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
         Save-WmtSettings -Settings $currentSettings
-        
-        return $selectedKeys
+        return $selectedItems
     }
     return $null
 }
+
 function Invoke-TempCleanup {
-    # 1. Open the BleachBit-style UI
     $selections = Show-AdvancedCleanupSelection
-    
-    # If user cancelled or selected nothing, exit
     if (-not $selections -or $selections.Count -eq 0) { return }
 
-    Invoke-UiCommand {
-        param($selections)
-        $deleted = 0
+    # --- 1. SETUP PROGRESS UI (Accelerated Style) ---
+    $pForm = New-Object System.Windows.Forms.Form
+    $pForm.Text = "Deep Cleaning System"
+    $pForm.Size = "500,140"
+    $pForm.StartPosition = "CenterScreen"
+    $pForm.ControlBox = $false
+    $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+    $pForm.ForeColor = "White"
 
-        # --- SYSTEM CATEGORY ---
-        if ($selections -contains "TempFiles") {
-            Write-Output "Cleaning Temp Files..."
-            $paths = @($env:TEMP, "C:\Windows\Temp") | Select-Object -Unique
-            foreach ($path in $paths) {
-                if (Test-Path $path) {
-                    Get-ChildItem -Path $path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                        try { Remove-Item $_.FullName -Force -Recurse -ErrorAction Stop; $deleted++ } catch {}
+    $pLabel = New-Object System.Windows.Forms.Label
+    $pLabel.Location = "20,15"; $pLabel.Size = "460,20"
+    $pLabel.Text = "Initializing..."
+    $pForm.Controls.Add($pLabel)
+
+    $pStatus = New-Object System.Windows.Forms.Label
+    $pStatus.Location = "20,35"; $pStatus.Size = "460,20"
+    $pStatus.ForeColor = "Gray"
+    $pStatus.Text = "Calculating..."
+    $pForm.Controls.Add($pStatus)
+
+    $pBar = New-Object System.Windows.Forms.ProgressBar
+    $pBar.Location = "20,65"; $pBar.Size = "440,20"
+    $pForm.Controls.Add($pBar)
+
+    $pForm.Show()
+    [System.Windows.Forms.Application]::DoEvents()
+
+    # --- 2. ACCELERATED CLEANING ENGINE ---
+    $script:totalDeleted = 0
+    $script:bytesRecovered = 0
+    $script:currentProgress = 0.0
+    $ruleWeight = 100.0 / ($selections.Count)
+
+    # Helper: Updates UI every 50 items to maintain speed
+    $Tick = {
+        param($text)
+        if ($script:totalDeleted % 50 -eq 0) {
+            $pStatus.Text = $text
+            $mb = [math]::Round($script:bytesRecovered / 1MB, 2)
+            $pLabel.Text = "Items Removed: $($script:totalDeleted)  |  Recovered: $mb MB"
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+    }
+
+    # Helper: .NET Fast Delete
+    function Fast-Clean-Path {
+        param($Path, $Pattern="*", $Recurse=$true)
+
+        if (-not (Test-Path $Path)) { return }
+        
+        try {
+            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
+            if (-not $dirInfo.Exists) { return }
+
+            $enumOpt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
+            
+            # Use EnumerateFiles (Lazy loading) for speed
+            $files = $dirInfo.EnumerateFiles($Pattern, $enumOpt)
+
+            foreach ($f in $files) {
+                try {
+                    $size = $f.Length
+                    $f.Delete()
+                    $script:bytesRecovered += $size
+                    $script:totalDeleted++
+                    & $Tick "Cleaning: $($f.Name)"
+                } catch { 
+                    # Access Denied is common in Temp, silently skip or log if verbose
+                }
+            }
+
+            # Optional: Clean empty folders (reverse order to handle nesting)
+            if ($Recurse) {
+                try {
+                    $dirs = $dirInfo.GetDirectories($Pattern, $enumOpt) | Sort-Object FullName -Descending
+                    foreach ($d in $dirs) {
+                        try {
+                            if ($d.GetFiles().Count -eq 0 -and $d.GetDirectories().Count -eq 0) {
+                                $d.Delete()
+                            }
+                        } catch {}
+                    }
+                } catch {}
+            }
+        } catch {
+            # Catch directory access errors
+        }
+    }
+
+    try {
+        foreach ($item in $selections) {
+            
+            # Update Progress Bar for new Rule
+            $script:currentProgress += $ruleWeight
+            $pBar.Value = [int]$script:currentProgress
+            [System.Windows.Forms.Application]::DoEvents()
+
+            # --- A. HANDLE WINAPP2 RULES (Objects) ---
+            if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
+                $pLabel.Text = "Processing Rule: $($item.Name)"
+                foreach ($rule in $item.Paths) {
+                    Fast-Clean-Path -Path $rule.Path -Pattern $rule.Pattern -Recurse ($rule.Options -ne "REMOVESELF")
+                    
+                    # Handle REMOVESELF special flag (Delete the folder itself)
+                    if ($rule.Options -match "REMOVESELF" -and (Test-Path $rule.Path)) {
+                        try { [System.IO.Directory]::Delete($rule.Path, $true) } catch {}
+                    }
+                }
+                continue
+            }
+
+            # --- B. HANDLE STANDARD RULES ---
+            $pLabel.Text = "Processing: $item"
+            switch ($item) {
+                "TempFiles" { 
+                    Fast-Clean-Path $env:TEMP
+                    Fast-Clean-Path "$env:SystemRoot\Temp"
+                }
+                "RecycleBin" { 
+                    $pStatus.Text = "Emptying Recycle Bin..."
+                    [System.Windows.Forms.Application]::DoEvents()
+                    try { 
+                        # Use VB method for reliable bin emptying
+                        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently') 
+                    } catch {} 
+                }
+                "WER" { Fast-Clean-Path "$env:ProgramData\Microsoft\Windows\WER" }
+                "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
+                "Thumbnails" { 
+                    # Thumbnails are locked by Explorer, requires special handling usually, but we try .NET delete
+                    Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false 
+                }
+                "PackageCache" { Fast-Clean-Path "$env:ProgramData\Package Cache" }
+                "Recent" { Fast-Clean-Path "$env:APPDATA\Microsoft\Windows\Recent" }
+                "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
+                
+                # Extended Browsers
+                "Edge"    { Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
+                "Chrome"  { Fast-Clean-Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
+                "Brave"   { Fast-Clean-Path "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
+                "Vivaldi" { Fast-Clean-Path "$env:LOCALAPPDATA\Vivaldi\User Data\Default\Cache" }
+                "Opera"   { 
+                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera Stable\Cache"
+                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera Stable\Cache"
+                }
+                "OperaGX" { 
+                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera GX Stable\Cache"
+                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\Cache"
+                }
+                "Firefox" { 
+                    $ffProfiles = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+                    if (Test-Path $ffProfiles) {
+                        Get-ChildItem $ffProfiles -Directory | ForEach-Object { 
+                            Fast-Clean-Path "$($_.FullName)\cache2\entries" 
+                        }
                     }
                 }
             }
         }
+    } finally {
+        $pForm.Close()
+    }
 
-        if ($selections -contains "RecycleBin") {
-            try { 
-                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently')
-                Write-Output "Recycle Bin emptied."
-            } catch { Write-Output "Recycle Bin cleanup skipped (empty or locked)." }
-        }
-
-        if ($selections -contains "WER") {
-            try { Remove-Item "C:\ProgramData\Microsoft\Windows\WER\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Cleared Windows Error Reporting logs." } catch {}
-        }
-
-        if ($selections -contains "DNS") {
-            try { Clear-DnsClientCache -ErrorAction SilentlyContinue; Write-Output "DNS Cache flushed." } catch {}
-        }
-
-        if ($selections -contains "Thumbnails") {
-            try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Windows\Explorer\thumbcache_*.db" -Force -ErrorAction SilentlyContinue; Write-Output "Thumbnail cache cleared." } catch {}
-        }
-
-        if ($selections -contains "PackageCache") {
-             try { Remove-Item "$env:ProgramData\Package Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Package Cache cleared." } catch {}
-        }
-
-        # --- EXPLORER & PRIVACY ---
-        if ($selections -contains "Recent") {
-            try { 
-                # Protect CustomDestinations (Quick Access pins)
-                Get-ChildItem "$env:APPDATA\Microsoft\Windows\Recent" -Force -ErrorAction SilentlyContinue | 
-                Where-Object { $_.Name -ne "CustomDestinations" -and $_.Name -ne "AutomaticDestinations" } | 
-                Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 
-                Write-Output "Recent Items cleared (Quick Access preserved)."
-            } catch {}
-        }
-
-        if ($selections -contains "RunMRU") {
-            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue; Write-Output "Run dialog history cleared." } catch {}
-        }
-
-        if ($selections -contains "TypedPaths") {
-            try { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\TypedPaths" -Name * -ErrorAction SilentlyContinue; Write-Output "Address bar history cleared." } catch {}
-        }
-
-        if ($selections -contains "UserAssist") {
-             try { reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\UserAssist" /f | Out-Null; Write-Output "UserAssist history cleared." } catch {}
-        }
-
-        # --- BROWSERS ---
-        if ($selections -contains "Edge") {
-             try { Remove-Item "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Edge cache cleared." } catch {}
-        }
-        if ($selections -contains "Chrome") {
-             try { Remove-Item "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache\*" -Recurse -Force -ErrorAction SilentlyContinue; Write-Output "Chrome cache cleared." } catch {}
-        }
-        if ($selections -contains "Firefox") {
-             try { Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles\*" -Directory | ForEach-Object { 
-                Remove-Item "$($_.FullName)\cache2\entries\*" -Recurse -Force -ErrorAction SilentlyContinue 
-            }; Write-Output "Firefox cache cleared." } catch {}
-        }
-
-        Write-Output "Cleanup complete. Deleted $deleted files."
-
-    # FIX IS BELOW: We wrap $selections in (,$selections) to pass it as a single array object
-    } "Running advanced cleanup..." -ArgumentList (,$selections)
+    # Summary Report
+    $mbFreed = [math]::Round($script:bytesRecovered / 1MB, 2)
+    $msg = "Cleanup Complete.`n`nFiles Removed: $($script:totalDeleted)`nSpace Recovered: $mbFreed MB"
+    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+    
+    # Log to Main GUI
+    Write-GuiLog "Cleanup finished. Removed $($script:totalDeleted) files ($mbFreed MB)."
 }
 
 # --- Registry Scan Selection UI ---
@@ -1339,6 +1728,13 @@ function Invoke-RegistryTask {
 
     function Remove-RegKeyForced {
         param($Path, $IsKey, $ValName)
+        
+        # === FIX: Normalize Registry Paths (Added this section) ===
+        if ($Path -match "^HKEY_CLASSES_ROOT") { $Path = $Path -replace "^HKEY_CLASSES_ROOT", "HKCR:" }
+        if ($Path -match "^HKEY_LOCAL_MACHINE") { $Path = $Path -replace "^HKEY_LOCAL_MACHINE", "HKLM:" }
+        if ($Path -match "^HKEY_CURRENT_USER") { $Path = $Path -replace "^HKEY_CURRENT_USER", "HKCU:" }
+        # ==========================================================
+
         $realPaths = @()
         if ($Path -match "^HKLM" -or $Path -match "^HKCU") { $realPaths += $Path }
         elseif ($Path -match "^HKCR:\\(?<SubPath>.*)") {
