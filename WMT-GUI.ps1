@@ -3014,7 +3014,6 @@ function Show-DriverCleanupDialog {
                         if ($dStr -as [DateTime]) { $current.SortDate = [DateTime]$dStr }
                     }
                 }
-
                 # 3. Fallback
                 elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') {
                     $current.OriginalName = $val
@@ -3047,7 +3046,7 @@ function Show-DriverCleanupDialog {
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.ForeColor = [System.Drawing.Color]::White
-
+    
     # Initialize ToolTip provider
     $tip = New-Object System.Windows.Forms.ToolTip
     $tip.AutoPopDelay = 5000
@@ -3055,9 +3054,23 @@ function Show-DriverCleanupDialog {
     $tip.ReshowDelay = 500
     $tip.ShowAlways = $true
 
+    # --- LAYOUT FIX: PANEL FIRST (Dock Bottom) --- 
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 60 # Reduced height for cleaner look
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    
+    # Draw a subtle top border on the panel
+    $pnl.Add_Paint({
+        param($sender, $e)
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60,60,60), 1)
+        $e.Graphics.DrawLine($pen, 0, 0, $sender.Width, 0)
+    })
+    $f.Controls.Add($pnl)
+
+    # --- GRID SECOND (Dock Fill) ---
     $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"
-    $dg.Height = 470
+    $dg.Dock = "Fill" 
     $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $dg.ForeColor = [System.Drawing.Color]::White
     $dg.AutoSizeColumnsMode = "Fill"
@@ -3086,18 +3099,19 @@ function Show-DriverCleanupDialog {
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
     
     $f.Controls.Add($dg)
+    $dg.BringToFront() # Ensures grid fills the remaining space above the panel
 
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 80
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnl)
-
-    # Helper for Themed Buttons with Tooltips
-    function New-DrvBtn($text, $x, $color=$null, $tooltipText=""){
+    # Helper for Themed Buttons with Tooltips AND Anchor support
+    function New-DrvBtn($text, $x, $color=$null, $tooltipText="", $anchor="Top, Left"){
         $b=New-Object System.Windows.Forms.Button
-        $b.Text=$text; $b.Left=$x; $b.Top=20; $b.Width=160; $b.Height=35
-        $b.FlatStyle="Flat"; $b.FlatAppearance.BorderSize=1
+        $b.Text=$text
+        $b.Left=$x
+        $b.Top=12 # Vertically centered in 60px panel
+        $b.Width=160
+        $b.Height=35
+        $b.FlatStyle="Flat"
+        $b.FlatAppearance.BorderSize=1
+        $b.Anchor = $anchor
         $b.FlatAppearance.BorderColor=[System.Drawing.ColorTranslator]::FromHtml("#444444")
         $b.ForeColor=[System.Drawing.Color]::White
         if($color){
@@ -3115,9 +3129,14 @@ function Show-DriverCleanupDialog {
         $pnl.Controls.Add($b); return $b
     }
 
-    $btnBackupClean = New-DrvBtn "Backup && Remove All" 20 "#006600" "Safely backs up all listed drivers to the data folder, then attempts to delete them."
-    $btnRemoveSel   = New-DrvBtn "Remove Selected" 200 "#802020" "Removes only the currently highlighted driver(s) from the list."
-    $btnClose       = New-DrvBtn "Close" 380 $null "Close this window."
+    # --- CHANGED: Renamed "Remove (Options...)" to "Remove All" ---
+    $btnBackupClean = New-DrvBtn "Remove All" 20 "#006600" "Select removal options (Backup vs No Backup) for ALL duplicates."
+    
+    $btnRemoveSel   = New-DrvBtn "Remove Selected" 190 "#802020" "Removes only the currently highlighted driver(s) from the list."
+    
+    # Place Close button aligned to the Right
+    $closeX = $pnl.Width - 180
+    $btnClose = New-DrvBtn "Close" $closeX $null "Close this window." "Top, Right"
 
     # 4. DATA BINDING
     $script:CurrentList = $toDelete
@@ -3150,33 +3169,69 @@ function Show-DriverCleanupDialog {
         if(-not $items -or $items.Count -eq 0){ return }
         $count = $items.Count
         
-        $msg = "Processing $count driver(s).`n`n" +
-               "1. Selected drivers will be backed up.`n" +
-               "2. Attempts safe deletion.`n" +
-               "3. Offers FORCE delete on failure."
-               
-        $confirm = [System.Windows.MessageBox]::Show($msg, "Driver Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($confirm -ne "Yes") { return }
+        # --- NEW CUSTOM CONFIRMATION DIALOG ---
+        $cf = New-Object System.Windows.Forms.Form
+        $cf.Text = "Confirm Driver Cleanup"
+        $cf.Size = "450, 240"
+        $cf.StartPosition = "CenterParent"
+        $cf.FormBorderStyle = "FixedDialog"
+        $cf.ControlBox = $false
+        $cf.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+        $cf.ForeColor = "White"
 
-        # A. BACKUP
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = "You are about to remove $count driver(s).`n`nHow would you like to proceed?"
+        $lbl.Location = "20, 20"; $lbl.Size = "400, 50"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $cf.Controls.Add($lbl)
+
+        $bBackup = New-Object System.Windows.Forms.Button
+        $bBackup.Text = "Backup && Clean"
+        $bBackup.DialogResult = "Yes"
+        $bBackup.Location = "20, 90"; $bBackup.Width = 130; $bBackup.Height = 35
+        $bBackup.BackColor = "SeaGreen"; $bBackup.ForeColor = "White"; $bBackup.FlatStyle = "Flat"
+        $cf.Controls.Add($bBackup)
+
+        $bNoBackup = New-Object System.Windows.Forms.Button
+        $bNoBackup.Text = "Clean (No Backup)"
+        $bNoBackup.DialogResult = "No"
+        $bNoBackup.Location = "160, 90"; $bNoBackup.Width = 130; $bNoBackup.Height = 35
+        $bNoBackup.BackColor = "IndianRed"; $bNoBackup.ForeColor = "White"; $bNoBackup.FlatStyle = "Flat"
+        $cf.Controls.Add($bNoBackup)
+
+        $bCancel = New-Object System.Windows.Forms.Button
+        $bCancel.Text = "Cancel"
+        $bCancel.DialogResult = "Cancel"
+        $bCancel.Location = "300, 90"; $bCancel.Width = 110; $bCancel.Height = 35
+        $bCancel.BackColor = "DimGray"; $bCancel.ForeColor = "White"; $bCancel.FlatStyle = "Flat"
+        $cf.Controls.Add($bCancel)
+
+        $result = $cf.ShowDialog()
+        
+        if ($result -eq "Cancel") { return }
+
+        # A. BACKUP (Only if Yes selected)
+        $backupCount = 0
         $timestamp = Get-Date -f 'yyyyMMdd_HHmm'
         $mainBkPath = Join-Path (Get-DataPath) "Drivers_Backup_$timestamp"
-        if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
-        
-        $backupCount = 0
-        $prog = 1
-        foreach($item in $items) {
-            $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
-            $f.Update()
-            
-            $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
-            $drvPath = Join-Path $mainBkPath $folderName
-            New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
 
-            $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0) { $backupCount++ }
-            $prog++
+        if ($result -eq "Yes") {
+            if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
+            
+            $prog = 1
+            foreach($item in $items) {
+                $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
+                $f.Update()
+                
+                $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
+                $drvPath = Join-Path $mainBkPath $folderName
+                New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
+
+                $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
+                if ($proc.ExitCode -eq 0) { $backupCount++ }
+                $prog++
+            }
         }
+
         $f.Text = "Processing Deletions..."
         $f.Update()
 
@@ -3217,7 +3272,10 @@ function Show-DriverCleanupDialog {
         }
 
         # C. REPORT & REFRESH
-        [System.Windows.MessageBox]::Show("Done.`nDeleted: $deleted`nBackups: $backupCount`nPath: $mainBkPath", "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        $resMsg = "Done.`nDeleted: $deleted"
+        if ($result -eq "Yes") { $resMsg += "`nBackups: $backupCount`nPath: $mainBkPath" }
+        
+        [System.Windows.MessageBox]::Show($resMsg, "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
 
         if ($deleted -gt 0) {
             # Remove deleted items from the current list
@@ -3248,6 +3306,8 @@ function Show-DriverCleanupDialog {
     $LoadGrid.Invoke()
     $f.ShowDialog() | Out-Null
 }
+
+# --- RESTORE DRIVERS ---
 function Invoke-RestoreDrivers {
     $dataPath = Get-DataPath
     $backups = @()
