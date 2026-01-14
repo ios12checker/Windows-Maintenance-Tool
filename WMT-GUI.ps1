@@ -800,21 +800,16 @@ function Get-Winapp2Rules {
 
     $dataPath  = Get-DataPath
     $iniPath   = Join-Path $dataPath "winapp2.ini"
-    # We go back to a standard filename. The script handles the versioning logic now.
     $cachePath = Join-Path $dataPath "winapp2_cache.json" 
 
     # --- 1. SMART CACHE CHECK ---
     $forceRebuild = $false
     
     if (Test-Path $cachePath) {
-        # If running from a saved file, check if we modified the script recently
         if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
             $scriptTime = (Get-Item $PSCommandPath).LastWriteTime
             $cacheTime  = (Get-Item $cachePath).LastWriteTime
-            
-            # If script is newer than cache, it means we changed logic -> Rebuild!
             if ($scriptTime -gt $cacheTime) { 
-                Write-GuiLog "Script modified detected: Rebuilding rule cache..."
                 $forceRebuild = $true 
             }
         }
@@ -834,14 +829,13 @@ function Get-Winapp2Rules {
                 $contentBytes = $response.Content.ReadAsByteArrayAsync().Result
                 $iniContent = [System.Text.Encoding]::UTF8.GetString($contentBytes)
                 [System.IO.File]::WriteAllText($iniPath, $iniContent)
-                $forceRebuild = $true # New download means we must rebuild
+                $forceRebuild = $true
             }
             $client.Dispose()
         } catch { Write-GuiLog "Download Warning: $($_.Exception.Message)" }
     }
 
     # --- 3. CACHE LOAD ---
-    # Only load cache if we aren't forced to rebuild
     if (-not $forceRebuild -and (Test-Path $cachePath)) {
         try { 
             $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
@@ -899,16 +893,36 @@ function Get-Winapp2Rules {
 
         if ($key -eq "Section") { $currentApp.Section = $val }
         elseif ($key.StartsWith("Detect")) {
-            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true }
-            if ($val.IndexOf('%') -ge 0) { foreach ($k in $envVars.Keys) { if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) } } }
+            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true } 
             
-            try {
-                $parent = [System.IO.Path]::GetDirectoryName($val)
-                if (-not [string]::IsNullOrWhiteSpace($parent)) {
-                    if (-not $dirCache.ContainsKey($parent)) { $dirCache[$parent] = (Test-Path $parent) }
-                    if ($dirCache[$parent]) { if (Test-Path $val) { $skipApp = $false } }
+            if ($val.IndexOf('%') -ge 0) { 
+                foreach ($k in $envVars.Keys) { 
+                    if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) } 
+                } 
+            }
+
+            # Registry Detection
+            if ($val -match "^HK") {
+                $regPath = $val -replace "^(?i)HKCU", "Registry::HKEY_CURRENT_USER" `
+                                -replace "^(?i)HKLM", "Registry::HKEY_LOCAL_MACHINE" `
+                                -replace "^(?i)HKCR", "Registry::HKEY_CLASSES_ROOT" `
+                                -replace "^(?i)HKU",  "Registry::HKEY_USERS"
+                if (Test-Path $regPath) { $skipApp = $false }
+            } 
+            # File Detection
+            else {
+                try {
+                    $parent = [System.IO.Path]::GetDirectoryName($val)
+                    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+                        if (-not $dirCache.ContainsKey($parent)) { $dirCache[$parent] = (Test-Path $parent) }
+                        if ($dirCache[$parent]) { 
+                            if (Test-Path $val) { $skipApp = $false } 
+                        }
+                    }
+                } catch { 
+                    if (Test-Path $val) { $skipApp = $false } 
                 }
-            } catch { if (Test-Path $val) { $skipApp = $false } }
+            }
         }
         elseif ($key.StartsWith("FileKey")) {
             $parts = $val -split "\|"
@@ -929,23 +943,35 @@ function Get-Winapp2Rules {
     foreach ($app in $finalList) {
         $name = $app.Name
 
-        # Priority 1: Browsers
+        # 1. BROWSERS
         if ($name -match "^Google Chrome") { $app.AppGroup = "Google Chrome"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Google Chrome\s*", "" }
         elseif ($name -match "^Microsoft Edge") { $app.AppGroup = "Microsoft Edge"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Microsoft Edge\s*", "" }
         elseif ($name -match "^Mozilla Firefox") { $app.AppGroup = "Mozilla Firefox"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Mozilla Firefox\s*", "" }
         elseif ($name -match "^Opera") { $app.AppGroup = "Opera"; $app.Section = "Browsers / Internet" }
         elseif ($name -match "^Brave") { $app.AppGroup = "Brave"; $app.Section = "Browsers / Internet" }
 
-        # Priority 2: Specific Productivity
-        elseif ($name -match "PowerToys") { $app.Section = "Productivity"; $app.AppGroup = "Microsoft PowerToys" }
+        # 2. SPECIFIC PRODUCTIVITY
+        elseif ($name -match "PowerToys") { 
+            $app.Section = "Productivity"
+            $app.AppGroup = "Microsoft PowerToys"
+            $app.Name = $name -replace "^Microsoft\s*PowerToys\s*", "" 
+        }
         elseif ($name -match "^Microsoft\sOffice|^Office\s") { $app.Section = "Productivity"; $app.AppGroup = "Microsoft Office" }
         elseif ($name -match "^Adobe\s") { $app.Section = "Productivity"; $app.AppGroup = "Adobe"; $app.Name = $name -replace "^Adobe\s+", "" }
-        elseif ($name -match "Discord|Steam|Spotify|Skype|TeamViewer|Zoom|Slack|Telegram|WhatsApp") { 
+        
+        # 3. GAMES (New Category)
+        elseif ($name -match "(?i)\b(Steam|Epic Games|Origin|Uplay|Ubisoft Connect|Battle.net|GOG Galaxy)\b") {
+            $app.Section = "Games"
+            $app.AppGroup = $name -split " " | Select-Object -First 1
+        }
+
+        # 4. CHAT APPS
+        elseif ($name -match "(?i)\b(Discord|Spotify|Skype|TeamViewer|Zoom|Slack|Telegram|WhatsApp)\b") { 
             $app.Section = "Internet & Chat"
             $app.AppGroup = $name -split " " | Select-Object -First 1 
         }
 
-        # Priority 3: System (Catch-all)
+        # 5. SYSTEM CATCH-ALL
         elseif ($name -match "^Windows\s" -or $name -eq "Windows" -or $name -match "Defender|Explorer|Store|Management Console") {
             $app.Section = "System"
             $app.AppGroup = "Windows"
