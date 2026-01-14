@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.9"
+$AppVersion = "4.10"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -1003,7 +1003,6 @@ function Show-AdvancedCleanupSelection {
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
-    # Add to form LATER to ensure docking priority, or use BringToFront
 
     $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
     $chkToggleWinapp2.Text = "Load Community Rules *"
@@ -1051,17 +1050,12 @@ function Show-AdvancedCleanupSelection {
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
     $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    
-    # --- FIX: ADD PADDING TO PREVENT OVERLAP ---
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
-    # --- CRITICAL: ADD ORDER DETERMINES DOCKING PRIORITY ---
-    # In WinForms, controls added *last* are docked *first* (conceptually) or fill remaining space.
-    # We add the Fill panel first, then the Dock panels, but use BringToFront to ensure z-order.
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
     $form.Controls.Add($mainPanel)
-    $mainPanel.BringToFront() # Ensures it sits 'inside' the Top/Bottom docks
+    $mainPanel.BringToFront()
 
     # --- INTERNAL RULES ---
     $internalRules = @(
@@ -1225,8 +1219,10 @@ function Show-AdvancedCleanupSelection {
         $selectedItems = @()
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            # Use Visible -and Checked to ensure user intended to clean what they saw
-            if ($cb.Visible -and $cb.Checked) { $selectedItems += $cb.Tag }
+            # --- FIX APPLIED HERE ---
+            # Removed "-and $cb.Visible". If it is Checked, we clean it, 
+            # regardless of whether the user has currently filtered it out via Search.
+            if ($cb.Checked) { $selectedItems += $cb.Tag }
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
@@ -1237,13 +1233,17 @@ function Show-AdvancedCleanupSelection {
 }
 
 function Invoke-TempCleanup {
+    # 1. GET SELECTION
     $selections = Show-AdvancedCleanupSelection
-    if (-not $selections -or $selections.Count -eq 0) { return }
+    if (-not $selections -or $selections.Count -eq 0) { 
+        Write-GuiLog "Cleanup canceled: No items selected."
+        return 
+    }
 
-    # --- 1. SETUP PROGRESS UI (Accelerated Style) ---
+    # 2. SETUP PROGRESS UI
     $pForm = New-Object System.Windows.Forms.Form
     $pForm.Text = "Deep Cleaning System"
-    $pForm.Size = "500,140"
+    $pForm.Size = "500,160"
     $pForm.StartPosition = "CenterScreen"
     $pForm.ControlBox = $false
     $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
@@ -1255,161 +1255,148 @@ function Invoke-TempCleanup {
     $pForm.Controls.Add($pLabel)
 
     $pStatus = New-Object System.Windows.Forms.Label
-    $pStatus.Location = "20,35"; $pStatus.Size = "460,20"
+    $pStatus.Location = "20,40"; $pStatus.Size = "460,20"
     $pStatus.ForeColor = "Gray"
-    $pStatus.Text = "Calculating..."
+    $pStatus.Text = "Preparing..."
     $pForm.Controls.Add($pStatus)
 
     $pBar = New-Object System.Windows.Forms.ProgressBar
-    $pBar.Location = "20,65"; $pBar.Size = "440,20"
+    $pBar.Location = "20,70"; $pBar.Size = "440,20"
     $pForm.Controls.Add($pBar)
 
     $pForm.Show()
     [System.Windows.Forms.Application]::DoEvents()
 
-    # --- 2. ACCELERATED CLEANING ENGINE ---
-    $script:totalDeleted = 0
-    $script:bytesRecovered = 0
-    $script:currentProgress = 0.0
+    # 3. STATS TRACKING (Using a Hashtable for safe scope access)
+    $stats = @{
+        Deleted = 0
+        Bytes   = 0
+        Progress = 0.0
+    }
+    
     $ruleWeight = 100.0 / ($selections.Count)
 
-    # Helper: Updates UI every 50 items to maintain speed
-    $Tick = {
-        param($text)
-        if ($script:totalDeleted % 50 -eq 0) {
-            $pStatus.Text = $text
-            $mb = [math]::Round($script:bytesRecovered / 1MB, 2)
-            $pLabel.Text = "Items Removed: $($script:totalDeleted)  |  Recovered: $mb MB"
-            [System.Windows.Forms.Application]::DoEvents()
-        }
-    }
-
-    # Helper: .NET Fast Delete
-    function Fast-Clean-Path {
+    # --- HELPER: ROBUST CLEANER ---
+    function Invoke-RobustClean {
         param($Path, $Pattern="*", $Recurse=$true)
+        
+        # Expand environment variables just in case
+        $Path = [Environment]::ExpandEnvironmentVariables($Path)
 
         if (-not (Test-Path $Path)) { return }
-        
+
+        # Update UI Status
+        $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
+        [System.Windows.Forms.Application]::DoEvents()
+
         try {
-            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
-            if (-not $dirInfo.Exists) { return }
-
-            $enumOpt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
+            # Use Get-ChildItem because it handles 'Access Denied' gracefully (SilentlyContinue)
+            # unlike [DirectoryInfo]::EnumerateFiles which crashes on the first locked file.
+            $items = Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue
             
-            # Use EnumerateFiles (Lazy loading) for speed
-            $files = $dirInfo.EnumerateFiles($Pattern, $enumOpt)
-
-            foreach ($f in $files) {
+            foreach ($item in $items) {
                 try {
-                    $size = $f.Length
-                    $f.Delete()
-                    $script:bytesRecovered += $size
-                    $script:totalDeleted++
-                    & $Tick "Cleaning: $($f.Name)"
-                } catch { 
-                    # Access Denied is common in Temp, silently skip or log if verbose
+                    $size = $item.Length
+                    $item.Delete()
+                    
+                    # Update Stats
+                    $stats.Deleted++
+                    $stats.Bytes += $size
+                    
+                    # Update UI (Throttle updates to every 25 files for speed)
+                    if ($stats.Deleted % 25 -eq 0) {
+                        $mb = [math]::Round($stats.Bytes / 1MB, 2)
+                        $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
+                        [System.Windows.Forms.Application]::DoEvents()
+                    }
+                } catch {
+                    # File is locked/in-use; skip it.
                 }
             }
 
-            # Optional: Clean empty folders (reverse order to handle nesting)
+            # Cleanup Empty Directories (Bottom-Up)
             if ($Recurse) {
-                try {
-                    $dirs = $dirInfo.GetDirectories($Pattern, $enumOpt) | Sort-Object FullName -Descending
-                    foreach ($d in $dirs) {
+                Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
+                    Sort-Object FullName -Descending | 
+                    ForEach-Object {
                         try {
-                            if ($d.GetFiles().Count -eq 0 -and $d.GetDirectories().Count -eq 0) {
-                                $d.Delete()
+                            if ((Get-ChildItem -Path $_.FullName -Force | Measure-Object).Count -eq 0) {
+                                Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
                             }
                         } catch {}
                     }
-                } catch {}
             }
         } catch {
-            # Catch directory access errors
+            Write-GuiLog "Error accessing $Path : $($_.Exception.Message)"
         }
     }
 
+    # 4. MAIN EXECUTION LOOP
     try {
         foreach ($item in $selections) {
-            
-            # Update Progress Bar for new Rule
-            $script:currentProgress += $ruleWeight
-            $pBar.Value = [int]$script:currentProgress
-            [System.Windows.Forms.Application]::DoEvents()
+            if ($pForm.IsDisposed) { break }
 
-            # --- A. HANDLE WINAPP2 RULES (Objects) ---
+            # Update Progress Bar
+            $stats.Progress += $ruleWeight
+            $pBar.Value = [int]$stats.Progress
+            
+            # --- A. WINAPP2 RULES (Object) ---
             if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
-                $pLabel.Text = "Processing Rule: $($item.Name)"
+                $pLabel.Text = "Cleaning: $($item.Name)"
                 foreach ($rule in $item.Paths) {
-                    Fast-Clean-Path -Path $rule.Path -Pattern $rule.Pattern -Recurse ($rule.Options -ne "REMOVESELF")
-                    
-                    # Handle REMOVESELF special flag (Delete the folder itself)
-                    if ($rule.Options -match "REMOVESELF" -and (Test-Path $rule.Path)) {
-                        try { [System.IO.Directory]::Delete($rule.Path, $true) } catch {}
-                    }
+                    $isRecurse = ($rule.Options -notmatch "REMOVESELF")
+                    Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse
                 }
                 continue
             }
 
-            # --- B. HANDLE STANDARD RULES ---
-            $pLabel.Text = "Processing: $item"
+            # --- B. INTERNAL RULES (String) ---
+            # Explicitly log what we are cleaning to debug
+            Write-GuiLog "Running Internal Cleaner: $item"
+            
             switch ($item) {
                 "TempFiles" { 
-                    Fast-Clean-Path $env:TEMP
-                    Fast-Clean-Path "$env:SystemRoot\Temp"
+                    Invoke-RobustClean $env:TEMP
+                    Invoke-RobustClean "$env:SystemRoot\Temp"
                 }
                 "RecycleBin" { 
                     $pStatus.Text = "Emptying Recycle Bin..."
-                    [System.Windows.Forms.Application]::DoEvents()
-                    try { 
-                        # Use VB method for reliable bin emptying
-                        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently') 
-                    } catch {} 
+                    try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
                 }
-                "WER" { Fast-Clean-Path "$env:ProgramData\Microsoft\Windows\WER" }
+                "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
                 "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
                 "Thumbnails" { 
-                    # Thumbnails are locked by Explorer, requires special handling usually, but we try .NET delete
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false 
+                    Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false 
                 }
-                "PackageCache" { Fast-Clean-Path "$env:ProgramData\Package Cache" }
-                "Recent" { Fast-Clean-Path "$env:APPDATA\Microsoft\Windows\Recent" }
+                "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" }
                 "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
                 
                 # Extended Browsers
-                "Edge"    { Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
-                "Chrome"  { Fast-Clean-Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
-                "Brave"   { Fast-Clean-Path "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
-                "Vivaldi" { Fast-Clean-Path "$env:LOCALAPPDATA\Vivaldi\User Data\Default\Cache" }
-                "Opera"   { 
-                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera Stable\Cache"
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera Stable\Cache"
-                }
-                "OperaGX" { 
-                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera GX Stable\Cache"
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\Cache"
-                }
+                "Edge"    { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
+                "Chrome"  { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
+                "Brave"   { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
                 "Firefox" { 
-                    $ffProfiles = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
-                    if (Test-Path $ffProfiles) {
-                        Get-ChildItem $ffProfiles -Directory | ForEach-Object { 
-                            Fast-Clean-Path "$($_.FullName)\cache2\entries" 
-                        }
+                    $ff = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
+                    if (Test-Path $ff) {
+                        Get-ChildItem $ff -Directory | ForEach-Object { Invoke-RobustClean "$($_.FullName)\cache2\entries" }
                     }
                 }
+                "Opera"   { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" }
+                "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" }
             }
         }
+    } catch {
+        Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
     } finally {
         $pForm.Close()
     }
 
-    # Summary Report
-    $mbFreed = [math]::Round($script:bytesRecovered / 1MB, 2)
-    $msg = "Cleanup Complete.`n`nFiles Removed: $($script:totalDeleted)`nSpace Recovered: $mbFreed MB"
-    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+    # 5. FINAL REPORT
+    $finalMB = [math]::Round($stats.Bytes / 1MB, 2)
+    $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
     
-    # Log to Main GUI
-    Write-GuiLog "Cleanup finished. Removed $($script:totalDeleted) files ($mbFreed MB)."
+    Write-GuiLog "Cleanup Finished: $($stats.Deleted) files, $finalMB MB."
+    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
 }
 
 # --- Registry Scan Selection UI ---
@@ -2330,7 +2317,8 @@ function Invoke-RegistryTask {
             
             $toDelete = @()
             if ($rawSelection) {
-                $toDelete = $rawSelection | Where-Object { $_ -ne $null -and $_.RegPath -ne $null }
+                # FIXED: $null on the left side
+                $toDelete = $rawSelection | Where-Object { $null -ne $_ -and $null -ne $_.RegPath }
             }
 
             if ($toDelete.Count -eq 0) { return }
@@ -2382,7 +2370,8 @@ function Invoke-SSDTrim {
         foreach ($ssd in $ssds) {
             $disk = Get-Disk | Where-Object { $_.FriendlyName -eq $ssd.FriendlyName }
             if ($disk) {
-                $vols = $disk | Get-Partition | Get-Volume | Where-Object DriveLetter -ne $null
+                # FIX: Use scriptblock for null check
+                $vols = $disk | Get-Partition | Get-Volume | Where-Object { $null -ne $_.DriveLetter }
                 foreach ($v in $vols) {
                     $out += "Optimizing $($v.DriveLetter):"
                     $out += Optimize-Volume -DriveLetter $v.DriveLetter -ReTrim -Verbose 4>&1
@@ -3073,9 +3062,9 @@ function Show-DriverCleanupDialog {
     
     # Draw a subtle top border on the panel
     $pnl.Add_Paint({
-        param($sender, $e)
+        param($s, $e) # Renamed from $sender to $s
         $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60,60,60), 1)
-        $e.Graphics.DrawLine($pen, 0, 0, $sender.Width, 0)
+        $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
     })
     $f.Controls.Add($pnl)
 
