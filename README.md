@@ -1,6 +1,6 @@
 # 🖥️ Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v4.9-green)
+![Version](https://img.shields.io/badge/version-v4.10-green)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
@@ -9,7 +9,8 @@ All-in-one Windows maintenance toolkit in PowerShell + Batch. Runs locally.
 ---
 
 ## 📸 Screenshots
-<img width="1181" height="808" alt="image" src="https://github.com/user-attachments/assets/00e17b09-a5cb-4193-8809-efbeedea1505" />
+<img width="1181" height="808" alt="image" src="https://github.com/user-attachments/assets/cd0271d9-4859-4426-adcd-97f639e7a71b" />
+
 
 
 
