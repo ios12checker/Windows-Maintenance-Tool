@@ -798,67 +798,64 @@ function Expand-EnvPath {
 function Get-Winapp2Rules {
     param([switch]$Download)
 
-    $dataPath = Get-DataPath
-    $iniPath  = Join-Path $dataPath "winapp2.ini"
-    $cachePath = Join-Path $dataPath "winapp2_cache_v11.json"
+    $dataPath  = Get-DataPath
+    $iniPath   = Join-Path $dataPath "winapp2.ini"
+    # We go back to a standard filename. The script handles the versioning logic now.
+    $cachePath = Join-Path $dataPath "winapp2_cache.json" 
 
-    # --- 1. DOWNLOAD LOGIC ---
+    # --- 1. SMART CACHE CHECK ---
+    $forceRebuild = $false
+    
+    if (Test-Path $cachePath) {
+        # If running from a saved file, check if we modified the script recently
+        if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
+            $scriptTime = (Get-Item $PSCommandPath).LastWriteTime
+            $cacheTime  = (Get-Item $cachePath).LastWriteTime
+            
+            # If script is newer than cache, it means we changed logic -> Rebuild!
+            if ($scriptTime -gt $cacheTime) { 
+                Write-GuiLog "Script modified detected: Rebuilding rule cache..."
+                $forceRebuild = $true 
+            }
+        }
+    }
+
+    # --- 2. DOWNLOAD ---
     if ($Download) {
         try {
-            # Force Tls12 for security compliance
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            
-            # Use HttpClient for high-speed compressed download (300KB vs 3MB)
             Add-Type -AssemblyName System.Net.Http
             $client = New-Object System.Net.Http.HttpClient
             $client.Timeout = [TimeSpan]::FromSeconds(15)
             
             $url = "https://cdn.jsdelivr.net/gh/MoscaDotTo/Winapp2@master/Winapp2.ini"
-            
             $response = $client.GetAsync($url).Result
             if ($response.IsSuccessStatusCode) {
                 $contentBytes = $response.Content.ReadAsByteArrayAsync().Result
-                $encoding = [System.Text.Encoding]::UTF8
-                $iniContent = $encoding.GetString($contentBytes)
-                
-                # Write to disk so we have a backup
+                $iniContent = [System.Text.Encoding]::UTF8.GetString($contentBytes)
                 [System.IO.File]::WriteAllText($iniPath, $iniContent)
-                
-                # CRITICAL: Delete old cache to force a rebuild with new data
-                if (Test-Path $cachePath) { Remove-Item $cachePath -Force }
+                $forceRebuild = $true # New download means we must rebuild
             }
             $client.Dispose()
-        } catch {
-            Write-GuiLog "Download Warning: $($_.Exception.Message)"
-        }
+        } catch { Write-GuiLog "Download Warning: $($_.Exception.Message)" }
     }
 
-    # --- 2. CACHE LOAD (With "Empty Cache" Protection) ---
-    if (-not $Download -and (Test-Path $cachePath)) {
+    # --- 3. CACHE LOAD ---
+    # Only load cache if we aren't forced to rebuild
+    if (-not $forceRebuild -and (Test-Path $cachePath)) {
         try { 
             $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
-            # FIX: If cache is valid but empty (0 items), ignore it and re-parse!
-            if ($cachedRules.Count -gt 5) { 
-                return $cachedRules 
-            }
+            if ($cachedRules.Count -gt 5) { return $cachedRules }
         } catch {}
     }
 
-    # --- 3. LOAD INI CONTENT ---
+    # --- 4. PARSE INI ---
     $iniContent = $null
-    if (Test-Path $iniPath) {
-        # Read file. Use -Raw for speed, let PowerShell detect encoding.
-        $iniContent = Get-Content $iniPath -Raw
-    }
+    if (Test-Path $iniPath) { $iniContent = Get-Content $iniPath -Raw }
+    if ([string]::IsNullOrWhiteSpace($iniContent)) { return @() }
 
-    if ([string]::IsNullOrWhiteSpace($iniContent)) {
-        return @()
-    }
-
-    # --- 4. PARSE RULES ---
     $rules = New-Object System.Collections.Generic.List[Object]
     
-    # Environment Variable Cache (Speeds up detection 100x)
     $envVars = @{ 
         "%Documents%" = [Environment]::GetFolderPath("MyDocuments")
         "%ProgramFiles%" = $env:ProgramFiles
@@ -869,28 +866,16 @@ function Get-Winapp2Rules {
         "%CommonAppData%" = $env:ProgramData
         "%UserProfile%" = $env:USERPROFILE
     }
-
-    # Directory Existence Cache (Prevents checking the same folder 50 times)
     $dirCache = @{} 
 
-    # Robust Split: Handles Windows (\r\n) and Unix (\n) line endings
     $lines = $iniContent -split "\r?\n"
-    
-    $currentApp = $null
-    $skipApp = $false
-    $hasDetect = $false
+    $currentApp = $null; $skipApp = $false; $hasDetect = $false
 
     foreach ($line in $lines) {
-        if ([string]::IsNullOrWhiteSpace($line)) { continue }
-        
-        $char = $line[0]
-        if ($char -eq ';') { continue }
+        if ([string]::IsNullOrWhiteSpace($line) -or $line[0] -eq ';') { continue }
 
-        # Header [AppName]
-        if ($char -eq '[') {
-            # Save previous app if valid
+        if ($line[0] -eq '[') {
             if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
-            
             $appName = $line.Trim(" []")
             $currentApp = [ordered]@{ 
                 Name = $appName
@@ -905,83 +890,69 @@ function Get-Winapp2Rules {
             continue
         }
 
-        # Key=Value
         $eqIndex = $line.IndexOf('=')
         if ($eqIndex -le 0) { continue }
-        
-        # Performance: Substring is faster than -split here
-        $key = $line.Substring(0, $eqIndex).Trim()
-        
         if ($skipApp) { continue }
 
+        $key = $line.Substring(0, $eqIndex).Trim()
         $val = $line.Substring($eqIndex + 1).Trim()
 
-        if ($key -eq "Section") { 
-            $currentApp.Section = $val 
-        }
+        if ($key -eq "Section") { $currentApp.Section = $val }
         elseif ($key.StartsWith("Detect")) {
-            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true } # Default to skipped until found
+            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true }
+            if ($val.IndexOf('%') -ge 0) { foreach ($k in $envVars.Keys) { if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) } } }
             
-            # Fast Variable Replacement
-            if ($val.IndexOf('%') -ge 0) {
-                foreach ($k in $envVars.Keys) {
-                    if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) }
-                }
-            }
-
-            # Check Parent Folder First (Optimization)
             try {
                 $parent = [System.IO.Path]::GetDirectoryName($val)
                 if (-not [string]::IsNullOrWhiteSpace($parent)) {
-                    if (-not $dirCache.ContainsKey($parent)) {
-                        $dirCache[$parent] = (Test-Path $parent)
-                    }
-                    
-                    if ($dirCache[$parent]) {
-                        if (Test-Path $val) { $skipApp = $false }
-                    }
+                    if (-not $dirCache.ContainsKey($parent)) { $dirCache[$parent] = (Test-Path $parent) }
+                    if ($dirCache[$parent]) { if (Test-Path $val) { $skipApp = $false } }
                 }
-            } catch {
-                # Fallback for weird paths
-                if (Test-Path $val) { $skipApp = $false }
-            }
+            } catch { if (Test-Path $val) { $skipApp = $false } }
         }
         elseif ($key.StartsWith("FileKey")) {
             $parts = $val -split "\|"
             if ($parts.Count -ge 2) {
                 $rawPath = $parts[0]
-                # Replace vars
-                if ($rawPath.IndexOf('%') -ge 0) {
-                    foreach ($k in $envVars.Keys) {
-                        if ($rawPath.Contains($k)) { $rawPath = $rawPath.Replace($k, $envVars[$k]) }
-                    }
-                }
-                
-                # Expand any remaining environment variables (e.g. %windir%)
+                if ($rawPath.IndexOf('%') -ge 0) { foreach ($k in $envVars.Keys) { if ($rawPath.Contains($k)) { $rawPath = $rawPath.Replace($k, $envVars[$k]) } } }
                 $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
-
-                if (-not $skipApp) {
-                     $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } })
-                }
+                if (-not $skipApp) { $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } }) }
             }
         }
         elseif ($key -eq "Description") { $currentApp.Desc = $val }
     }
-    # Add the final app
     if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
 
-    # --- 5. CATEGORIZE & SAVE ---
+    # --- 5. CATEGORIZATION ---
     $finalList = $rules | Where-Object { $_.Paths.Count -gt 0 }
     
     foreach ($app in $finalList) {
         $name = $app.Name
-        if ($name -match "^Google Chrome") { $app.AppGroup = "Google Chrome"; $app.Section = "Browsers / Internet" }
-        elseif ($name -match "^Microsoft Edge") { $app.AppGroup = "Microsoft Edge"; $app.Section = "Browsers / Internet" }
-        elseif ($name -match "^Mozilla Firefox") { $app.AppGroup = "Mozilla Firefox"; $app.Section = "Browsers / Internet" }
-        elseif ($name -match "Discord|Steam|Spotify") { $app.Section = "Internet & Chat"; $app.AppGroup = $name }
+
+        # Priority 1: Browsers
+        if ($name -match "^Google Chrome") { $app.AppGroup = "Google Chrome"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Google Chrome\s*", "" }
+        elseif ($name -match "^Microsoft Edge") { $app.AppGroup = "Microsoft Edge"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Microsoft Edge\s*", "" }
+        elseif ($name -match "^Mozilla Firefox") { $app.AppGroup = "Mozilla Firefox"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Mozilla Firefox\s*", "" }
+        elseif ($name -match "^Opera") { $app.AppGroup = "Opera"; $app.Section = "Browsers / Internet" }
+        elseif ($name -match "^Brave") { $app.AppGroup = "Brave"; $app.Section = "Browsers / Internet" }
+
+        # Priority 2: Specific Productivity
+        elseif ($name -match "PowerToys") { $app.Section = "Productivity"; $app.AppGroup = "Microsoft PowerToys" }
+        elseif ($name -match "^Microsoft\sOffice|^Office\s") { $app.Section = "Productivity"; $app.AppGroup = "Microsoft Office" }
+        elseif ($name -match "^Adobe\s") { $app.Section = "Productivity"; $app.AppGroup = "Adobe"; $app.Name = $name -replace "^Adobe\s+", "" }
+        elseif ($name -match "Discord|Steam|Spotify|Skype|TeamViewer|Zoom|Slack|Telegram|WhatsApp") { 
+            $app.Section = "Internet & Chat"
+            $app.AppGroup = $name -split " " | Select-Object -First 1 
+        }
+
+        # Priority 3: System (Catch-all)
+        elseif ($name -match "^Windows\s" -or $name -eq "Windows" -or $name -match "Defender|Explorer|Store|Management Console") {
+            $app.Section = "System"
+            $app.AppGroup = "Windows"
+            $app.Name = $name -replace "^Windows\s+", "" 
+        }
     }
 
-    # Save new cache
     try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
     
     return $finalList
