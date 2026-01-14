@@ -170,7 +170,7 @@ function Get-WmtSettings {
         TempCleanup  = @{}
         RegistryScan = @{}
         WingetIgnore = @()
-        LoadWinapp2  = $false # <--- NEW SETTING
+        LoadWinapp2  = $false 
     }
     
     if (Test-Path $path) {
@@ -183,9 +183,20 @@ function Get-WmtSettings {
             if ($json.RegistryScan) { 
                 foreach ($p in $json.RegistryScan.PSObject.Properties) { $defaults.RegistryScan[$p.Name] = $p.Value } 
             }
-            if ($json.WingetIgnore) { $defaults.WingetIgnore = @($json.WingetIgnore) }
             
-            # Load persistence setting
+            # --- FIX: Force clean string array ---
+            if ($json.PSObject.Properties["WingetIgnore"]) {
+                $raw = $json.WingetIgnore
+                $clean = New-Object System.Collections.ArrayList
+                if ($raw) {
+                    foreach ($item in $raw) {
+                        # "$item" forces it to be text, removing any object wrappers
+                        [void]$clean.Add("$item".Trim())
+                    }
+                }
+                $defaults.WingetIgnore = $clean.ToArray()
+            }
+            
             if ($json.PSObject.Properties["LoadWinapp2"]) { 
                 $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2
             }
@@ -3821,6 +3832,8 @@ function Show-TaskManager {
                         <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600"/>
                         <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
                         <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#802020"/>
+                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#B8860B" ToolTip="Hide selected updates from future scans"/>
+                        <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}" ToolTip="View and restore ignored updates"/>
                     </StackPanel>
                 </Grid>
 
@@ -4066,6 +4079,12 @@ Set-ButtonIcon "btnTabDrivers" "M7,17L10.5,12.5L5,9.6V17H7M12,21L14.6,16.3L9.5,1
 Set-ButtonIcon "btnTabCleanup" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Cleanup" "Disk cleanup, Temp files, Shortcuts, Registry" 18
 Set-ButtonIcon "btnTabUtils" "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.7,20.3C23.1,19.9 23.1,19.3 22.7,19Z" "Utilities" "System Info, SSD Trim, Activation, Task Scheduler" 18
 Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
+$btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
+$btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
+# (Ban Icon for Ignore)
+Set-ButtonIcon "btnWingetIgnore" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12C4,13.85 4.63,15.55 5.68,16.91L16.91,5.68C15.55,4.63 13.85,4 12,4M12,20A8,8 0 0,0 20,12C20,10.15 19.37,8.45 18.32,7.09L7.09,18.32C8.45,19.37 10.15,20 12,20Z" "Ignore Selected" "Hide selected updates from future scans" 16 "#FFD700"
+# (List/Restore Icon for Unignore)
+Set-ButtonIcon "btnWingetUnignore" "M2,5H22V7H2V5M2,9H22V11H2V9M2,13H22V15H2V13M2,17H22V19H2V17" "Manage Ignored" "View and restore ignored updates"
 
 # --- CUSTOM HEALTH ICON (Red Squircle with White Cross) ---
 $btnHealth = Get-Ctrl "btnTabHealth"
@@ -4640,6 +4659,10 @@ $btnWingetScan.Add_Click({
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
+    # 1. LOAD IGNORE LIST
+    $currentSettings = Get-WmtSettings
+    $ignoreList = if ($currentSettings.WingetIgnore) { $currentSettings.WingetIgnore } else { @() }
+
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
     
     # Capture output
@@ -4654,57 +4677,192 @@ $btnWingetScan.Add_Click({
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            # --- FILTERS ---
-            # 1. Skip headers, separators, and standard messages
             if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
-            
-            # 2. Skip Progress Bars (Block characters like █, ▒, etc.)
             if ($line -match "[\u2580-\u259F]") { continue }
-
-            # 3. Skip Download Status lines (e.g., "10.5 MB / 10.5 MB")
             if ($line -match "\d+\s*(KB|MB|GB|TB)") { continue }
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
-            # STRATEGY: Greedy Match from Right-to-Left with Fix for '<'
-            # 1. ID column: ([^<\s]\S*) -> Ensures ID does not start with '<'
-            # 2. Version column: ((?:<\s+)?\S+) -> Captures optional '< ' prefix followed by the version string
-            
-            # Case A: 5 Columns (Name, Id, Version, Available, Source)
             if ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
             }
-            # Case B: 4 Columns (Name, Id, Version, Source) - "Available" missing
             elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
             }
-            # Case C: 3 Columns (Name, Id, Version) - "Available" and "Source" missing
             elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
             }
 
-            # Final Safety Check: Ensure ID doesn't look like a leftover file size unit
             if ($name -and $id -notmatch "^(KB|MB|GB|/)$") {
-                [void]$lstWinget.Items.Add([PSCustomObject]@{ 
-                    Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
-                })
+                # 2. FILTER: Only add if ID is NOT in ignore list
+                if ($id.Trim() -notin $ignoreList) {
+                    [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+                        Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
+                    })
+                }
             }
         }
         Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
     
-    # Check if list is empty and add placeholder message
     $logCount = $lstWinget.Items.Count
-    
     if ($logCount -eq 0) {
         [void]$lstWinget.Items.Add([PSCustomObject]@{ 
             Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
         })
-        $logCount = 0 # Correct the log count for the placeholder
+        $logCount = 0
     }
     
     $lblWingetStatus.Visibility = "Hidden"
     Write-GuiLog "Scan complete. Found $logCount updates."
+})
+
+# --- IGNORE SELECTED ---
+$btnWingetIgnore.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+
+    $msg = "Ignore $($selected.Count) package(s)?`n`nThese updates will be hidden from future scans."
+    if ([System.Windows.Forms.MessageBox]::Show($msg, "Ignore Updates", "YesNo", "Question") -eq "Yes") {
+        
+        # 1. Get fresh settings
+        $settings = Get-WmtSettings
+        
+        # 2. Create a fresh ArrayList to ensure it is editable
+        $newList = New-Object System.Collections.ArrayList
+        
+        # Add existing items (checking for nulls)
+        if ($settings.WingetIgnore) {
+            foreach ($existing in $settings.WingetIgnore) {
+                if (-not [string]::IsNullOrWhiteSpace($existing)) {
+                    [void]$newList.Add($existing.ToString())
+                }
+            }
+        }
+
+        # 3. Add NEW items
+        foreach ($item in $selected) {
+            $id = $item.Id
+            # Avoid duplicates
+            if ($id -and ($id -notin $newList)) {
+                [void]$newList.Add($id)
+            }
+            # Remove from GUI immediately
+            $lstWinget.Items.Remove($item)
+        }
+
+        # 4. Save back as a standard array
+        $settings.WingetIgnore = $newList.ToArray()
+        Save-WmtSettings -Settings $settings
+        
+        Write-GuiLog "Ignored $($selected.Count) packages. Saved to settings.json."
+    }
+})
+
+# --- MANAGE IGNORED (UNIGNORE) ---
+$btnWingetUnignore.Add_Click({
+    # 1. READ SETTINGS (Direct & Simple)
+    $jsonPath = Join-Path (Get-DataPath) "settings.json"
+    $listItems = @()
+
+    if (Test-Path $jsonPath) {
+        try {
+            $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            if ($json.WingetIgnore) {
+                # Force array and string conversion immediately
+                $listItems = @($json.WingetIgnore) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" }
+            }
+        } catch { Write-GuiLog "Error: $($_.Exception.Message)" }
+    }
+
+    if ($listItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No ignored packages found.", "Manage Ignored", "OK", "Information") | Out-Null
+        return
+    }
+
+    # 2. UI SETUP
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Manage Ignored Updates"
+    $f.Size = "500, 400"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32,32,32)
+    $f.ForeColor = "White"
+
+    # 3. CONTROLS (Critical Order for Docking)
+    # Add Dock=Bottom/Top controls FIRST so they claim space. Add Dock=Fill LAST.
+
+    # -- Bottom Panel --
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"; $pnl.Height = 50
+    $f.Controls.Add($pnl)
+
+    # -- Top Label --
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Select packages to restore (Un-ignore):"
+    $lbl.Dock = "Top"; $lbl.Height = 30; $lbl.Padding = "10,10,0,0"
+    $f.Controls.Add($lbl)
+
+    # -- ListBox (Fill) --
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.Dock = "Fill"
+    $lb.BackColor = [System.Drawing.Color]::FromArgb(20,20,20)
+    $lb.ForeColor = "White"
+    $lb.BorderStyle = "FixedSingle"
+    $lb.SelectionMode = "MultiExtended"
+    
+    # Manual Add (Fail-safe)
+    $lb.BeginUpdate()
+    foreach ($item in $listItems) {
+        [void]$lb.Items.Add($item)
+    }
+    $lb.EndUpdate()
+    
+    $f.Controls.Add($lb)
+    
+    # CRITICAL: Ensure ListBox is at the 'top' of Z-order so it fills remaining space correctly
+    $lb.BringToFront()
+
+    # -- Buttons --
+    $btnRestore = New-Object System.Windows.Forms.Button
+    $btnRestore.Text = "Un-Ignore Selected"
+    $btnRestore.Size = "150, 30"; $btnRestore.Location = "20, 10"
+    $btnRestore.BackColor = "SeaGreen"; $btnRestore.ForeColor = "White"; $btnRestore.FlatStyle = "Flat"
+    $pnl.Controls.Add($btnRestore)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Close"
+    $btnClose.Size = "100, 30"; $btnClose.Location = "360, 10"
+    $btnClose.BackColor = "DimGray"; $btnClose.ForeColor = "White"; $btnClose.FlatStyle = "Flat"
+    $btnClose.Add_Click({ $f.Close() })
+    $pnl.Controls.Add($btnClose)
+
+    # 4. ACTION
+    $script:RefreshNeeded = $false
+
+    $btnRestore.Add_Click({
+        $selected = @($lb.SelectedItems)
+        if ($selected.Count -gt 0) {
+            # Read fresh, remove items, save
+            $s = Get-WmtSettings
+            $current = [System.Collections.ArrayList]@($s.WingetIgnore)
+            
+            foreach ($item in $selected) {
+                if ($current.Contains($item)) { $current.Remove($item) }
+                $lb.Items.Remove($item)
+            }
+            
+            $s.WingetIgnore = $current.ToArray()
+            Save-WmtSettings -Settings $s
+            $script:RefreshNeeded = $true
+        }
+    })
+
+    $f.ShowDialog() | Out-Null
+    
+    if ($script:RefreshNeeded) {
+        Write-GuiLog "List updated. Refreshing..."
+        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
 })
 
 $btnWingetFind.Add_Click({
