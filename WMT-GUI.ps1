@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.9"
+$AppVersion = "4.10"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -170,7 +170,7 @@ function Get-WmtSettings {
         TempCleanup  = @{}
         RegistryScan = @{}
         WingetIgnore = @()
-        LoadWinapp2  = $false # <--- NEW SETTING
+        LoadWinapp2  = $false 
     }
     
     if (Test-Path $path) {
@@ -183,9 +183,20 @@ function Get-WmtSettings {
             if ($json.RegistryScan) { 
                 foreach ($p in $json.RegistryScan.PSObject.Properties) { $defaults.RegistryScan[$p.Name] = $p.Value } 
             }
-            if ($json.WingetIgnore) { $defaults.WingetIgnore = @($json.WingetIgnore) }
             
-            # Load persistence setting
+            # --- FIX: Force clean string array ---
+            if ($json.PSObject.Properties["WingetIgnore"]) {
+                $raw = $json.WingetIgnore
+                $clean = New-Object System.Collections.ArrayList
+                if ($raw) {
+                    foreach ($item in $raw) {
+                        # "$item" forces it to be text, removing any object wrappers
+                        [void]$clean.Add("$item".Trim())
+                    }
+                }
+                $defaults.WingetIgnore = $clean.ToArray()
+            }
+            
             if ($json.PSObject.Properties["LoadWinapp2"]) { 
                 $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2
             }
@@ -787,60 +798,86 @@ function Expand-EnvPath {
 function Get-Winapp2Rules {
     param([switch]$Download)
 
-    $iniUrl   = "https://raw.githubusercontent.com/MoscaDotTo/Winapp2/master/Winapp2.ini"
-    $dataPath = Get-DataPath
-    $iniPath  = Join-Path $dataPath "winapp2.ini"
-    $cachePath = Join-Path $dataPath "winapp2_cache_v11.json" # Bumped version
+    $dataPath  = Get-DataPath
+    $iniPath   = Join-Path $dataPath "winapp2.ini"
+    $cachePath = Join-Path $dataPath "winapp2_cache.json" 
 
-    # --- 1. ACCELERATED DOWNLOAD ---
+    # --- 1. SMART CACHE CHECK ---
+    $forceRebuild = $false
+    
+    if (Test-Path $cachePath) {
+        if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
+            $scriptTime = (Get-Item $PSCommandPath).LastWriteTime
+            $cacheTime  = (Get-Item $cachePath).LastWriteTime
+            if ($scriptTime -gt $cacheTime) { 
+                $forceRebuild = $true 
+            }
+        }
+    }
+
+    # --- 2. DOWNLOAD ---
     if ($Download) {
         try {
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $wc = New-Object System.Net.WebClient
-            $wc.Proxy = $null
-            $wc.DownloadFile($iniUrl, $iniPath)
-            if (Test-Path $cachePath) { Remove-Item $cachePath -Force }
+            Add-Type -AssemblyName System.Net.Http
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [TimeSpan]::FromSeconds(15)
+            
+            $url = "https://cdn.jsdelivr.net/gh/MoscaDotTo/Winapp2@master/Winapp2.ini"
+            $response = $client.GetAsync($url).Result
+            if ($response.IsSuccessStatusCode) {
+                $contentBytes = $response.Content.ReadAsByteArrayAsync().Result
+                $iniContent = [System.Text.Encoding]::UTF8.GetString($contentBytes)
+                [System.IO.File]::WriteAllText($iniPath, $iniContent)
+                $forceRebuild = $true
+            }
+            $client.Dispose()
+        } catch { Write-GuiLog "Download Warning: $($_.Exception.Message)" }
+    }
+
+    # --- 3. CACHE LOAD ---
+    if (-not $forceRebuild -and (Test-Path $cachePath)) {
+        try { 
+            $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
+            if ($cachedRules.Count -gt 5) { return $cachedRules }
         } catch {}
     }
 
-    # --- 2. CACHE HIT ---
-    if (-not $Download -and (Test-Path $cachePath)) {
-        try { return (Get-Content $cachePath -Raw | ConvertFrom-Json) } catch {}
-    }
+    # --- 4. PARSE INI ---
+    $iniContent = $null
+    if (Test-Path $iniPath) { $iniContent = Get-Content $iniPath -Raw }
+    if ([string]::IsNullOrWhiteSpace($iniContent)) { return @() }
 
-    # --- 3. PARSE INI ---
-    if (-not (Test-Path $iniPath)) { return @() }
-    
     $rules = New-Object System.Collections.Generic.List[Object]
-    $currentApp = $null
-    $skipApp = $false
-    $hasDetect = $false
     
-    $specialVars = @{ 
+    $envVars = @{ 
         "%Documents%" = [Environment]::GetFolderPath("MyDocuments")
         "%ProgramFiles%" = $env:ProgramFiles
         "%ProgramFiles(x86)%" = ${env:ProgramFiles(x86)}
         "%SystemDrive%" = $env:SystemDrive
+        "%AppData%" = $env:APPDATA
+        "%LocalAppData%" = $env:LOCALAPPDATA
+        "%CommonAppData%" = $env:ProgramData
+        "%UserProfile%" = $env:USERPROFILE
     }
+    $dirCache = @{} 
 
-    foreach ($rawLine in [System.IO.File]::ReadLines($iniPath)) {
-        if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
-        $line = $rawLine.Trim()
-        if ($line[0] -eq ';') { continue }
+    $lines = $iniContent -split "\r?\n"
+    $currentApp = $null; $skipApp = $false; $hasDetect = $false
+
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line) -or $line[0] -eq ';') { continue }
 
         if ($line[0] -eq '[') {
             if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
-            
-            # Clean Name: Remove brackets AND trailing asterisks immediately
-            $appName = $line.Substring(1, $line.Length - 2).Trim(" *")
-            
+            $appName = $line.Trim(" []")
             $currentApp = [ordered]@{ 
                 Name = $appName
                 ID = "Winapp2_" + ($appName -replace '[^a-zA-Z0-9]','')
                 Section = "Applications"
                 AppGroup = "General"
                 Paths = New-Object System.Collections.Generic.List[Object]
-                Desc = "Clean $appName"
+                Desc = ""
                 IsInternal = $false
             }
             $skipApp = $false; $hasDetect = $false
@@ -848,126 +885,103 @@ function Get-Winapp2Rules {
         }
 
         $eqIndex = $line.IndexOf('=')
-        if ($eqIndex -gt 0) {
-            $key = $line.Substring(0, $eqIndex).Trim()
-            $val = $line.Substring($eqIndex + 1).Trim()
+        if ($eqIndex -le 0) { continue }
+        if ($skipApp) { continue }
 
-            if ($key -eq "Section") { $currentApp.Section = $val }
-            elseif ($key.StartsWith("Detect")) {
-                if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true }
-                if ($val.Contains("%")) { 
-                    foreach ($k in $specialVars.Keys) { 
-                        if ($val.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                            $val = $val -replace ([regex]::Escape($k)), $specialVars[$k] 
+        $key = $line.Substring(0, $eqIndex).Trim()
+        $val = $line.Substring($eqIndex + 1).Trim()
+
+        if ($key -eq "Section") { $currentApp.Section = $val }
+        elseif ($key.StartsWith("Detect")) {
+            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true } 
+            
+            if ($val.IndexOf('%') -ge 0) { 
+                foreach ($k in $envVars.Keys) { 
+                    if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) } 
+                } 
+            }
+
+            # Registry Detection
+            if ($val -match "^HK") {
+                $regPath = $val -replace "^(?i)HKCU", "Registry::HKEY_CURRENT_USER" `
+                                -replace "^(?i)HKLM", "Registry::HKEY_LOCAL_MACHINE" `
+                                -replace "^(?i)HKCR", "Registry::HKEY_CLASSES_ROOT" `
+                                -replace "^(?i)HKU",  "Registry::HKEY_USERS"
+                if (Test-Path $regPath) { $skipApp = $false }
+            } 
+            # File Detection
+            else {
+                try {
+                    $parent = [System.IO.Path]::GetDirectoryName($val)
+                    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+                        if (-not $dirCache.ContainsKey($parent)) { $dirCache[$parent] = (Test-Path $parent) }
+                        if ($dirCache[$parent]) { 
+                            if (Test-Path $val) { $skipApp = $false } 
                         }
                     }
-                    $val = [Environment]::ExpandEnvironmentVariables($val) 
-                }
-                $pathExists = $false
-                if ($val -match "^HK") {
-                    $r = $val -replace "^(?i)HKCU", "Registry::HKEY_CURRENT_USER" `
-                              -replace "^(?i)HKLM", "Registry::HKEY_LOCAL_MACHINE" `
-                              -replace "^(?i)HKCR", "Registry::HKEY_CLASSES_ROOT"
-                    if (Test-Path $r) { $pathExists = $true }
-                } else { 
-                    if (Test-Path $val) { $pathExists = $true } 
-                }
-                if ($pathExists) { $skipApp = $false }
-            }
-            elseif ($key.StartsWith("FileKey")) {
-                $parts = $val -split "\|"
-                if ($parts.Count -ge 2) {
-                    $rawPath = $parts[0]
-                    if ($rawPath.Contains("%")) { 
-                        foreach ($k in $specialVars.Keys) { 
-                            if ($rawPath.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                                $rawPath = $rawPath -replace ([regex]::Escape($k)), $specialVars[$k] 
-                            }
-                        }
-                        $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
-                    }
-                    if (Test-Path $rawPath) { 
-                        $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } }) 
-                    }
+                } catch { 
+                    if (Test-Path $val) { $skipApp = $false } 
                 }
             }
-            elseif ($key -eq "Description") { $currentApp.Desc = $val }
         }
+        elseif ($key.StartsWith("FileKey")) {
+            $parts = $val -split "\|"
+            if ($parts.Count -ge 2) {
+                $rawPath = $parts[0]
+                if ($rawPath.IndexOf('%') -ge 0) { foreach ($k in $envVars.Keys) { if ($rawPath.Contains($k)) { $rawPath = $rawPath.Replace($k, $envVars[$k]) } } }
+                $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
+                if (-not $skipApp) { $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } }) }
+            }
+        }
+        elseif ($key -eq "Description") { $currentApp.Desc = $val }
     }
     if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
 
+    # --- 5. CATEGORIZATION ---
     $finalList = $rules | Where-Object { $_.Paths.Count -gt 0 }
-
-    # ==========================================
-    # LOGIC: CATEGORIZATION ENGINE
-    # ==========================================
-    $prefixCounts = @{}
+    
     foreach ($app in $finalList) {
-        if ($app.Name -match "^([^\s]+)") {
-            $w = $matches[1]
-            if (-not $prefixCounts.ContainsKey($w)) { $prefixCounts[$w] = 0 }
-            $prefixCounts[$w]++
-        }
-    }
+        $name = $app.Name
 
-    # Explicit Singletons: Apps that should ALWAYS be their own group, even if only 1 rule exists
-    $knownSingletons = @("Spotify", "Discord", "Steam", "Skype", "TeamViewer", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber", "Signal", "Dropbox", "OneDrive")
+        # 1. BROWSERS
+        if ($name -match "^Google Chrome") { $app.AppGroup = "Google Chrome"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Google Chrome\s*", "" }
+        elseif ($name -match "^Microsoft Edge") { $app.AppGroup = "Microsoft Edge"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Microsoft Edge\s*", "" }
+        elseif ($name -match "^Mozilla Firefox") { $app.AppGroup = "Mozilla Firefox"; $app.Section = "Browsers / Internet"; $app.Name = $name -replace "Mozilla Firefox\s*", "" }
+        elseif ($name -match "^Opera") { $app.AppGroup = "Opera"; $app.Section = "Browsers / Internet" }
+        elseif ($name -match "^Brave") { $app.AppGroup = "Brave"; $app.Section = "Browsers / Internet" }
 
-    foreach ($app in $finalList) {
-        $rawName = $app.Name
-        $group = "General"
-        $cleanName = $rawName
-        $useSplit = $false
-
-        # A. HYPHEN SPLIT (Spotify - Songs)
-        if ($rawName -match "^(.+?)\s+-\s+(.*)$") {
-            $group = $matches[1].Trim()
-            $cleanName = $matches[2].Trim()
-            $useSplit = $true
+        # 2. SPECIFIC PRODUCTIVITY
+        elseif ($name -match "PowerToys") { 
+            $app.Section = "Productivity"
+            $app.AppGroup = "Microsoft PowerToys"
+            $app.Name = $name -replace "^Microsoft\s*PowerToys\s*", "" 
         }
-        # B. PREFIX SPLIT (Adobe Reader)
-        elseif ($rawName -match "^([^\s]+)\s+(.*)$") {
-            $prefix = $matches[1]
-            $suffix = $matches[2]
-            if ($prefixCounts.ContainsKey($prefix) -and $prefixCounts[$prefix] -gt 1) {
-                $group = $prefix; $cleanName = $suffix; $useSplit = $true
-            }
-        }
+        elseif ($name -match "^Microsoft\sOffice|^Office\s") { $app.Section = "Productivity"; $app.AppGroup = "Microsoft Office" }
+        elseif ($name -match "^Adobe\s") { $app.Section = "Productivity"; $app.AppGroup = "Adobe"; $app.Name = $name -replace "^Adobe\s+", "" }
         
-        # C. SINGLETON CHECK (Fixes "Spotify" disappearing into General)
-        if (-not $useSplit) {
-            if ($knownSingletons -contains $rawName -or ($prefixCounts.ContainsKey($rawName) -and $prefixCounts[$rawName] -gt 1)) {
-                $group = $rawName
-                $cleanName = "Standard Cleanup"
-                $useSplit = $true
-            }
+        # 3. GAMES (New Category)
+        elseif ($name -match "(?i)\b(Steam|Epic Games|Origin|Uplay|Ubisoft Connect|Battle.net|GOG Galaxy)\b") {
+            $app.Section = "Games"
+            $app.AppGroup = $name -split " " | Select-Object -First 1
         }
 
-        # D. GROUP RENAMING
-        if ($group -eq "Google" -and $cleanName -match "^Chrome") { $group = "Google Chrome"; $cleanName = $cleanName -replace "^Chrome\s*", "" }
-        if ($group -eq "Microsoft" -and $cleanName -match "^Edge") { $group = "Microsoft Edge"; $cleanName = $cleanName -replace "^Edge\s*", "" }
-        if ($group -eq "Mozilla" -and $cleanName -match "^Firefox") { $group = "Mozilla Firefox"; $cleanName = $cleanName -replace "^Firefox\s*", "" }
-        if ($group -eq "Opera" -and $cleanName -match "^GX") { $group = "Opera GX"; $cleanName = $cleanName -replace "^GX\s*", "" }
+        # 4. CHAT APPS
+        elseif ($name -match "(?i)\b(Discord|Spotify|Skype|TeamViewer|Zoom|Slack|Telegram|WhatsApp)\b") { 
+            $app.Section = "Internet & Chat"
+            $app.AppGroup = $name -split " " | Select-Object -First 1 
+        }
 
-        $cleanName = $cleanName.Trim(" -*")
-        if ([string]::IsNullOrWhiteSpace($cleanName)) { $cleanName = "Standard Cleanup" }
-
-        # E. ASSIGN SECTION
-        $section = "Applications"
-        if ($group -in "Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "Opera GX", "Vivaldi", "Waterfox", "Tor Browser", "Chromium", "Yandex") { $section = "Browsers / Internet" }
-        elseif ($group -in "Steam", "Discord", "Skype", "TeamViewer", "Spotify", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber") { $section = "Internet & Chat" }
-        elseif ($group -match "Adobe|Microsoft|Office|LibreOffice|Foxit") { $section = "Productivity" }
-        elseif ($group -match "NVIDIA|AMD|Intel|Realtek|Driver") { $section = "System & Drivers" }
-        elseif ($group -match "Windows" -or $group -eq "Temporary Files") { $section = "System" }
-
-        $app.Section = $section
-        if ($useSplit) { $app.AppGroup = $group; $app.Name = $cleanName } 
-        else { $app.AppGroup = "General"; $app.Name = $rawName }
+        # 5. SYSTEM CATCH-ALL
+        elseif ($name -match "^Windows\s" -or $name -eq "Windows" -or $name -match "Defender|Explorer|Store|Management Console") {
+            $app.Section = "System"
+            $app.AppGroup = "Windows"
+            $app.Name = $name -replace "^Windows\s+", "" 
+        }
     }
 
     try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
     
-    $finalList | Write-Output
+    return $finalList
 }
 
 function Show-AdvancedCleanupSelection {
@@ -992,7 +1006,6 @@ function Show-AdvancedCleanupSelection {
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
-    # Add to form LATER to ensure docking priority, or use BringToFront
 
     $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
     $chkToggleWinapp2.Text = "Load Community Rules *"
@@ -1040,17 +1053,12 @@ function Show-AdvancedCleanupSelection {
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
     $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    
-    # --- FIX: ADD PADDING TO PREVENT OVERLAP ---
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
-    # --- CRITICAL: ADD ORDER DETERMINES DOCKING PRIORITY ---
-    # In WinForms, controls added *last* are docked *first* (conceptually) or fill remaining space.
-    # We add the Fill panel first, then the Dock panels, but use BringToFront to ensure z-order.
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
     $form.Controls.Add($mainPanel)
-    $mainPanel.BringToFront() # Ensures it sits 'inside' the Top/Bottom docks
+    $mainPanel.BringToFront()
 
     # --- INTERNAL RULES ---
     $internalRules = @(
@@ -1214,8 +1222,10 @@ function Show-AdvancedCleanupSelection {
         $selectedItems = @()
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            # Use Visible -and Checked to ensure user intended to clean what they saw
-            if ($cb.Visible -and $cb.Checked) { $selectedItems += $cb.Tag }
+            # --- FIX APPLIED HERE ---
+            # Removed "-and $cb.Visible". If it is Checked, we clean it, 
+            # regardless of whether the user has currently filtered it out via Search.
+            if ($cb.Checked) { $selectedItems += $cb.Tag }
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
@@ -1226,13 +1236,17 @@ function Show-AdvancedCleanupSelection {
 }
 
 function Invoke-TempCleanup {
+    # 1. GET SELECTION
     $selections = Show-AdvancedCleanupSelection
-    if (-not $selections -or $selections.Count -eq 0) { return }
+    if (-not $selections -or $selections.Count -eq 0) { 
+        Write-GuiLog "Cleanup canceled: No items selected."
+        return 
+    }
 
-    # --- 1. SETUP PROGRESS UI (Accelerated Style) ---
+    # 2. SETUP PROGRESS UI
     $pForm = New-Object System.Windows.Forms.Form
     $pForm.Text = "Deep Cleaning System"
-    $pForm.Size = "500,140"
+    $pForm.Size = "500,160"
     $pForm.StartPosition = "CenterScreen"
     $pForm.ControlBox = $false
     $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
@@ -1244,161 +1258,140 @@ function Invoke-TempCleanup {
     $pForm.Controls.Add($pLabel)
 
     $pStatus = New-Object System.Windows.Forms.Label
-    $pStatus.Location = "20,35"; $pStatus.Size = "460,20"
+    $pStatus.Location = "20,40"; $pStatus.Size = "460,20"
     $pStatus.ForeColor = "Gray"
-    $pStatus.Text = "Calculating..."
+    $pStatus.Text = "Preparing..."
     $pForm.Controls.Add($pStatus)
 
     $pBar = New-Object System.Windows.Forms.ProgressBar
-    $pBar.Location = "20,65"; $pBar.Size = "440,20"
+    $pBar.Location = "20,70"; $pBar.Size = "440,20"
     $pForm.Controls.Add($pBar)
 
     $pForm.Show()
     [System.Windows.Forms.Application]::DoEvents()
 
-    # --- 2. ACCELERATED CLEANING ENGINE ---
-    $script:totalDeleted = 0
-    $script:bytesRecovered = 0
-    $script:currentProgress = 0.0
+    # 3. STATS TRACKING
+    $stats = @{
+        Deleted = 0
+        Bytes   = 0
+        Progress = 0.0
+    }
+    
     $ruleWeight = 100.0 / ($selections.Count)
 
-    # Helper: Updates UI every 50 items to maintain speed
-    $Tick = {
-        param($text)
-        if ($script:totalDeleted % 50 -eq 0) {
-            $pStatus.Text = $text
-            $mb = [math]::Round($script:bytesRecovered / 1MB, 2)
-            $pLabel.Text = "Items Removed: $($script:totalDeleted)  |  Recovered: $mb MB"
-            [System.Windows.Forms.Application]::DoEvents()
-        }
-    }
-
-    # Helper: .NET Fast Delete
-    function Fast-Clean-Path {
+    # --- HELPER: ROBUST CLEANER ---
+    function Invoke-RobustClean {
         param($Path, $Pattern="*", $Recurse=$true)
-
-        if (-not (Test-Path $Path)) { return }
         
+        $Path = [Environment]::ExpandEnvironmentVariables($Path)
+        if (-not (Test-Path $Path)) { return }
+
+        $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
+        [System.Windows.Forms.Application]::DoEvents()
+
         try {
-            $dirInfo = New-Object System.IO.DirectoryInfo($Path)
-            if (-not $dirInfo.Exists) { return }
-
-            $enumOpt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
+            $items = Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue
             
-            # Use EnumerateFiles (Lazy loading) for speed
-            $files = $dirInfo.EnumerateFiles($Pattern, $enumOpt)
-
-            foreach ($f in $files) {
+            foreach ($item in $items) {
                 try {
-                    $size = $f.Length
-                    $f.Delete()
-                    $script:bytesRecovered += $size
-                    $script:totalDeleted++
-                    & $Tick "Cleaning: $($f.Name)"
-                } catch { 
-                    # Access Denied is common in Temp, silently skip or log if verbose
-                }
-            }
-
-            # Optional: Clean empty folders (reverse order to handle nesting)
-            if ($Recurse) {
-                try {
-                    $dirs = $dirInfo.GetDirectories($Pattern, $enumOpt) | Sort-Object FullName -Descending
-                    foreach ($d in $dirs) {
-                        try {
-                            if ($d.GetFiles().Count -eq 0 -and $d.GetDirectories().Count -eq 0) {
-                                $d.Delete()
-                            }
-                        } catch {}
+                    $size = $item.Length
+                    $item.Delete()
+                    
+                    $stats.Deleted++
+                    $stats.Bytes += $size
+                    
+                    if ($stats.Deleted % 50 -eq 0) {
+                        $mb = [math]::Round($stats.Bytes / 1MB, 2)
+                        $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
+                        [System.Windows.Forms.Application]::DoEvents()
                     }
                 } catch {}
             }
-        } catch {
-            # Catch directory access errors
-        }
+
+            if ($Recurse) {
+                Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
+                    Sort-Object FullName -Descending | 
+                    ForEach-Object { try { if ((Get-ChildItem -Path $_.FullName -Force).Count -eq 0) { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } } catch {} }
+            }
+        } catch {}
     }
 
+    # 4. MAIN EXECUTION LOOP
+    Write-GuiLog "--- Starting Cleanup ---"
+    
     try {
         foreach ($item in $selections) {
+            if ($pForm.IsDisposed) { break }
+
+            # Snapshot bytes BEFORE this item
+            $startBytes = $stats.Bytes
+
+            # Update UI
+            $stats.Progress += $ruleWeight
+            $pBar.Value = [int]$stats.Progress
             
-            # Update Progress Bar for new Rule
-            $script:currentProgress += $ruleWeight
-            $pBar.Value = [int]$script:currentProgress
-            [System.Windows.Forms.Application]::DoEvents()
+            # Determine Name for Logging
+            $itemName = if ($item -is [string]) { $item } else { $item.Name }
+            $pLabel.Text = "Cleaning: $itemName"
 
-            # --- A. HANDLE WINAPP2 RULES (Objects) ---
+            # --- A. WINAPP2 RULES (Object) ---
             if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
-                $pLabel.Text = "Processing Rule: $($item.Name)"
                 foreach ($rule in $item.Paths) {
-                    Fast-Clean-Path -Path $rule.Path -Pattern $rule.Pattern -Recurse ($rule.Options -ne "REMOVESELF")
-                    
-                    # Handle REMOVESELF special flag (Delete the folder itself)
-                    if ($rule.Options -match "REMOVESELF" -and (Test-Path $rule.Path)) {
-                        try { [System.IO.Directory]::Delete($rule.Path, $true) } catch {}
-                    }
+                    $isRecurse = ($rule.Options -notmatch "REMOVESELF")
+                    Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse
                 }
-                continue
             }
-
-            # --- B. HANDLE STANDARD RULES ---
-            $pLabel.Text = "Processing: $item"
-            switch ($item) {
-                "TempFiles" { 
-                    Fast-Clean-Path $env:TEMP
-                    Fast-Clean-Path "$env:SystemRoot\Temp"
-                }
-                "RecycleBin" { 
-                    $pStatus.Text = "Emptying Recycle Bin..."
-                    [System.Windows.Forms.Application]::DoEvents()
-                    try { 
-                        # Use VB method for reliable bin emptying
-                        [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory("C:\`$Recycle.Bin", 'OnlyErrorDialogs', 'DeletePermanently') 
-                    } catch {} 
-                }
-                "WER" { Fast-Clean-Path "$env:ProgramData\Microsoft\Windows\WER" }
-                "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
-                "Thumbnails" { 
-                    # Thumbnails are locked by Explorer, requires special handling usually, but we try .NET delete
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false 
-                }
-                "PackageCache" { Fast-Clean-Path "$env:ProgramData\Package Cache" }
-                "Recent" { Fast-Clean-Path "$env:APPDATA\Microsoft\Windows\Recent" }
-                "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
-                
-                # Extended Browsers
-                "Edge"    { Fast-Clean-Path "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
-                "Chrome"  { Fast-Clean-Path "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
-                "Brave"   { Fast-Clean-Path "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
-                "Vivaldi" { Fast-Clean-Path "$env:LOCALAPPDATA\Vivaldi\User Data\Default\Cache" }
-                "Opera"   { 
-                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera Stable\Cache"
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera Stable\Cache"
-                }
-                "OperaGX" { 
-                    Fast-Clean-Path "$env:APPDATA\Opera Software\Opera GX Stable\Cache"
-                    Fast-Clean-Path "$env:LOCALAPPDATA\Opera Software\Opera GX Stable\Cache"
-                }
-                "Firefox" { 
-                    $ffProfiles = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
-                    if (Test-Path $ffProfiles) {
-                        Get-ChildItem $ffProfiles -Directory | ForEach-Object { 
-                            Fast-Clean-Path "$($_.FullName)\cache2\entries" 
+            # --- B. INTERNAL RULES (String) ---
+            else {
+                switch ($item) {
+                    "TempFiles" { 
+                        Invoke-RobustClean $env:TEMP
+                        Invoke-RobustClean "$env:SystemRoot\Temp"
+                    }
+                    "RecycleBin" { 
+                        # Recycle Bin is tricky to measure file-by-file without permission errors,
+                        # so we often rely on Windows API. For now, we attempt standard clear.
+                        try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                    "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
+                    "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
+                    "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false }
+                    "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" }
+                    "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
+                    "Edge"    { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
+                    "Chrome"  { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
+                    "Brave"   { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
+                    "Firefox" { 
+                        if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
+                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { Invoke-RobustClean "$($_.FullName)\cache2\entries" }
                         }
                     }
+                    "Opera"   { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" }
+                    "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" }
                 }
             }
+
+            # Calculate difference for this specific item
+            $diffBytes = $stats.Bytes - $startBytes
+            
+            # Log it if we actually removed something
+            if ($diffBytes -gt 0) {
+                $itemMB = [math]::Round($diffBytes / 1MB, 2)
+                Write-GuiLog "Cleaned $itemName : $itemMB MB"
+            }
         }
+    } catch {
+        Write-GuiLog "Error: $($_.Exception.Message)"
     } finally {
         $pForm.Close()
     }
 
-    # Summary Report
-    $mbFreed = [math]::Round($script:bytesRecovered / 1MB, 2)
-    $msg = "Cleanup Complete.`n`nFiles Removed: $($script:totalDeleted)`nSpace Recovered: $mbFreed MB"
-    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+    # 5. FINAL REPORT
+    $finalMB = [math]::Round($stats.Bytes / 1MB, 2)
+    Write-GuiLog "Total Removed: $finalMB MB"
     
-    # Log to Main GUI
-    Write-GuiLog "Cleanup finished. Removed $($script:totalDeleted) files ($mbFreed MB)."
+    $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
+    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
 }
 
 # --- Registry Scan Selection UI ---
@@ -2319,7 +2312,8 @@ function Invoke-RegistryTask {
             
             $toDelete = @()
             if ($rawSelection) {
-                $toDelete = $rawSelection | Where-Object { $_ -ne $null -and $_.RegPath -ne $null }
+                # FIXED: $null on the left side
+                $toDelete = $rawSelection | Where-Object { $null -ne $_ -and $null -ne $_.RegPath }
             }
 
             if ($toDelete.Count -eq 0) { return }
@@ -2371,7 +2365,8 @@ function Invoke-SSDTrim {
         foreach ($ssd in $ssds) {
             $disk = Get-Disk | Where-Object { $_.FriendlyName -eq $ssd.FriendlyName }
             if ($disk) {
-                $vols = $disk | Get-Partition | Get-Volume | Where-Object DriveLetter -ne $null
+                # FIX: Use scriptblock for null check
+                $vols = $disk | Get-Partition | Get-Volume | Where-Object { $null -ne $_.DriveLetter }
                 foreach ($v in $vols) {
                     $out += "Optimizing $($v.DriveLetter):"
                     $out += Optimize-Volume -DriveLetter $v.DriveLetter -ReTrim -Verbose 4>&1
@@ -3014,7 +3009,6 @@ function Show-DriverCleanupDialog {
                         if ($dStr -as [DateTime]) { $current.SortDate = [DateTime]$dStr }
                     }
                 }
-
                 # 3. Fallback
                 elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') {
                     $current.OriginalName = $val
@@ -3047,7 +3041,7 @@ function Show-DriverCleanupDialog {
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $f.ForeColor = [System.Drawing.Color]::White
-
+    
     # Initialize ToolTip provider
     $tip = New-Object System.Windows.Forms.ToolTip
     $tip.AutoPopDelay = 5000
@@ -3055,9 +3049,23 @@ function Show-DriverCleanupDialog {
     $tip.ReshowDelay = 500
     $tip.ShowAlways = $true
 
+    # --- LAYOUT FIX: PANEL FIRST (Dock Bottom) --- 
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 60 # Reduced height for cleaner look
+    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
+    
+    # Draw a subtle top border on the panel
+    $pnl.Add_Paint({
+        param($s, $e) # Renamed from $sender to $s
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60,60,60), 1)
+        $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
+    })
+    $f.Controls.Add($pnl)
+
+    # --- GRID SECOND (Dock Fill) ---
     $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"
-    $dg.Height = 470
+    $dg.Dock = "Fill" 
     $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
     $dg.ForeColor = [System.Drawing.Color]::White
     $dg.AutoSizeColumnsMode = "Fill"
@@ -3086,18 +3094,19 @@ function Show-DriverCleanupDialog {
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
     
     $f.Controls.Add($dg)
+    $dg.BringToFront() # Ensures grid fills the remaining space above the panel
 
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 80
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnl)
-
-    # Helper for Themed Buttons with Tooltips
-    function New-DrvBtn($text, $x, $color=$null, $tooltipText=""){
+    # Helper for Themed Buttons with Tooltips AND Anchor support
+    function New-DrvBtn($text, $x, $color=$null, $tooltipText="", $anchor="Top, Left"){
         $b=New-Object System.Windows.Forms.Button
-        $b.Text=$text; $b.Left=$x; $b.Top=20; $b.Width=160; $b.Height=35
-        $b.FlatStyle="Flat"; $b.FlatAppearance.BorderSize=1
+        $b.Text=$text
+        $b.Left=$x
+        $b.Top=12 # Vertically centered in 60px panel
+        $b.Width=160
+        $b.Height=35
+        $b.FlatStyle="Flat"
+        $b.FlatAppearance.BorderSize=1
+        $b.Anchor = $anchor
         $b.FlatAppearance.BorderColor=[System.Drawing.ColorTranslator]::FromHtml("#444444")
         $b.ForeColor=[System.Drawing.Color]::White
         if($color){
@@ -3115,9 +3124,14 @@ function Show-DriverCleanupDialog {
         $pnl.Controls.Add($b); return $b
     }
 
-    $btnBackupClean = New-DrvBtn "Backup && Remove All" 20 "#006600" "Safely backs up all listed drivers to the data folder, then attempts to delete them."
-    $btnRemoveSel   = New-DrvBtn "Remove Selected" 200 "#802020" "Removes only the currently highlighted driver(s) from the list."
-    $btnClose       = New-DrvBtn "Close" 380 $null "Close this window."
+    # --- CHANGED: Renamed "Remove (Options...)" to "Remove All" ---
+    $btnBackupClean = New-DrvBtn "Remove All" 20 "#006600" "Select removal options (Backup vs No Backup) for ALL duplicates."
+    
+    $btnRemoveSel   = New-DrvBtn "Remove Selected" 190 "#802020" "Removes only the currently highlighted driver(s) from the list."
+    
+    # Place Close button aligned to the Right
+    $closeX = $pnl.Width - 180
+    $btnClose = New-DrvBtn "Close" $closeX $null "Close this window." "Top, Right"
 
     # 4. DATA BINDING
     $script:CurrentList = $toDelete
@@ -3150,33 +3164,69 @@ function Show-DriverCleanupDialog {
         if(-not $items -or $items.Count -eq 0){ return }
         $count = $items.Count
         
-        $msg = "Processing $count driver(s).`n`n" +
-               "1. Selected drivers will be backed up.`n" +
-               "2. Attempts safe deletion.`n" +
-               "3. Offers FORCE delete on failure."
-               
-        $confirm = [System.Windows.MessageBox]::Show($msg, "Driver Cleanup", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($confirm -ne "Yes") { return }
+        # --- NEW CUSTOM CONFIRMATION DIALOG ---
+        $cf = New-Object System.Windows.Forms.Form
+        $cf.Text = "Confirm Driver Cleanup"
+        $cf.Size = "450, 240"
+        $cf.StartPosition = "CenterParent"
+        $cf.FormBorderStyle = "FixedDialog"
+        $cf.ControlBox = $false
+        $cf.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+        $cf.ForeColor = "White"
 
-        # A. BACKUP
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = "You are about to remove $count driver(s).`n`nHow would you like to proceed?"
+        $lbl.Location = "20, 20"; $lbl.Size = "400, 50"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+        $cf.Controls.Add($lbl)
+
+        $bBackup = New-Object System.Windows.Forms.Button
+        $bBackup.Text = "Backup && Clean"
+        $bBackup.DialogResult = "Yes"
+        $bBackup.Location = "20, 90"; $bBackup.Width = 130; $bBackup.Height = 35
+        $bBackup.BackColor = "SeaGreen"; $bBackup.ForeColor = "White"; $bBackup.FlatStyle = "Flat"
+        $cf.Controls.Add($bBackup)
+
+        $bNoBackup = New-Object System.Windows.Forms.Button
+        $bNoBackup.Text = "Clean (No Backup)"
+        $bNoBackup.DialogResult = "No"
+        $bNoBackup.Location = "160, 90"; $bNoBackup.Width = 130; $bNoBackup.Height = 35
+        $bNoBackup.BackColor = "IndianRed"; $bNoBackup.ForeColor = "White"; $bNoBackup.FlatStyle = "Flat"
+        $cf.Controls.Add($bNoBackup)
+
+        $bCancel = New-Object System.Windows.Forms.Button
+        $bCancel.Text = "Cancel"
+        $bCancel.DialogResult = "Cancel"
+        $bCancel.Location = "300, 90"; $bCancel.Width = 110; $bCancel.Height = 35
+        $bCancel.BackColor = "DimGray"; $bCancel.ForeColor = "White"; $bCancel.FlatStyle = "Flat"
+        $cf.Controls.Add($bCancel)
+
+        $result = $cf.ShowDialog()
+        
+        if ($result -eq "Cancel") { return }
+
+        # A. BACKUP (Only if Yes selected)
+        $backupCount = 0
         $timestamp = Get-Date -f 'yyyyMMdd_HHmm'
         $mainBkPath = Join-Path (Get-DataPath) "Drivers_Backup_$timestamp"
-        if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
-        
-        $backupCount = 0
-        $prog = 1
-        foreach($item in $items) {
-            $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
-            $f.Update()
-            
-            $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
-            $drvPath = Join-Path $mainBkPath $folderName
-            New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
 
-            $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
-            if ($proc.ExitCode -eq 0) { $backupCount++ }
-            $prog++
+        if ($result -eq "Yes") {
+            if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
+            
+            $prog = 1
+            foreach($item in $items) {
+                $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
+                $f.Update()
+                
+                $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
+                $drvPath = Join-Path $mainBkPath $folderName
+                New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
+
+                $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
+                if ($proc.ExitCode -eq 0) { $backupCount++ }
+                $prog++
+            }
         }
+
         $f.Text = "Processing Deletions..."
         $f.Update()
 
@@ -3217,7 +3267,10 @@ function Show-DriverCleanupDialog {
         }
 
         # C. REPORT & REFRESH
-        [System.Windows.MessageBox]::Show("Done.`nDeleted: $deleted`nBackups: $backupCount`nPath: $mainBkPath", "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        $resMsg = "Done.`nDeleted: $deleted"
+        if ($result -eq "Yes") { $resMsg += "`nBackups: $backupCount`nPath: $mainBkPath" }
+        
+        [System.Windows.MessageBox]::Show($resMsg, "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
 
         if ($deleted -gt 0) {
             # Remove deleted items from the current list
@@ -3248,6 +3301,8 @@ function Show-DriverCleanupDialog {
     $LoadGrid.Invoke()
     $f.ShowDialog() | Out-Null
 }
+
+# --- RESTORE DRIVERS ---
 function Invoke-RestoreDrivers {
     $dataPath = Get-DataPath
     $backups = @()
@@ -3761,6 +3816,8 @@ function Show-TaskManager {
                         <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600"/>
                         <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
                         <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#802020"/>
+                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#B8860B" ToolTip="Hide selected updates from future scans"/>
+                        <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}" ToolTip="View and restore ignored updates"/>
                     </StackPanel>
                 </Grid>
 
@@ -4006,6 +4063,12 @@ Set-ButtonIcon "btnTabDrivers" "M7,17L10.5,12.5L5,9.6V17H7M12,21L14.6,16.3L9.5,1
 Set-ButtonIcon "btnTabCleanup" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Cleanup" "Disk cleanup, Temp files, Shortcuts, Registry" 18
 Set-ButtonIcon "btnTabUtils" "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.7,20.3C23.1,19.9 23.1,19.3 22.7,19Z" "Utilities" "System Info, SSD Trim, Activation, Task Scheduler" 18
 Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
+$btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
+$btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
+# (Ban Icon for Ignore)
+Set-ButtonIcon "btnWingetIgnore" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12C4,13.85 4.63,15.55 5.68,16.91L16.91,5.68C15.55,4.63 13.85,4 12,4M12,20A8,8 0 0,0 20,12C20,10.15 19.37,8.45 18.32,7.09L7.09,18.32C8.45,19.37 10.15,20 12,20Z" "Ignore Selected" "Hide selected updates from future scans" 16 "#FFD700"
+# (List/Restore Icon for Unignore)
+Set-ButtonIcon "btnWingetUnignore" "M2,5H22V7H2V5M2,9H22V11H2V9M2,13H22V15H2V13M2,17H22V19H2V17" "Manage Ignored" "View and restore ignored updates"
 
 # --- CUSTOM HEALTH ICON (Red Squircle with White Cross) ---
 $btnHealth = Get-Ctrl "btnTabHealth"
@@ -4309,6 +4372,60 @@ $txtGlobalSearch.Add_TextChanged({
 })
 $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $match=$SearchIndex[$lstSearchResults.SelectedItem]; (Get-Ctrl $match.Tab).RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))); $txtGlobalSearch.Text="" } })
 
+
+# WINGET CONTEXT MENU (Right-Click)
+$ctxMenu = New-Object System.Windows.Controls.ContextMenu
+
+# 1. Update Selected
+$miUpdate = New-Object System.Windows.Controls.MenuItem
+$miUpdate.Header = "Update Selected"
+# We reference the button variable directly to ensure it works
+$miUpdate.Add_Click({ 
+    $btnWingetUpdateSel.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miUpdate)
+
+# 2. Uninstall Selected
+$miUninstall = New-Object System.Windows.Controls.MenuItem
+$miUninstall.Header = "Uninstall Selected"
+$miUninstall.Add_Click({ 
+    $btnWingetUninstall.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miUninstall)
+
+# --- Separator ---
+[void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+# 3. Ignore Selected
+$miIgnore = New-Object System.Windows.Controls.MenuItem
+$miIgnore.Header = "Ignore Selected"
+$miIgnore.Add_Click({ 
+    $btnWingetIgnore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miIgnore)
+
+# 4. Manage Ignored
+$miManage = New-Object System.Windows.Controls.MenuItem
+$miManage.Header = "Manage Ignored List..."
+$miManage.Add_Click({ 
+    $btnWingetUnignore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miManage)
+
+# --- Separator ---
+[void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+# 5. Refresh Updates
+$miRefresh = New-Object System.Windows.Controls.MenuItem
+$miRefresh.Header = "Refresh Updates"
+$miRefresh.Add_Click({ 
+    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miRefresh)
+
+# 6. Attach to List
+$lstWinget.ContextMenu = $ctxMenu
+
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_TextChanged({
@@ -4580,6 +4697,10 @@ $btnWingetScan.Add_Click({
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
+    # 1. LOAD IGNORE LIST
+    $currentSettings = Get-WmtSettings
+    $ignoreList = if ($currentSettings.WingetIgnore) { $currentSettings.WingetIgnore } else { @() }
+
     $tempOut = Join-Path $env:TEMP "winget_upd.txt"
     
     # Capture output
@@ -4594,57 +4715,192 @@ $btnWingetScan.Add_Click({
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            # --- FILTERS ---
-            # 1. Skip headers, separators, and standard messages
             if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
-            
-            # 2. Skip Progress Bars (Block characters like █, ▒, etc.)
             if ($line -match "[\u2580-\u259F]") { continue }
-
-            # 3. Skip Download Status lines (e.g., "10.5 MB / 10.5 MB")
             if ($line -match "\d+\s*(KB|MB|GB|TB)") { continue }
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
-            # STRATEGY: Greedy Match from Right-to-Left with Fix for '<'
-            # 1. ID column: ([^<\s]\S*) -> Ensures ID does not start with '<'
-            # 2. Version column: ((?:<\s+)?\S+) -> Captures optional '< ' prefix followed by the version string
-            
-            # Case A: 5 Columns (Name, Id, Version, Available, Source)
             if ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
             }
-            # Case B: 4 Columns (Name, Id, Version, Source) - "Available" missing
             elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
             }
-            # Case C: 3 Columns (Name, Id, Version) - "Available" and "Source" missing
             elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
             }
 
-            # Final Safety Check: Ensure ID doesn't look like a leftover file size unit
             if ($name -and $id -notmatch "^(KB|MB|GB|/)$") {
-                [void]$lstWinget.Items.Add([PSCustomObject]@{ 
-                    Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
-                })
+                # 2. FILTER: Only add if ID is NOT in ignore list
+                if ($id.Trim() -notin $ignoreList) {
+                    [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+                        Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
+                    })
+                }
             }
         }
         Remove-Item $tempOut -ErrorAction SilentlyContinue
     }
     
-    # Check if list is empty and add placeholder message
     $logCount = $lstWinget.Items.Count
-    
     if ($logCount -eq 0) {
         [void]$lstWinget.Items.Add([PSCustomObject]@{ 
             Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
         })
-        $logCount = 0 # Correct the log count for the placeholder
+        $logCount = 0
     }
     
     $lblWingetStatus.Visibility = "Hidden"
     Write-GuiLog "Scan complete. Found $logCount updates."
+})
+
+# --- IGNORE SELECTED ---
+$btnWingetIgnore.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+
+    $msg = "Ignore $($selected.Count) package(s)?`n`nThese updates will be hidden from future scans."
+    if ([System.Windows.Forms.MessageBox]::Show($msg, "Ignore Updates", "YesNo", "Question") -eq "Yes") {
+        
+        # 1. Get fresh settings
+        $settings = Get-WmtSettings
+        
+        # 2. Create a fresh ArrayList to ensure it is editable
+        $newList = New-Object System.Collections.ArrayList
+        
+        # Add existing items (checking for nulls)
+        if ($settings.WingetIgnore) {
+            foreach ($existing in $settings.WingetIgnore) {
+                if (-not [string]::IsNullOrWhiteSpace($existing)) {
+                    [void]$newList.Add($existing.ToString())
+                }
+            }
+        }
+
+        # 3. Add NEW items
+        foreach ($item in $selected) {
+            $id = $item.Id
+            # Avoid duplicates
+            if ($id -and ($id -notin $newList)) {
+                [void]$newList.Add($id)
+            }
+            # Remove from GUI immediately
+            $lstWinget.Items.Remove($item)
+        }
+
+        # 4. Save back as a standard array
+        $settings.WingetIgnore = $newList.ToArray()
+        Save-WmtSettings -Settings $settings
+        
+        Write-GuiLog "Ignored $($selected.Count) packages. Saved to settings.json."
+    }
+})
+
+# --- MANAGE IGNORED (UNIGNORE) ---
+$btnWingetUnignore.Add_Click({
+    # 1. READ SETTINGS (Direct & Simple)
+    $jsonPath = Join-Path (Get-DataPath) "settings.json"
+    $listItems = @()
+
+    if (Test-Path $jsonPath) {
+        try {
+            $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
+            if ($json.WingetIgnore) {
+                # Force array and string conversion immediately
+                $listItems = @($json.WingetIgnore) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" }
+            }
+        } catch { Write-GuiLog "Error: $($_.Exception.Message)" }
+    }
+
+    if ($listItems.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No ignored packages found.", "Manage Ignored", "OK", "Information") | Out-Null
+        return
+    }
+
+    # 2. UI SETUP
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Manage Ignored Updates"
+    $f.Size = "500, 400"
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32,32,32)
+    $f.ForeColor = "White"
+
+    # 3. CONTROLS (Critical Order for Docking)
+    # Add Dock=Bottom/Top controls FIRST so they claim space. Add Dock=Fill LAST.
+
+    # -- Bottom Panel --
+    $pnl = New-Object System.Windows.Forms.Panel
+    $pnl.Dock = "Bottom"; $pnl.Height = 50
+    $f.Controls.Add($pnl)
+
+    # -- Top Label --
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Text = "Select packages to restore (Un-ignore):"
+    $lbl.Dock = "Top"; $lbl.Height = 30; $lbl.Padding = "10,10,0,0"
+    $f.Controls.Add($lbl)
+
+    # -- ListBox (Fill) --
+    $lb = New-Object System.Windows.Forms.ListBox
+    $lb.Dock = "Fill"
+    $lb.BackColor = [System.Drawing.Color]::FromArgb(20,20,20)
+    $lb.ForeColor = "White"
+    $lb.BorderStyle = "FixedSingle"
+    $lb.SelectionMode = "MultiExtended"
+    
+    # Manual Add (Fail-safe)
+    $lb.BeginUpdate()
+    foreach ($item in $listItems) {
+        [void]$lb.Items.Add($item)
+    }
+    $lb.EndUpdate()
+    
+    $f.Controls.Add($lb)
+    
+    # CRITICAL: Ensure ListBox is at the 'top' of Z-order so it fills remaining space correctly
+    $lb.BringToFront()
+
+    # -- Buttons --
+    $btnRestore = New-Object System.Windows.Forms.Button
+    $btnRestore.Text = "Un-Ignore Selected"
+    $btnRestore.Size = "150, 30"; $btnRestore.Location = "20, 10"
+    $btnRestore.BackColor = "SeaGreen"; $btnRestore.ForeColor = "White"; $btnRestore.FlatStyle = "Flat"
+    $pnl.Controls.Add($btnRestore)
+
+    $btnClose = New-Object System.Windows.Forms.Button
+    $btnClose.Text = "Close"
+    $btnClose.Size = "100, 30"; $btnClose.Location = "360, 10"
+    $btnClose.BackColor = "DimGray"; $btnClose.ForeColor = "White"; $btnClose.FlatStyle = "Flat"
+    $btnClose.Add_Click({ $f.Close() })
+    $pnl.Controls.Add($btnClose)
+
+    # 4. ACTION
+    $script:RefreshNeeded = $false
+
+    $btnRestore.Add_Click({
+        $selected = @($lb.SelectedItems)
+        if ($selected.Count -gt 0) {
+            # Read fresh, remove items, save
+            $s = Get-WmtSettings
+            $current = [System.Collections.ArrayList]@($s.WingetIgnore)
+            
+            foreach ($item in $selected) {
+                if ($current.Contains($item)) { $current.Remove($item) }
+                $lb.Items.Remove($item)
+            }
+            
+            $s.WingetIgnore = $current.ToArray()
+            Save-WmtSettings -Settings $s
+            $script:RefreshNeeded = $true
+        }
+    })
+
+    $f.ShowDialog() | Out-Null
+    
+    if ($script:RefreshNeeded) {
+        Write-GuiLog "List updated. Refreshing..."
+        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
 })
 
 $btnWingetFind.Add_Click({
