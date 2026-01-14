@@ -4388,6 +4388,60 @@ $txtGlobalSearch.Add_TextChanged({
 })
 $lstSearchResults.Add_SelectionChanged({ if ($lstSearchResults.SelectedItem) { $match=$SearchIndex[$lstSearchResults.SelectedItem]; (Get-Ctrl $match.Tab).RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))); $txtGlobalSearch.Text="" } })
 
+
+# WINGET CONTEXT MENU (Right-Click)
+$ctxMenu = New-Object System.Windows.Controls.ContextMenu
+
+# 1. Update Selected
+$miUpdate = New-Object System.Windows.Controls.MenuItem
+$miUpdate.Header = "Update Selected"
+# We reference the button variable directly to ensure it works
+$miUpdate.Add_Click({ 
+    $btnWingetUpdateSel.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miUpdate)
+
+# 2. Uninstall Selected
+$miUninstall = New-Object System.Windows.Controls.MenuItem
+$miUninstall.Header = "Uninstall Selected"
+$miUninstall.Add_Click({ 
+    $btnWingetUninstall.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miUninstall)
+
+# --- Separator ---
+[void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+# 3. Ignore Selected
+$miIgnore = New-Object System.Windows.Controls.MenuItem
+$miIgnore.Header = "Ignore Selected"
+$miIgnore.Add_Click({ 
+    $btnWingetIgnore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miIgnore)
+
+# 4. Manage Ignored
+$miManage = New-Object System.Windows.Controls.MenuItem
+$miManage.Header = "Manage Ignored List..."
+$miManage.Add_Click({ 
+    $btnWingetUnignore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miManage)
+
+# --- Separator ---
+[void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+# 5. Refresh Updates
+$miRefresh = New-Object System.Windows.Controls.MenuItem
+$miRefresh.Header = "Refresh Updates"
+$miRefresh.Add_Click({ 
+    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
+[void]$ctxMenu.Items.Add($miRefresh)
+
+# 6. Attach to List
+$lstWinget.ContextMenu = $ctxMenu
+
 # --- WINGET ---
 $txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
 $txtWingetSearch.Add_TextChanged({
