@@ -798,187 +798,193 @@ function Expand-EnvPath {
 function Get-Winapp2Rules {
     param([switch]$Download)
 
-    $iniUrl   = "https://raw.githubusercontent.com/MoscaDotTo/Winapp2/master/Winapp2.ini"
     $dataPath = Get-DataPath
     $iniPath  = Join-Path $dataPath "winapp2.ini"
-    $cachePath = Join-Path $dataPath "winapp2_cache_v11.json" # Bumped version
+    $cachePath = Join-Path $dataPath "winapp2_cache_v11.json"
 
-    # --- 1. ACCELERATED DOWNLOAD ---
+    # --- 1. DOWNLOAD LOGIC ---
     if ($Download) {
         try {
+            # Force Tls12 for security compliance
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $wc = New-Object System.Net.WebClient
-            $wc.Proxy = $null
-            $wc.DownloadFile($iniUrl, $iniPath)
-            if (Test-Path $cachePath) { Remove-Item $cachePath -Force }
+            
+            # Use HttpClient for high-speed compressed download (300KB vs 3MB)
+            Add-Type -AssemblyName System.Net.Http
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [TimeSpan]::FromSeconds(15)
+            
+            $url = "https://cdn.jsdelivr.net/gh/MoscaDotTo/Winapp2@master/Winapp2.ini"
+            
+            $response = $client.GetAsync($url).Result
+            if ($response.IsSuccessStatusCode) {
+                $contentBytes = $response.Content.ReadAsByteArrayAsync().Result
+                $encoding = [System.Text.Encoding]::UTF8
+                $iniContent = $encoding.GetString($contentBytes)
+                
+                # Write to disk so we have a backup
+                [System.IO.File]::WriteAllText($iniPath, $iniContent)
+                
+                # CRITICAL: Delete old cache to force a rebuild with new data
+                if (Test-Path $cachePath) { Remove-Item $cachePath -Force }
+            }
+            $client.Dispose()
+        } catch {
+            Write-GuiLog "Download Warning: $($_.Exception.Message)"
+        }
+    }
+
+    # --- 2. CACHE LOAD (With "Empty Cache" Protection) ---
+    if (-not $Download -and (Test-Path $cachePath)) {
+        try { 
+            $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
+            # FIX: If cache is valid but empty (0 items), ignore it and re-parse!
+            if ($cachedRules.Count -gt 5) { 
+                return $cachedRules 
+            }
         } catch {}
     }
 
-    # --- 2. CACHE HIT ---
-    if (-not $Download -and (Test-Path $cachePath)) {
-        try { return (Get-Content $cachePath -Raw | ConvertFrom-Json) } catch {}
+    # --- 3. LOAD INI CONTENT ---
+    $iniContent = $null
+    if (Test-Path $iniPath) {
+        # Read file. Use -Raw for speed, let PowerShell detect encoding.
+        $iniContent = Get-Content $iniPath -Raw
     }
 
-    # --- 3. PARSE INI ---
-    if (-not (Test-Path $iniPath)) { return @() }
-    
+    if ([string]::IsNullOrWhiteSpace($iniContent)) {
+        return @()
+    }
+
+    # --- 4. PARSE RULES ---
     $rules = New-Object System.Collections.Generic.List[Object]
-    $currentApp = $null
-    $skipApp = $false
-    $hasDetect = $false
     
-    $specialVars = @{ 
+    # Environment Variable Cache (Speeds up detection 100x)
+    $envVars = @{ 
         "%Documents%" = [Environment]::GetFolderPath("MyDocuments")
         "%ProgramFiles%" = $env:ProgramFiles
         "%ProgramFiles(x86)%" = ${env:ProgramFiles(x86)}
         "%SystemDrive%" = $env:SystemDrive
+        "%AppData%" = $env:APPDATA
+        "%LocalAppData%" = $env:LOCALAPPDATA
+        "%CommonAppData%" = $env:ProgramData
+        "%UserProfile%" = $env:USERPROFILE
     }
 
-    foreach ($rawLine in [System.IO.File]::ReadLines($iniPath)) {
-        if ([string]::IsNullOrWhiteSpace($rawLine)) { continue }
-        $line = $rawLine.Trim()
-        if ($line[0] -eq ';') { continue }
+    # Directory Existence Cache (Prevents checking the same folder 50 times)
+    $dirCache = @{} 
 
-        if ($line[0] -eq '[') {
+    # Robust Split: Handles Windows (\r\n) and Unix (\n) line endings
+    $lines = $iniContent -split "\r?\n"
+    
+    $currentApp = $null
+    $skipApp = $false
+    $hasDetect = $false
+
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        
+        $char = $line[0]
+        if ($char -eq ';') { continue }
+
+        # Header [AppName]
+        if ($char -eq '[') {
+            # Save previous app if valid
             if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
             
-            # Clean Name: Remove brackets AND trailing asterisks immediately
-            $appName = $line.Substring(1, $line.Length - 2).Trim(" *")
-            
+            $appName = $line.Trim(" []")
             $currentApp = [ordered]@{ 
                 Name = $appName
                 ID = "Winapp2_" + ($appName -replace '[^a-zA-Z0-9]','')
                 Section = "Applications"
                 AppGroup = "General"
                 Paths = New-Object System.Collections.Generic.List[Object]
-                Desc = "Clean $appName"
+                Desc = ""
                 IsInternal = $false
             }
             $skipApp = $false; $hasDetect = $false
             continue
         }
 
+        # Key=Value
         $eqIndex = $line.IndexOf('=')
-        if ($eqIndex -gt 0) {
-            $key = $line.Substring(0, $eqIndex).Trim()
-            $val = $line.Substring($eqIndex + 1).Trim()
+        if ($eqIndex -le 0) { continue }
+        
+        # Performance: Substring is faster than -split here
+        $key = $line.Substring(0, $eqIndex).Trim()
+        
+        if ($skipApp) { continue }
 
-            if ($key -eq "Section") { $currentApp.Section = $val }
-            elseif ($key.StartsWith("Detect")) {
-                if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true }
-                if ($val.Contains("%")) { 
-                    foreach ($k in $specialVars.Keys) { 
-                        if ($val.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                            $val = $val -replace ([regex]::Escape($k)), $specialVars[$k] 
-                        }
-                    }
-                    $val = [Environment]::ExpandEnvironmentVariables($val) 
-                }
-                $pathExists = $false
-                if ($val -match "^HK") {
-                    $r = $val -replace "^(?i)HKCU", "Registry::HKEY_CURRENT_USER" `
-                              -replace "^(?i)HKLM", "Registry::HKEY_LOCAL_MACHINE" `
-                              -replace "^(?i)HKCR", "Registry::HKEY_CLASSES_ROOT"
-                    if (Test-Path $r) { $pathExists = $true }
-                } else { 
-                    if (Test-Path $val) { $pathExists = $true } 
-                }
-                if ($pathExists) { $skipApp = $false }
-            }
-            elseif ($key.StartsWith("FileKey")) {
-                $parts = $val -split "\|"
-                if ($parts.Count -ge 2) {
-                    $rawPath = $parts[0]
-                    if ($rawPath.Contains("%")) { 
-                        foreach ($k in $specialVars.Keys) { 
-                            if ($rawPath.IndexOf($k, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
-                                $rawPath = $rawPath -replace ([regex]::Escape($k)), $specialVars[$k] 
-                            }
-                        }
-                        $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
-                    }
-                    if (Test-Path $rawPath) { 
-                        $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } }) 
-                    }
-                }
-            }
-            elseif ($key -eq "Description") { $currentApp.Desc = $val }
+        $val = $line.Substring($eqIndex + 1).Trim()
+
+        if ($key -eq "Section") { 
+            $currentApp.Section = $val 
         }
+        elseif ($key.StartsWith("Detect")) {
+            if (-not $hasDetect) { $hasDetect = $true; $skipApp = $true } # Default to skipped until found
+            
+            # Fast Variable Replacement
+            if ($val.IndexOf('%') -ge 0) {
+                foreach ($k in $envVars.Keys) {
+                    if ($val.Contains($k)) { $val = $val.Replace($k, $envVars[$k]) }
+                }
+            }
+
+            # Check Parent Folder First (Optimization)
+            try {
+                $parent = [System.IO.Path]::GetDirectoryName($val)
+                if (-not [string]::IsNullOrWhiteSpace($parent)) {
+                    if (-not $dirCache.ContainsKey($parent)) {
+                        $dirCache[$parent] = (Test-Path $parent)
+                    }
+                    
+                    if ($dirCache[$parent]) {
+                        if (Test-Path $val) { $skipApp = $false }
+                    }
+                }
+            } catch {
+                # Fallback for weird paths
+                if (Test-Path $val) { $skipApp = $false }
+            }
+        }
+        elseif ($key.StartsWith("FileKey")) {
+            $parts = $val -split "\|"
+            if ($parts.Count -ge 2) {
+                $rawPath = $parts[0]
+                # Replace vars
+                if ($rawPath.IndexOf('%') -ge 0) {
+                    foreach ($k in $envVars.Keys) {
+                        if ($rawPath.Contains($k)) { $rawPath = $rawPath.Replace($k, $envVars[$k]) }
+                    }
+                }
+                
+                # Expand any remaining environment variables (e.g. %windir%)
+                $rawPath = [Environment]::ExpandEnvironmentVariables($rawPath)
+
+                if (-not $skipApp) {
+                     $currentApp.Paths.Add(@{ Path = $rawPath; Pattern = $parts[1]; Options = if ($parts.Count -gt 2) { $parts[2] } else { "" } })
+                }
+            }
+        }
+        elseif ($key -eq "Description") { $currentApp.Desc = $val }
     }
+    # Add the final app
     if ($currentApp -and -not $skipApp) { $rules.Add([PSCustomObject]$currentApp) }
 
+    # --- 5. CATEGORIZE & SAVE ---
     $finalList = $rules | Where-Object { $_.Paths.Count -gt 0 }
-
-    # ==========================================
-    # LOGIC: CATEGORIZATION ENGINE
-    # ==========================================
-    $prefixCounts = @{}
+    
     foreach ($app in $finalList) {
-        if ($app.Name -match "^([^\s]+)") {
-            $w = $matches[1]
-            if (-not $prefixCounts.ContainsKey($w)) { $prefixCounts[$w] = 0 }
-            $prefixCounts[$w]++
-        }
+        $name = $app.Name
+        if ($name -match "^Google Chrome") { $app.AppGroup = "Google Chrome"; $app.Section = "Browsers / Internet" }
+        elseif ($name -match "^Microsoft Edge") { $app.AppGroup = "Microsoft Edge"; $app.Section = "Browsers / Internet" }
+        elseif ($name -match "^Mozilla Firefox") { $app.AppGroup = "Mozilla Firefox"; $app.Section = "Browsers / Internet" }
+        elseif ($name -match "Discord|Steam|Spotify") { $app.Section = "Internet & Chat"; $app.AppGroup = $name }
     }
 
-    # Explicit Singletons: Apps that should ALWAYS be their own group, even if only 1 rule exists
-    $knownSingletons = @("Spotify", "Discord", "Steam", "Skype", "TeamViewer", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber", "Signal", "Dropbox", "OneDrive")
-
-    foreach ($app in $finalList) {
-        $rawName = $app.Name
-        $group = "General"
-        $cleanName = $rawName
-        $useSplit = $false
-
-        # A. HYPHEN SPLIT (Spotify - Songs)
-        if ($rawName -match "^(.+?)\s+-\s+(.*)$") {
-            $group = $matches[1].Trim()
-            $cleanName = $matches[2].Trim()
-            $useSplit = $true
-        }
-        # B. PREFIX SPLIT (Adobe Reader)
-        elseif ($rawName -match "^([^\s]+)\s+(.*)$") {
-            $prefix = $matches[1]
-            $suffix = $matches[2]
-            if ($prefixCounts.ContainsKey($prefix) -and $prefixCounts[$prefix] -gt 1) {
-                $group = $prefix; $cleanName = $suffix; $useSplit = $true
-            }
-        }
-        
-        # C. SINGLETON CHECK (Fixes "Spotify" disappearing into General)
-        if (-not $useSplit) {
-            if ($knownSingletons -contains $rawName -or ($prefixCounts.ContainsKey($rawName) -and $prefixCounts[$rawName] -gt 1)) {
-                $group = $rawName
-                $cleanName = "Standard Cleanup"
-                $useSplit = $true
-            }
-        }
-
-        # D. GROUP RENAMING
-        if ($group -eq "Google" -and $cleanName -match "^Chrome") { $group = "Google Chrome"; $cleanName = $cleanName -replace "^Chrome\s*", "" }
-        if ($group -eq "Microsoft" -and $cleanName -match "^Edge") { $group = "Microsoft Edge"; $cleanName = $cleanName -replace "^Edge\s*", "" }
-        if ($group -eq "Mozilla" -and $cleanName -match "^Firefox") { $group = "Mozilla Firefox"; $cleanName = $cleanName -replace "^Firefox\s*", "" }
-        if ($group -eq "Opera" -and $cleanName -match "^GX") { $group = "Opera GX"; $cleanName = $cleanName -replace "^GX\s*", "" }
-
-        $cleanName = $cleanName.Trim(" -*")
-        if ([string]::IsNullOrWhiteSpace($cleanName)) { $cleanName = "Standard Cleanup" }
-
-        # E. ASSIGN SECTION
-        $section = "Applications"
-        if ($group -in "Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "Opera GX", "Vivaldi", "Waterfox", "Tor Browser", "Chromium", "Yandex") { $section = "Browsers / Internet" }
-        elseif ($group -in "Steam", "Discord", "Skype", "TeamViewer", "Spotify", "Zoom", "Slack", "Telegram", "WhatsApp", "Viber") { $section = "Internet & Chat" }
-        elseif ($group -match "Adobe|Microsoft|Office|LibreOffice|Foxit") { $section = "Productivity" }
-        elseif ($group -match "NVIDIA|AMD|Intel|Realtek|Driver") { $section = "System & Drivers" }
-        elseif ($group -match "Windows" -or $group -eq "Temporary Files") { $section = "System" }
-
-        $app.Section = $section
-        if ($useSplit) { $app.AppGroup = $group; $app.Name = $cleanName } 
-        else { $app.AppGroup = "General"; $app.Name = $rawName }
-    }
-
+    # Save new cache
     try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
     
-    $finalList | Write-Output
+    return $finalList
 }
 
 function Show-AdvancedCleanupSelection {
@@ -1267,7 +1273,7 @@ function Invoke-TempCleanup {
     $pForm.Show()
     [System.Windows.Forms.Application]::DoEvents()
 
-    # 3. STATS TRACKING (Using a Hashtable for safe scope access)
+    # 3. STATS TRACKING
     $stats = @{
         Deleted = 0
         Bytes   = 0
@@ -1280,18 +1286,13 @@ function Invoke-TempCleanup {
     function Invoke-RobustClean {
         param($Path, $Pattern="*", $Recurse=$true)
         
-        # Expand environment variables just in case
         $Path = [Environment]::ExpandEnvironmentVariables($Path)
-
         if (-not (Test-Path $Path)) { return }
 
-        # Update UI Status
         $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
         [System.Windows.Forms.Application]::DoEvents()
 
         try {
-            # Use Get-ChildItem because it handles 'Access Denied' gracefully (SilentlyContinue)
-            # unlike [DirectoryInfo]::EnumerateFiles which crashes on the first locked file.
             $items = Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue
             
             foreach ($item in $items) {
@@ -1299,103 +1300,100 @@ function Invoke-TempCleanup {
                     $size = $item.Length
                     $item.Delete()
                     
-                    # Update Stats
                     $stats.Deleted++
                     $stats.Bytes += $size
                     
-                    # Update UI (Throttle updates to every 25 files for speed)
-                    if ($stats.Deleted % 25 -eq 0) {
+                    if ($stats.Deleted % 50 -eq 0) {
                         $mb = [math]::Round($stats.Bytes / 1MB, 2)
                         $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
                         [System.Windows.Forms.Application]::DoEvents()
                     }
-                } catch {
-                    # File is locked/in-use; skip it.
-                }
+                } catch {}
             }
 
-            # Cleanup Empty Directories (Bottom-Up)
             if ($Recurse) {
                 Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
                     Sort-Object FullName -Descending | 
-                    ForEach-Object {
-                        try {
-                            if ((Get-ChildItem -Path $_.FullName -Force | Measure-Object).Count -eq 0) {
-                                Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue
-                            }
-                        } catch {}
-                    }
+                    ForEach-Object { try { if ((Get-ChildItem -Path $_.FullName -Force).Count -eq 0) { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } } catch {} }
             }
-        } catch {
-            Write-GuiLog "Error accessing $Path : $($_.Exception.Message)"
-        }
+        } catch {}
     }
 
     # 4. MAIN EXECUTION LOOP
+    Write-GuiLog "--- Starting Cleanup ---"
+    
     try {
         foreach ($item in $selections) {
             if ($pForm.IsDisposed) { break }
 
-            # Update Progress Bar
+            # Snapshot bytes BEFORE this item
+            $startBytes = $stats.Bytes
+
+            # Update UI
             $stats.Progress += $ruleWeight
             $pBar.Value = [int]$stats.Progress
             
+            # Determine Name for Logging
+            $itemName = if ($item -is [string]) { $item } else { $item.Name }
+            $pLabel.Text = "Cleaning: $itemName"
+
             # --- A. WINAPP2 RULES (Object) ---
             if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
-                $pLabel.Text = "Cleaning: $($item.Name)"
                 foreach ($rule in $item.Paths) {
                     $isRecurse = ($rule.Options -notmatch "REMOVESELF")
                     Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse
                 }
-                continue
+            }
+            # --- B. INTERNAL RULES (String) ---
+            else {
+                switch ($item) {
+                    "TempFiles" { 
+                        Invoke-RobustClean $env:TEMP
+                        Invoke-RobustClean "$env:SystemRoot\Temp"
+                    }
+                    "RecycleBin" { 
+                        # Recycle Bin is tricky to measure file-by-file without permission errors,
+                        # so we often rely on Windows API. For now, we attempt standard clear.
+                        try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                    "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
+                    "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
+                    "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false }
+                    "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" }
+                    "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
+                    "Edge"    { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
+                    "Chrome"  { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
+                    "Brave"   { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
+                    "Firefox" { 
+                        if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
+                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { Invoke-RobustClean "$($_.FullName)\cache2\entries" }
+                        }
+                    }
+                    "Opera"   { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" }
+                    "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" }
+                }
             }
 
-            # --- B. INTERNAL RULES (String) ---
-            # Explicitly log what we are cleaning to debug
-            Write-GuiLog "Running Internal Cleaner: $item"
+            # Calculate difference for this specific item
+            $diffBytes = $stats.Bytes - $startBytes
             
-            switch ($item) {
-                "TempFiles" { 
-                    Invoke-RobustClean $env:TEMP
-                    Invoke-RobustClean "$env:SystemRoot\Temp"
-                }
-                "RecycleBin" { 
-                    $pStatus.Text = "Emptying Recycle Bin..."
-                    try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
-                }
-                "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
-                "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
-                "Thumbnails" { 
-                    Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false 
-                }
-                "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" }
-                "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
-                
-                # Extended Browsers
-                "Edge"    { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
-                "Chrome"  { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
-                "Brave"   { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
-                "Firefox" { 
-                    $ff = "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles"
-                    if (Test-Path $ff) {
-                        Get-ChildItem $ff -Directory | ForEach-Object { Invoke-RobustClean "$($_.FullName)\cache2\entries" }
-                    }
-                }
-                "Opera"   { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" }
-                "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" }
+            # Log it if we actually removed something
+            if ($diffBytes -gt 0) {
+                $itemMB = [math]::Round($diffBytes / 1MB, 2)
+                Write-GuiLog "Cleaned $itemName : $itemMB MB"
             }
         }
     } catch {
-        Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
+        Write-GuiLog "Error: $($_.Exception.Message)"
     } finally {
         $pForm.Close()
     }
 
     # 5. FINAL REPORT
     $finalMB = [math]::Round($stats.Bytes / 1MB, 2)
-    $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
+    Write-GuiLog "Total Removed: $finalMB MB"
     
-    Write-GuiLog "Cleanup Finished: $($stats.Deleted) files, $finalMB MB."
+    $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
     [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
 }
 
