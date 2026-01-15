@@ -76,6 +76,13 @@ MIT Licensed — see `LICENSE`.
 
 ---
 
+## 🖥️ Other programs ive made
+[MSS Mac Service Script](https://github.com/ios12checker/MSS-Mac-Service-Script)
+
+[Winrar Patcher](https://github.com/ios12checker/Winrar-Patcher)
+
+---
+
 ## 🤝 Contributing
 
 Issues/PRs welcome. Please include repro steps and environment details for bugs.
