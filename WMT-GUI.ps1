@@ -5396,9 +5396,12 @@ $btnNavDownloads.Add_Click({ Show-DownloadStats })
 
 # --- LAUNCH ---
 $window.Add_Loaded({ 
+    # 1. Click the Updates tab by default
     (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
     
-    # Trigger the background update check after the window loads
+    # 2. Trigger the background update check
     Start-UpdateCheckBackground
 })
+
+# 3. Show the Window
 $window.ShowDialog() | Out-Null
