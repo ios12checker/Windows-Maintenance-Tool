@@ -3602,6 +3602,111 @@ function Invoke-MASActivation {
     } "Running MAS activation..."
 }
 
+function Show-ContextMenuBuilder {
+    # Ensure libraries are loaded
+    Add-Type -AssemblyName System.Windows.Forms
+    Add-Type -AssemblyName System.Drawing
+
+    # --- SETUP FORM ---
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Custom Context Menu Builder"
+    $f.Size = New-Object System.Drawing.Size(600, 420) # Increased height for description
+    $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $f.ForeColor = "White"
+    $f.FormBorderStyle = "FixedDialog"
+    $f.MaximizeBox = $false
+
+    # --- HEADER / WARNING ---
+    $lblWarn = New-Object System.Windows.Forms.Label
+    $lblWarn.Text = "NOTE: This tool replaces the 'Set as desktop background' option to force your custom action into the top-level Windows 11 menu."
+    $lblWarn.Location = "20, 10"; $lblWarn.Size = "540, 40"
+    $lblWarn.ForeColor = "Yellow" # Highlight the warning
+    $lblWarn.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+    $f.Controls.Add($lblWarn)
+
+    # --- UI INPUTS ---
+    $lbl1 = New-Object System.Windows.Forms.Label; $lbl1.Text = "Menu Name:"; $lbl1.Location = "20, 50"; $lbl1.ForeColor = "LightGray"; $lbl1.AutoSize = $true; $f.Controls.Add($lbl1)
+    
+    $txtName = New-Object System.Windows.Forms.TextBox; $txtName.Location = "20, 75"; $txtName.Width = 540; 
+    $txtName.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtName.ForeColor = "White"
+    $txtName.Text = "Take Ownership" # DEFAULT VALUE
+    $f.Controls.Add($txtName)
+
+    $lbl2 = New-Object System.Windows.Forms.Label; $lbl2.Text = "Command:"; $lbl2.Location = "20, 115"; $lbl2.ForeColor = "LightGray"; $lbl2.AutoSize = $true; $f.Controls.Add($lbl2)
+    
+    $txtCmd = New-Object System.Windows.Forms.TextBox; $txtCmd.Location = "20, 140"; $txtCmd.Width = 450; 
+    $txtCmd.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtCmd.ForeColor = "White"
+    # DEFAULT COMMAND (Take Ownership)
+    $txtCmd.Text = 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f \"%1\" /r /d y && icacls \"%1\" /grant administrators:F /t'' -Verb runAs"'
+    $f.Controls.Add($txtCmd)
+    
+    $btnBrowseCmd = New-Object System.Windows.Forms.Button; $btnBrowseCmd.Text = "Browse..."; $btnBrowseCmd.Location = "480, 138"; $btnBrowseCmd.Width = 80; $btnBrowseCmd.BackColor = "DimGray"; $btnBrowseCmd.ForeColor = "White"; $btnBrowseCmd.FlatStyle = "Flat"; $f.Controls.Add($btnBrowseCmd)
+
+    $lbl3 = New-Object System.Windows.Forms.Label; $lbl3.Text = "Icon Path (Optional):"; $lbl3.Location = "20, 180"; $lbl3.ForeColor = "LightGray"; $lbl3.AutoSize = $true; $f.Controls.Add($lbl3)
+    
+    $txtIcon = New-Object System.Windows.Forms.TextBox; $txtIcon.Location = "20, 205"; $txtIcon.Width = 450; 
+    $txtIcon.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtIcon.ForeColor = "White"
+    $txtIcon.Text = "imageres.dll,-78" # DEFAULT ICON (Shield)
+    $f.Controls.Add($txtIcon)
+    
+    $btnBrowseIcon = New-Object System.Windows.Forms.Button; $btnBrowseIcon.Text = "Browse..."; $btnBrowseIcon.Location = "480, 203"; $btnBrowseIcon.Width = 80; $btnBrowseIcon.BackColor = "DimGray"; $btnBrowseIcon.ForeColor = "White"; $btnBrowseIcon.FlatStyle = "Flat"; $f.Controls.Add($btnBrowseIcon)
+
+    $lblHint = New-Object System.Windows.Forms.Label; $lblHint.Text = "Hint: Use `"%1`" for the selected file.`nExample: `"C:\Apps\App.exe`" `"%1`""; $lblHint.Location = "20, 240"; $lblHint.AutoSize = $true; $lblHint.ForeColor = "Gray"; $f.Controls.Add($lblHint)
+
+    # --- BUTTONS ---
+    $btnApply = New-Object System.Windows.Forms.Button; $btnApply.Text = "Apply to Menu"; $btnApply.Location = "20, 290"; $btnApply.Width = 160; $btnApply.Height = 35; $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"; $f.Controls.Add($btnApply)
+    
+    $btnRemove = New-Object System.Windows.Forms.Button; $btnRemove.Text = "Remove from Menu"; $btnRemove.Location = "200, 290"; $btnRemove.Width = 160; $btnRemove.Height = 35; $btnRemove.BackColor = "IndianRed"; $btnRemove.ForeColor = "White"; $btnRemove.FlatStyle = "Flat"; $f.Controls.Add($btnRemove)
+    
+    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = "Cancel"; $btnClose.Location = "460, 290"; $btnClose.Width = 100; $btnClose.Height = 35; $btnClose.BackColor = "DimGray"; $btnClose.ForeColor = "White"; $btnClose.FlatStyle = "Flat"; $f.Controls.Add($btnClose)
+
+    # --- LOGIC ---
+    $f.AcceptButton = $btnApply 
+    $f.CancelButton = $btnClose
+
+    $btnBrowseCmd.Add_Click({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = "Programs|*.exe;*.bat;*.cmd|All Files|*.*"
+        if ($dlg.ShowDialog() -eq "OK") { $txtCmd.Text = "`"$($dlg.FileName)`" `"%1`"" }
+    })
+    $btnBrowseIcon.Add_Click({
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = "Icons|*.ico;*.exe;*.dll|All Files|*.*"
+        if ($dlg.ShowDialog() -eq "OK") { $txtIcon.Text = $dlg.FileName }
+    })
+
+    $btnApply.Add_Click({
+        if ([string]::IsNullOrWhiteSpace($txtName.Text) -or [string]::IsNullOrWhiteSpace($txtCmd.Text)) { [System.Windows.Forms.MessageBox]::Show("Name and Command are required."); return }
+        
+        $targets = @("HKCU:\Software\Classes\*\shell\SetDesktopWallpaper", "HKCU:\Software\Classes\Directory\shell\SetDesktopWallpaper")
+        try {
+            foreach ($key in $targets) {
+                if (-not (Test-Path -LiteralPath $key)) { New-Item -Path $key -Force | Out-Null }
+                Set-ItemProperty -LiteralPath $key -Name "MUIVerb" -Value $txtName.Text
+                Set-ItemProperty -LiteralPath $key -Name "MultiSelectModel" -Value "Player"
+                if (-not [string]::IsNullOrWhiteSpace($txtIcon.Text)) { Set-ItemProperty -LiteralPath $key -Name "Icon" -Value $txtIcon.Text }
+                
+                $cmdKey = Join-Path $key "command"
+                if (-not (Test-Path -LiteralPath $cmdKey)) { New-Item -Path $cmdKey -Force | Out-Null }
+                Set-Item -LiteralPath $cmdKey -Value $txtCmd.Text
+            }
+            [System.Windows.Forms.MessageBox]::Show("Context Menu updated successfully!", "Success", "OK", "Information")
+            $f.Close()
+        } catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message) }
+    })
+
+    $btnRemove.Add_Click({
+        if ([System.Windows.Forms.MessageBox]::Show("Remove the custom menu item?", "Confirm", "YesNo") -eq "Yes") {
+            $targets = @("HKCU:\Software\Classes\*\shell\SetDesktopWallpaper", "HKCU:\Software\Classes\Directory\shell\SetDesktopWallpaper")
+            foreach ($key in $targets) { if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue } }
+            [System.Windows.Forms.MessageBox]::Show("Item removed.", "Success")
+            $f.Close()
+        }
+    })
+    
+    $btnClose.Add_Click({ $f.Close() })
+    $f.ShowDialog() | Out-Null
+}
+
 # --- FIREWALL RULE DIALOG ---
 function Show-RuleDialog {
     param($Title, $RuleObj=$null) 
@@ -4032,6 +4137,7 @@ function Show-TaskManager {
                         <Button Name="btnUtilTrim" Content="Trim SSD" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnUtilMas" Content="MAS Activation" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnTaskManager" Content="Task Scheduler Manager" Width="200" Style="{StaticResource ActionBtn}" Background="#004444"/>
+                        <Button Name="btnCtxBuilder" Content="Custom Context Menu" Width="200" Style="{StaticResource ActionBtn}" Background="#004444"/>
                     </WrapPanel>
 
                     <TextBlock Text="Repairs &amp; Settings" Foreground="#888" Margin="5"/>
@@ -4166,7 +4272,6 @@ Set-ButtonIcon "btnDotNetEnable" "M14.6,16.6L19.2,12L14.6,7.4L16,6L22,12L16,18L1
 Set-ButtonIcon "btnDotNetDisable" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Reset .NET RollFwd" "Removes the DOTNET_ROLL_FORWARD environment variable"
 Set-ButtonIcon "btnTaskManager" "M14,10H2V12H14V10M14,6H2V8H14V6M2,16H10V14H2V16M21.5,11.5L23,13L16,20L11.5,15.5L13,14L16,17L21.5,11.5Z" "Task Scheduler" "View, Enable, Disable, or Delete Windows Scheduled Tasks"
 Set-ButtonIcon "btnInstallGpedit" "M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2H6M6,4H13V9H18V20H6V4M8,12V14H16V12H8M8,16V18H13V16H8Z" "Install Gpedit" "Installs the Group Policy Editor on Windows Home editions"
-
 Set-ButtonIcon "btnSFC" "M15.5,14L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5M9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14Z" "SFC Scan" "Scans system files for corruption and repairs them"
 Set-ButtonIcon "btnDISMCheck" "M22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10H22M19.5,12.5C19.5,11.1 20.6,10 22,10H8V15H19.5V12.5Z" "DISM Check" "Checks the health of the Windows Image (dism /checkhealth)"
 Set-ButtonIcon "btnDISMRestore" "M19.5,12.5C19.5,11.1 20.6,10 22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10C9.4,10 10.5,11.1 10.5,12.5C10.5,13.9 9.4,15 8,15V19H12V22H8C6.3,22 5,20.7 5,19V15C3.6,15 2.5,13.9 2.5,12.5C2.5,11.1 3.6,10 5,10V9C5,3.5 9.5,-1 15,-1C20.5,-1 25,3.5 25,9V10C26.4,10 27.5,11.1 27.5,12.5C27.5,13.9 26.4,15 25,15V19C25,20.7 23.7,22 22,22H17V19H22V15C20.6,15 19.5,13.9 19.5,12.5Z" "DISM Restore" "Attempts to repair the Windows Image (dism /restorehealth)"
@@ -4221,7 +4326,7 @@ Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,1
 Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
 Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
 Set-ButtonIcon "btnUtilMas" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "MAS Activation" "Downloads and runs Microsoft Activation Scripts"
-
+Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Context Menu Builder" "Create a custom right-click action for Windows 11"
 # ==========================================
 # 5. LOGIC & EVENTS
 # ==========================================
@@ -4301,6 +4406,7 @@ $btnDotNetEnable = Get-Ctrl "btnDotNetEnable"
 $btnDotNetDisable = Get-Ctrl "btnDotNetDisable"
 $btnTaskManager = Get-Ctrl "btnTaskManager"
 $btnInstallGpedit = Get-Ctrl "btnInstallGpedit"
+$btnCtxBuilder = Get-Ctrl "btnCtxBuilder"
 
 $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
@@ -4413,6 +4519,7 @@ Add-SearchIndexEntry "btnDotNetEnable"      "Set .NET RollForward"            "b
 Add-SearchIndexEntry "btnDotNetDisable"     "Reset .NET RollForward"          "btnTabUtils"
 Add-SearchIndexEntry "btnTaskManager"       "Task Scheduler Manager"          "btnTabUtils"
 Add-SearchIndexEntry "btnInstallGpedit"     "Install Group Policy (Home)"     "btnTabUtils"
+Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
 
 # 8. Support
 Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
@@ -5379,7 +5486,7 @@ $btnUtilTrim.Add_Click({
 $btnUtilSysInfo.Add_Click({ Invoke-SystemReports })
 $btnUtilMas.Add_Click({ Invoke-MASActivation })
 $btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
-
+$btnCtxBuilder.Add_Click({ Show-ContextMenuBuilder })
 
 # --- Support ---
 $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
