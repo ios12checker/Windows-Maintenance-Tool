@@ -233,72 +233,129 @@ function Show-DownloadStats {
 }
 
 # --- UPDATE CHECKER ---
-function Invoke-UpdateCheck {
-    $lb = Get-Ctrl "LogBox"
-    
-    # 1. CONFIG & CACHE BUSTING
-    $time = Get-Date -Format "yyyyMMddHHmmss"
-    $updateUrl = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/refs/heads/main/WMT-GUI.ps1?t=$time"
-    
-    $localVer = [Version]$script:AppVersion
-    $remoteVer = [Version]"0.0"
-    $remoteContent = $null
-
-    # 2. GET REMOTE VERSION
-    if ($lb) { 
-        $lb.AppendText("`n[UPDATE] Checking for updates...`n") 
-        $lb.ScrollToEnd()
+function Start-UpdateCheckBackground {
+    # 1. Access LogBox
+    $lbStart = Get-Ctrl "LogBox"
+    if ($lbStart) { 
+        $lbStart.AppendText("`n[UPDATE] Checking for updates...`n") 
+        $lbStart.ScrollToEnd()
     }
 
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $webReq = Invoke-WebRequest -Uri $updateUrl -UseBasicParsing -TimeoutSec 5
-        $remoteContent = $webReq.Content
+    $localVersionStr = $script:AppVersion
 
-        # Robust Regex Matching
-        if ($remoteContent -match '\$AppVersion\s*=\s*"(\d+(\.\d+)+)"') {
-            $remoteVer = [Version]$matches[1]
-        }
-        elseif ($remoteContent -match "Windows Maintenance Tool.*v(\d+(\.\d+)+)") {
-            $remoteVer = [Version]$matches[1]
-        }
-    } catch {
-        if ($lb) { 
-            $lb.AppendText("[UPDATE] Check failed: $($_.Exception.Message)`n")
-            $lb.ScrollToEnd() 
-        }
-        return
-    }
-
-    if ($lb) { 
-        $lb.AppendText("[UPDATE] Local: v$localVer | Remote: v$remoteVer`n") 
-        $lb.ScrollToEnd()
-    }
-
-    # 3. COMPARE & INSTALL
-    if ($remoteVer -gt $localVer) {
-        if ($lb) { $lb.AppendText(" -> Update Available!`n"); $lb.ScrollToEnd() }
+    # 2. Start Background Job
+    $script:UpdateJob = Start-Job -ScriptBlock {
+        param($CurrentVer)
         
-        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
-        $result = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        
+        $jobRes = @{
+            Status        = "Failed"
+            RemoteVersion = "0.0"
+            Content       = ""
+            Error         = ""
+        }
 
-        if ($result -eq "Yes") {
+        try {
+            $time = Get-Date -Format "yyyyMMddHHmmss"
+            $url  = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/main/WMT-GUI.ps1?t=$time"
+            
+            $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15
+            $content = $req.Content
+            $jobRes.Content = $content
+
+            if ($content -match '\$AppVersion\s*=\s*"(\d+(\.\d+)+)"') {
+                $jobRes.RemoteVersion = $matches[1]
+                $jobRes.Status = "Success"
+            }
+            elseif ($content -match "Windows Maintenance Tool.*v(\d+(\.\d+)+)") {
+                $jobRes.RemoteVersion = $matches[1]
+                $jobRes.Status = "Success"
+            } else {
+                $jobRes.Error = "Version string not found."
+            }
+        } catch {
+            $jobRes.Error = $_.Exception.Message
+        }
+
+        return ($jobRes | ConvertTo-Json -Depth 2 -Compress)
+
+    } -ArgumentList $localVersionStr
+
+    # 3. Setup Timer
+    $script:UpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:UpdateTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:UpdateTicks = 0
+    
+    $script:UpdateTimer.Add_Tick({
+        $lb = Get-Ctrl "LogBox"
+        $script:UpdateTicks++
+        
+        # A. Timeout Check (30s)
+        if ($script:UpdateTicks -gt 60) {
+            $script:UpdateTimer.Stop()
+            if ($script:UpdateJob) { Stop-Job -Job $script:UpdateJob; Remove-Job -Job $script:UpdateJob }
+            $script:UpdateJob = $null
+            if ($lb) { $lb.AppendText("[UPDATE] Error: Request timed out.`n"); $lb.ScrollToEnd() }
+            return
+        }
+
+        # B. Check Job Status
+        if ($script:UpdateJob.State -ne 'Running') {
+            $script:UpdateTimer.Stop()
+            
+            $rawOutput = Receive-Job -Job $script:UpdateJob
+            Remove-Job -Job $script:UpdateJob
+            $script:UpdateJob = $null
+            
+            if (-not $rawOutput) {
+                 if ($lb) { $lb.AppendText("[UPDATE] Error: Job returned no data.`n"); $lb.ScrollToEnd() }
+                 return
+            }
+
             try {
-                $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
-                $backupPath = Join-Path (Get-DataPath) $backupName
-                Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
-                Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
+                $jsonStr = $rawOutput | Select-Object -Last 1
+                $jobResult = $jsonStr | ConvertFrom-Json
                 
-                [System.Windows.MessageBox]::Show("Update complete! Backup saved to data folder.`nRestarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-                Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
-                exit
+                if ($jobResult.Status -eq "Success") {
+                    $localVer  = [Version]$script:AppVersion
+                    $remoteVer = [Version]$jobResult.RemoteVersion
+                    
+                    if ($lb) { 
+                        $lb.AppendText("[UPDATE] Local: v$localVer | Remote: v$remoteVer`n")
+                        $lb.ScrollToEnd()
+                    }
+
+                    if ($remoteVer -gt $localVer) {
+                        if ($lb) { $lb.AppendText(" -> Update Available!`n"); $lb.ScrollToEnd() }
+                        
+                        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+                        $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
+                        
+                        if ($mbRes -eq "Yes") {
+                            $remoteContent = $jobResult.Content
+                            $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
+                            $backupPath = Join-Path (Get-DataPath) $backupName
+                            Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
+                            Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
+                            
+                            [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
+                            Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
+                            exit
+                        }
+                    } else {
+                        if ($lb) { $lb.AppendText(" -> System is up to date.`n"); $lb.ScrollToEnd() }
+                    }
+                } else {
+                    if ($lb) { $lb.AppendText("[UPDATE] Failed: $($jobResult.Error)`n"); $lb.ScrollToEnd() }
+                }
             } catch {
-                [System.Windows.MessageBox]::Show("Update failed: $_", "Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+                if ($lb) { $lb.AppendText("[UPDATE] Processing Error: $($_.Exception.Message)`n"); $lb.ScrollToEnd() }
             }
         }
-    } else {
-        if ($lb) { $lb.AppendText(" -> You are up to date.`n"); $lb.ScrollToEnd() }
-    }
+    })
+    
+    $script:UpdateTimer.Start()
 }
 
 # --- RESTORED LOGIC ---
@@ -5338,6 +5395,10 @@ $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
 $btnNavDownloads.Add_Click({ Show-DownloadStats })
 
 # --- LAUNCH ---
-Invoke-UpdateCheck
-$window.Add_Loaded({ (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
+$window.Add_Loaded({ 
+    (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+    
+    # Trigger the background update check after the window loads
+    Start-UpdateCheckBackground
+})
 $window.ShowDialog() | Out-Null
