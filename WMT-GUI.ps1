@@ -4879,228 +4879,192 @@ $btnWingetUninstall.Add_Click({
 })
 
 # ---------------------------------------------------------
-# HIGH-PERFORMANCE THREADED SCAN (UPDATES)
+# PARALLEL SCAN ENGINE
 # ---------------------------------------------------------
 
-# 1. SETUP SCAN TIMER
+# 1. SETUP MULTI-THREAD TIMER
 $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(100)
-$script:AsyncScan = $null
-$script:AsyncScanPS = $null
+$script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+# We now use a LIST of active scanners instead of just one
+$script:ActiveScans = [System.Collections.ArrayList]::new()
 
 $script:ScanTimer.Add_Tick({
-    if ($script:AsyncScan -and $script:AsyncScan.IsCompleted) {
-        $script:ScanTimer.Stop()
+    if ($script:ActiveScans.Count -gt 0) {
         
-        try {
-            $results = $script:AsyncScanPS.EndInvoke($script:AsyncScan)
-            $script:AsyncScanPS.Dispose()
+        # Iterate backwards so we can remove completed tasks safely
+        for ($i = $script:ActiveScans.Count - 1; $i -ge 0; $i--) {
+            $task = $script:ActiveScans[$i]
             
-            # Process Results
-            foreach ($item in $results) {
-                # --- CRITICAL FIX: Skip null items ---
-                if ($null -eq $item) { continue }
+            if ($task.AsyncResult.IsCompleted) {
+                try {
+                    $results = $task.PowerShell.EndInvoke($task.AsyncResult)
+                    $task.PowerShell.Dispose()
+                    
+                    # Process Results
+                    foreach ($item in $results) {
+                        if ($null -eq $item) { continue }
 
-                if ($item -is [string] -and $item.StartsWith("LOG:")) {
-                    Write-GuiLog ($item.Substring(4))
+                        if ($item -is [string] -and $item.StartsWith("LOG:")) {
+                            Write-GuiLog ($item.Substring(4))
+                        }
+                        elseif ($item.PSObject.Properties["Name"]) {
+                            # --- STRICT GARBAGE FILTER ---
+                            # Rejects headers, separators, and empty dashed lines
+                            if ($item.Name -match "^-+$" -or $item.Id -match "^-+$") { continue }
+                            if ($item.Name -eq "Name" -and $item.Id -eq "Id") { continue }
+                            if ($item.Name -eq "Source" -and $item.Id -eq "Name") { continue }
+                            if ($item.Version -eq "Version" -or $item.Available -eq "Available") { continue }
+                            
+                            # Add to UI
+                            [void]$lstWinget.Items.Add($item)
+                        }
+                    }
+                } catch {
+                    Write-GuiLog "Scan Error: $($_.Exception.Message)"
                 }
-                elseif ($item.PSObject.Properties["Name"]) {
-                    # Add to the correct UI list
-                    [void]$lstWinget.Items.Add($item)
-                }
+                
+                # Remove finished task
+                $script:ActiveScans.RemoveAt($i)
             }
-        } catch {
-            Write-GuiLog "Scan Thread Error: $($_.Exception.Message)"
         }
-
-        # UI Cleanup
-        $lblWingetStatus.Visibility = "Hidden"
-        $btnWingetScan.IsEnabled = $true
-        $btnWingetUpdateAll.IsEnabled = $true
-        $btnWingetUpdateSel.IsEnabled = $true
-        
-        if ($lstWinget.Items.Count -eq 0) {
-             Write-GuiLog "System is up to date."
-        } else {
-             Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
+    } else {
+        # All tasks finished
+        if ($script:ScanTimer.IsEnabled) {
+            $script:ScanTimer.Stop()
+            
+            $lblWingetStatus.Visibility = "Hidden"
+            $btnWingetScan.IsEnabled = $true
+            $btnWingetUpdateAll.IsEnabled = $true
+            $btnWingetUpdateSel.IsEnabled = $true
+            
+            if ($lstWinget.Items.Count -eq 0) {
+                 Write-GuiLog "System is up to date."
+            } else {
+                 Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
+            }
         }
-        
-        $script:AsyncScan = $null
-        $script:AsyncScanPS = $null
     }
 })
 
-# 2. BUTTON CLICK (Start Thread)
-# ---------------------------------------------------------
-# FIXED SCAN LOGIC (Threaded + Garbage Filter)
-# ---------------------------------------------------------
-
-$script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(100)
-$script:AsyncScan = $null
-$script:AsyncScanPS = $null
-
-$script:ScanTimer.Add_Tick({
-    if ($script:AsyncScan -and $script:AsyncScan.IsCompleted) {
-        $script:ScanTimer.Stop()
-        
-        try {
-            $results = $script:AsyncScanPS.EndInvoke($script:AsyncScan)
-            $script:AsyncScanPS.Dispose()
-            
-            foreach ($item in $results) {
-                if ($null -eq $item) { continue } # Safety Check
-
-                if ($item -is [string] -and $item.StartsWith("LOG:")) {
-                    Write-GuiLog ($item.Substring(4))
-                }
-                elseif ($item.PSObject.Properties["Name"]) {
-                    # --- FINAL GARBAGE CHECK (UI Thread) ---
-                    if ($item.Name -eq "Name" -or $item.Name -match "^-+$") { continue }
-                    if ($item.Id -eq "Id" -or $item.Id -eq "Version") { continue }
-
-                    [void]$lstWinget.Items.Add($item) # <-- Correct UI Element
-                }
-            }
-        } catch {
-            Write-GuiLog "Scan Thread Error: $($_.Exception.Message)"
-        }
-
-        $lblWingetStatus.Visibility = "Hidden"
-        $btnWingetScan.IsEnabled = $true
-        $btnWingetUpdateAll.IsEnabled = $true
-        $btnWingetUpdateSel.IsEnabled = $true
-        
-        if ($lstWinget.Items.Count -eq 0) {
-             Write-GuiLog "System is up to date."
-        } else {
-             Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
-        }
-        
-        $script:AsyncScan = $null
-        $script:AsyncScanPS = $null
-    }
-})
-
+# 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
-    $lblWingetStatus.Text = "Scanning for updates..."; $lblWingetStatus.Visibility = "Visible"
+    # UI Prep
+    $lblWingetStatus.Text = "Scanning all providers..."
+    $lblWingetStatus.Visibility = "Visible"
     $lstWinget.Items.Clear()
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateAll.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
     
     Write-GuiLog " "
-    Write-GuiLog "Starting Update Scan..."
+    Write-GuiLog "Starting Parallel Scan..."
 
+    # Get Settings
     $settings = Get-WmtSettings
     $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget", "msstore", "pip", "npm", "chocolatey") }
     $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
 
-    $scanBlock = {
-        param($Enabled, $IgnoreList)
-        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        function Log($msg) { Write-Output "LOG:$msg" }
-        
-        # --- WINGET SCAN ---
-        if ("winget" -in $Enabled -or "msstore" -in $Enabled) {
+    # Reset Task List
+    $script:ActiveScans.Clear()
+
+    # --- DEFINE PROVIDER WORKERS ---
+
+    # A. WINGET WORKER
+    if ("winget" -in $enabled -or "msstore" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($Enabled, $IgnoreList)
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            function Log($m){ Write-Output "LOG:$m" }
+            
             Log "Scanning Winget & Store..."
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo("powershell", "-NoProfile -Command `"winget list --upgrade-available --include-unknown --accept-source-agreements`"")
+            $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true; $pInfo.StandardOutputEncoding=[System.Text.UTF8Encoding]::new($false)
+            $p=[System.Diagnostics.Process]::Start($pInfo); $out=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
             
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pInfo.FileName = "powershell.exe"
-            $encCmd = "winget list --upgrade-available --include-unknown --accept-source-agreements"
-            $pInfo.Arguments = "-NoProfile -Command `"$encCmd`""
-            $pInfo.RedirectStandardOutput = $true; $pInfo.RedirectStandardError = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true; $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-            
-            try {
-                $p = [System.Diagnostics.Process]::Start($pInfo)
-                $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-
-                if ([string]::IsNullOrWhiteSpace($out)) { $lines = @() } else { $lines = $out -split "`r`n" }
+            if (-not [string]::IsNullOrWhiteSpace($out)) {
+                $lines = $out -split "`r`n"
                 $idxId = -1
-                foreach ($line in $lines) { if ($line -match "Name\s+Id\s+Version") { $idxId = $line.IndexOf("Id"); break } }
+                foreach($l in $lines){ if($l -match "Name\s+Id\s+Version"){$idxId=$l.IndexOf("Id"); break} }
 
-                foreach ($line in $lines) {
-                    $line = $line.Trim()
+                foreach($line in $lines){
+                    $line=$line.Trim(); if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
+                    $n=$null;$i=$null;$v=$null;$a=$null;$s="winget"
                     
-                    # --- IMPROVED GARBAGE FILTER ---
-                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                    if ($line -match "^-+$") { continue }
-                    if ($line -match "^Name\s+Id") { continue }
-                    
-                    $n=$null; $i=$null; $v=$null; $a=$null; $s="winget"
-
-                    if ($idxId -gt 0 -and $line.Length -gt $idxId) {
-                        $n = $line.Substring(0, $idxId).Trim()
-                        $rest = $line.Substring($idxId).Trim()
-                        $parts = $rest -split "\s+"
-                        if ($parts.Count -ge 4) { $i=$parts[0]; $v=$parts[1]; $a=$parts[2]; $s=$parts[3] }
-                        elseif ($parts.Count -ge 3) { $i=$parts[0]; $v=$parts[1]; $a=$parts[2] }
+                    if($idxId -gt 0 -and $line.Length -gt $idxId){
+                        $n=$line.Substring(0,$idxId).Trim(); $rest=$line.Substring($idxId).Trim(); $parts=$rest -split "\s+"
+                        if($parts.Count -ge 4){$i=$parts[0];$v=$parts[1];$a=$parts[2];$s=$parts[3]}
+                        elseif($parts.Count -ge 3){$i=$parts[0];$v=$parts[1];$a=$parts[2]}
                     }
-                    
-                    if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
-                        if ($matches.Count -ge 6) {
-                            $n=$matches[1].Trim(); $i=$matches[2].Trim(); $v=$matches[3].Trim(); $a=$matches[4].Trim(); $s=$matches[5].Trim()
-                        }
+                    if(!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)'){
+                        $n=$matches[1].Trim();$i=$matches[2].Trim();$v=$matches[3].Trim();$a=$matches[4].Trim();$s=$matches[5].Trim()
                     }
-
-                    if ($n -and $i) {
-                        if ($i.Length -le 2) { continue }
-                        
-                        # --- POST-PARSE FILTER ---
-                        if ($n -eq "Name" -or $i -eq "Id") { continue }
-                        if ($n -match "^-+$" -or $i -match "^-+$") { continue }
-
-                        if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { continue }
-                        if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
-                        if ($v -eq "Unknown") { $v = "?" }
-                        
-                        [PSCustomObject]@{ Source=$s; Name=$n; Id=$i; Version=$v; Available=$a }
+                    if($n -and $i -and $i.Length -gt 2){
+                        if($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)){continue}
+                        if($s -eq "msstore"){$s="msstore"}else{$s="winget"}
+                        if($v -eq "Unknown"){$v="?"}
+                        [PSCustomObject]@{Source=$s;Name=$n;Id=$i;Version=$v;Available=$a}
                     }
                 }
-            } catch { Log "Winget Scan Error: $_" }
-        }
-
-        # --- OTHER PROVIDERS (Pip, NPM, Choco) ---
-        if ("pip" -in $Enabled) {
-            Log "Scanning Pip..."
-            try {
-                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pip list --outdated --format=json"); $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-                if (-not [string]::IsNullOrWhiteSpace($json) -and $json.Trim().StartsWith("[")) {
-                    $pkgs = $json | ConvertFrom-Json
-                    foreach ($p in $pkgs) { if ($IgnoreList -and $IgnoreList -contains $p.name) { continue }; [PSCustomObject]@{ Source="pip"; Name=$p.name; Id=$p.name; Version=$p.version; Available=$p.latest_version } }
-                }
-            } catch { Log "Pip failed." }
-        }
-        if ("npm" -in $Enabled) {
-            Log "Scanning Npm..."
-            try {
-                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json"); $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-                if (-not [string]::IsNullOrWhiteSpace($json) -and $json.Trim().StartsWith("{")) {
-                    $pkgs = $json | ConvertFrom-Json
-                    foreach ($key in $pkgs.PSObject.Properties.Name) { if ($IgnoreList -and $IgnoreList -contains $key) { continue }; $obj = $pkgs.$key; [PSCustomObject]@{ Source="npm"; Name=$key; Id=$key; Version=$obj.current; Available=$obj.latest } }
-                }
-            } catch { Log "Npm failed." }
-        }
-        if ("chocolatey" -in $Enabled) {
-            Log "Scanning Chocolatey..."
-            try {
-                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("choco", "outdated -r"); $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-                if (-not [string]::IsNullOrWhiteSpace($out)) {
-                    $lines = $out -split "`r`n"
-                    foreach ($line in $lines) {
-                        if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
-                        if ($parts.Count -ge 4) { $n = $parts[0]; if ($IgnoreList -and $IgnoreList -contains $n) { continue }; [PSCustomObject]@{ Source="chocolatey"; Name=$n; Id=$n; Version=$parts[1]; Available=$parts[2] } }
-                    }
-                }
-            } catch { Log "Choco failed." }
-        }
+            }
+        }).AddArgument($enabled).AddArgument($ignoreList)
+        
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
     }
 
-    $script:AsyncScanPS = [PowerShell]::Create().AddScript($scanBlock).AddArgument($enabled).AddArgument($ignoreList)
-    $script:AsyncScan = $script:AsyncScanPS.BeginInvoke()
+    # B. PIP WORKER
+    if ("pip" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Pip..."
+            try {
+                $pInfo=New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pip list --outdated --format=json"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
+                $p=[System.Diagnostics.Process]::Start($pInfo); $json=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                if($json.Trim().StartsWith("[")){ 
+                    $pkgs=$json|ConvertFrom-Json; foreach($p in $pkgs){ if($IgnoreList -contains $p.name){continue}; [PSCustomObject]@{Source="pip";Name=$p.name;Id=$p.name;Version=$p.version;Available=$p.latest_version} } 
+                }
+            } catch { Write-Output "LOG:Pip check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # C. NPM WORKER
+    if ("npm" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Npm..."
+            try {
+                $pInfo=New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
+                $p=[System.Diagnostics.Process]::Start($pInfo); $json=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                if($json.Trim().StartsWith("{")){ 
+                    $pkgs=$json|ConvertFrom-Json; foreach($k in $pkgs.PSObject.Properties.Name){ if($IgnoreList -contains $k){continue}; $o=$pkgs.$k; [PSCustomObject]@{Source="npm";Name=$k;Id=$k;Version=$o.current;Available=$o.latest} } 
+                }
+            } catch { Write-Output "LOG:Npm check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # D. CHOCO WORKER
+    if ("chocolatey" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Chocolatey..."
+            try {
+                $pInfo=New-Object System.Diagnostics.ProcessStartInfo("choco", "outdated -r"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
+                $p=[System.Diagnostics.Process]::Start($pInfo); $out=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                $lines=$out -split "`r`n"
+                foreach($l in $lines){ 
+                    if(!$l){continue}; $p=$l -split "\|"; if($p.Count -ge 4){ $n=$p[0]; if($IgnoreList -contains $n){continue}; [PSCustomObject]@{Source="chocolatey";Name=$n;Id=$n;Version=$p[1];Available=$p[2]} } 
+                }
+            } catch { Write-Output "LOG:Choco check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # Start Timer to monitor all threads
     $script:ScanTimer.Start()
 })
 
