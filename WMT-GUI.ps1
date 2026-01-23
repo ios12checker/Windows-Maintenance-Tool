@@ -5187,145 +5187,237 @@ $sortBlock = {
 # Attach the Click Handler to the ListView headers
 $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
 
+# ---------------------------------------------------------
+# NON-BLOCKING SEARCH LOGIC
+# ---------------------------------------------------------
+
+# 1. SETUP TIMER TO PROCESS RESULTS
+$script:SearchTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:SearchTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+
+$script:SearchTimer.Add_Tick({
+    if ($script:SearchJob) {
+        # Get any new results available since last tick
+        $results = Receive-Job -Job $script:SearchJob
+        
+        foreach ($item in $results) {
+            if ($item -is [string]) {
+                # Handle Status Messages from the Job
+                if ($item.StartsWith("LOG:")) { Write-GuiLog ($item -replace "LOG:","") }
+                if ($item.StartsWith("STATUS:")) { $lblWingetStatus.Text = ($item -replace "STATUS:","") }
+            }
+            elseif ($item.PSObject.Properties["Source"]) {
+                # Handle Search Result Objects
+                # Filter out duplicates if necessary, or just add
+                [void]$lstWinget.Items.Add($item)
+            }
+        }
+
+        # Check if Job is done
+        if ($script:SearchJob.State -notin @('Running')) {
+            $script:SearchTimer.Stop()
+            Remove-Job -Job $script:SearchJob -Force
+            $script:SearchJob = $null
+            
+            # UI Cleanup
+            $lblWingetStatus.Visibility = "Hidden"
+            $btnWingetFind.IsEnabled = $true
+            $txtWingetSearch.IsEnabled = $true
+            
+            if ($lstWinget.Items.Count -eq 0) { 
+                [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No results found"; Id=""; Version=""; Available="" }) 
+            }
+            Write-GuiLog "Search Complete."
+        }
+    }
+})
+
+# 2. THE SEARCH BUTTON CLICK EVENT
+# ---------------------------------------------------------
+# HIGH-PERFORMANCE THREADED SEARCH
+# ---------------------------------------------------------
+
+# 1. SETUP UI TIMER (Handles the Thread Callback)
+$script:SearchTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:SearchTimer.Interval = [TimeSpan]::FromMilliseconds(100)
+$script:AsyncSearch = $null
+$script:AsyncPowerShell = $null
+
+$script:SearchTimer.Add_Tick({
+    # Check if the thread has finished
+    if ($script:AsyncSearch -and $script:AsyncSearch.IsCompleted) {
+        $script:SearchTimer.Stop()
+        
+        try {
+            # Get Results from the Thread
+            $results = $script:AsyncPowerShell.EndInvoke($script:AsyncSearch)
+            $script:AsyncPowerShell.Dispose()
+            
+            foreach ($item in $results) {
+                # Handle Log Messages vs Result Objects
+                if ($item -is [string] -and $item.StartsWith("LOG:")) {
+                    Write-GuiLog ($item.Substring(4))
+                }
+                elseif ($item.PSObject.Properties["Name"]) {
+                    [void]$lstWinget.Items.Add($item)
+                }
+            }
+        } catch {
+            Write-GuiLog "Thread Error: $($_.Exception.Message)"
+        }
+
+        # UI Cleanup
+        $lblWingetStatus.Visibility = "Hidden"
+        $btnWingetFind.IsEnabled = $true
+        $txtWingetSearch.IsEnabled = $true
+        $lblWingetStatus.Text = "Ready"
+        
+        if ($lstWinget.Items.Count -eq 0) { 
+            [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No results found"; Id=""; Version=""; Available="" }) 
+        }
+        Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+        
+        $script:AsyncSearch = $null
+        $script:AsyncPowerShell = $null
+    }
+})
+
+# 2. THE BUTTON CLICK (Starts the Thread)
 $btnWingetFind.Add_Click({
     if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -eq "Search new packages...") { return }
 
+    # UI Prep
     $query = $txtWingetSearch.Text
     $lblWingetTitle.Text = "Search Results: $query"
     $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
-    [System.Windows.Forms.Application]::DoEvents()
-
-    # Load Settings
-    $settings = Get-WmtSettings
-    if (-not $settings.EnabledProviders) { $enabled = @("winget", "msstore", "pip", "npm", "chocolatey") } 
-    else { $enabled = $settings.EnabledProviders }
+    $btnWingetFind.IsEnabled = $false 
     
     Write-GuiLog " "
-    Write-GuiLog "Starting Unified Search: '$query'"
+    Write-GuiLog "Starting Search: '$query'"
 
-    # ---------------------------------------------------------
-    # 1. WINGET & MSSTORE SEARCH
-    # ---------------------------------------------------------
-    $lblWingetStatus.Text = "Searching Winget & Store..."
-    Write-GuiLog "Searching Winget & Store..."
-    [System.Windows.Forms.Application]::DoEvents()
+    # Get Settings
+    $settings = Get-WmtSettings
+    $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget", "msstore", "pip", "npm", "chocolatey") }
 
-    $sourceFlag = ""
-    # Correct logic: If ONLY msstore is enabled, force it. If ONLY winget is enabled, force it.
-    if ("winget" -in $enabled -and "msstore" -notin $enabled) { $sourceFlag = "--source winget" }
-    elseif ("winget" -notin $enabled -and "msstore" -in $enabled) { $sourceFlag = "--source msstore" }
-    
-    $cleanQuery = $query.Replace('"', '')
-    $psCmd = "
-        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
-        winget search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements
-    "
-    $bytes = [System.Text.Encoding]::Unicode.GetBytes($psCmd)
-    $encoded = [Convert]::ToBase64String($bytes)
-    
-    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $pInfo.FileName = "powershell.exe"
-    $pInfo.Arguments = "-NoProfile -EncodedCommand $encoded"
-    $pInfo.RedirectStandardOutput = $true; $pInfo.RedirectStandardError = $true
-    $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true; $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-
-    try {
-        $p = [System.Diagnostics.Process]::Start($pInfo)
-        $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-        $lines = $out -split "`r`n"
+    # 3. DEFINE THE WORKER THREAD SCRIPT
+    # This contains the EXACT logic that worked for you before.
+    $scriptBlock = {
+        param($Query, $Enabled)
         
-        $idxId = -1
-        foreach ($line in $lines) { if ($line -match "Name\s+Id\s+Version") { $idxId = $line.IndexOf("Id"); break } }
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        function Log($msg) { Write-Output "LOG:$msg" }
 
-        foreach ($line in $lines) {
-            $line = $line.Trim()
+        # --- A. WINGET & MSSTORE ---
+        if ("winget" -in $Enabled -or "msstore" -in $Enabled) {
+            Log "Searching Winget & Store..."
             
-            # --- IMPROVED GARBAGE FILTERING ---
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
-            if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
+            $sourceFlag = ""
+            if ("winget" -in $Enabled -and "msstore" -notin $Enabled) { $sourceFlag = "--source winget" }
+            elseif ("winget" -notin $Enabled -and "msstore" -in $Enabled) { $sourceFlag = "--source msstore" }
             
-            # Explicitly reject lines that are just headers repeated (common in multi-source search)
-            if ($line -match "^Name" -and $line -match "Id" -and $line -match "Version") { continue }
-            # Reject the weird single dash line
-            if ($line -eq "-") { continue }
+            $cleanQuery = $Query.Replace('"', '')
+            
+            # Use standard ProcessStartInfo (Fastest method)
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pInfo.FileName = "powershell.exe"
+            # We wrap the command in PS to ensure encoding is handled correctly
+            $encCmd = "winget search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements"
+            $pInfo.Arguments = "-NoProfile -Command `"$encCmd`""
+            $pInfo.RedirectStandardOutput = $true
+            $pInfo.RedirectStandardError = $true
+            $pInfo.UseShellExecute = $false
+            $pInfo.CreateNoWindow = $true
+            $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
-            $n=$null; $i=$null; $v=$null; $s="winget"
-            
-            # Method A: Header Offset (Best for spaces)
-            if ($idxId -gt 0 -and $line.Length -gt $idxId) {
-                $n = $line.Substring(0, $idxId).Trim()
-                $rest = $line.Substring($idxId).Trim()
-                $parts = $rest -split "\s+"
-                if ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $s = $parts[2] }
-                elseif ($parts.Count -ge 2) { $i = $parts[0]; $v = $parts[1] }
-            }
-            
-            # Method B: Regex Fallback
-            if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
-                 $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $s = $matches[4].Trim()
-            }
-            elseif (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
-                 $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim()
-            }
+            try {
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit()
+                
+                $lines = $out -split "`r`n"
+                $idxId = -1
+                foreach ($line in $lines) { if ($line -match "Name\s+Id\s+Version") { $idxId = $line.IndexOf("Id"); break } }
 
-            # Valid Entry Check & Final Garbage Filter
-            if ($n -and $i -and $i.Length -gt 2 -and $n -notmatch "^-+$" -and $i -notmatch "^-+$") {
-                 # Final sanity check: if the "Name" column extracted is literally "Name", skip it
-                 if ($n -eq "Name" -and $i -eq "Id") { continue }
-                 if ($i -eq "Version" -or $v -eq "Source") { continue }
+                foreach ($line in $lines) {
+                    $line = $line.Trim()
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                    if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
+                    if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
+                    
+                    if ($line -match "^Name" -and $line -match "Id" -and $line -match "Version") { continue }
+                    if ($line -eq "-") { continue }
 
-                 if ($i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
-                     if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
-                     [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=$s; Name=$n; Id=$i; Version=$v; Available="-" })
-                 }
-            }
+                    $n=$null; $i=$null; $v=$null; $s="winget"
+                    
+                    # Method A: Header Offset
+                    if ($idxId -gt 0 -and $line.Length -gt $idxId) {
+                        $n = $line.Substring(0, $idxId).Trim()
+                        $rest = $line.Substring($idxId).Trim()
+                        $parts = $rest -split "\s+"
+                        if ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $s = $parts[2] }
+                        elseif ($parts.Count -ge 2) { $i = $parts[0]; $v = $parts[1] }
+                    }
+                    
+                    # Method B: Regex Fallback
+                    if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
+                        $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $s = $matches[4].Trim()
+                    }
+                    elseif (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
+                        $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim()
+                    }
+
+                    if ($n -and $i -and $i.Length -gt 2) {
+                        if ($n -eq "Name" -and $i -eq "Id") { continue }
+                        if ($i -eq "Version" -or $v -eq "Source") { continue }
+                        if ($i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
+                            if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
+                            [PSCustomObject]@{ Source=$s; Name=$n; Id=$i; Version=$v; Available="-" }
+                        }
+                    }
+                }
+            } catch { Log "Winget Error: $_" }
         }
-    } catch { Write-GuiLog "Winget Search Error: $_" }
 
-    # 2. NPM SEARCH (Existing logic remains...)
-    if ("npm" -in $enabled) {
-        $lblWingetStatus.Text = "Searching Npm..."
-        Write-GuiLog "Searching Npm..."
-        [System.Windows.Forms.Application]::DoEvents()
-        try {
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "cmd"; $pInfo.Arguments = "/c npm search `"$query`" --json"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-            $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-            if ($json.Contains("[")) {
-                $json = $json.Substring($json.IndexOf("[")); $pkgs = $json | ConvertFrom-Json
-                foreach ($pkg in $pkgs) { 
-                    [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="npm"; Name=$pkg.name; Id=$pkg.name; Version=$pkg.version; Available="-" }) 
+        # --- B. NPM ---
+        if ("npm" -in $Enabled) {
+            Log "Searching NPM..."
+            try {
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm search `"$Query`" --json")
+                $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+                $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                if ($json.Contains("[")) {
+                    $json = $json.Substring($json.IndexOf("[")); $pkgs = $json | ConvertFrom-Json
+                    foreach ($pkg in $pkgs) { 
+                        [PSCustomObject]@{ Source="npm"; Name=$pkg.name; Id=$pkg.name; Version=$pkg.version; Available="-" } 
+                    }
                 }
-            }
-        } catch { Write-GuiLog "Npm skipped." }
-    }
+            } catch { Log "Npm skipped." }
+        }
 
-    # 3. CHOCOLATEY SEARCH (Existing logic remains...)
-    if ("chocolatey" -in $enabled) {
-        $lblWingetStatus.Text = "Searching Chocolatey..."
-        Write-GuiLog "Searching Chocolatey..."
-        [System.Windows.Forms.Application]::DoEvents()
-        try {
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "choco"; $pInfo.Arguments = "search `"$query`" -r"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-            $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
-            $lines = $out -split "`r`n"
-            foreach ($line in $lines) {
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
-                if ($parts.Count -ge 2) { 
-                    [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="chocolatey"; Name=$parts[0]; Id=$parts[0]; Version=$parts[1]; Available="-" }) 
+        # --- C. CHOCO ---
+        if ("chocolatey" -in $Enabled) {
+            Log "Searching Chocolatey..."
+            try {
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("choco", "search `"$Query`" -r")
+                $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+                $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                $lines = $out -split "`r`n"
+                foreach ($line in $lines) {
+                    if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
+                    if ($parts.Count -ge 2) { 
+                        [PSCustomObject]@{ Source="chocolatey"; Name=$parts[0]; Id=$parts[0]; Version=$parts[1]; Available="-" } 
+                    }
                 }
-            }
-        } catch { Write-GuiLog "Choco skipped." }
+            } catch { Log "Choco skipped." }
+        }
     }
 
-    if ($lstWinget.Items.Count -eq 0) { 
-        [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No results found"; Id=""; Version=""; Available="" }) 
-    }
-    
-    $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+    # 4. EXECUTE THREAD (The Magic Part)
+    $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled)
+    $script:AsyncSearch = $script:AsyncPowerShell.BeginInvoke()
+    $script:SearchTimer.Start()
 })
 
 $btnWingetUpdateSel.Add_Click({ 
