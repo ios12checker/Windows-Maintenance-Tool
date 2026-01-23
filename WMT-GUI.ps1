@@ -49,6 +49,43 @@ if ([Environment]::OSVersion.Version.Major -ge 6) {
 
 Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# OPTIMIZATION: Define Token Manipulator globally once (Prevents "Type already exists" errors)
+if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Type) {
+    $tokenCode = @'
+    using System;
+    using System.Runtime.InteropServices;
+    public class Win32 {
+        public class TokenManipulator {
+            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
+            [DllImport("kernel32.dll", ExactSpelling = true)]
+            internal static extern IntPtr GetCurrentProcess();
+            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+            internal static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+            [DllImport("advapi32.dll", SetLastError = true)]
+            internal static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+            [StructLayout(LayoutKind.Sequential, Pack = 1)]
+            internal struct TokPriv1Luid { public int Count; public long Luid; public int Attr; }
+            internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
+            internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+            internal const int TOKEN_QUERY = 0x00000008;
+            public static bool EnablePrivilege(string privilege) {
+                try {
+                    IntPtr htok = IntPtr.Zero;
+                    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htok)) return false;
+                    TokPriv1Luid tp; tp.Count = 1; tp.Attr = SE_PRIVILEGE_ENABLED; tp.Luid = 0;
+                    if (!LookupPrivilegeValue(null, privilege, ref tp.Luid)) return false;
+                    if (!AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) return false;
+                    return true;
+                } catch { return false; }
+            }
+        }
+    }
+'@
+    Add-Type -TypeDefinition $tokenCode
+}
+
 # ==========================================
 # 2. HELPER FUNCTIONS
 # ==========================================
@@ -233,24 +270,19 @@ function Start-UpdateCheckBackground {
 
     $localVersionStr = $script:AppVersion
 
-    # 2. Start Background Job
-    $script:UpdateJob = Start-Job -ScriptBlock {
+    # 2. Start Background Thread (Runspace)
+    $script:UpdateRunspace = [PowerShell]::Create().AddScript({
         param($CurrentVer)
-        
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
-        $jobRes = @{
-            Status        = "Failed"
-            RemoteVersion = "0.0"
-            Content       = ""
-            Error         = ""
-        }
+        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; Content = ""; Error = "" }
 
         try {
             $time = Get-Date -Format "yyyyMMddHHmmss"
             $url  = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/main/WMT-GUI.ps1?t=$time"
             
-            $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 15
+            # Shorter timeout for UI responsiveness
+            $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
             $content = $req.Content
             $jobRes.Content = $content
 
@@ -267,10 +299,10 @@ function Start-UpdateCheckBackground {
         } catch {
             $jobRes.Error = $_.Exception.Message
         }
+        return $jobRes
+    }).AddArgument($localVersionStr)
 
-        return ($jobRes | ConvertTo-Json -Depth 2 -Compress)
-
-    } -ArgumentList $localVersionStr
+    $script:UpdateAsyncResult = $script:UpdateRunspace.BeginInvoke()
 
     # 3. Setup Timer
     $script:UpdateTimer = New-Object System.Windows.Threading.DispatcherTimer
@@ -281,32 +313,27 @@ function Start-UpdateCheckBackground {
         $lb = Get-Ctrl "LogBox"
         $script:UpdateTicks++
         
-        # A. Timeout Check (30s)
-        if ($script:UpdateTicks -gt 60) {
+        # A. Timeout Check (20s)
+        if ($script:UpdateTicks -gt 40) {
             $script:UpdateTimer.Stop()
-            if ($script:UpdateJob) { Stop-Job -Job $script:UpdateJob; Remove-Job -Job $script:UpdateJob }
-            $script:UpdateJob = $null
+            if ($script:UpdateRunspace) { $script:UpdateRunspace.Dispose() }
             if ($lb) { $lb.AppendText("[UPDATE] Error: Request timed out.`n"); $lb.ScrollToEnd() }
             return
         }
 
         # B. Check Job Status
-        if ($script:UpdateJob.State -ne 'Running') {
+        if ($script:UpdateAsyncResult.IsCompleted) {
             $script:UpdateTimer.Stop()
             
-            $rawOutput = Receive-Job -Job $script:UpdateJob
-            Remove-Job -Job $script:UpdateJob
-            $script:UpdateJob = $null
-            
-            if (-not $rawOutput) {
-                 if ($lb) { $lb.AppendText("[UPDATE] Error: Job returned no data.`n"); $lb.ScrollToEnd() }
-                 return
-            }
-
             try {
-                $jsonStr = $rawOutput | Select-Object -Last 1
-                $jobResult = $jsonStr | ConvertFrom-Json
+                $jobResult = $script:UpdateRunspace.EndInvoke($script:UpdateAsyncResult)
+                $script:UpdateRunspace.Dispose()
                 
+                # Retrieve the actual object (EndInvoke returns a collection)
+                if ($jobResult -is [System.Collections.ObjectModel.Collection[PSObject]]) {
+                     $jobResult = $jobResult[0]
+                }
+
                 if ($jobResult.Status -eq "Success") {
                     $localVer  = [Version]$script:AppVersion
                     $remoteVer = [Version]$jobResult.RemoteVersion
@@ -1396,8 +1423,11 @@ function Invoke-TempCleanup {
         $opt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
         
         try {
+            # Use EnumerateFiles for lower memory usage on large folders
             $files = [System.IO.Directory]::EnumerateFiles($Path, $Pattern, $opt)
             
+            $batchCount = 0
+
             foreach ($file in $files) {
                 try {
                     $fInfo = [System.IO.FileInfo]::new($file)
@@ -1406,11 +1436,14 @@ function Invoke-TempCleanup {
 
                     $stats.Deleted++
                     $stats.Bytes += $size
-                    
-                    if ($stats.Deleted % 100 -eq 0) {
+                    $batchCount++
+
+                    # OPTIMIZATION: Update UI only every 50 files
+                    if ($batchCount -gt 50) {
                         $mb = [math]::Round($stats.Bytes / 1MB, 2)
                         $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
                         [System.Windows.Forms.Application]::DoEvents()
+                        $batchCount = 0
                     }
                 } catch {}
             }
