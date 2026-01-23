@@ -1799,14 +1799,117 @@ function Show-RegistryCleaner {
     [void]$f.ShowDialog()
     return $f.Tag
 }
-# --- Registry Engine ---
+# =========================================================
+# 1. GLOBAL REGISTRY HELPERS
+# (Place these ABOVE Invoke-RegistryTask)
+# =========================================================
+
+function Test-PathExists {
+    param($Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($Path -match "%.*%" -or $Path -match "\$\(.*\)") { return $true }
+    if (Test-Path -Path $Path) { return $true }
+    if ($Path -match "(?i)System32") {
+        $nativePath = $Path -replace "(?i)System32", "Sysnative"
+        if (Test-Path -Path $nativePath) { return $true }
+    }
+    return $false
+}
+
+function Remove-RegKeyForced {
+    param($Path, $IsKey, $ValName)
+    if ($Path -match "^HKEY_CLASSES_ROOT") { $Path = $Path -replace "^HKEY_CLASSES_ROOT", "HKCR:" }
+    if ($Path -match "^HKEY_LOCAL_MACHINE") { $Path = $Path -replace "^HKEY_LOCAL_MACHINE", "HKLM:" }
+    if ($Path -match "^HKEY_CURRENT_USER") { $Path = $Path -replace "^HKEY_CURRENT_USER", "HKCU:" }
+
+    $realPaths = @()
+    if ($Path -match "^HKLM" -or $Path -match "^HKCU") { $realPaths += $Path }
+    elseif ($Path -match "^HKCR:\\(?<SubPath>.*)") {
+        $sub = $Matches.SubPath
+        if (Test-Path "HKLM:\SOFTWARE\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\Classes\$sub" }
+        if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub" }
+        if (Test-Path "HKCU:\Software\Classes\$sub") { $realPaths += "HKCU:\Software\Classes\$sub" }
+    }
+    if ($realPaths.Count -eq 0) { $realPaths += $Path }
+
+    $globalSuccess = $true
+    foreach ($targetPath in $realPaths) {
+        try {
+            if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
+            else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
+            continue
+        } catch {}
+        try {
+            $sid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+            $adminUser = $sid.Translate([System.Security.Principal.NTAccount])
+            $rule = New-Object System.Security.AccessControl.RegistryAccessRule($adminUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+            $UnlockItem = { 
+                param($p) 
+                try { 
+                    $acl=Get-Acl $p; $acl.SetOwner($adminUser); Set-Acl $p $acl -ErrorAction SilentlyContinue; 
+                    $acl=Get-Acl $p; $acl.SetAccessRule($rule); Set-Acl $p $acl -ErrorAction SilentlyContinue 
+                } catch {} 
+            }
+            if ($IsKey) { $children = Get-ChildItem -Path $targetPath -Recurse -ErrorAction SilentlyContinue; foreach ($c in $children) { & $UnlockItem -p $c.PSPath } }
+            & $UnlockItem -p $targetPath
+            if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
+            else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
+        } catch { $globalSuccess = $false }
+    }
+    return $globalSuccess
+}
+
+function Backup-RegKey {
+    param($ItemObj, $FilePath)
+    $path = $ItemObj.RegPath; $targetValue = $ItemObj.ValueName; $type = $ItemObj.Type
+    if ([string]::IsNullOrWhiteSpace($path)) { return }
+    $regKeyPath = $path -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\" -replace "^HKCU:?\\", "HKEY_CURRENT_USER\" -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\"
+    $sb = [System.Text.StringBuilder]::new(); [void]$sb.AppendLine("[$regKeyPath]")
+    try {
+        if ($type -eq "Value") {
+            $val = Get-ItemProperty -Path $path -Name $targetValue -ErrorAction SilentlyContinue
+            if ($val) { 
+                $vData = $val.$targetValue
+                if ($vData -is [string]) { $vData = '"' + ($vData -replace '\\', '\\' -replace '"', '\"') + '"' } 
+                elseif ($vData -is [int]) { $vData = "dword:{0:x8}" -f $vData }
+                [void]$sb.AppendLine("`"$targetValue`"=$vData") 
+            }
+        }
+        [void]$sb.AppendLine(""); Add-Content -Path $FilePath -Value $sb.ToString() -Encoding Unicode
+    } catch {}
+}
+
+function Show-SafetyDialog {
+    param($Count)
+    $f = New-Object System.Windows.Forms.Form
+    $f.Text = "Safety Pre-Check"; $f.Size = "450, 320"; $f.StartPosition = "CenterScreen"
+    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32); $f.ForeColor = "White"
+    $f.FormBorderStyle = "FixedDialog"; $f.ControlBox = $false
+    
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Location = "20, 20"; $lbl.Size = "400, 80"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
+    $lbl.Text = "You are about to force-delete $Count invalid registry keys.`n`nThese keys are locked by the system. Deleting them is generally safe for cleanup, but carries a small risk."
+    $f.Controls.Add($lbl)
+    
+    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = "Create Restore Point && Force Clean"; $b1.DialogResult = "Yes"; $b1.Location = "50, 110"; $b1.Size = "340, 45"; $b1.BackColor = "SeaGreen"; $b1.ForeColor = "White"; $b1.FlatStyle = "Flat"; $f.Controls.Add($b1)
+    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Force Clean (No Backup)"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
+    $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
+    
+    return $f.ShowDialog()
+}
+
+# =========================================================
+# 2. INVOKE-REGISTRYTASK (Full Function)
+# =========================================================
+
 function Invoke-RegistryTask {
     param([string]$Action)
 
     $bkDir = Join-Path (Get-DataPath) "RegistryBackups"
     if (-not (Test-Path $bkDir)) { New-Item -Path $bkDir -ItemType Directory | Out-Null }
 
-    # --- 1. PRIVILEGE BOOSTER ---
+    # --- PRIVILEGE BOOSTER ---
+    # Only adding the type if it doesn't exist to prevent errors on re-run
     if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Type) {
         Add-Type -TypeDefinition @"
         using System;
@@ -1840,691 +1943,576 @@ function Invoke-RegistryTask {
         }
 "@
     }
-    [Win32.TokenManipulator]::EnablePrivilege("SeTakeOwnershipPrivilege") | Out-Null
-    [Win32.TokenManipulator]::EnablePrivilege("SeRestorePrivilege") | Out-Null
+    try {
+        [Win32.TokenManipulator]::EnablePrivilege("SeTakeOwnershipPrivilege") | Out-Null
+        [Win32.TokenManipulator]::EnablePrivilege("SeRestorePrivilege") | Out-Null
+    } catch {}
 
-    # --- 2. HELPER FUNCTIONS ---
-    function Test-PathExists {
-        param($Path)
-        if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-        if ($Path -match "%.*%" -or $Path -match "\$\(.*\)") { return $true }
-        if (Test-Path -Path $Path) { return $true }
-        if ($Path -match "(?i)System32") {
-            $nativePath = $Path -replace "(?i)System32", "Sysnative"
-            if (Test-Path -Path $nativePath) { return $true }
-        }
-        return $false
-    }
-
-    function Test-IsWhitelisted {
-        param($Path)
-        if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-        $SafeList = @("TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2", "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost", "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker", "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe", "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe", "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon")
-        foreach ($safe in $SafeList) { if ($Path -match "(?i)$safe") { return $true } }
-        return $false
-    }
-
-    function Get-RealExePath {
-        param($RawString)
-        if ([string]::IsNullOrWhiteSpace($RawString)) { return $null }
-        $clean = $RawString.Trim()
-        if ($clean -match "^(.*?),\s*-?\d+$") { $clean = $matches[1].Trim() }
-        if ($clean.StartsWith('"')) {
-            $endQuote = $clean.IndexOf('"', 1)
-            if ($endQuote -gt 1) {
-                $quotedPart = $clean.Substring(1, $endQuote - 1)
-                if (Test-PathExists $quotedPart) { return $quotedPart }
-                $clean = $quotedPart 
-            }
-        }
-        if (Test-PathExists $clean) { return $clean }
-        if ($clean.Contains(" ")) {
-            $parts = $clean -split " "
-            $candidate = $parts[0]
-            $Check = { param($p) if (Test-PathExists $p) { return $true }; if (Test-PathExists "$p.exe") { return $true }; return $false }
-            if (& $Check $candidate) { return $candidate }
-            for ($i = 1; $i -lt $parts.Count; $i++) {
-                $candidate += " " + $parts[$i]
-                if (& $Check $candidate) { return $candidate }
-            }
-        }
-        return $clean
-    }
-
-    function Remove-RegKeyForced {
-        param($Path, $IsKey, $ValName)
-        
-        # === FIX: Normalize Registry Paths (Added this section) ===
-        if ($Path -match "^HKEY_CLASSES_ROOT") { $Path = $Path -replace "^HKEY_CLASSES_ROOT", "HKCR:" }
-        if ($Path -match "^HKEY_LOCAL_MACHINE") { $Path = $Path -replace "^HKEY_LOCAL_MACHINE", "HKLM:" }
-        if ($Path -match "^HKEY_CURRENT_USER") { $Path = $Path -replace "^HKEY_CURRENT_USER", "HKCU:" }
-        # ==========================================================
-
-        $realPaths = @()
-        if ($Path -match "^HKLM" -or $Path -match "^HKCU") { $realPaths += $Path }
-        elseif ($Path -match "^HKCR:\\(?<SubPath>.*)") {
-            $sub = $Matches.SubPath
-            if (Test-Path "HKLM:\SOFTWARE\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\Classes\$sub" }
-            if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub" }
-            if (Test-Path "HKCU:\Software\Classes\$sub") { $realPaths += "HKCU:\Software\Classes\$sub" }
-        }
-        if ($realPaths.Count -eq 0) { $realPaths += $Path }
-
-        $globalSuccess = $true
-        foreach ($targetPath in $realPaths) {
-            try {
-                if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
-                else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
-                continue
-            } catch {}
-            try {
-                $sid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-                $adminUser = $sid.Translate([System.Security.Principal.NTAccount])
-                $rule = New-Object System.Security.AccessControl.RegistryAccessRule($adminUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-                $UnlockItem = { 
-                    param($p) 
-                    try { 
-                        $acl=Get-Acl $p; $acl.SetOwner($adminUser); Set-Acl $p $acl -ErrorAction SilentlyContinue; 
-                        $acl=Get-Acl $p; $acl.SetAccessRule($rule); Set-Acl $p $acl -ErrorAction SilentlyContinue 
-                    } catch {} 
-                }
-                if ($IsKey) { $children = Get-ChildItem -Path $targetPath -Recurse -ErrorAction SilentlyContinue; foreach ($c in $children) { & $UnlockItem -p $c.PSPath } }
-                & $UnlockItem -p $targetPath
-                if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
-                else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
-            } catch { $globalSuccess = $false }
-        }
-        return $globalSuccess
-    }
-
-    function Backup-RegKey {
-        param($ItemObj, $FilePath)
-        $path = $ItemObj.RegPath; $targetValue = $ItemObj.ValueName; $type = $ItemObj.Type
-        if ([string]::IsNullOrWhiteSpace($path)) { return }
-        $regKeyPath = $path -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\" -replace "^HKCU:?\\", "HKEY_CURRENT_USER\" -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\"
-        $sb = [System.Text.StringBuilder]::new(); [void]$sb.AppendLine("[$regKeyPath]")
-        try {
-            if ($type -eq "Value") {
-                $val = Get-ItemProperty -Path $path -Name $targetValue -ErrorAction SilentlyContinue
-                if ($val) { $vData = $val.$targetValue; if ($vData -is [string]) { $vData = '"' + ($vData -replace '\\', '\\' -replace '"', '\"') + '"' } elseif ($vData -is [int]) { $vData = "dword:{0:x8}" -f $vData }; [void]$sb.AppendLine("`"$targetValue`"=$vData") }
-            }
-            [void]$sb.AppendLine(""); Add-Content -Path $FilePath -Value $sb.ToString() -Encoding Unicode
-        } catch {}
-    }
-
-    function Show-SafetyDialog {
-        param($Count)
-        $f = New-Object System.Windows.Forms.Form
-        $f.Text = "Safety Pre-Check"; $f.Size = "450, 320"; $f.StartPosition = "CenterScreen"
-        $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32); $f.ForeColor = "White"
-        $f.FormBorderStyle = "FixedDialog"; $f.ControlBox = $false
-        $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Location = "20, 20"; $lbl.Size = "400, 80"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-        $lbl.Text = "You are about to force-delete $Count invalid registry keys.`n`nThese keys are locked by the system. Deleting them is generally safe for cleanup, but carries a small risk."
-        $f.Controls.Add($lbl)
-        $b1 = New-Object System.Windows.Forms.Button; $b1.Text = "Create Restore Point && Force Clean"; $b1.DialogResult = "Yes"; $b1.Location = "50, 110"; $b1.Size = "340, 45"; $b1.BackColor = "SeaGreen"; $b1.ForeColor = "White"; $b1.FlatStyle = "Flat"; $f.Controls.Add($b1)
-        $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Force Clean (No Backup)"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
-        $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
-        return $f.ShowDialog()
-    }
-
-    # --- 3. MAIN LOGIC ---
+    # --- MAIN SCAN LOGIC ---
     if ($Action -eq "DeepClean") {
         $selectedScans = Show-RegScanSelection
         if (-not $selectedScans) { return }
 
+        # Progress UI
         $pForm = New-Object System.Windows.Forms.Form; $pForm.Text="Scanning Registry"; $pForm.Size="500,120"; $pForm.StartPosition="CenterScreen"; $pForm.ControlBox=$false
         $pForm.BackColor=[System.Drawing.Color]::FromArgb(30,30,30); $pForm.ForeColor="White"
-        $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location="20,15"; $pLabel.Size="460,20"; $pLabel.Text="Initializing..."; $pForm.Controls.Add($pLabel)
+        $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location="20,15"; $pLabel.Size="460,20"; $pLabel.Text="Initializing Background Scan..."; $pForm.Controls.Add($pLabel)
         $pBar = New-Object System.Windows.Forms.ProgressBar; $pBar.Location="20,45"; $pBar.Size="440,20"; $pForm.Controls.Add($pBar)
-        $pForm.Show(); [System.Windows.Forms.Application]::DoEvents()
+        $pForm.Show()
 
-        $findings = New-Object System.Collections.Generic.List[PSObject]
+        # Shared Data for Thread
+        $syncHash = [hashtable]::Synchronized(@{
+            Findings = [System.Collections.ArrayList]::new()
+            Status = "Starting..."
+            Progress = 0
+            IsCompleted = $false
+            Error = $null
+        })
+
+        # --- RUNSPACE CONFIGURATION ---
+        $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
+        # STA Mode is critical for Registry (HKCR) scans to work correctly
+        $rs.ApartmentState = "STA"
+        $rs.ThreadOptions = "ReuseThread"
+        $rs.Open()
         
-        # FIX: We track total progress (0-100) using floats
-        $script:currentProgress = 0.0
+        $rs.SessionStateProxy.SetVariable("SyncHash", $syncHash)
+        $rs.SessionStateProxy.SetVariable("SelectedScans", $selectedScans)
+
+        $ps = [PowerShell]::Create()
+        $ps.Runspace = $rs
         
-        # Calculate how much percentage each category is worth
-        # e.g., if 5 scans selected, each is worth 20%
-        $categoryWeight = 100.0 / ($selectedScans.Count)
+        # --- SCANNING SCRIPT BLOCK ---
+        [void]$ps.AddScript({
+            Import-Module Microsoft.PowerShell.Management
+            Import-Module Microsoft.PowerShell.Security
+            $SelectedScans = @($SelectedScans)
 
-        try {
-            # Helper to setup category
-            $StartCategory = {
-                param($Name) 
-                $pLabel.Text = "Scanning $Name..."
-                $pForm.Refresh()
-                [System.Windows.Forms.Application]::DoEvents()
-            }
-
-            # NEW: Helper that fills the bar based on the *actual* loop count
-            # We assume a large number (e.g., 5000) for "infinite" loops like ActiveX
-            $Tick = {
-                param($DetailText, $CurrentIndex, $TotalEstimated)
-                
-                # Update UI every 50 items to keep speed high
-                if ($CurrentIndex % 50 -eq 0) {
-                    if ($DetailText.Length -gt 60) { $DetailText = $DetailText.Substring(0, 57) + "..." }
-                    $pLabel.Text = $DetailText
-
-                    # Calculate progress WITHIN this specific category (0.0 to 1.0)
-                    $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
-                    
-                    # Add that fraction to the global base progress
-                    # e.g. if we are in category 1 of 5 (base 0%), and we are 50% done:
-                    # Total = 0 + (0.5 * 20) = 10%
-                    $realVal = $script:currentProgress + ($fraction * $categoryWeight)
-                    
-                    $pBar.Value = [int]$realVal
-                    [System.Windows.Forms.Application]::DoEvents()
+            # Internal Helper: Check if path exists
+            function Test-PathExists {
+                param($Path)
+                if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+                if ($Path -match "%.*%" -or $Path -match "\$\(.*\)") { return $true }
+                if (Test-Path -Path $Path) { return $true }
+                if ($Path -match "(?i)System32") {
+                    $nativePath = $Path -replace "(?i)System32", "Sysnative"
+                    if (Test-Path -Path $nativePath) { return $true }
                 }
-            }
-            
-            # Helper to finalize a category and lock in its progress
-            $EndCategory = {
-                $script:currentProgress += $categoryWeight
-                $pBar.Value = [int]$script:currentProgress
-                [System.Windows.Forms.Application]::DoEvents()
+                return $false
             }
 
-            # 1. ACTIVEX & COM
-            if ($selectedScans -contains "ActiveX") { 
-                & $StartCategory "ActiveX/COM"
-                $root = [Microsoft.Win32.Registry]::ClassesRoot
-                $clsidKey = $root.OpenSubKey("CLSID", $false)
-                if ($clsidKey) { 
-                    $subKeys = $clsidKey.GetSubKeyNames()
-                    $total = $subKeys.Count
-                    $i = 0
-                    foreach ($id in $subKeys) { 
-                        $i++
-                        & $Tick "Scanning CLSID: $id" $i $total
-                        try { 
-                            $sub = $clsidKey.OpenSubKey("$id\InProcServer32", $false)
-                            if ($sub) { 
-                                $dll = $sub.GetValue($null)
-                                if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $dll)) { 
-                                    $cleanDll = Get-RealExePath $dll
-                                    if (-not (Test-PathExists $cleanDll)) {
-                                        $findings.Add([PSCustomObject]@{ Problem="ActiveX Issue"; Data=$cleanDll; DisplayKey=$id; RegPath="HKCR:\CLSID\$id\InProcServer32"; ValueName=$null; Type="Key" }) 
-                                    }
-                                }
-                                $sub.Close() 
-                            }
-                            $sub2 = $clsidKey.OpenSubKey("$id\LocalServer32", $false)
-                            if ($sub2) {
-                                $exe = $sub2.GetValue($null)
-                                if ($exe -and $exe -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $exe)) {
-                                    $cleanExe = Get-RealExePath $exe
-                                    if (-not (Test-PathExists $cleanExe)) {
-                                        $findings.Add([PSCustomObject]@{ Problem="ActiveX Issue"; Data=$cleanExe; DisplayKey=$id; RegPath="HKCR:\CLSID\$id\LocalServer32"; ValueName=$null; Type="Key" })
-                                    }
-                                }
-                                $sub2.Close()
-                            }
-                        } catch {} 
+            # Internal Helper: Whitelist
+            function Test-IsWhitelisted {
+                param($Path)
+                if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+                $SafeList = @("TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2", "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost", "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker", "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe", "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe", "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon")
+                foreach ($safe in $SafeList) { if ($Path -match "(?i)$safe") { return $true } }
+                return $false
+            }
+
+            # Internal Helper: Clean Path Strings
+            function Get-RealExePath {
+                param($RawString)
+                if ([string]::IsNullOrWhiteSpace($RawString)) { return $null }
+                $clean = $RawString.Trim()
+                if ($clean -match "^(.*?),\s*-?\d+$") { $clean = $matches[1].Trim() }
+                if ($clean.StartsWith('"')) {
+                    $endQuote = $clean.IndexOf('"', 1)
+                    if ($endQuote -gt 1) {
+                        $quotedPart = $clean.Substring(1, $endQuote - 1)
+                        if (Test-PathExists $quotedPart) { return $quotedPart }
+                        $clean = $quotedPart 
                     }
-                    $clsidKey.Close() 
                 }
-                & $EndCategory
+                if (Test-PathExists $clean) { return $clean }
+                if ($clean.Contains(" ")) {
+                    $parts = $clean -split " "
+                    $candidate = $parts[0]
+                    $Check = { param($p) if (Test-PathExists $p) { return $true }; if (Test-PathExists "$p.exe") { return $true }; return $false }
+                    if (& $Check $candidate) { return $candidate }
+                    for ($i = 1; $i -lt $parts.Count; $i++) {
+                        $candidate += " " + $parts[$i]
+                        if (& $Check $candidate) { return $candidate }
+                    }
+                }
+                return $clean
             }
 
-            # 2. FILE EXTENSIONS
-            if ($selectedScans -contains "Ext") { 
-                & $StartCategory "File Extensions"
-                $root=[Microsoft.Win32.Registry]::ClassesRoot
-                $names = $root.GetSubKeyNames()
-                $total = $names.Count
-                $i = 0
-                foreach ($ext in $names) { 
-                    $i++
-                    & $Tick "Scanning Ext: $ext" $i $total
-                    if($ext.StartsWith(".")) { 
-                        try { 
-                            $sub=$root.OpenSubKey($ext)
-                            if($sub.SubKeyCount -eq 0 -and $null -eq $sub.GetValue($null)){ 
-                                $findings.Add([PSCustomObject]@{ Problem="Unused Extension"; Data=$ext; DisplayKey=$ext; RegPath="HKCR:\$ext"; ValueName=$null; Type="Key" }) 
-                            }; $sub.Close() 
-                        } catch {} 
-                    } 
-                }
-                & $EndCategory
-            }
+            try {
+                $categoryWeight = 100.0 / ($SelectedScans.Count)
+                $currentBaseProgress = 0.0
 
-            # 3. USER FILE EXTS
-            if ($selectedScans -contains "FileExts") {
-                & $StartCategory "User File Associations"
-                $path = "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
-                $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($path)
-                if ($root) {
-                    $names = $root.GetSubKeyNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($ext in $names) {
-                        $i++
-                        & $Tick "Scanning UserExt: $ext" $i $total
-                        $owl = $root.OpenSubKey("$ext\OpenWithList")
-                        if ($owl) {
-                            foreach ($valName in $owl.GetValueNames()) {
-                                if ($valName -match "^[a-z]$") { 
-                                    $val = $owl.GetValue($valName)
-                                    if ($val -match '^[a-zA-Z]:\\') {
-                                        $cleanPath = Get-RealExePath $val
-                                        if (-not (Test-PathExists $cleanPath)) {
-                                            $findings.Add([PSCustomObject]@{ Problem="Invalid FileExt MRU"; Data=$cleanPath; DisplayKey=$ext; RegPath="HKCU:\$path\$ext\OpenWithList"; ValueName=$valName; Type="Value" })
+                # Tick Helper
+                $Tick = {
+                    param($DetailText, $CurrentIndex, $TotalEstimated)
+                    if ($CurrentIndex % 50 -eq 0) {
+                        $SyncHash.Status = $DetailText
+                        $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
+                        $realVal = $currentBaseProgress + ($fraction * $categoryWeight)
+                        $SyncHash.Progress = [int]$realVal
+                    }
+                }
+                $EndCategory = {
+                    $currentBaseProgress += $categoryWeight
+                    $SyncHash.Progress = [int]$currentBaseProgress
+                }
+
+                # 1. ACTIVEX & COM
+                if ($SelectedScans -contains "ActiveX") { 
+                    $SyncHash.Status = "Scanning ActiveX/COM..."
+                    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                    $clsidKey = $root.OpenSubKey("CLSID", $false)
+                    if ($clsidKey) { 
+                        $subKeys = $clsidKey.GetSubKeyNames(); $total = $subKeys.Count; $i = 0
+                        foreach ($id in $subKeys) { 
+                            $i++; & $Tick "Scanning CLSID: $id" $i $total
+                            try { 
+                                $sub = $clsidKey.OpenSubKey("$id\InProcServer32", $false)
+                                if ($sub) { 
+                                    $dll = $sub.GetValue($null)
+                                    if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $dll)) { 
+                                        $cleanDll = Get-RealExePath $dll
+                                        if (-not (Test-PathExists $cleanDll)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="ActiveX Issue"; Data=$cleanDll; DisplayKey=$id; RegPath="HKCR:\CLSID\$id\InProcServer32"; ValueName=$null; Type="Key" }) }
+                                    }
+                                    $sub.Close() 
+                                }
+                                $sub2 = $clsidKey.OpenSubKey("$id\LocalServer32", $false)
+                                if ($sub2) {
+                                    $exe = $sub2.GetValue($null)
+                                    if ($exe -and $exe -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $exe)) {
+                                        $cleanExe = Get-RealExePath $exe
+                                        if (-not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="ActiveX Issue"; Data=$cleanExe; DisplayKey=$id; RegPath="HKCR:\CLSID\$id\LocalServer32"; ValueName=$null; Type="Key" }) }
+                                    }
+                                    $sub2.Close()
+                                }
+                            } catch {} 
+                        }
+                        $clsidKey.Close() 
+                    }
+                    & $EndCategory
+                }
+
+                # 2. FILE EXTENSIONS
+                if ($SelectedScans -contains "Ext") { 
+                    $SyncHash.Status = "Scanning File Extensions..."
+                    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                    $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                    foreach ($ext in $names) { 
+                        $i++; & $Tick "Scanning Ext: $ext" $i $total
+                        if($ext.StartsWith(".")) { 
+                            try { 
+                                $sub=$root.OpenSubKey($ext)
+                                if($sub.SubKeyCount -eq 0 -and $null -eq $sub.GetValue($null)){ 
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Unused Extension"; Data=$ext; DisplayKey=$ext; RegPath="HKCR:\$ext"; ValueName=$null; Type="Key" }) 
+                                }; $sub.Close() 
+                            } catch {} 
+                        } 
+                    }
+                    & $EndCategory
+                }
+
+                # 3. USER FILE EXTS
+                if ($SelectedScans -contains "FileExts") {
+                    $SyncHash.Status = "Scanning User File Associations..."
+                    $path = "Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts"
+                    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($path)
+                    if ($root) {
+                        $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                        foreach ($ext in $names) {
+                            $i++; & $Tick "Scanning UserExt: $ext" $i $total
+                            $owl = $root.OpenSubKey("$ext\OpenWithList")
+                            if ($owl) {
+                                foreach ($valName in $owl.GetValueNames()) {
+                                    if ($valName -match "^[a-z]$") { 
+                                        $val = $owl.GetValue($valName)
+                                        if ($val -match '^[a-zA-Z]:\\') {
+                                            $cleanPath = Get-RealExePath $val
+                                            if (-not (Test-PathExists $cleanPath)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Invalid FileExt MRU"; Data=$cleanPath; DisplayKey=$ext; RegPath="HKCU:\$path\$ext\OpenWithList"; ValueName=$valName; Type="Value" }) }
                                         }
                                     }
                                 }
+                                $owl.Close()
                             }
-                            $owl.Close()
                         }
+                        $root.Close()
                     }
-                    $root.Close()
+                    & $EndCategory
                 }
-                & $EndCategory
-            }
 
-            # 4. APP PATHS
-            if ($selectedScans -contains "AppPaths") {
-                & $StartCategory "Application Paths"
-                $key = "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
-                $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
-                if ($root) {
-                    $names = $root.GetSubKeyNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($app in $names) {
-                        $i++
-                        & $Tick "Scanning AppPath: $app" $i $total
-                        try {
-                            $sub = $root.OpenSubKey($app)
-                            $path = $sub.GetValue($null)
-                            if ($path -and $path -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $path)) {
-                                $clean = Get-RealExePath $path
-                                if (-not (Test-PathExists $clean)) {
-                                    $findings.Add([PSCustomObject]@{ Problem="Missing App Path"; Data=$clean; DisplayKey=$app; RegPath="HKLM:\$key\$app"; ValueName=$null; Type="Key" })
-                                }
-                            }
-                            $sub.Close()
-                        } catch {}
-                    }
-                    $root.Close()
-                }
-                & $EndCategory
-            }
-
-            # 5. APPLICATIONS & PROGIDs
-            if ($selectedScans -contains "Apps" -or $selectedScans -contains "ProgIDs") {
-                & $StartCategory "Applications & ProgIDs"
-                $searchRoots = @()
-                if ($selectedScans -contains "Apps") { $searchRoots += [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("Applications") }
-                if ($selectedScans -contains "ProgIDs") { $searchRoots += [Microsoft.Win32.Registry]::ClassesRoot }
-
-                foreach ($root in $searchRoots) {
+                # 4. APP PATHS
+                if ($SelectedScans -contains "AppPaths") {
+                    $SyncHash.Status = "Scanning App Paths..."
+                    $key = "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+                    $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
                     if ($root) {
-                        $names = $root.GetSubKeyNames()
-                        $total = $names.Count
-                        $i = 0
+                        $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
                         foreach ($app in $names) {
-                            $i++
-                            & $Tick "Scanning App: $app" $i $total
+                            $i++; & $Tick "Scanning AppPath: $app" $i $total
                             try {
-                                $appKey = $root.OpenSubKey($app)
-                                $shellKey = $appKey.OpenSubKey("shell")
-                                if ($shellKey) {
-                                    foreach ($verb in $shellKey.GetSubKeyNames()) {
-                                        try {
-                                            $cmdKey = $shellKey.OpenSubKey("$verb\command")
-                                            if ($cmdKey) {
-                                                $cmd = $cmdKey.GetValue($null)
-                                                if ($cmd) {
-                                                    $clean = Get-RealExePath $cmd
-                                                    if ($clean -and $clean -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $clean)) {
-                                                        if (-not (Test-PathExists $clean) -and $clean -notmatch "%1") {
-                                                            $findings.Add([PSCustomObject]@{ Problem="Invalid App Command ($verb)"; Data=$clean; DisplayKey=$app; RegPath="$($root.Name)\$app\shell\$verb\command"; ValueName=$null; Type="Key" })
+                                $sub = $root.OpenSubKey($app)
+                                $path = $sub.GetValue($null)
+                                if ($path -and $path -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $path)) {
+                                    $clean = Get-RealExePath $path
+                                    if (-not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing App Path"; Data=$clean; DisplayKey=$app; RegPath="HKLM:\$key\$app"; ValueName=$null; Type="Key" }) }
+                                }
+                                $sub.Close()
+                            } catch {}
+                        }
+                        $root.Close()
+                    }
+                    & $EndCategory
+                }
+
+                # 5. APPLICATIONS & PROGIDs
+                if ($SelectedScans -contains "Apps" -or $SelectedScans -contains "ProgIDs") {
+                    $SyncHash.Status = "Scanning Apps & ProgIDs..."
+                    $searchRoots = @()
+                    if ($SelectedScans -contains "Apps") { 
+                        $cr = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                        $searchRoots += $cr.OpenSubKey("Applications") 
+                    }
+                    if ($SelectedScans -contains "ProgIDs") { 
+                        $searchRoots += [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                    }
+
+                    foreach ($root in $searchRoots) {
+                        if ($root) {
+                            $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                            foreach ($app in $names) {
+                                $i++; & $Tick "Scanning App: $app" $i $total
+                                try {
+                                    $appKey = $root.OpenSubKey($app); $shellKey = $appKey.OpenSubKey("shell")
+                                    if ($shellKey) {
+                                        foreach ($verb in $shellKey.GetSubKeyNames()) {
+                                            try {
+                                                $cmdKey = $shellKey.OpenSubKey("$verb\command")
+                                                if ($cmdKey) {
+                                                    $cmd = $cmdKey.GetValue($null)
+                                                    if ($cmd) {
+                                                        $clean = Get-RealExePath $cmd
+                                                        if ($clean -and $clean -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $clean)) {
+                                                            if (-not (Test-PathExists $clean) -and $clean -notmatch "%1") {
+                                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Invalid App Command ($verb)"; Data=$clean; DisplayKey=$app; RegPath="$($root.Name)\$app\shell\$verb\command"; ValueName=$null; Type="Key" })
+                                                            }
                                                         }
                                                     }
+                                                    $cmdKey.Close()
                                                 }
-                                                $cmdKey.Close()
-                                            }
-                                        } catch {}
+                                            } catch {}
+                                        }
+                                        $shellKey.Close()
                                     }
-                                    $shellKey.Close()
+                                    $appKey.Close()
+                                } catch {}
+                            }
+                        }
+                    }
+                    & $EndCategory
+                }
+
+                # 6. UNINSTALLERS
+                if ($SelectedScans -contains "Uninstall") {
+                    $SyncHash.Status = "Scanning Uninstallers..."
+                    $paths = @("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")
+                    $hives = @([Microsoft.Win32.Registry]::LocalMachine, [Microsoft.Win32.Registry]::CurrentUser)
+                    $total = 500; $i = 0
+                    foreach ($h in $hives) {
+                        foreach ($p in $paths) {
+                            try {
+                                $rk = $h.OpenSubKey($p)
+                                if ($rk) {
+                                    foreach ($subName in $rk.GetSubKeyNames()) {
+                                        $i++; & $Tick "Scanning Uninstaller: $subName" $i $total
+                                        $sub = $rk.OpenSubKey($subName)
+                                        $uString = $sub.GetValue("UninstallString")
+                                        if ($uString -and $uString -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $uString)) {
+                                            if ($uString -notmatch "(?i)MsiExec.exe") {
+                                                $clean = Get-RealExePath $uString
+                                                if (-not (Test-PathExists $clean)) {
+                                                    $rootName = if ($h.Name -match "LocalMachine") { "HKLM" } else { "HKCU" }
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing Uninstaller"; Data=$clean; DisplayKey=$subName; RegPath="$rootName`:\$p\$subName"; ValueName=$null; Type="Key" })
+                                                }
+                                            }
+                                        }
+                                        $sub.Close()
+                                    }
+                                    $rk.Close()
                                 }
-                                $appKey.Close()
                             } catch {}
                         }
                     }
+                    & $EndCategory
                 }
-                & $EndCategory
-            }
 
-            # 6. UNINSTALLERS
-            if ($selectedScans -contains "Uninstall") {
-                & $StartCategory "Uninstallers"
-                $paths = @(
-                    "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-                    "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"
-                )
-                $hives = @([Microsoft.Win32.Registry]::LocalMachine, [Microsoft.Win32.Registry]::CurrentUser)
-                
-                # We do a rough estimate of 500 items to avoid double scanning for count
-                $total = 500 
-                $i = 0
+                # 7. MUI CACHE
+                if ($SelectedScans -contains "MuiCache") {
+                    $SyncHash.Status = "Scanning MuiCache..."
+                    $key = "Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
+                    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($key)
+                    if ($root) {
+                        $names = $root.GetValueNames(); $total = $names.Count; $i = 0
+                        foreach ($valName in $names) {
+                            $i++; & $Tick "Scanning MuiCache: $valName" $i $total
+                            $cleanPath = $valName -replace '\.(FriendlyAppName|ApplicationCompany)$', ''
+                            if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath)) {
+                                if (-not (Test-PathExists $cleanPath)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Obsolete MuiCache"; Data=$cleanPath; DisplayKey="MuiCache"; RegPath="HKCU:\$key"; ValueName=$valName; Type="Value" }) }
+                            }
+                        }
+                        $root.Close()
+                    }
+                    & $EndCategory
+                }
 
-                foreach ($h in $hives) {
-                    foreach ($p in $paths) {
-                        try {
-                            $rk = $h.OpenSubKey($p)
-                            if ($rk) {
-                                foreach ($subName in $rk.GetSubKeyNames()) {
-                                    $i++
-                                    & $Tick "Scanning Uninstaller: $subName" $i $total
-                                    $sub = $rk.OpenSubKey($subName)
-                                    $uString = $sub.GetValue("UninstallString")
-                                    if ($uString -and $uString -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $uString)) {
-                                        if ($uString -notmatch "(?i)MsiExec.exe") {
-                                            $clean = Get-RealExePath $uString
-                                            if (-not (Test-PathExists $clean)) {
-                                                $rootName = if ($h.Name -match "LocalMachine") { "HKLM" } else { "HKCU" }
-                                                $findings.Add([PSCustomObject]@{ Problem="Missing Uninstaller"; Data=$clean; DisplayKey=$subName; RegPath="$rootName`:\$p\$subName"; ValueName=$null; Type="Key" })
-                                            }
+                # 8. APPCOMPAT FLAGS
+                if ($SelectedScans -contains "AppCompat") {
+                    $SyncHash.Status = "Scanning Compatibility Store..."
+                    $key = "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store"
+                    $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($key)
+                    if ($root) {
+                        $names = $root.GetValueNames(); $total = $names.Count; $i = 0
+                        foreach ($valName in $names) {
+                            $i++; & $Tick "Scanning AppCompat: $valName" $i $total
+                            if ($valName -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $valName)) {
+                                if (-not (Test-PathExists $valName)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Obsolete Compatibility Ref"; Data=$valName; DisplayKey="AppCompat"; RegPath="HKCU:\$key"; ValueName=$valName; Type="Value" }) }
+                            }
+                        }
+                        $root.Close()
+                    }
+                    & $EndCategory
+                }
+
+                # 9. FIREWALL
+                if ($SelectedScans -contains "Firewall") {
+                    $SyncHash.Status = "Scanning Firewall Rules..."
+                    $key = "SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
+                    $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
+                    if ($root) {
+                        $names = $root.GetValueNames(); $total = $names.Count; $i = 0
+                        foreach ($valName in $names) {
+                            $i++; & $Tick "Scanning Firewall: $valName" $i $total
+                            $data = $root.GetValue($valName)
+                            if ($data -match "App=([^|]+)") {
+                                $appPath = $matches[1]; $expanded = [Environment]::ExpandEnvironmentVariables($appPath)
+                                if ($expanded -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $expanded)) {
+                                    if (-not (Test-PathExists $expanded)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Invalid Firewall Rule"; Data=$expanded; DisplayKey=$valName; RegPath="HKLM:\$key"; ValueName=$valName; Type="Value" }) }
+                                }
+                            }
+                        }
+                        $root.Close()
+                    }
+                    & $EndCategory
+                }
+
+                # 10. SERVICES
+                if ($SelectedScans -contains "Services") {
+                    $SyncHash.Status = "Scanning Services..."
+                    $key = "SYSTEM\CurrentControlSet\Services"
+                    $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
+                    if ($root) {
+                        $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                        foreach ($svc in $names) {
+                            $i++; & $Tick "Scanning Service: $svc" $i $total
+                            try {
+                                $sub = $root.OpenSubKey($svc)
+                                $img = $sub.GetValue("ImagePath")
+                                if ($img -and $img -match '^[a-zA-Z]:\\' -and $img -notmatch "\\drivers\\") {
+                                    $clean = Get-RealExePath $img
+                                    if (-not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing Service Binary"; Data=$clean; DisplayKey=$svc; RegPath="HKLM:\$key\$svc"; ValueName="ImagePath"; Type="Value" }) }
+                                }
+                                $sub.Close()
+                            } catch {}
+                        }
+                        $root.Close()
+                    }
+                    & $EndCategory
+                }
+
+                # 11. TYPE LIBRARIES
+                if ($SelectedScans -contains "TypeLib") {
+                    $SyncHash.Status = "Scanning Type Libraries..."
+                    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                    $tlKey = $root.OpenSubKey("TypeLib", $false)
+                    if ($tlKey) {
+                        $names = $tlKey.GetSubKeyNames(); $total = $names.Count; $i = 0
+                        foreach ($guid in $names) {
+                            $i++; & $Tick "Scanning TypeLib: $guid" $i $total
+                            try {
+                                $verKey = $tlKey.OpenSubKey($guid)
+                                if ($verKey) {
+                                    foreach ($ver in $verKey.GetSubKeyNames()) {
+                                        $numKey = $verKey.OpenSubKey($ver)
+                                        $helpDir = $numKey.GetValue("HELPDIR")
+                                        if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-PathExists $helpDir)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing HelpDir"; Data=$helpDir; DisplayKey="$guid"; RegPath="HKCR:\TypeLib\$guid\$ver"; ValueName="HELPDIR"; Type="Value" }) 
                                         }
+                                        $numKey.Close()
                                     }
-                                    $sub.Close()
+                                    $verKey.Close()
                                 }
-                                $rk.Close()
-                            }
-                        } catch {}
-                    }
-                }
-                & $EndCategory
-            }
-
-            # 7. MUI CACHE
-            if ($selectedScans -contains "MuiCache") {
-                & $StartCategory "MuiCache"
-                $key = "Software\Classes\Local Settings\Software\Microsoft\Windows\Shell\MuiCache"
-                $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($key)
-                if ($root) {
-                    $names = $root.GetValueNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($valName in $names) {
-                        $i++
-                        & $Tick "Scanning MuiCache: $valName" $i $total
-                        $cleanPath = $valName -replace '\.(FriendlyAppName|ApplicationCompany)$', ''
-                        if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath)) {
-                            if (-not (Test-PathExists $cleanPath)) {
-                                $findings.Add([PSCustomObject]@{ Problem="Obsolete MuiCache"; Data=$cleanPath; DisplayKey="MuiCache"; RegPath="HKCU:\$key"; ValueName=$valName; Type="Value" })
-                            }
+                            } catch {}
                         }
+                        $tlKey.Close()
                     }
-                    $root.Close()
+                    & $EndCategory
                 }
-                & $EndCategory
-            }
 
-            # 8. APPCOMPAT FLAGS
-            if ($selectedScans -contains "AppCompat") {
-                & $StartCategory "Compatibility Store"
-                $key = "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Compatibility Assistant\Store"
-                $root = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($key)
-                if ($root) {
-                    $names = $root.GetValueNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($valName in $names) {
-                        $i++
-                        & $Tick "Scanning AppCompat: $valName" $i $total
-                        if ($valName -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $valName)) {
-                            if (-not (Test-PathExists $valName)) {
-                                $findings.Add([PSCustomObject]@{ Problem="Obsolete Compatibility Ref"; Data=$valName; DisplayKey="AppCompat"; RegPath="HKCU:\$key"; ValueName=$valName; Type="Value" })
-                            }
-                        }
-                    }
-                    $root.Close()
-                }
-                & $EndCategory
-            }
-
-            # 9. FIREWALL
-            if ($selectedScans -contains "Firewall") {
-                & $StartCategory "Firewall Rules"
-                $key = "SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules"
-                $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
-                if ($root) {
-                    $names = $root.GetValueNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($valName in $names) {
-                        $i++
-                        & $Tick "Scanning Firewall: $valName" $i $total
-                        $data = $root.GetValue($valName)
-                        if ($data -match "App=([^|]+)") {
-                            $appPath = $matches[1]
-                            $expanded = [Environment]::ExpandEnvironmentVariables($appPath)
-                            if ($expanded -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $expanded)) {
-                                if (-not (Test-PathExists $expanded)) {
-                                    $findings.Add([PSCustomObject]@{ Problem="Invalid Firewall Rule"; Data=$expanded; DisplayKey=$valName; RegPath="HKLM:\$key"; ValueName=$valName; Type="Value" })
-                                }
-                            }
-                        }
-                    }
-                    $root.Close()
-                }
-                & $EndCategory
-            }
-
-            # 10. SERVICES
-            if ($selectedScans -contains "Services") {
-                & $StartCategory "Services"
-                $key = "SYSTEM\CurrentControlSet\Services"
-                $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
-                if ($root) {
-                    $names = $root.GetSubKeyNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($svc in $names) {
-                        $i++
-                        & $Tick "Scanning Service: $svc" $i $total
+                # 12. DEFAULT ICONS
+                if ($SelectedScans -contains "Icons") {
+                    $SyncHash.Status = "Scanning Default Icons..."
+                    $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
+                    $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                    foreach ($ext in $names) {
+                        $i++; & $Tick "Scanning Icon: $ext" $i $total
                         try {
-                            $sub = $root.OpenSubKey($svc)
-                            $img = $sub.GetValue("ImagePath")
-                            if ($img -and $img -match '^[a-zA-Z]:\\' -and $img -notmatch "\\drivers\\") {
-                                $clean = Get-RealExePath $img
-                                if (-not (Test-PathExists $clean)) {
-                                    $findings.Add([PSCustomObject]@{ Problem="Missing Service Binary"; Data=$clean; DisplayKey=$svc; RegPath="HKLM:\$key\$svc"; ValueName="ImagePath"; Type="Value" })
-                                }
-                            }
-                            $sub.Close()
-                        } catch {}
-                    }
-                    $root.Close()
-                }
-                & $EndCategory
-            }
-
-            # 11. TYPE LIBRARIES
-            if ($selectedScans -contains "TypeLib") {
-                & $StartCategory "Type Libraries"
-                $root = [Microsoft.Win32.Registry]::ClassesRoot
-                $tlKey = $root.OpenSubKey("TypeLib", $false)
-                if ($tlKey) {
-                    $names = $tlKey.GetSubKeyNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach ($guid in $names) {
-                        $i++
-                        & $Tick "Scanning TypeLib: $guid" $i $total
-                        try {
-                            $verKey = $tlKey.OpenSubKey($guid)
-                            if ($verKey) {
-                                foreach ($ver in $verKey.GetSubKeyNames()) {
-                                    $numKey = $verKey.OpenSubKey($ver)
-                                    $helpDir = $numKey.GetValue("HELPDIR")
-                                    if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-PathExists $helpDir)) {
-                                        $findings.Add([PSCustomObject]@{ Problem="Missing HelpDir"; Data=$helpDir; DisplayKey="$guid"; RegPath="HKCR:\TypeLib\$guid\$ver"; ValueName="HELPDIR"; Type="Value" }) 
+                            $iconKey = $root.OpenSubKey("$ext\DefaultIcon")
+                            if ($iconKey) {
+                                $val = $iconKey.GetValue($null)
+                                if ($val) {
+                                    $cleanPath = Get-RealExePath $val
+                                    if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Invalid Default Icon"; Data=$cleanPath; DisplayKey=$ext; RegPath="HKCR:\$ext\DefaultIcon"; ValueName=$null; Type="Key" })
                                     }
-                                    $numKey.Close()
                                 }
-                                $verKey.Close()
+                                $iconKey.Close()
                             }
                         } catch {}
                     }
-                    $tlKey.Close()
+                    & $EndCategory
                 }
-                & $EndCategory
-            }
 
-            # 12. DEFAULT ICONS
-            if ($selectedScans -contains "Icons") {
-                & $StartCategory "Default Icons"
-                $root = [Microsoft.Win32.Registry]::ClassesRoot
-                $names = $root.GetSubKeyNames()
-                $total = $names.Count
-                $i = 0
-                foreach ($ext in $names) {
-                    $i++
-                    & $Tick "Scanning Icon: $ext" $i $total
-                    try {
-                        $iconKey = $root.OpenSubKey("$ext\DefaultIcon")
-                        if ($iconKey) {
-                            $val = $iconKey.GetValue($null)
-                            if ($val) {
-                                $cleanPath = Get-RealExePath $val
-                                if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
-                                    $findings.Add([PSCustomObject]@{ Problem="Invalid Default Icon"; Data=$cleanPath; DisplayKey=$ext; RegPath="HKCR:\$ext\DefaultIcon"; ValueName=$null; Type="Key" })
-                                }
-                            }
-                            $iconKey.Close()
+                # 13. SHARED DLLs
+                if ($SelectedScans -contains "SharedDLLs") { 
+                    $SyncHash.Status = "Scanning Shared DLLs..."
+                    $keys = @("SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDlls", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDlls")
+                    foreach ($k in $keys) {
+                        $rk=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k)
+                        if($rk){ 
+                            $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
+                            foreach($val in $names){ 
+                                $i++; & $Tick "Scanning DLL: $val" $i $total
+                                if($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)){ [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing Shared Ref"; Data=$val; DisplayKey="SharedDlls"; RegPath="HKLM:\$k"; ValueName=$val; Type="Value" }) } 
+                            }; $rk.Close() 
                         }
-                    } catch {}
-                }
-                & $EndCategory
-            }
-
-            # 13. SHARED DLLs
-            if ($selectedScans -contains "SharedDLLs") { 
-                & $StartCategory "Shared DLLs"
-                $keys = @("SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDlls", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDlls")
-                foreach ($k in $keys) {
-                    $rk=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k)
-                    if($rk){ 
-                        $names = $rk.GetValueNames()
-                        $total = $names.Count
-                        $i = 0
-                        foreach($val in $names){ 
-                            $i++
-                            & $Tick "Scanning DLL: $val" $i $total
-                            if($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)){ 
-                                $findings.Add([PSCustomObject]@{ Problem="Missing Shared Ref"; Data=$val; DisplayKey="SharedDlls"; RegPath="HKLM:\$k"; ValueName=$val; Type="Value" }) 
-                            } 
-                        }; $rk.Close() 
                     }
+                    & $EndCategory
                 }
-                & $EndCategory
-            }
 
-            # 14. STARTUP
-            if ($selectedScans -contains "Startup") { 
-                & $StartCategory "Startup Items"
-                $paths = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
-                foreach ($p in $paths) { 
-                    if(Test-Path $p){ 
-                        $props = Get-ItemProperty $p
-                        $names = $props.PSObject.Properties.Name
-                        $total = $names.Count
-                        $i = 0
-                        foreach($n in $names){ 
-                            $i++
-                            & $Tick "Scanning Startup: $n" $i $total
-                            $v=$props.$n
-                            if($v -is [string] -and $v -match '^[a-zA-Z]:\\'){ 
-                                $cleanExe = Get-RealExePath $v
-                                if(-not (Test-PathExists $cleanExe)){ 
-                                    $findings.Add([PSCustomObject]@{ Problem="Broken Startup"; Data=$cleanExe; DisplayKey=$n; RegPath=$p; ValueName=$n; Type="Value" }) 
+                # 14. STARTUP
+                if ($SelectedScans -contains "Startup") { 
+                    $SyncHash.Status = "Scanning Startup Items..."
+                    $paths = @("HKCU:\Software\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run")
+                    foreach ($p in $paths) { 
+                        if(Test-Path $p){ 
+                            $props = Get-ItemProperty $p
+                            $names = $props.PSObject.Properties.Name; $total = $names.Count; $i = 0
+                            foreach($n in $names){ 
+                                $i++; & $Tick "Scanning Startup: $n" $i $total
+                                $v=$props.$n
+                                if($v -is [string] -and $v -match '^[a-zA-Z]:\\'){ 
+                                    $cleanExe = Get-RealExePath $v
+                                    if(-not (Test-PathExists $cleanExe)){ [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Broken Startup"; Data=$cleanExe; DisplayKey=$n; RegPath=$p; ValueName=$n; Type="Value" }) } 
                                 } 
                             } 
                         } 
                     } 
-                } 
-                & $EndCategory
-            }
+                    & $EndCategory
+                }
 
-            # 15. INSTALLER FOLDERS
-            if ($selectedScans -contains "Installer") { 
-                & $StartCategory "Installer Folders"
-                $k="SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
-                $rk=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k)
-                if($rk){ 
-                    $names = $rk.GetValueNames()
-                    $total = $names.Count
-                    $i = 0
-                    foreach($val in $names){ 
-                        $i++
-                        & $Tick "Scanning Installer: $val" $i $total
-                        if($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)){ 
-                            $findings.Add([PSCustomObject]@{ Problem="Missing Installer Folder"; Data=$val; DisplayKey="Installer"; RegPath="HKLM:\$k"; ValueName=$val; Type="Value" }) 
-                        } 
-                    }; $rk.Close() 
-                } 
-                & $EndCategory
-            }
+                # 15. INSTALLER FOLDERS
+                if ($SelectedScans -contains "Installer") { 
+                    $SyncHash.Status = "Scanning Installer Folders..."
+                    $k="SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\Folders"
+                    $rk=[Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k)
+                    if($rk){ 
+                        $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
+                        foreach($val in $names){ 
+                            $i++; & $Tick "Scanning Installer: $val" $i $total
+                            if($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)){ [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem="Missing Installer Folder"; Data=$val; DisplayKey="Installer"; RegPath="HKLM:\$k"; ValueName=$val; Type="Value" }) } 
+                        }; $rk.Close() 
+                    } 
+                    & $EndCategory
+                }
 
-            $pForm.Close()
+                $SyncHash.IsCompleted = $true
+            } catch {
+                $SyncHash.Error = $_.Exception.Message
+                $SyncHash.IsCompleted = $true
+            }
+        })
+
+        $handle = $ps.BeginInvoke()
+        
+        # --- UI TIMER (Main Thread) ---
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromMilliseconds(100)
+        
+        $timer.Add_Tick({
+            $pLabel.Text = $syncHash.Status
+            $pBar.Value = $syncHash.Progress
             
-            # --- RESULTS PROCESSING ---
-            if ($findings.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Registry Cleaner: No issues found!", "Scan Complete", "OK", "Information") | Out-Null
-                return
-            }
-            
-            $rawSelection = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
-            
-            $toDelete = @()
-            if ($rawSelection) {
-                # FIXED: $null on the left side
-                $toDelete = $rawSelection | Where-Object { $null -ne $_ -and $null -ne $_.RegPath }
-            }
+            if ($syncHash.IsCompleted) {
+                $timer.Stop()
+                $pForm.Close()
+                $ps.Dispose()
+                $rs.Dispose()
 
-            if ($toDelete.Count -eq 0) { return }
+                if ($syncHash.Error) { [System.Windows.Forms.MessageBox]::Show("Scan Error: $($syncHash.Error)", "Error", "OK", "Error"); return }
 
-            # --- SAFETY PROMPT ---
-            $res = Show-SafetyDialog -Count $toDelete.Count
-            if ($res -eq "Cancel") { return }
-            if ($res -eq "Yes") {
-                Invoke-UiCommand { try { Checkpoint-Computer -Description "WMT DeepClean" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop; "Restore Point created." } catch { "Restore Point failed (Disabled?). Continuing..." } } "Creating Restore Point..."
-            }
-
-            # --- EXECUTE FIX ---
-            Invoke-UiCommand {
-                param($toDelete, $bkDir) 
+                $findings = $syncHash.Findings
                 
-                $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
-                $fixed=0; $skipped=0; $backedUpKeys=@()
-                
-                Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
-
-                foreach ($item in $toDelete) {
-                    $uid = "$($item.RegPath):$($item.ValueName)"
-                    if ($uid -notin $backedUpKeys) { Backup-RegKey -ItemObj $item -FilePath $bkFile; $backedUpKeys += $uid }
-                    
-                    Write-GuiLog "Removing: $($item.DisplayKey)"
-                    $isKey = ($item.Type -eq "Key")
-                    $success = Remove-RegKeyForced -Path $item.RegPath -IsKey $isKey -ValName $item.ValueName
-                    
-                    if ($success) { $fixed++ } else { $skipped++ }
+                # --- RESULTS PROCESSING ---
+                if ($findings.Count -eq 0) {
+                    [System.Windows.Forms.MessageBox]::Show("Registry Cleaner: No issues found!", "Scan Complete", "OK", "Information") | Out-Null
+                    return
                 }
                 
-                $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
-                if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (System Protected)" }
-                $finalMsg += "`n`nBackup: $bkFile"
-                [System.Windows.Forms.MessageBox]::Show($finalMsg, "Result", "OK", "Information") | Out-Null
+                $rawSelection = Show-RegistryCleaner -ScanResults ($findings | Select-Object *)
                 
-            } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir
+                $toDelete = @()
+                if ($rawSelection) {
+                    $toDelete = $rawSelection | Where-Object { $null -ne $_ -and $null -ne $_.RegPath }
+                }
 
-        } catch { $pForm.Close(); [System.Windows.Forms.MessageBox]::Show($_.Exception.Message) }
+                if ($toDelete.Count -eq 0) { return }
+
+                # --- SAFETY PROMPT ---
+                $res = Show-SafetyDialog -Count $toDelete.Count
+                if ($res -eq "Cancel") { return }
+                if ($res -eq "Yes") {
+                    Invoke-UiCommand { try { Checkpoint-Computer -Description "WMT DeepClean" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop; "Restore Point created." } catch { "Restore Point failed (Disabled?). Continuing..." } } "Creating Restore Point..."
+                }
+
+                # --- EXECUTE FIX (Main Thread) ---
+                Invoke-UiCommand {
+                    param($toDelete, $bkDir) 
+                    
+                    $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                    $fixed=0; $skipped=0; $backedUpKeys=@()
+                    
+                    Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+
+                    foreach ($item in $toDelete) {
+                        $uid = "$($item.RegPath):$($item.ValueName)"
+                        if ($uid -notin $backedUpKeys) { Backup-RegKey -ItemObj $item -FilePath $bkFile; $backedUpKeys += $uid }
+                        
+                        Write-GuiLog "Removing: $($item.DisplayKey)"
+                        $isKey = ($item.Type -eq "Key")
+                        $success = Remove-RegKeyForced -Path $item.RegPath -IsKey $isKey -ValName $item.ValueName
+                        
+                        if ($success) { $fixed++ } else { $skipped++ }
+                    }
+                    
+                    $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
+                    if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (System Protected)" }
+                    $finalMsg += "`n`nBackup: $bkFile"
+                    [System.Windows.Forms.MessageBox]::Show($finalMsg, "Result", "OK", "Information") | Out-Null
+                    
+                } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir
+            }
+        }.GetNewClosure())
+        
+        $timer.Start()
     }
 }
 
