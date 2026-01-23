@@ -145,17 +145,23 @@ function Show-TextDialog {
 }
 
 # --- SETTINGS MANAGER ---
+# Initialize cache variable
+$script:WmtSettingsCache = $null
+
 function Save-WmtSettings {
     param($Settings)
     $path = Join-Path (Get-DataPath) "settings.json"
     try {
+        # Update the memory cache immediately
+        $script:WmtSettingsCache = $Settings
+
         # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
         $saveObj = [PSCustomObject]@{
             TempCleanup      = $Settings.TempCleanup
             RegistryScan     = $Settings.RegistryScan
             WingetIgnore     = $Settings.WingetIgnore
             LoadWinapp2      = [bool]$Settings.LoadWinapp2
-            EnabledProviders = $Settings.EnabledProviders # <--- ADDED THIS LINE
+            EnabledProviders = $Settings.EnabledProviders
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     } catch {
@@ -164,6 +170,9 @@ function Save-WmtSettings {
 }
 
 function Get-WmtSettings {
+    # OPTIMIZATION: Return cached settings if available to avoid disk I/O
+    if ($script:WmtSettingsCache) { return $script:WmtSettingsCache }
+
     $path = Join-Path (Get-DataPath) "settings.json"
     
     # Default Structure
@@ -172,7 +181,7 @@ function Get-WmtSettings {
         RegistryScan     = @{}
         WingetIgnore     = @()
         LoadWinapp2      = $false 
-        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey") # <--- Default Value
+        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey")
     }
     
     if (Test-Path $path) {
@@ -185,31 +194,21 @@ function Get-WmtSettings {
             if ($json.RegistryScan) { 
                 foreach ($p in $json.RegistryScan.PSObject.Properties) { $defaults.RegistryScan[$p.Name] = $p.Value } 
             }
-            
-            # --- FIX: Force clean string array ---
             if ($json.PSObject.Properties["WingetIgnore"]) {
                 $raw = $json.WingetIgnore
                 $clean = New-Object System.Collections.ArrayList
-                if ($raw) {
-                    foreach ($item in $raw) {
-                        [void]$clean.Add("$item".Trim())
-                    }
-                }
+                if ($raw) { foreach ($item in $raw) { [void]$clean.Add("$item".Trim()) } }
                 $defaults.WingetIgnore = $clean.ToArray()
             }
-            
-            if ($json.PSObject.Properties["LoadWinapp2"]) { 
-                $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2
-            }
-
-            # <--- ADDED LOADING LOGIC HERE
-            if ($json.PSObject.Properties["EnabledProviders"]) {
-                $defaults.EnabledProviders = $json.EnabledProviders
-            }
+            if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
+            if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
         } catch { 
             Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
         }
     }
+    
+    # Cache the result
+    $script:WmtSettingsCache = $defaults
     return $defaults
 }
 
@@ -1353,17 +1352,19 @@ function Invoke-TempCleanup {
         [System.Windows.Forms.Application]::DoEvents()
 
         try {
-            $items = Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue
-            
-            foreach ($item in $items) {
+            # OPTIMIZATION: Pipe Get-ChildItem directly to ForEach-Object.
+            # This streams the files instead of collecting them all in an array variable first,
+            # preventing memory spikes and UI freezes on large folders.
+            Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
                 try {
-                    $size = $item.Length
-                    $item.Delete()
+                    $size = $_.Length
+                    $_.Delete() # Use .NET Delete method for slightly better performance
                     
                     $stats.Deleted++
                     $stats.Bytes += $size
                     
-                    if ($stats.Deleted % 50 -eq 0) {
+                    # OPTIMIZATION: Update UI only every 100 files to speed up processing
+                    if ($stats.Deleted % 100 -eq 0) {
                         $mb = [math]::Round($stats.Bytes / 1MB, 2)
                         $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
                         [System.Windows.Forms.Application]::DoEvents()
@@ -1372,6 +1373,7 @@ function Invoke-TempCleanup {
             }
 
             if ($Recurse) {
+                # Clean empty directories (Reverse sort to handle nested depths)
                 Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
                     Sort-Object FullName -Descending | 
                     ForEach-Object { try { if ((Get-ChildItem -Path $_.FullName -Force).Count -eq 0) { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } } catch {} }
