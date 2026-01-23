@@ -1388,24 +1388,25 @@ function Invoke-TempCleanup {
         param($Path, $Pattern="*", $Recurse=$true)
         
         $Path = [Environment]::ExpandEnvironmentVariables($Path)
-        if (-not (Test-Path $Path)) { return }
+        if (-not (Test-Path -LiteralPath $Path)) { return }
 
         $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
         [System.Windows.Forms.Application]::DoEvents()
 
+        $opt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
+        
         try {
-            # OPTIMIZATION: Pipe Get-ChildItem directly to ForEach-Object.
-            # This streams the files instead of collecting them all in an array variable first,
-            # preventing memory spikes and UI freezes on large folders.
-            Get-ChildItem -Path $Path -Filter $Pattern -Recurse:$Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $files = [System.IO.Directory]::EnumerateFiles($Path, $Pattern, $opt)
+            
+            foreach ($file in $files) {
                 try {
-                    $size = $_.Length
-                    $_.Delete() # Use .NET Delete method for slightly better performance
-                    
+                    $fInfo = [System.IO.FileInfo]::new($file)
+                    $size = $fInfo.Length
+                    $fInfo.Delete() 
+
                     $stats.Deleted++
                     $stats.Bytes += $size
                     
-                    # OPTIMIZATION: Update UI only every 100 files to speed up processing
                     if ($stats.Deleted % 100 -eq 0) {
                         $mb = [math]::Round($stats.Bytes / 1MB, 2)
                         $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
@@ -1415,10 +1416,15 @@ function Invoke-TempCleanup {
             }
 
             if ($Recurse) {
-                # Clean empty directories (Reverse sort to handle nested depths)
-                Get-ChildItem -Path $Path -Recurse -Directory -Force -ErrorAction SilentlyContinue | 
-                    Sort-Object FullName -Descending | 
-                    ForEach-Object { try { if ((Get-ChildItem -Path $_.FullName -Force).Count -eq 0) { Remove-Item -Path $_.FullName -Force -ErrorAction SilentlyContinue } } catch {} }
+                $dirs = [System.IO.Directory]::GetDirectories($Path, "*", [System.IO.SearchOption]::AllDirectories)
+                [Array]::Sort($dirs, [System.Collections.Comparer]::Default)
+                [Array]::Reverse($dirs)
+                
+                foreach ($dir in $dirs) {
+                    try {
+                        [System.IO.Directory]::Delete($dir, $false) 
+                    } catch {}
+                }
             }
         } catch {}
     }
@@ -1456,9 +1462,35 @@ function Invoke-TempCleanup {
                         Invoke-RobustClean "$env:SystemRoot\Temp"
                     }
                     "RecycleBin" { 
-                        # Recycle Bin is tricky to measure file-by-file without permission errors,
-                        # so we often rely on Windows API. For now, we attempt standard clear.
-                        try { Clear-RecycleBin -Force -ErrorAction SilentlyContinue } catch {}
+                        try {
+                            # FORCE CLEAN METHOD (COM Object)
+                            $shell = New-Object -ComObject Shell.Application
+                            $bin = $shell.Namespace(0xA) # 0xA = Recycle Bin
+                            $items = $bin.Items()
+                            $count = $items.Count
+
+                            if ($count -gt 0) {
+                                Write-GuiLog "Recycle Bin: Force cleaning $count items..."
+                                
+                                foreach ($f in $items) {
+                                    try {
+                                        $path = $f.Path
+                                        
+                                        # Measure Size (Accurately using Get-ChildItem on the real path)
+                                        if ($path -and (Test-Path -LiteralPath $path)) {
+                                            $size = (Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                                            $stats.Bytes += $size
+                                            
+                                            # Force Delete
+                                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+                                            $stats.Deleted++
+                                        }
+                                    } catch {}
+                                }
+                            }
+                        } catch {
+                            Write-GuiLog "Recycle Bin Error: $($_.Exception.Message)"
+                        }
                     }
                     "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
                     "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
