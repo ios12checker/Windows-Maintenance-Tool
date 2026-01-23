@@ -151,10 +151,11 @@ function Save-WmtSettings {
     try {
         # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
         $saveObj = [PSCustomObject]@{
-            TempCleanup  = $Settings.TempCleanup
-            RegistryScan = $Settings.RegistryScan
-            WingetIgnore = $Settings.WingetIgnore
-            LoadWinapp2  = [bool]$Settings.LoadWinapp2 # Ensure Boolean
+            TempCleanup      = $Settings.TempCleanup
+            RegistryScan     = $Settings.RegistryScan
+            WingetIgnore     = $Settings.WingetIgnore
+            LoadWinapp2      = [bool]$Settings.LoadWinapp2
+            EnabledProviders = $Settings.EnabledProviders # <--- ADDED THIS LINE
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     } catch {
@@ -167,10 +168,11 @@ function Get-WmtSettings {
     
     # Default Structure
     $defaults = @{
-        TempCleanup  = @{}
-        RegistryScan = @{}
-        WingetIgnore = @()
-        LoadWinapp2  = $false 
+        TempCleanup      = @{}
+        RegistryScan     = @{}
+        WingetIgnore     = @()
+        LoadWinapp2      = $false 
+        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey") # <--- Default Value
     }
     
     if (Test-Path $path) {
@@ -190,7 +192,6 @@ function Get-WmtSettings {
                 $clean = New-Object System.Collections.ArrayList
                 if ($raw) {
                     foreach ($item in $raw) {
-                        # "$item" forces it to be text, removing any object wrappers
                         [void]$clean.Add("$item".Trim())
                     }
                 }
@@ -199,6 +200,11 @@ function Get-WmtSettings {
             
             if ($json.PSObject.Properties["LoadWinapp2"]) { 
                 $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2
+            }
+
+            # <--- ADDED LOADING LOGIC HERE
+            if ($json.PSObject.Properties["EnabledProviders"]) {
+                $defaults.EnabledProviders = $json.EnabledProviders
             }
         } catch { 
             Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
@@ -3952,34 +3958,38 @@ function Show-TaskManager {
                     <Grid Grid.Row="0" Margin="0,0,0,15">
                         <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/></Grid.ColumnDefinitions>
                         <StackPanel>
-                             <TextBlock Name="lblWingetTitle" Text="Available Updates" FontSize="24" Foreground="White" FontWeight="Light"/>
-                             <TextBlock Name="lblWingetStatus" Text="Scanning..." Foreground="Yellow" Visibility="Hidden"/>
+                             <StackPanel Orientation="Horizontal">
+                                 <TextBlock Name="lblWingetTitle" Text="Updates:" FontSize="24" Foreground="White" FontWeight="Light" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                             </StackPanel>
+                             <TextBlock Name="lblWingetStatus" Text="Scanning..." Foreground="Yellow" Visibility="Hidden" Margin="0,5,0,0"/>
                         </StackPanel>
                         <Grid Grid.Column="1">
                              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                              <TextBox Name="txtWingetSearch" Grid.Column="0" Height="30" VerticalContentAlignment="Center" Text="Search new packages..." Padding="5" Background="#1E1E1E" Foreground="White"/>
-                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="50" Height="30" Background="#007ACC" Foreground="White" ToolTip="Search the Winget repository for new apps"/>
+                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="50" Height="30" Background="#007ACC" Foreground="White" ToolTip="Search repository"/>
                         </Grid>
                     </Grid>
 
                     <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                         <ListView.View>
-                            <GridView>
-                                <GridViewColumn Header="Name" Width="300" DisplayMemberBinding="{Binding Name}"/>
+                             <GridView>
+                                <GridViewColumn Header="Source" Width="80" DisplayMemberBinding="{Binding Source}"/>
+                                <GridViewColumn Header="Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
                                 <GridViewColumn Header="Id" Width="200" DisplayMemberBinding="{Binding Id}"/>
-                                <GridViewColumn Header="Version" Width="120" DisplayMemberBinding="{Binding Version}"/>
-                                <GridViewColumn Header="Available" Width="120" DisplayMemberBinding="{Binding Available}"/>
-                            </GridView>
+                                <GridViewColumn Header="Version" Width="100" DisplayMemberBinding="{Binding Version}"/>
+                                <GridViewColumn Header="Available" Width="100" DisplayMemberBinding="{Binding Available}"/>
+                                </GridView>
                         </ListView.View>
                     </ListView>
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Name="btnWingetScan" Content="Refresh Updates" Width="150" Style="{StaticResource ActionBtn}"/>
+                        <Button Name="btnManageProviders" Content="Providers" Width="100" Style="{StaticResource ActionBtn}" Background="#555" Margin="0,0,10,0" ToolTip="Enable/Disable package managers or install missing ones"/>
+                        <Button Name="btnWingetScan" Content="Refresh All" Width="150" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600"/>
                         <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
                         <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#802020"/>
-                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#B8860B" ToolTip="Hide selected updates from future scans"/>
-                        <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}" ToolTip="View and restore ignored updates"/>
+                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#B8860B"/>
+                        <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}"/>
                     </StackPanel>
                 </Grid>
 
@@ -4334,6 +4344,8 @@ $TabButtons = @("btnTabUpdates","btnTabHealth","btnTabNetwork","btnTabFirewall",
 $Panels     = @("pnlUpdates","pnlHealth","pnlNetwork","pnlFirewall","pnlDrivers","pnlCleanup","pnlUtils","pnlSupport")
 
 # --- INITIALIZE ALL CONTROLS ---
+$btnManageProviders = Get-Ctrl "btnManageProviders"
+$btnManageProviders.Add_Click({ Show-ProviderManager })
 $btnWingetScan = Get-Ctrl "btnWingetScan"
 $btnWingetUpdateSel = Get-Ctrl "btnWingetUpdateSel"
 $btnWingetInstall = Get-Ctrl "btnWingetInstall"
@@ -4343,6 +4355,10 @@ $lstWinget = Get-Ctrl "lstWinget"
 $txtWingetSearch = Get-Ctrl "txtWingetSearch"
 $lblWingetStatus = Get-Ctrl "lblWingetStatus"
 $lblWingetTitle = Get-Ctrl "lblWingetTitle"
+$cmbPackageManager = Get-Ctrl "cmbPackageManager"
+$cmbPackageManager.Add_SelectionChanged({ 
+    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+})
 
 $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
@@ -4644,294 +4660,333 @@ $script:WingetTimer.Add_Tick({
 
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
-    param($ListItems, $ActionName, $CmdTemplate)
+    param($ListItems, $ActionName)
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
     
-    # Lock UI
-    $btnWingetScan.IsEnabled = $false
-    $btnWingetUpdateSel.IsEnabled = $false
-    $btnWingetInstall.IsEnabled = $false
-    $btnWingetUninstall.IsEnabled = $false
-    
-    $lblWingetStatus.Text = "$ActionName in progress..."
-    $lblWingetStatus.Visibility = "Visible"
-    $script:WingetRefreshNeeded = ($ActionName -match "Update|Uninstall")
-    
-    Write-GuiLog " "
-    Write-GuiLog "=== STARTING $ActionName ($($ListItems.Count) Items) ==="
+    $btnWingetScan.IsEnabled = $false; $btnWingetUpdateSel.IsEnabled = $false
+    $lblWingetStatus.Text = "$ActionName in progress..."; $lblWingetStatus.Visibility = "Visible"
     
     $jobArgs = @{
-        Items = $ListItems | Select-Object Name, Id
-        Template = $CmdTemplate
-        IsUninstall = ($ActionName -eq "Uninstall")
-        LocalAppData = $env:LOCALAPPDATA 
-        TempDir = $env:TEMP
+        Items = $ListItems | Select-Object Source, Name, Id
+        ActionName = $ActionName
     }
 
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
         param($ArgsDict)
-        Add-Type -AssemblyName System.Windows.Forms
-        
         $items = $ArgsDict.Items
-        $tmpl = $ArgsDict.Template
-        $isUninstall = $ArgsDict.IsUninstall
-        $localAppData = $ArgsDict.LocalAppData
-        $tempDir = $ArgsDict.TempDir
+        $act   = $ArgsDict.ActionName
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
-        # --- 1. COMPREHENSIVE ERROR CODE DATABASE ---
-        $ErrorCodes = @{
-            # Success
-            "0"          = "Success"
-            "0x0"        = "Success"
-
-            # WinGet Specific (0x8A15xxxx)
-            "0x8a150001" = "Invalid Argument (WinGet parameter error)";
-            "0x8a150002" = "Command Failed (General internal failure)";
-            "0x8a150003" = "Source Not Found (Repo missing or corrupted)";
-            "0x8a150004" = "Installer Failed (Generic installer error)";
-            "0x8a150005" = "Download Hash Mismatch (File corrupted/altered)";
-            "0x8a150006" = "No Applicable Installer (Not supported on this OS/Arch)";
-            "0x8a150007" = "Installer Failed to Start (Exe/MSI launch failed)";
-            "0x8a150008" = "Manifest Not Found (Package info missing)";
-            "0x8a150009" = "Invalid Manifest (Package data malformed)";
-            "0x8a15000a" = "Unsupported Installer Type";
-            "0x8a15000b" = "Package Not Found (ID does not exist)";
-            "0x8a15000c" = "Installer Failed (Vendor returned error)";
-            "0x8a15000d" = "Download Failed (Network/Server error)";
-            "0x8a15000e" = "Installer Hash Mismatch (Validation failed)";
-            "0x8a15000f" = "Data Missing (Source broken/outdated)";
-            "0x8a150014" = "Network Error (Server disconnected)";
-
-            # Windows System Errors (0x8007xxxx)
-            "0x80070002" = "File Not Found (System cannot find file)";
-            "0x80070003" = "Path Not Found (Cache corruption or missing file)";
-            "0x80070005" = "Access Denied (Try running as Admin)";
-            "0x80070490" = "Element Not Found (Windows Update/MSIX issue)";
-            "0x80072ee7" = "DNS Lookup Failure (Check internet)";
-            "0x80072f8f" = "SSL/TLS Certificate Error (Check Date/Time)";
-            "0x800401f5" = "Application Not Found (Ghost Registry Entry)";
-
-            # Installer / MSI Codes
-            "1603"       = "Fatal Error (Generic MSI Failure)";
-            "1618"       = "Installation in Progress (Another installer running)";
-            "1619"       = "Package Error (Could not open package)";
-            "1602"       = "Cancelled by User";
-            "1639"       = "Invalid Command Line Argument"
-        }
-
         foreach ($item in $items) {
-            Write-Output "Processing: $($item.Name)..."
-            $baseCmd = $tmpl -f $item.Id
-            
-            $commonFlags = "--accept-source-agreements"
-            if (-not $isUninstall) {
-                $commonFlags += " --accept-package-agreements"
+            $src = $item.Source
+            $id  = $item.Id
+            $cmd = ""
+
+            # === ROUTING LOGIC ===
+            if ($src -eq "winget") {
+                if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
+                if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
+                if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" --accept-source-agreements --disable-interactivity" }
+            }
+            elseif ($src -eq "pypi") {
+                if ($act -eq "Install")   { $cmd = "pip install `"$id`"" }
+                if ($act -eq "Update")    { $cmd = "pip install --upgrade `"$id`"" }
+                if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
+            }
+            elseif ($src -eq "npm") {
+                if ($act -eq "Install")   { $cmd = "npm install -g `"$id`"" }
+                if ($act -eq "Update")    { $cmd = "npm update -g `"$id`"" }
+                if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
+            }
+            elseif ($src -eq "chocolatey") {
+                # Chocolatey uses -y to skip confirmation prompts
+                if ($act -eq "Install")   { $cmd = "choco install `"$id`" -y" }
+                if ($act -eq "Update")    { $cmd = "choco upgrade `"$id`" -y" }
+                if ($act -eq "Uninstall") { $cmd = "choco uninstall `"$id`" -y" }
             }
 
-            # 2. Attempt Silent Execution
-            $expr = "$baseCmd $commonFlags --disable-interactivity"
-            
-            # Capture both STDOUT and STDERR merged
-            $output = Invoke-Expression "$expr 2>&1"
-            
-            $failed = $false
-            $adminBlocked = $false
-            $detectedLog = $null
-            $failureReason = ""
-
-            # 3. Analyze Output Line-by-Line
-            foreach ($line in $output) {
-                $lineStr = $line.ToString()
-                if ($lineStr -match '^\s*[\-\\|/]\s*$') { continue }
-                
-                # A. Detect Log File Paths in Output
-                if ($lineStr -match "Log file.*:\s*(.*\.log)") {
-                    $detectedLog = $matches[1].Trim()
-                }
-
-                # B. Translate Error Codes
-                # Matches Hex (0x...) OR 4-digit Windows Installer codes (16xx)
-                if ($lineStr -match "(0x[0-9a-fA-F]{8}|16[0-9]{2})") {
-                    $code = $matches[1].ToLower()
-                    if ($ErrorCodes.ContainsKey($code)) {
-                        $desc = $ErrorCodes[$code]
-                        $lineStr += " < $desc >"
-                        $lineStr += "`n   [!] NOTE: This error is from WinGet or the App Installer, NOT the Windows Maintenance Tool."
-                        
-                        if ($code -ne "0" -and $code -ne "0x0") { 
-                            $failureReason = "$desc ($code)" 
-                        }
-                    }
-                }
-
-                Write-Output $lineStr
-                
-                # C. Detect Failure Keywords
-                if ($lineStr -match "Installer failed" -or $lineStr -match "exit code:") { $failed = $true }
-                if ($lineStr -match "Argument name was not recognized") { $failed = $true }
-                if ($lineStr -match "cannot be .* from an admin.* context" -or $lineStr -match "run this installer as a normal user") {
-                    $failed = $true; $adminBlocked = $true
-                }
+            if ($cmd) {
+                Write-Output "[$src] $act : $($item.Name)..."
+                Write-Output "Running: $cmd"
+                $output = Invoke-Expression "$cmd 2>&1"
+                $output | ForEach-Object { Write-Output $_ }
+                Write-Output "--------------------------------"
             }
-            
-            # 4. Special "Deep Scan" for Silent .NET/Burn Logs (if no log found yet)
-            if (-not $detectedLog -and ($item.Id -match "Microsoft.DotNet" -or $failed)) {
-                $logPaths = @($tempDir)
-                $wingetDir = Get-ChildItem -Path "$localAppData\Packages\Microsoft.DesktopAppInstaller_*" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
-                if ($wingetDir) { $logPaths += "$wingetDir\LocalState\DiagOutputDir" }
-                
-                # Find recent log (last 3 mins) matching the ID or SDK pattern
-                $foundLog = Get-ChildItem -Path $logPaths -Recurse -ErrorAction SilentlyContinue | 
-                            Where-Object { 
-                                $_.LastWriteTime -gt (Get-Date).AddMinutes(-3) -and 
-                                ($_.Name -match "Microsoft.DotNet.SDK" -or $_.Name -match "WinGet")
-                            } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                
-                if ($foundLog) {
-                    $content = Get-Content -Path $foundLog.FullName -Raw -ErrorAction SilentlyContinue
-                    # Check for the known "Pseudo Bundle" corruption
-                    if ($content -match "Error 0x80070003" -or $content -match "Failed to get size of pseudo bundle") {
-                        $failureReason = "Installer Cache Corruption (0x80070003)"
-                        $failed = $true
-                        Write-Output ">> [CRITICAL] Detected silent cache corruption in log."
-                    }
-                    $detectedLog = $foundLog.FullName
-                }
-            }
-
-            # 5. Handle Failures & User Interaction
-            
-            # Case A: Admin Context Blocked
-            if ($adminBlocked) {
-                $msg = "The installer for '$($item.Name)' refuses to run as Administrator.`n`nLaunch as Standard User?"
-                $choice = [System.Windows.Forms.MessageBox]::Show($msg, "Admin Context Blocked", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-                if ($choice -eq "Yes") {
-                    Write-Output ">> Preparing to launch as Standard User..."
-                    $tempCmd = Join-Path $tempDir "WMT_DeElevate_Install.cmd"
-                    $batchContent = "@echo off`nTitle Installing $($item.Name)`necho Launching Winget as Standard User...`n$baseCmd $commonFlags`npause`ndel `"%~f0`" & exit"
-                    Set-Content -Path $tempCmd -Value $batchContent -Encoding ASCII
-                    Start-Process (Join-Path $env:WinDir "explorer.exe") -ArgumentList "`"$tempCmd`""
-                    $failed = $false 
-                }
-            }
-            # Case B: General Failure (Silent or Explicit)
-            elseif ($failed) {
-                # B1. Offer Log Link (If found)
-                if ($detectedLog) {
-                    $logMsg = "The operation failed.`n"
-                    if ($failureReason) { $logMsg += "Reason: $failureReason`n" }
-                    $logMsg += "`nA log file was detected. Would you like to open it to see why?"
-                    
-                    $logChoice = [System.Windows.Forms.MessageBox]::Show($logMsg, "Installation Failed", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Error)
-                    if ($logChoice -eq "Yes") {
-                        Invoke-Item $detectedLog
-                    }
-                }
-
-                # B2. Offer Interactive Mode
-                $retryMsg = "Silent installation failed for '$($item.Name)'."
-                if ($failureReason) { $retryMsg += "`nError: $failureReason" }
-                $retryMsg += "`n`nWould you like to try running the installer INTERACTIVELY so you can see the error messages?"
-                
-                $retryChoice = [System.Windows.Forms.MessageBox]::Show($retryMsg, "Retry Interactively?", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-                
-                if ($retryChoice -eq "Yes") {
-                    [System.Windows.Forms.MessageBox]::Show("The installer UI will now open.`nPlease follow the prompts manually.", "Launching Interactive Mode", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-                    Write-Output ">> Launching Interactive Mode..."
-                    $argString = $baseCmd -replace "^winget\s+", ""
-                    $finalArgs = "$argString $commonFlags --interactive"
-                    $proc = Start-Process -FilePath "winget" -ArgumentList $finalArgs -Wait -PassThru -NoNewWindow
-                    Write-Output ">> Interactive process finished (Exit Code: $($proc.ExitCode))."
-                }
-            }
-            Write-Output "--------------------------------"
         }
     }
     $script:WingetTimer.Start()
 }
 
 # 3. EVENT HANDLERS
+function Show-ProviderManager {
+    # 1. Load Current Settings
+    $settings = Get-WmtSettings
+    # Force default if missing
+    if (-not $settings.EnabledProviders) { 
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "chocolatey") -Force
+    }
+    $enabled = $settings.EnabledProviders
+
+    # 2. Define UI
+    [xml]$pXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Package Manager Settings" Height="400" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#252526">
+    <Window.Resources>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#DDD"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="White"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="#333"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="3">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        
+        <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
+        <TextBlock Text="Select which package managers to scan." Foreground="#AAA" Margin="0,25,0,0" Grid.Row="0"/>
+
+        <StackPanel Grid.Row="1" Margin="0,15,0,0">
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
+                <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Text="Windows Package Manager (CLI)" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkMsStore" Grid.Column="0"/>
+                <TextBlock Text="MS Store" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Text="Microsoft Store Apps (via Winget)" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkPip" Grid.Column="0"/>
+                <TextBlock Text="Python (Pip)" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblPipStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnInstallPip" Content="Install Python" Grid.Column="3" Visibility="Collapsed"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkNpm" Grid.Column="0"/>
+                <TextBlock Text="Node (Npm)" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnInstallNpm" Content="Install Node.js" Grid.Column="3" Visibility="Collapsed"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkChoco" Grid.Column="0"/>
+                <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblChocoStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnInstallChoco" Content="Install Choco" Grid.Column="3" Visibility="Collapsed"/>
+            </Grid>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnSave" Content="Save &amp; Close" Background="#007ACC" Width="120"/>
+        </StackPanel>
+    </Grid>
+</Window>
+"@
+    $reader = (New-Object System.Xml.XmlNodeReader $pXaml)
+    $win = [Windows.Markup.XamlReader]::Load($reader)
+
+    function Get-WinCtrl($name) { $win.FindName($name) }
+    $chkMsStore = Get-WinCtrl "chkMsStore"
+    $chkPip   = Get-WinCtrl "chkPip"
+    $chkNpm   = Get-WinCtrl "chkNpm"
+    $chkChoco = Get-WinCtrl "chkChoco"
+    
+    # Set Checkboxes
+    if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
+    if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
+    if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
+    if ("chocolatey" -in $enabled) { $chkChoco.IsChecked = $true }
+
+    # Check Installed Status
+    function Test-IsCommand($cmd) { return (Get-Command $cmd -ErrorAction SilentlyContinue) }
+
+    if (Test-IsCommand "pip") { (Get-WinCtrl "lblPipStatus").Text = "Installed"; (Get-WinCtrl "lblPipStatus").Foreground = "LightGreen" } 
+    else { (Get-WinCtrl "lblPipStatus").Text = "Not Found"; (Get-WinCtrl "lblPipStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallPip").Visibility = "Visible" }
+
+    if (Test-IsCommand "npm") { (Get-WinCtrl "lblNpmStatus").Text = "Installed"; (Get-WinCtrl "lblNpmStatus").Foreground = "LightGreen" } 
+    else { (Get-WinCtrl "lblNpmStatus").Text = "Not Found"; (Get-WinCtrl "lblNpmStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallNpm").Visibility = "Visible" }
+
+    if (Test-IsCommand "choco") { (Get-WinCtrl "lblChocoStatus").Text = "Installed"; (Get-WinCtrl "lblChocoStatus").Foreground = "LightGreen" } 
+    else { (Get-WinCtrl "lblChocoStatus").Text = "Not Found"; (Get-WinCtrl "lblChocoStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallChoco").Visibility = "Visible" }
+
+    # Wire Up Buttons
+    (Get-WinCtrl "btnInstallPip").Add_Click({ Start-Process "winget" -ArgumentList "install Python.Python.3 --accept-source-agreements"; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
+    (Get-WinCtrl "btnInstallNpm").Add_Click({ Start-Process "winget" -ArgumentList "install OpenJS.NodeJS --accept-source-agreements"; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
+    (Get-WinCtrl "btnInstallChoco").Add_Click({ Start-Process "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"[System.Net.ServicePointManager]::SecurityProtocol = 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))`"" -Verb RunAs; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
+
+    # --- FIX: Save Logic ---
+    (Get-WinCtrl "btnSave").Add_Click({
+        $newEnabled = @("winget") 
+        if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
+        if ($chkPip.IsChecked) { $newEnabled += "pip" }
+        if ($chkNpm.IsChecked) { $newEnabled += "npm" }
+        if ($chkChoco.IsChecked) { $newEnabled += "chocolatey" }
+        
+        # Load fresh settings again to ensure we don't overwrite other changes
+        $current = Get-WmtSettings
+        $current.EnabledProviders = $newEnabled
+        
+        # Call the CORRECT save function
+        Save-WmtSettings -Settings $current
+        $win.Close()
+    })
+
+    $win.ShowDialog()
+}
+
+$btnWingetUpdateSel.Add_Click({ 
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update"
+})
+
+$btnWingetInstall.Add_Click({ 
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install"
+})
+
+$btnWingetUninstall.Add_Click({ 
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+
+    if ([System.Windows.Forms.MessageBox]::Show("Uninstall $($selected.Count) packages?", "Confirm", "YesNo") -eq "Yes") {
+        & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall"
+    }
+})
+
 $btnWingetScan.Add_Click({
-    $lblWingetTitle.Text = "Available Updates"
-    $lblWingetStatus.Text = "Scanning..."; $lblWingetStatus.Visibility = "Visible"
+    $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Visible"; $btnWingetInstall.Visibility = "Collapsed"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
-    
-    # 1. LOAD IGNORE LIST
-    $currentSettings = Get-WmtSettings
-    $ignoreList = if ($currentSettings.WingetIgnore) { $currentSettings.WingetIgnore } else { @() }
 
-    # 2. SETUP PROCESS (RAM Mode)
+    $settings = Get-WmtSettings
+    if (-not $settings.EnabledProviders) { $enabled = @("winget", "msstore", "pip", "npm", "chocolatey") } 
+    else { $enabled = $settings.EnabledProviders }
+
+    $countWinget = 0; $countPip = 0; $countNpm = 0; $countChoco = 0
+    Write-GuiLog " "
+    Write-GuiLog "Starting Universal Update Scan"
+
+    # --- 1. WINGET / MSSTORE SCAN ---
+    $lblWingetStatus.Text = "Scanning Winget & Store..."
+    Write-GuiLog "Scanning Winget & Store..."
+    [System.Windows.Forms.Application]::DoEvents()
+    
     $pInfo = New-Object System.Diagnostics.ProcessStartInfo
     $pInfo.FileName = "winget.exe"
+    # Note: --upgrade-available checks ALL enabled sources (winget + msstore) automatically
     $pInfo.Arguments = "list --upgrade-available --accept-source-agreements"
-    $pInfo.RedirectStandardOutput = $true
-    $pInfo.RedirectStandardError = $true
-    $pInfo.UseShellExecute = $false
-    $pInfo.CreateNoWindow = $true
-    $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    
+    $pInfo.RedirectStandardOutput = $true; $pInfo.RedirectStandardError = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true; $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
     try {
         $p = [System.Diagnostics.Process]::Start($pInfo)
-        $outputBlock = $p.StandardOutput.ReadToEnd()
-        $p.WaitForExit()
-
-        $lines = $outputBlock -split "`r`n"
+        $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+        $lines = $out -split "`r`n"
         
         foreach ($line in $lines) {
             $line = $line.Trim()
-            
-            # --- GARBAGE FILTER ---
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            if ($line -match "^Name\s+Id") { continue }      # Skip Header
-            if ($line -match "^-+$") { continue }            # Skip Separator lines (----)
-            if ($line.Length -lt 2 -and $line -match "[\\/|\-]") { continue } # Skip Spinners
-            if ($line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
-            if ($line -match "[\u2580-\u259F]") { continue } # Block progress bars
+            if ($line.Length -lt 2) { continue }
+            if ($line -match "^Name\s+Id" -or $line -match "^Id\s+Version" -or $line -match "^----") { continue }
+            if ($line -match "upgrades\s+available" -or $line -match "No installed package") { continue }
+            if ($line -match "[\u2580-\u259F]") { continue }
 
-            $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
+            $n=$null; $i=$null; $v=$null; $a=$null; $s="winget"
 
-            # 3. PARSE LOGIC (Relaxed Space Rule)
-            # CHANGED \s{2,} TO \s+ to allow single spaces between columns
-            # We rely on ID, Version, Available, and Source having NO spaces to anchor the match.
-            
+            # --- REGEX FIX: Greedy Match with Single Space (\s+) support ---
             # Strategy 1: 5 Columns (Name, Id, Version, Available, Source)
+            # Uses greedy name (.+) but anchors on the end columns having NO spaces ([^\s]+)
             if ($line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)$') {
-                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
-            }
-            # Strategy 2: 4 Columns (Source missing)
+                $n=$matches[1]; $i=$matches[2]; $v=$matches[3]; $a=$matches[4]; $s=$matches[5]
+            } 
+            # Strategy 2: 4 Columns (Name, Id, Version, [Source/Avail])
             elseif ($line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)$') {
-                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]
+                $n=$matches[1]; $i=$matches[2]; $v=$matches[3]; $col4=$matches[4]
+                if ($col4 -match "^(winget|msstore|chocolatey|npm|pypi)$") { $s = $col4; $a = "Update" } 
+                else { $a = $col4 }
             }
 
-            # 4. VALIDATE & ADD
-            if ($name -and $id -and $id -ne "Id" -and $id.Length -gt 2) {
-                if ($id.Trim() -notin $ignoreList) {
-                    [void]$lstWinget.Items.Add([PSCustomObject]@{ 
-                        Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
-                    })
-                }
+            if ($n -and $i -and $i -ne "Id" -and $i -notin $ignoreList) {
+                # Filter out msstore if disabled
+                if ($s -eq "msstore" -and "msstore" -notin $enabled) { continue }
+                
+                [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=$s; Name=$n.Trim(); Id=$i.Trim(); Version=$v.Trim(); Available=$a.Trim() })
+                $countWinget++
             }
         }
-    }
-    catch {
-        [System.Windows.Forms.MessageBox]::Show("Scan failed: $($_.Exception.Message)", "Error", "OK", "Error")
-    }
-    
-    $logCount = $lstWinget.Items.Count
-    if ($logCount -eq 0) {
-        [void]$lstWinget.Items.Add([PSCustomObject]@{ 
-            Name="No updates available"; Id=""; Version=""; Available=""; Source="" 
-        })
-        $logCount = 0
-    }
-    
+        Write-GuiLog " -> Winget found $countWinget updates."
+    } catch { Write-GuiLog " -> Winget Error: $_" }
+
+    # --- 2. PIP SCAN ---
+    if ("pip" -in $enabled) {
+        $lblWingetStatus.Text = "Scanning Python (Pip)..."
+        Write-GuiLog "Scanning Pip..."
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "pip"; $pInfo.Arguments = "list --outdated --format=json"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            if ($json.Contains("[")) {
+                $json = $json.Substring($json.IndexOf("[")); $pkgs = $json | ConvertFrom-Json
+                foreach ($pkg in $pkgs) { if ($pkg.name -notin $ignoreList) { [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="pypi"; Name=$pkg.name; Id=$pkg.name; Version=$pkg.version; Available=$pkg.latest_version }); $countPip++ } }
+                Write-GuiLog " -> Pip found $countPip updates."
+            } else { Write-GuiLog " -> Pip found 0 updates." }
+        } catch { Write-GuiLog " -> Pip skipped." }
+    } else { Write-GuiLog " -> Pip disabled." }
+
+    # --- 3. NPM SCAN ---
+    if ("npm" -in $enabled) {
+        $lblWingetStatus.Text = "Scanning Node (Npm)..."
+        Write-GuiLog "Scanning Npm..."
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "cmd"; $pInfo.Arguments = "/c npm outdated -g --json"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            if ($json.Contains("{")) {
+                $json = $json.Substring($json.IndexOf("{")); $obj = $json | ConvertFrom-Json
+                foreach ($prop in $obj.PSObject.Properties) { if ($prop.Name -notin $ignoreList) { [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="npm"; Name=$prop.Name; Id=$prop.Name; Version=$prop.Value.current; Available=$prop.Value.latest }); $countNpm++ } }
+                Write-GuiLog " -> Npm found $countNpm updates."
+            } else { Write-GuiLog " -> Npm found 0 updates." }
+        } catch { Write-GuiLog " -> Npm skipped." }
+    } else { Write-GuiLog " -> Npm disabled." }
+
+    # --- 4. CHOCO SCAN ---
+    if ("chocolatey" -in $enabled) {
+        $lblWingetStatus.Text = "Scanning Chocolatey..."
+        Write-GuiLog "Scanning Chocolatey..."
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "choco"; $pInfo.Arguments = "outdated -r --ignore-unfound"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            $lines = $out -split "`r`n"
+            foreach ($line in $lines) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
+                if ($parts.Count -ge 3) { $n = $parts[0]; $v = $parts[1]; $a = $parts[2]
+                    if ($n -notin $ignoreList) { [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="chocolatey"; Name=$n; Id=$n; Version=$v; Available=$a }); $countChoco++ }
+                }
+            }
+            Write-GuiLog " -> Chocolatey found $countChoco updates."
+        } catch { Write-GuiLog " -> Chocolatey skipped." }
+    } else { Write-GuiLog " -> Choco disabled." }
+
+    $total = $countWinget + $countPip + $countNpm + $countChoco
+    if ($lstWinget.Items.Count -eq 0) { [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No updates available"; Id=""; Version=""; Available="" }) }
     $lblWingetStatus.Visibility = "Hidden"
-    Write-GuiLog "Scan complete. Found $logCount updates."
+    Write-GuiLog "Scan Complete. Total: $total"
 })
 
 # --- IGNORE SELECTED ---
@@ -5082,106 +5137,187 @@ $btnWingetUnignore.Add_Click({
     }
 })
 
+# --- LISTVIEW SORTING LOGIC ---
+$lstWinget = Get-Ctrl "lstWinget"
+$script:LastSortHeader = ""
+$script:SortAscending = $true
+
+$sortBlock = {
+    param($src, $e) 
+    
+    # Check if the clicked element is a Column Header
+    if ($e.OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) {
+        $header = $e.OriginalSource.Column.Header
+        
+        # Ignore clicks on padding/empty space
+        if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+        # Toggle Sort Direction if clicking the same header
+        if ($script:LastSortHeader -eq $header) {
+            $script:SortAscending = -not $script:SortAscending
+        } else {
+            $script:SortAscending = $true
+            $script:LastSortHeader = $header
+        }
+
+        # Get Items
+        $items = @($lstWinget.Items)
+        $lstWinget.Items.Clear()
+
+        # Perform Sort
+        if ($script:SortAscending) {
+            $sorted = $items | Sort-Object -Property $header
+        } else {
+            $sorted = $items | Sort-Object -Property $header -Descending
+        }
+
+        # Repopulate
+        $sorted | ForEach-Object { $lstWinget.Items.Add($_) }
+    }
+}
+
+# Attach the Click Handler to the ListView headers
+$lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
+
 $btnWingetFind.Add_Click({
     if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -eq "Search new packages...") { return }
-    
-    $lblWingetTitle.Text = "Search Results: " + $txtWingetSearch.Text
+
+    $query = $txtWingetSearch.Text
+    $lblWingetTitle.Text = "Search Results: $query"
     $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
+
+    # Load Settings
+    $settings = Get-WmtSettings
+    if (-not $settings.EnabledProviders) { $enabled = @("winget", "msstore", "pip", "npm", "chocolatey") } 
+    else { $enabled = $settings.EnabledProviders }
     
-    # 1. SETUP COMMAND (Encoded to prevent quote breakage)
-    $cleanQuery = $txtWingetSearch.Text.Replace('"', '')
+    Write-GuiLog " "
+    Write-GuiLog "Starting Unified Search: '$query'"
+
+    # ---------------------------------------------------------
+    # 1. WINGET & MSSTORE SEARCH
+    # ---------------------------------------------------------
+    $lblWingetStatus.Text = "Searching Winget & Store..."
+    Write-GuiLog "Searching Winget & Store..."
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $sourceFlag = ""
+    # Correct logic: If ONLY msstore is enabled, force it. If ONLY winget is enabled, force it.
+    if ("winget" -in $enabled -and "msstore" -notin $enabled) { $sourceFlag = "--source winget" }
+    elseif ("winget" -notin $enabled -and "msstore" -in $enabled) { $sourceFlag = "--source msstore" }
     
+    $cleanQuery = $query.Replace('"', '')
     $psCmd = "
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
-        winget search --query `"$cleanQuery`" --source winget --accept-source-agreements
+        winget search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements
     "
-    
     $bytes = [System.Text.Encoding]::Unicode.GetBytes($psCmd)
     $encoded = [Convert]::ToBase64String($bytes)
     
     $pInfo = New-Object System.Diagnostics.ProcessStartInfo
     $pInfo.FileName = "powershell.exe"
     $pInfo.Arguments = "-NoProfile -EncodedCommand $encoded"
-    $pInfo.RedirectStandardOutput = $true
-    $pInfo.RedirectStandardError = $true
-    $pInfo.UseShellExecute = $false
-    $pInfo.CreateNoWindow = $true
-    $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    
-    # 2. EXECUTE
+    $pInfo.RedirectStandardOutput = $true; $pInfo.RedirectStandardError = $true
+    $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true; $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
     try {
         $p = [System.Diagnostics.Process]::Start($pInfo)
-        $outputBlock = $p.StandardOutput.ReadToEnd()
-        $p.WaitForExit()
+        $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+        $lines = $out -split "`r`n"
         
-        $lines = $outputBlock -split "`r`n"
-        
-        # 3. PARSE RESULTS
         $idxId = -1
-        
-        # Try to find header column position first
-        foreach ($line in $lines) {
-            if ($line -match "Name\s+Id\s+Version") {
-                $idxId = $line.IndexOf("Id")
-                break
-            }
-        }
-        
+        foreach ($line in $lines) { if ($line -match "Name\s+Id\s+Version") { $idxId = $line.IndexOf("Id"); break } }
+
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            # --- GARBAGE FILTER (Updated) ---
-            if ([string]::IsNullOrWhiteSpace($line) -or $line -match "^Name" -or $line -match "^----") { continue }
-            if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:") { continue }
-            # FIX: Ignore the specific "No package found" message so it isn't parsed as an app
-            if ($line -match "No package found matching input criteria") { continue }
+            # --- IMPROVED GARBAGE FILTERING ---
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
+            if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
             
-            $n=$null; $i=$null; $v=$null
+            # Explicitly reject lines that are just headers repeated (common in multi-source search)
+            if ($line -match "^Name" -and $line -match "Id" -and $line -match "Version") { continue }
+            # Reject the weird single dash line
+            if ($line -eq "-") { continue }
+
+            $n=$null; $i=$null; $v=$null; $s="winget"
             
-            # METHOD A: Column Slicing (If header was found)
+            # Method A: Header Offset (Best for spaces)
             if ($idxId -gt 0 -and $line.Length -gt $idxId) {
                 $n = $line.Substring(0, $idxId).Trim()
                 $rest = $line.Substring($idxId).Trim()
                 $parts = $rest -split "\s+"
-                if ($parts.Count -ge 2) {
-                    $i = $parts[0]
-                    $v = $parts[1]
-                }
+                if ($parts.Count -ge 3) { $i = $parts[0]; $v = $parts[1]; $s = $parts[2] }
+                elseif ($parts.Count -ge 2) { $i = $parts[0]; $v = $parts[1] }
             }
             
-            # METHOD B: Greedy Regex (Fallback)
-            if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
-                 $n = $matches[1].Trim()
-                 $i = $matches[2].Trim()
-                 $v = $matches[3].Trim()
+            # Method B: Regex Fallback
+            if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)') {
+                 $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim(); $s = $matches[4].Trim()
+            }
+            elseif (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
+                 $n = $matches[1].Trim(); $i = $matches[2].Trim(); $v = $matches[3].Trim()
             }
 
-            # Add to List (Strict Validation)
-            # We ensure ID is at least 2 chars and doesn't contain common junk words
-            if ($n -and $i -and $i.Length -gt 2 -and $i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
-                 [void]$lstWinget.Items.Add([PSCustomObject]@{ 
-                    Name = $n
-                    Id = $i
-                    Version = $v
-                    Available = "-"
-                    Source = "winget" 
-                })
+            # Valid Entry Check & Final Garbage Filter
+            if ($n -and $i -and $i.Length -gt 2 -and $n -notmatch "^-+$" -and $i -notmatch "^-+$") {
+                 # Final sanity check: if the "Name" column extracted is literally "Name", skip it
+                 if ($n -eq "Name" -and $i -eq "Id") { continue }
+                 if ($i -eq "Version" -or $v -eq "Source") { continue }
+
+                 if ($i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
+                     if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
+                     [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=$s; Name=$n; Id=$i; Version=$v; Available="-" })
+                 }
             }
         }
-    }
-    catch {
-        [System.Windows.Forms.MessageBox]::Show("Search failed: $($_.Exception.Message)", "Error", "OK", "Error")
-    }
-    
-    # Clean "No Results" Message
-    if ($lstWinget.Items.Count -eq 0) {
-        [void]$lstWinget.Items.Add([PSCustomObject]@{ Name="No packages found matching input"; Id=""; Version=""; Available=""; Source="" })
+    } catch { Write-GuiLog "Winget Search Error: $_" }
+
+    # 2. NPM SEARCH (Existing logic remains...)
+    if ("npm" -in $enabled) {
+        $lblWingetStatus.Text = "Searching Npm..."
+        Write-GuiLog "Searching Npm..."
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "cmd"; $pInfo.Arguments = "/c npm search `"$query`" --json"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            if ($json.Contains("[")) {
+                $json = $json.Substring($json.IndexOf("[")); $pkgs = $json | ConvertFrom-Json
+                foreach ($pkg in $pkgs) { 
+                    [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="npm"; Name=$pkg.name; Id=$pkg.name; Version=$pkg.version; Available="-" }) 
+                }
+            }
+        } catch { Write-GuiLog "Npm skipped." }
     }
 
+    # 3. CHOCOLATEY SEARCH (Existing logic remains...)
+    if ("chocolatey" -in $enabled) {
+        $lblWingetStatus.Text = "Searching Chocolatey..."
+        Write-GuiLog "Searching Chocolatey..."
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo; $pInfo.FileName = "choco"; $pInfo.Arguments = "search `"$query`" -r"; $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+            $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+            $lines = $out -split "`r`n"
+            foreach ($line in $lines) {
+                if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
+                if ($parts.Count -ge 2) { 
+                    [void]$lstWinget.Items.Add([PSCustomObject]@{ Source="chocolatey"; Name=$parts[0]; Id=$parts[0]; Version=$parts[1]; Available="-" }) 
+                }
+            }
+        } catch { Write-GuiLog "Choco skipped." }
+    }
+
+    if ($lstWinget.Items.Count -eq 0) { 
+        [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No results found"; Id=""; Version=""; Available="" }) 
+    }
+    
     $lblWingetStatus.Visibility = "Hidden"
+    Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
 })
 
 $btnWingetUpdateSel.Add_Click({ 
