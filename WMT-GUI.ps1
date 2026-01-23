@@ -2441,7 +2441,7 @@ function Invoke-RegistryTask {
             }
         })
 
-        $handle = $ps.BeginInvoke()
+        [void]$ps.BeginInvoke()
         
         # --- UI TIMER (Main Thread) ---
         $timer = New-Object System.Windows.Threading.DispatcherTimer
@@ -3944,22 +3944,45 @@ function Show-TaskManager {
         WindowStartupLocation="CenterScreen" Background="#121212" Foreground="#E0E0E0">
 
     <Window.Resources>
-        <Style TargetType="Button" x:Key="BaseBtn">
+        <SolidColorBrush x:Key="BgDark" Color="#121212"/>
+        <SolidColorBrush x:Key="BgPanel" Color="#1E1E1E"/>
+        <SolidColorBrush x:Key="BgHover" Color="#333333"/>
+        <SolidColorBrush x:Key="BorderBrush" Color="#333333"/>
+        <SolidColorBrush x:Key="Accent" Color="#007ACC"/>
+        <SolidColorBrush x:Key="TextPrimary" Color="#E0E0E0"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#AAAAAA"/>
+        
+        <SolidColorBrush x:Key="BtnGreen" Color="#006600"/>
+        <SolidColorBrush x:Key="BtnRed" Color="#802020"/>
+        <SolidColorBrush x:Key="BtnBlue" Color="#004444"/>
+        <SolidColorBrush x:Key="BtnYellow" Color="#B8860B"/>
+
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{StaticResource BgPanel}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderBrush" Value="#444"/>
+            <Setter Property="Padding" Value="5"/>
+        </Style>
+
+        <Style TargetType="Button" x:Key="NavBtn">
             <Setter Property="Background" Value="Transparent"/>
             <Setter Property="Foreground" Value="#CCCCCC"/>
             <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Height" Value="40"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Padding" Value="15,0"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                         <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" Padding="10">
-                            <ContentPresenter HorizontalAlignment="Left" VerticalAlignment="Center"/>
-                         </Border>
-                         <ControlTemplate.Triggers>
+                        <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4">
+                            <ContentPresenter VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#333333"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgHover}"/>
                                 <Setter Property="Foreground" Value="White"/>
                             </Trigger>
-                         </ControlTemplate.Triggers>
+                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
@@ -3979,7 +4002,7 @@ function Show-TaskManager {
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#007ACC"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Accent}"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter TargetName="Bd" Property="Background" Value="#222"/>
@@ -3991,13 +4014,26 @@ function Show-TaskManager {
             </Setter>
         </Style>
         
+        <Style TargetType="Button" x:Key="PositiveBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="{StaticResource BtnGreen}"/>
+        </Style>
+        <Style TargetType="Button" x:Key="DestructiveBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="{StaticResource BtnRed}"/>
+        </Style>
+        <Style TargetType="Button" x:Key="UtilityBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="{StaticResource BtnBlue}"/>
+        </Style>
+        <Style TargetType="Button" x:Key="WarningBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="{StaticResource BtnYellow}"/>
+        </Style>
+
         <Style x:Key="FwItem" TargetType="ListViewItem">
             <Setter Property="BorderThickness" Value="0"/>
             <Style.Triggers>
-                <Trigger Property="ItemsControl.AlternationIndex" Value="0"><Setter Property="Background" Value="#1E1E1E"/></Trigger>
+                <Trigger Property="ItemsControl.AlternationIndex" Value="0"><Setter Property="Background" Value="{StaticResource BgPanel}"/></Trigger>
                 <Trigger Property="ItemsControl.AlternationIndex" Value="1"><Setter Property="Background" Value="#252526"/></Trigger>
-                <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="#007ACC"/><Setter Property="Foreground" Value="White"/></Trigger>
-                <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#3E3E42"/></Trigger>
+                <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{StaticResource Accent}"/><Setter Property="Foreground" Value="White"/></Trigger>
+                <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource BgHover}"/></Trigger>
             </Style.Triggers>
         </Style>
     </Window.Resources>
@@ -4008,7 +4044,7 @@ function Show-TaskManager {
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
-        <Border Grid.Column="0" Background="#1E1E1E" BorderBrush="#333" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/> 
@@ -4018,32 +4054,32 @@ function Show-TaskManager {
                 </Grid.RowDefinitions>
 
                 <StackPanel Grid.Row="0" Margin="10,20,10,10">
-                    <TextBlock Text="GLOBAL SEARCH" FontSize="10" Foreground="#666" FontWeight="Bold" Margin="2,0,0,5"/>
-                    <TextBox Name="txtGlobalSearch" Height="30" Padding="5" Background="#1E1E1E" Foreground="White" BorderBrush="#444" ToolTip="Type to search for any function within the app"/>
+                    <TextBlock Text="GLOBAL SEARCH" FontSize="10" Foreground="{StaticResource TextSecondary}" FontWeight="Bold" Margin="2,0,0,5"/>
+                    <TextBox Name="txtGlobalSearch" Height="30" ToolTip="Type to search for any function within the app"/>
                 </StackPanel>
 
                 <StackPanel Name="pnlNavButtons" Grid.Row="1" Margin="0,10,0,0">
-                    <Button Name="btnTabUpdates" Content="Updates (Winget)" Style="{StaticResource BaseBtn}" Tag="pnlUpdates"/>
-                    <Button Name="btnTabHealth" Content="System Health" Style="{StaticResource BaseBtn}" Tag="pnlHealth"/>
-                    <Button Name="btnTabNetwork" Content="Network &amp; DNS" Style="{StaticResource BaseBtn}" Tag="pnlNetwork"/>
-                    <Button Name="btnTabFirewall" Content="Firewall Manager" Style="{StaticResource BaseBtn}" Tag="pnlFirewall"/>
-                    <Button Name="btnTabDrivers" Content="Drivers" Style="{StaticResource BaseBtn}" Tag="pnlDrivers"/>
-                    <Button Name="btnTabCleanup" Content="Cleanup" Style="{StaticResource BaseBtn}" Tag="pnlCleanup"/>
-                    <Button Name="btnTabUtils" Content="Utilities" Style="{StaticResource BaseBtn}" Tag="pnlUtils"/>
-                    <Button Name="btnTabSupport" Content="Support &amp; Credits" Style="{StaticResource BaseBtn}" Tag="pnlSupport"/>
-                    <Button Name="btnNavDownloads" Content="Release Downloads" Style="{StaticResource BaseBtn}" ToolTip="Show latest release download counts"/>
+                    <Button Name="btnTabUpdates" Content="Updates (Winget)" Style="{StaticResource NavBtn}" Tag="pnlUpdates"/>
+                    <Button Name="btnTabHealth" Content="System Health" Style="{StaticResource NavBtn}" Tag="pnlHealth"/>
+                    <Button Name="btnTabNetwork" Content="Network &amp; DNS" Style="{StaticResource NavBtn}" Tag="pnlNetwork"/>
+                    <Button Name="btnTabFirewall" Content="Firewall Manager" Style="{StaticResource NavBtn}" Tag="pnlFirewall"/>
+                    <Button Name="btnTabDrivers" Content="Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
+                    <Button Name="btnTabCleanup" Content="Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
+                    <Button Name="btnTabUtils" Content="Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
+                    <Button Name="btnTabSupport" Content="Support &amp; Credits" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
+                    <Button Name="btnNavDownloads" Content="Release Downloads" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
                 </StackPanel>
                 
                 <ListBox Name="lstSearchResults" Grid.Row="2" Background="#111" BorderThickness="0" Foreground="Cyan" Visibility="Collapsed" Margin="5"/>
 
                 <StackPanel Grid.Row="3" Margin="10">
-                     <TextBlock Text="LOG OUTPUT" FontSize="10" Foreground="#666" FontWeight="Bold"/>
+                    <TextBlock Text="LOG OUTPUT" FontSize="10" Foreground="{StaticResource TextSecondary}" FontWeight="Bold"/>
                     <TextBox Name="LogBox" Height="290" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" Background="#111" Foreground="#0F0" BorderThickness="0"/>
                 </StackPanel>
             </Grid>
         </Border>
 
-        <Border Grid.Column="1" Background="#121212">
+        <Border Grid.Column="1" Background="{StaticResource BgDark}">
             <Grid Margin="20">
                 
                 <Grid Name="pnlUpdates" Visibility="Visible">
@@ -4059,12 +4095,12 @@ function Show-TaskManager {
                         </StackPanel>
                         <Grid Grid.Column="1">
                              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                             <TextBox Name="txtWingetSearch" Grid.Column="0" Height="30" VerticalContentAlignment="Center" Text="Search new packages..." Padding="5" Background="#1E1E1E" Foreground="White"/>
-                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="50" Height="30" Background="#007ACC" Foreground="White" ToolTip="Search repository"/>
+                             <TextBox Name="txtWingetSearch" Grid.Column="0" Height="30" VerticalContentAlignment="Center" Text="Search new packages..."/>
+                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="60" Height="30" Background="{StaticResource Accent}" Foreground="White" ToolTip="Search repository"/>
                         </Grid>
                     </Grid>
 
-                    <ListView Name="lstWinget" Grid.Row="1" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                    <ListView Name="lstWinget" Grid.Row="1" Background="{StaticResource BgPanel}" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                         <ListView.View>
                              <GridView>
                                 <GridViewColumn Header="Source" Width="80" DisplayMemberBinding="{Binding Source}"/>
@@ -4072,17 +4108,17 @@ function Show-TaskManager {
                                 <GridViewColumn Header="Id" Width="200" DisplayMemberBinding="{Binding Id}"/>
                                 <GridViewColumn Header="Version" Width="100" DisplayMemberBinding="{Binding Version}"/>
                                 <GridViewColumn Header="Available" Width="100" DisplayMemberBinding="{Binding Available}"/>
-                                </GridView>
+                            </GridView>
                         </ListView.View>
                     </ListView>
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Name="btnManageProviders" Content="Providers" Width="100" Style="{StaticResource ActionBtn}" Background="#555" Margin="0,0,10,0" ToolTip="Enable/Disable package managers or install missing ones"/>
+                        <Button Name="btnManageProviders" Content="Providers" Width="100" Style="{StaticResource ActionBtn}" Background="#555" Margin="0,0,10,0" ToolTip="Enable/Disable package managers"/>
                         <Button Name="btnWingetScan" Content="Refresh All" Width="150" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600"/>
-                        <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#006600" Visibility="Collapsed"/>
-                        <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource ActionBtn}" Background="#802020"/>
-                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource ActionBtn}" Background="#B8860B"/>
+                        <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource PositiveBtn}"/>
+                        <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
+                        <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource DestructiveBtn}"/>
+                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource WarningBtn}"/>
                         <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}"/>
                     </StackPanel>
                 </Grid>
@@ -4100,17 +4136,17 @@ function Show-TaskManager {
                 <StackPanel Name="pnlNetwork" Visibility="Collapsed">
                     <TextBlock Text="Network &amp; DNS" FontSize="24" Margin="0,0,0,20"/>
                     
-                    <TextBlock Text="General Tools" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="General Tools" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel Margin="0,0,0,15">
                         <Button Name="btnNetInfo" Content="Show IP Config" Width="180" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnFlushDNS" Content="Flush DNS" Width="180" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnResetWifi" Content="Restart Wi-Fi" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnNetRepair" Content="Full Network Repair" Width="180" Style="{StaticResource ActionBtn}" Background="#8B8000"/>
+                        <Button Name="btnNetRepair" Content="Full Network Repair" Width="180" Style="{StaticResource WarningBtn}" Background="#8B8000"/>
                         <Button Name="btnRouteTable" Content="Save Routing Table" Width="180" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnRouteView" Content="View Routing Table" Width="180" Style="{StaticResource ActionBtn}"/>
                     </WrapPanel>
                     
-                    <TextBlock Text="DNS Presets" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="DNS Presets" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel Margin="0,0,0,15">
                         <Button Name="btnDnsGoogle" Content="Google (8.8.8.8)" Width="180" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDnsCloudflare" Content="Cloudflare (1.1.1.1)" Width="180" Style="{StaticResource ActionBtn}"/>
@@ -4119,13 +4155,13 @@ function Show-TaskManager {
                         <Button Name="btnDnsCustom" Content="Custom DNS..." Width="180" Style="{StaticResource ActionBtn}"/>
                     </WrapPanel>
 
-                    <TextBlock Text="DNS Encryption (DoH)" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="DNS Encryption (DoH)" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel Margin="0,0,0,15">
-                        <Button Name="btnDohAuto" Content="Enable DoH (All)" Width="250" Style="{StaticResource ActionBtn}" Background="#006666"/>
-                        <Button Name="btnDohDisable" Content="Disable DoH" Width="180" Style="{StaticResource ActionBtn}" Background="#660000"/>
+                        <Button Name="btnDohAuto" Content="Enable DoH (All)" Width="250" Style="{StaticResource UtilityBtn}"/>
+                        <Button Name="btnDohDisable" Content="Disable DoH" Width="180" Style="{StaticResource DestructiveBtn}" Background="#660000"/>
                     </WrapPanel>
 
-                    <TextBlock Text="Hosts File" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="Hosts File" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel>
                         <Button Name="btnHostsUpdate" Content="Download AdBlock" Width="180" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnHostsEdit" Content="Edit Hosts" Width="180" Style="{StaticResource ActionBtn}"/>
@@ -4142,10 +4178,10 @@ function Show-TaskManager {
                             <TextBlock Text="Firewall Manager" FontSize="24" Margin="0,0,20,0"/>
                             <TextBlock Name="lblFwStatus" Text="Loading..." Foreground="Yellow" Visibility="Collapsed"/>
                         </StackPanel>
-                        <TextBox Name="txtFwSearch" Grid.Column="1" Text="Search Rules..." Padding="5" Background="#1E1E1E" Foreground="White" BorderBrush="#444" ToolTip="Type rule name or port to search"/>
+                        <TextBox Name="txtFwSearch" Grid.Column="1" Text="Search Rules..." ToolTip="Type rule name or port to search"/>
                     </Grid>
                     
-                    <ListView Name="lstFirewall" Grid.Row="1" Background="#1E1E1E" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                    <ListView Name="lstFirewall" Grid.Row="1" Background="{StaticResource BgPanel}" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                         <ListView.View>
                             <GridView>
                                 <GridViewColumn Header="Name" Width="350" DisplayMemberBinding="{Binding Name}"/>
@@ -4192,15 +4228,15 @@ function Show-TaskManager {
 
                     <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
                         <Button Name="btnFwRefresh" Content="Reload" Width="100" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwAdd" Content="Add Rule" Width="100" Style="{StaticResource ActionBtn}" Background="#006600"/>
+                        <Button Name="btnFwAdd" Content="Add Rule" Width="100" Style="{StaticResource PositiveBtn}"/>
                         <Button Name="btnFwEdit" Content="Modify" Width="100" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnFwEnable" Content="Enable" Width="80" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnFwDisable" Content="Disable" Width="80" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwDelete" Content="Delete" Width="80" Style="{StaticResource ActionBtn}" Background="#802020"/>
+                        <Button Name="btnFwDelete" Content="Delete" Width="80" Style="{StaticResource DestructiveBtn}"/>
                         <Button Name="btnFwExport" Content="Export" Width="90" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnFwImport" Content="Import" Width="90" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnFwDefaults" Content="Restore Defaults" Width="140" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwPurge" Content="Delete All" Width="100" Style="{StaticResource ActionBtn}" Background="#7A1F1F"/>
+                        <Button Name="btnFwPurge" Content="Delete All" Width="100" Style="{StaticResource DestructiveBtn}" Background="#7A1F1F"/>
                     </StackPanel>
                 </Grid>
 
@@ -4227,7 +4263,7 @@ function Show-TaskManager {
                         <Button Name="btnCleanDisk" Content="Disk Cleanup" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnCleanTemp" Content="Delete Temp Files" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnCleanShortcuts" Content="Fix Shortcuts" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCleanReg" Content="Clean Registry Keys" Width="200" Style="{StaticResource ActionBtn}" Background="#B8860B"/>
+                        <Button Name="btnCleanReg" Content="Clean Registry Keys" Width="200" Style="{StaticResource WarningBtn}"/>
                         <Button Name="btnCleanXbox" Content="Clean Xbox Data" Width="200" Style="{StaticResource ActionBtn}"/>
                     </WrapPanel>
                 </StackPanel>
@@ -4235,22 +4271,22 @@ function Show-TaskManager {
                 <StackPanel Name="pnlUtils" Visibility="Collapsed">
                     <TextBlock Text="Utilities" FontSize="24" Margin="0,0,0,20"/>
                     
-                    <TextBlock Text="System &amp; Activation" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="System &amp; Activation" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel Margin="0,0,0,15">
                         <Button Name="btnUtilSysInfo" Content="System Info Report" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnUtilTrim" Content="Trim SSD" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnUtilMas" Content="MAS Activation" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnTaskManager" Content="Task Scheduler Manager" Width="200" Style="{StaticResource ActionBtn}" Background="#004444"/>
-                        <Button Name="btnCtxBuilder" Content="Custom Context Menu" Width="200" Style="{StaticResource ActionBtn}" Background="#004444"/>
+                        <Button Name="btnTaskManager" Content="Task Scheduler Manager" Width="200" Style="{StaticResource UtilityBtn}"/>
+                        <Button Name="btnCtxBuilder" Content="Custom Context Menu" Width="200" Style="{StaticResource UtilityBtn}"/>
                     </WrapPanel>
 
-                    <TextBlock Text="Repairs &amp; Settings" Foreground="#888" Margin="5"/>
+                    <TextBlock Text="Repairs &amp; Settings" Foreground="{StaticResource TextSecondary}" Margin="5"/>
                     <WrapPanel>
-                        <Button Name="btnUpdateRepair" Content="Reset Windows Update" Width="200" Style="{StaticResource ActionBtn}" Background="#8B8000"/>
+                        <Button Name="btnUpdateRepair" Content="Reset Windows Update" Width="200" Style="{StaticResource WarningBtn}" Background="#8B8000"/>
                         <Button Name="btnUpdateServices" Content="Restart Update Services" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDotNetEnable" Content="Set .NET RollForward" Width="200" Style="{StaticResource ActionBtn}"/>
                         <Button Name="btnDotNetDisable" Content="Unset .NET RollForward" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnInstallGpedit" Content="Install Gpedit (Home)" Width="200" Style="{StaticResource ActionBtn}" Background="#004444"/>
+                        <Button Name="btnInstallGpedit" Content="Install Gpedit (Home)" Width="200" Style="{StaticResource UtilityBtn}"/>
                     </WrapPanel>
                 </StackPanel>
 
@@ -4277,7 +4313,7 @@ function Show-TaskManager {
                     </StackPanel>
 
                     <TextBlock Text="License: MIT License" Foreground="#666" Margin="0,10,0,0" FontSize="10"/>
-                    <TextBlock Text="Copyright (c) 2025" Foreground="#666" FontSize="10"/>
+                    <TextBlock Text="Copyright (c) 2026" Foreground="#666" FontSize="10"/>
                     
                     <StackPanel Orientation="Horizontal" Margin="0,20,0,0">
                          <Button Name="btnSupportDiscord" Content="Join Discord" Width="180" Style="{StaticResource ActionBtn}" Background="#5865F2"/>
@@ -5475,7 +5511,6 @@ $btnWingetFind.Add_Click({
             
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "winget"
-            # ERROR FIXED: Removed the line that overwrote this with "-NoProfile..."
             $pInfo.Arguments = "search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements"
             
             $pInfo.RedirectStandardOutput = $true
