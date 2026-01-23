@@ -82,31 +82,6 @@ function Invoke-UiCommand {
     }
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
-function Start-GuiJob {
-    param(
-        [scriptblock]$ScriptBlock, 
-        [string]$JobName, 
-        [scriptblock]$CompletedAction,
-        [object[]]$Arguments = @()   # <--- ADDED THIS
-    )
-    
-    # Pass arguments into the background job
-    $job = Start-Job -ScriptBlock $ScriptBlock -ArgumentList $Arguments
-    
-    $timer = New-Object System.Windows.Threading.DispatcherTimer
-    $timer.Interval = [TimeSpan]::FromMilliseconds(500)
-    $timer.Add_Tick({
-        if ($job.State -ne 'Running') {
-            $timer.Stop()
-            $result = Receive-Job -Job $job
-            Remove-Job -Job $job
-            
-            # Execute completion logic (Back on the UI thread)
-            & $CompletedAction $result
-        }
-    })
-    $timer.Start()
-}
 
 # Centralized data path for exports (in repo folder)
 function Get-DataPath {
@@ -5259,52 +5234,6 @@ $sortBlock = {
 $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
 
 # ---------------------------------------------------------
-# NON-BLOCKING SEARCH LOGIC
-# ---------------------------------------------------------
-
-# 1. SETUP TIMER TO PROCESS RESULTS
-$script:SearchTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:SearchTimer.Interval = [TimeSpan]::FromMilliseconds(200)
-
-$script:SearchTimer.Add_Tick({
-    if ($script:SearchJob) {
-        # Get any new results available since last tick
-        $results = Receive-Job -Job $script:SearchJob
-        
-        foreach ($item in $results) {
-            if ($item -is [string]) {
-                # Handle Status Messages from the Job
-                if ($item.StartsWith("LOG:")) { Write-GuiLog ($item -replace "LOG:","") }
-                if ($item.StartsWith("STATUS:")) { $lblWingetStatus.Text = ($item -replace "STATUS:","") }
-            }
-            elseif ($item.PSObject.Properties["Source"]) {
-                # Handle Search Result Objects
-                # Filter out duplicates if necessary, or just add
-                [void]$lstWinget.Items.Add($item)
-            }
-        }
-
-        # Check if Job is done
-        if ($script:SearchJob.State -notin @('Running')) {
-            $script:SearchTimer.Stop()
-            Remove-Job -Job $script:SearchJob -Force
-            $script:SearchJob = $null
-            
-            # UI Cleanup
-            $lblWingetStatus.Visibility = "Hidden"
-            $btnWingetFind.IsEnabled = $true
-            $txtWingetSearch.IsEnabled = $true
-            
-            if ($lstWinget.Items.Count -eq 0) { 
-                [void]$lstWinget.Items.Add([PSCustomObject]@{ Source=""; Name="No results found"; Id=""; Version=""; Available="" }) 
-            }
-            Write-GuiLog "Search Complete."
-        }
-    }
-})
-
-# 2. THE SEARCH BUTTON CLICK EVENT
-# ---------------------------------------------------------
 # HIGH-PERFORMANCE THREADED SEARCH
 # ---------------------------------------------------------
 
@@ -5546,7 +5475,6 @@ $btnDISMCheck.Add_Click({
             )
             if ($prompt -eq "Yes") {
                 Write-Output "Launching DISM RestoreHealth..."
-                # Run DISM Restore (nested): Fixed newline issue
                 Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -ExecutionPolicy Bypass -Command "dism /online /cleanup-image /restorehealth; Write-Host; Write-Host ''Execution Complete.'' -ForegroundColor Green; Write-Host ''Press Enter to close...'' -NoNewline -ForegroundColor Gray; Read-Host"' -Verb RunAs -WindowStyle Normal
             }
         }
@@ -5816,7 +5744,7 @@ $btnCleanReg.Add_Click({
     $actions = [ordered]@{
         "List Safe Keys (Obsolete)"="List"
         "Delete Safe Keys (Obsolete)"="Delete"
-        "Deep Clean (Invalid Paths)"="DeepClean"  # <--- NEW OPTION
+        "Deep Clean (Invalid Paths)"="DeepClean"
         "Backup HKLM Hive"="BackupHKLM"
         "Restore Registry Backup"="Restore"
         "Run SFC/DISM Scan"="Scan"
@@ -5862,7 +5790,6 @@ $btnDotNetEnable.Add_Click({
     if ($form.ShowDialog() -eq "OK") { 
         $choice = ($radios | Where-Object { $_.Checked }).Tag; 
         if ($choice) { 
-            # FIXED LINE BELOW: Added param block and ArgumentList
             Invoke-UiCommand { param($choice) Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." -ArgumentList $choice
         } 
     }
