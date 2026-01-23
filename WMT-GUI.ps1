@@ -5089,9 +5089,27 @@ $btnWingetScan.Add_Click({
             function Log($m){ Write-Output "LOG:$m" }
             
             Log "Scanning Winget & Store..."
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo("powershell", "-NoProfile -Command `"winget list --upgrade-available --include-unknown --accept-source-agreements`"")
-            $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true; $pInfo.StandardOutputEncoding=[System.Text.UTF8Encoding]::new($false)
-            $p=[System.Diagnostics.Process]::Start($pInfo); $out=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+
+            # OPTIMIZATION: Check if we can skip the slow MS Store
+            # If "msstore" is NOT in the enabled list, we force winget to look ONLY at the winget source.
+            $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements"
+            if ("msstore" -notin $Enabled) {
+                $wArgs += " --source winget"
+                Log "Skipping MS Store source (optimization enabled)"
+            }
+
+            # OPTIMIZATION: Run winget directly (Removes PowerShell wrapper overhead)
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pInfo.FileName = "winget"
+            $pInfo.Arguments = $wArgs
+            $pInfo.RedirectStandardOutput = $true
+            $pInfo.UseShellExecute = $false
+            $pInfo.CreateNoWindow = $true
+            $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            
+            $p = [System.Diagnostics.Process]::Start($pInfo)
+            $out = $p.StandardOutput.ReadToEnd()
+            $p.WaitForExit()
             
             if (-not [string]::IsNullOrWhiteSpace($out)) {
                 $lines = $out -split "`r`n"
@@ -5455,12 +5473,11 @@ $btnWingetFind.Add_Click({
             
             $cleanQuery = $Query.Replace('"', '')
             
-            # Use standard ProcessStartInfo (Fastest method)
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pInfo.FileName = "powershell.exe"
-            # We wrap the command in PS to ensure encoding is handled correctly
-            $encCmd = "winget search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements"
-            $pInfo.Arguments = "-NoProfile -Command `"$encCmd`""
+            $pInfo.FileName = "winget"
+            # ERROR FIXED: Removed the line that overwrote this with "-NoProfile..."
+            $pInfo.Arguments = "search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements"
+            
             $pInfo.RedirectStandardOutput = $true
             $pInfo.RedirectStandardError = $true
             $pInfo.UseShellExecute = $false
