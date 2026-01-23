@@ -475,75 +475,134 @@ function Set-DnsAddresses {
     } "Applying $labelText..." -ArgumentList (,$addrList), $labelText
 }
 
-function Enable-AllDoh {
-    $dnsServers = @(
-        @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" },
-        @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" },
-        @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" },
-        @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" },
-        @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" },
-        @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" },
-        @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" },
-        @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" },
-        @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" },
-        @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" },
-        @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" },
-        @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" },
-        @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" },
-        @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" },
-        @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" },
-        @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
-    )
-    Invoke-UiCommand {
-        param($dnsServers)
-        $applied = 0
-        foreach ($dns in $dnsServers) {
-            try {
-                $cmd = "netsh dns add encryption server=$($dns.Server) dohtemplate=$($dns.Template) autoupgrade=yes udpfallback=no"
-                Invoke-Expression $cmd | Out-Null
-                if ($LASTEXITCODE -eq 0) { $applied++; Write-Output "Enabled DoH for $($dns.Server)" }
-            } catch { Write-Output "Failed DoH for $($dns.Server): $($_.Exception.Message)" }
-        }
-        try { ipconfig /flushdns | Out-Null } catch {}
-        try {
-            $svc = Get-Service -Name Dnscache -ErrorAction SilentlyContinue
-            if ($svc.Status -eq "Running" -and $svc.StartType -ne "Disabled") { Restart-Service -Name Dnscache -Force -ErrorAction SilentlyContinue }
-        } catch {}
-        Write-Output "Applied DoH templates to $applied server(s)."
+# --- SHARED DNS CONFIGURATION ---
+$script:DohTargets = @(
+    @{ Server = "1.1.1.1";               Template = "https://cloudflare-dns.com/dns-query" }
+    @{ Server = "1.0.0.1";               Template = "https://cloudflare-dns.com/dns-query" }
+    @{ Server = "2606:4700:4700::1111";  Template = "https://cloudflare-dns.com/dns-query" }
+    @{ Server = "2606:4700:4700::1001";  Template = "https://cloudflare-dns.com/dns-query" }
+    @{ Server = "8.8.8.8";               Template = "https://dns.google/dns-query" }
+    @{ Server = "8.8.4.4";               Template = "https://dns.google/dns-query" }
+    @{ Server = "2001:4860:4860::8888";  Template = "https://dns.google/dns-query" }
+    @{ Server = "2001:4860:4860::8844";  Template = "https://dns.google/dns-query" }
+    @{ Server = "9.9.9.9";               Template = "https://dns.quad9.net/dns-query" }
+    @{ Server = "149.112.112.112";       Template = "https://dns.quad9.net/dns-query" }
+    @{ Server = "2620:fe::fe";           Template = "https://dns.quad9.net/dns-query" }
+    @{ Server = "2620:fe::fe:9";         Template = "https://dns.quad9.net/dns-query" }
+    @{ Server = "94.140.14.14";          Template = "https://dns.adguard.com/dns-query" }
+    @{ Server = "94.140.15.15";          Template = "https://dns.adguard.com/dns-query" }
+    @{ Server = "2a10:50c0::ad1:ff";     Template = "https://dns.adguard.com/dns-query" }
+    @{ Server = "2a10:50c0::ad2:ff";     Template = "https://dns.adguard.com/dns-query" }
+)
 
-        if ($applied -gt 0) {
-            [System.Windows.MessageBox]::Show("Enabled DoH for $applied server(s).", "Enable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show("Failed to enable DoH. Check the log for details.", "Enable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+function Start-DohJob {
+    param($List, $IsEnable)
+
+    # 1. UI Feedback
+    # Attempt to find buttons. If not found, variables will be null.
+    $btnEnable = Get-Ctrl "btnDohAuto"
+    $btnDisable = Get-Ctrl "btnDohDisable"
+    
+    # Safely disable if found
+    if ($btnEnable) { $btnEnable.IsEnabled = $false }
+    if ($btnDisable) { $btnDisable.IsEnabled = $false }
+    
+    $actionStr = if ($IsEnable) { "Enabling" } else { "Disabling" }
+    Write-GuiLog "$actionStr DoH... (Batch Processing)"
+
+    # 2. Start Background Job
+    $script:DohJob = Start-Job -ScriptBlock {
+        param($List, $IsEnable)
+        
+        # Create a temp file for the batch commands
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        $cnt = 0
+        
+        # Build the batch file content
+        $lines = @()
+        foreach ($dns in $List) {
+            if ($IsEnable) {
+                $lines += "dns add encryption server=$($dns.Server) dohtemplate=$($dns.Template) autoupgrade=yes udpfallback=no"
+            } else {
+                $lines += "dns delete encryption server=$($dns.Server)"
+            }
+            $cnt++
         }
-    } "Enabling DoH for known DNS providers..." -ArgumentList (,$dnsServers)
+        
+        # Write to file
+        $lines | Set-Content -Path $tmpFile -Encoding Ascii
+
+        # Run netsh in batch mode (-f)
+        $p = Start-Process -FilePath "netsh.exe" -ArgumentList "-f", $tmpFile -NoNewWindow -PassThru -Wait
+        
+        # Cleanup
+        if (Test-Path $tmpFile) { Remove-Item $tmpFile }
+        
+        # Helper tasks
+        ipconfig /flushdns | Out-Null
+        if ($IsEnable) {
+            try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        
+        # Return the result object
+        if ($p.ExitCode -eq 0) {
+            Write-Output ([PSCustomObject]@{ Count = $cnt; Success = $true })
+        } else {
+            Write-Output ([PSCustomObject]@{ Count = 0; Success = $false })
+        }
+
+    } -ArgumentList $List, $IsEnable
+
+    # 3. Monitor Job
+    if ($script:DohTimer) { $script:DohTimer.Stop() }
+    $script:DohTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DohTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    
+    $script:DohTimer.Add_Tick({
+        if ($script:DohJob.State -ne 'Running') {
+            $script:DohTimer.Stop()
+            
+            # Re-fetch buttons in this scope to be safe
+            $btnEnable = Get-Ctrl "btnDohAuto"
+            $btnDisable = Get-Ctrl "btnDohDisable"
+
+            try {
+                $rawResults = Receive-Job -Job $script:DohJob
+                $res = $rawResults | Where-Object { $_ -is [PSCustomObject] -and $_.Psobject.Properties.Match('Count') } | Select-Object -Last 1
+
+                if ($res -and $res.Success) {
+                    $c = $res.Count
+                    $finMsg = if ($IsEnable) { "Successfully applied $c DoH rules." } else { "Successfully removed $c DoH rules." }
+                    
+                    Write-GuiLog "Done. $finMsg"
+                    
+                    if ($c -gt 0) {
+                        # FIXED: Use [System.Windows.MessageBox] (WPF) to match the Enum types
+                        [System.Windows.MessageBox]::Show($finMsg, "DoH Manager", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                    }
+                } else {
+                     Write-GuiLog "Operation failed or no changes were made."
+                }
+            } catch {
+                Write-GuiLog "Job Error: $($_.Exception.Message)"
+            }
+
+            # Cleanup
+            Remove-Job -Job $script:DohJob
+            $script:DohJob = $null
+
+            # Unlock Buttons (Safe Check)
+            if ($btnEnable) { $btnEnable.IsEnabled = $true }
+            if ($btnDisable) { $btnDisable.IsEnabled = $true }
+        }
+    })
+    
+    $script:DohTimer.Start()
 }
 
-function Disable-AllDoh {
-    $dnsServers = @(
-        "1.1.1.1","1.0.0.1","2606:4700:4700::1111","2606:4700:4700::1001",
-        "8.8.8.8","8.8.4.4","2001:4860:4860::8888","2001:4860:4860::8844",
-        "9.9.9.9","149.112.112.112","2620:fe::fe","2620:fe::fe:9",
-        "94.140.14.14","94.140.15.15","2a10:50c0::ad1:ff","2a10:50c0::ad2:ff"
-    )
-    Invoke-UiCommand {
-        param($dnsServers)
-        $removed = 0
-        foreach ($dns in $dnsServers) {
-            try {
-                Invoke-Expression "netsh dns delete encryption server=$dns" | Out-Null
-                if ($LASTEXITCODE -eq 0) { $removed++; Write-Output "Removed DoH entry for $dns" }
-            } catch { Write-Output ("Failed removing DoH for {0}: {1}" -f $dns, $_.Exception.Message) }
-        }
-        try { ipconfig /flushdns | Out-Null } catch {}
-        Write-Output "Removed $removed DoH entries."
-        if ($removed -gt 0) {
-            [System.Windows.MessageBox]::Show("Removed $removed DoH entries.", "Disable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } else {
-            [System.Windows.MessageBox]::Show("No DoH entries were removed. Check the log for details.", "Disable DoH", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-        }
-    } "Disabling DoH entries..." -ArgumentList (,$dnsServers)
-}
+# Redirect existing function calls to the new Async handler
+function Enable-AllDoh { Start-DohJob -List $script:DohTargets -IsEnable $true }
+function Disable-AllDoh { Start-DohJob -List $script:DohTargets -IsEnable $false }
 
 # --- Hosts Adblock ---
 function Invoke-HostsUpdate {
@@ -4693,10 +4752,34 @@ $Script:StartWingetAction = {
             }
 
             if ($cmd) {
+                # 1. Log the action to the GUI
                 Write-Output "[$src] $act : $($item.Name)..."
                 Write-Output "Running: $cmd"
-                $output = Invoke-Expression "$cmd 2>&1"
-                $output | ForEach-Object { Write-Output $_ }
+
+                # 2. Smart-Split the command string
+                # This Regex splits by space but keeps "Quoted Strings" together
+                # (Prevents errors if an App ID has a space in it)
+                $parts = [regex]::Matches($cmd, '("[^"]*"|\S+)').Value
+                
+                if ($parts.Count -gt 0) {
+                    $exe = $parts[0]
+                    # Get arguments and strip quotes (PowerShell adds them back automatically)
+                    $argList = $parts[1..($parts.Count - 1)] | ForEach-Object { $_.Trim('"') }
+
+                    # 3. Run safely using the Call Operator '&'
+                    try {
+                        # 2>&1 ensures errors are captured in $output
+                        $output = & $exe $argList 2>&1
+                        
+                        # 4. Print the output to the GUI log
+                        if ($output) { 
+                            $output | ForEach-Object { Write-Output $_ } 
+                        }
+                    } catch {
+                        Write-Output "Error: $($_.Exception.Message)"
+                    }
+                }
+
                 Write-Output "--------------------------------"
             }
         }
