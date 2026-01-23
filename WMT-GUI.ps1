@@ -14,10 +14,18 @@ $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
-# HIDE CONSOLE
-$t = '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int state);'
-$w = Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions -PassThru
-$null = $w::ShowWindow(([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle, 0)
+# HIDE CONSOLE (Safe Check)
+# This prevents crashes if you run the script twice in the same session
+if (-not ([System.Management.Automation.PSTypeName]'Win32Functions.Win32ShowWindow').Type) {
+    $t = '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int state);'
+    Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions
+}
+try {
+    $hwnd = ([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle
+    if ($hwnd -ne [IntPtr]::Zero) {
+        [Win32Functions.Win32ShowWindow]::ShowWindow($hwnd, 0) | Out-Null
+    }
+} catch {}
 
 # ADMIN CHECK
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
@@ -27,14 +35,16 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     exit
 }
 
-# ENABLE HIGH-DPI AWARENESS (Fixes blurry text on 4K screens)
+# ENABLE HIGH-DPI AWARENESS (Safe Check)
 if ([Environment]::OSVersion.Version.Major -ge 6) {
-    $code = @'
-    [DllImport("user32.dll")]
-    public static extern bool SetProcessDPIAware();
+    if (-not ([System.Management.Automation.PSTypeName]'Win32Dpi').Type) {
+        $code = @'
+        [DllImport("user32.dll")]
+        public static extern bool SetProcessDPIAware();
 '@
-    $Win32Dpi = Add-Type -MemberDefinition $code -Name "Win32Dpi" -PassThru
-    $Win32Dpi::SetProcessDPIAware() | Out-Null
+        Add-Type -MemberDefinition $code -Name "Win32Dpi"
+    }
+    try { [Win32Dpi]::SetProcessDPIAware() | Out-Null } catch {}
 }
 
 Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
@@ -1047,8 +1057,6 @@ function Get-Winapp2Rules {
 }
 
 function Show-AdvancedCleanupSelection {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
 
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.TempCleanup
@@ -2443,9 +2451,6 @@ function Invoke-SSDTrim {
     } "Running SSD Trim/ReTrim..."
 }
 function Show-BrokenShortcuts {
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
-
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
     $f.Size = "1100, 650"
@@ -4877,6 +4882,7 @@ $btnWingetScan.Add_Click({
     [System.Windows.Forms.Application]::DoEvents()
 
     $settings = Get-WmtSettings
+    $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
     if (-not $settings.EnabledProviders) { $enabled = @("winget", "msstore", "pip", "npm", "chocolatey") } 
     else { $enabled = $settings.EnabledProviders }
 
