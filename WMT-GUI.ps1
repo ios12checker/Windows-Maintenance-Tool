@@ -4865,38 +4865,51 @@ $btnWingetScan.Add_Click({
     $currentSettings = Get-WmtSettings
     $ignoreList = if ($currentSettings.WingetIgnore) { $currentSettings.WingetIgnore } else { @() }
 
-    $tempOut = Join-Path $env:TEMP "winget_upd.txt"
+    # 2. SETUP PROCESS (RAM Mode)
+    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pInfo.FileName = "winget.exe"
+    $pInfo.Arguments = "list --upgrade-available --accept-source-agreements"
+    $pInfo.RedirectStandardOutput = $true
+    $pInfo.RedirectStandardError = $true
+    $pInfo.UseShellExecute = $false
+    $pInfo.CreateNoWindow = $true
+    $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
     
-    # Capture output
-    $psCmd = "chcp 65001 >`$null; `$host.ui.RawUI.BufferSize = New-Object Management.Automation.Host.Size(300, 3000); winget list --upgrade-available --accept-source-agreements 2>&1 | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
-    
-    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
-    $proc.WaitForExit()
-    
-    if (Test-Path $tempOut) {
-        $lines = Get-Content $tempOut -Encoding UTF8
+    try {
+        $p = [System.Diagnostics.Process]::Start($pInfo)
+        $outputBlock = $p.StandardOutput.ReadToEnd()
+        $p.WaitForExit()
+
+        $lines = $outputBlock -split "`r`n"
         
         foreach ($line in $lines) {
             $line = $line.Trim()
             
-            if ($line -eq "" -or $line -match "^Name" -or $line -match "^----" -or $line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
-            if ($line -match "[\u2580-\u259F]") { continue }
-            if ($line -match "\d+\s*(KB|MB|GB|TB)") { continue }
+            # --- GARBAGE FILTER ---
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            if ($line -match "^Name\s+Id") { continue }      # Skip Header
+            if ($line -match "^-+$") { continue }            # Skip Separator lines (----)
+            if ($line.Length -lt 2 -and $line -match "[\\/|\-]") { continue } # Skip Spinners
+            if ($line -match "upgrades\s+available" -or $line -match "No installed package found") { continue }
+            if ($line -match "[\u2580-\u259F]") { continue } # Block progress bars
 
             $name=$null; $id=$null; $ver=$null; $avail="-"; $src="winget"
 
-            if ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)\s+(\S+)$') {
+            # 3. PARSE LOGIC (Relaxed Space Rule)
+            # CHANGED \s{2,} TO \s+ to allow single spaces between columns
+            # We rely on ID, Version, Available, and Source having NO spaces to anchor the match.
+            
+            # Strategy 1: 5 Columns (Name, Id, Version, Available, Source)
+            if ($line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)$') {
                 $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]; $src = $matches[5]
             }
-            elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)\s+(\S+)$') {
-                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $src = $matches[4]
-            }
-            elseif ($line -match '^(.+)\s+([^<\s]\S*)\s+((?:<\s+)?\S+)$') {
-                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]
+            # Strategy 2: 4 Columns (Source missing)
+            elseif ($line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)$') {
+                $name = $matches[1]; $id = $matches[2]; $ver = $matches[3]; $avail = $matches[4]
             }
 
-            if ($name -and $id -notmatch "^(KB|MB|GB|/)$") {
-                # 2. FILTER: Only add if ID is NOT in ignore list
+            # 4. VALIDATE & ADD
+            if ($name -and $id -and $id -ne "Id" -and $id.Length -gt 2) {
                 if ($id.Trim() -notin $ignoreList) {
                     [void]$lstWinget.Items.Add([PSCustomObject]@{ 
                         Name=$name.Trim(); Id=$id.Trim(); Version=$ver.Trim(); Available=$avail.Trim(); Source=$src.Trim() 
@@ -4904,7 +4917,9 @@ $btnWingetScan.Add_Click({
                 }
             }
         }
-        Remove-Item $tempOut -ErrorAction SilentlyContinue
+    }
+    catch {
+        [System.Windows.Forms.MessageBox]::Show("Scan failed: $($_.Exception.Message)", "Error", "OK", "Error")
     }
     
     $logCount = $lstWinget.Items.Count
@@ -5068,30 +5083,104 @@ $btnWingetUnignore.Add_Click({
 })
 
 $btnWingetFind.Add_Click({
-    if ($txtWingetSearch.Text -eq "" -or $txtWingetSearch.Text -eq "Search new packages...") { return }
+    if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -eq "Search new packages...") { return }
+    
     $lblWingetTitle.Text = "Search Results: " + $txtWingetSearch.Text
     $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
     $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
     $lstWinget.Items.Clear()
     [System.Windows.Forms.Application]::DoEvents()
     
-    $tempOut = Join-Path $env:TEMP "winget_search.txt"
-    $psCmd = "chcp 65001 >`$null; winget search `"$($txtWingetSearch.Text)`" --accept-source-agreements | Out-File -FilePath `"$tempOut`" -Encoding UTF8"
-    $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -Command $psCmd" -NoNewWindow -PassThru
-    $proc.WaitForExit()
+    # 1. SETUP COMMAND (Encoded to prevent quote breakage)
+    $cleanQuery = $txtWingetSearch.Text.Replace('"', '')
     
-    if (Test-Path $tempOut) {
-        $lines = Get-Content $tempOut -Encoding UTF8
+    $psCmd = "
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+        winget search --query `"$cleanQuery`" --source winget --accept-source-agreements
+    "
+    
+    $bytes = [System.Text.Encoding]::Unicode.GetBytes($psCmd)
+    $encoded = [Convert]::ToBase64String($bytes)
+    
+    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $pInfo.FileName = "powershell.exe"
+    $pInfo.Arguments = "-NoProfile -EncodedCommand $encoded"
+    $pInfo.RedirectStandardOutput = $true
+    $pInfo.RedirectStandardError = $true
+    $pInfo.UseShellExecute = $false
+    $pInfo.CreateNoWindow = $true
+    $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    
+    # 2. EXECUTE
+    try {
+        $p = [System.Diagnostics.Process]::Start($pInfo)
+        $outputBlock = $p.StandardOutput.ReadToEnd()
+        $p.WaitForExit()
+        
+        $lines = $outputBlock -split "`r`n"
+        
+        # 3. PARSE RESULTS
+        $idxId = -1
+        
+        # Try to find header column position first
         foreach ($line in $lines) {
-            if ($line -match '^(\S.{0,35}?)\s{2,}(\S+)\s{2,}(\S+)') {
-                if ($matches[1] -notmatch "Name" -and $matches[1] -notmatch "----") {
-                     [void]$lstWinget.Items.Add([PSCustomObject]@{ Name=$matches[1].Trim(); Id=$matches[2].Trim(); Version=$matches[3].Trim(); Available="-"; Source="winget" })
-                }
+            if ($line -match "Name\s+Id\s+Version") {
+                $idxId = $line.IndexOf("Id")
+                break
             }
         }
-        Remove-Item $tempOut -ErrorAction SilentlyContinue
+        
+        foreach ($line in $lines) {
+            $line = $line.Trim()
+            
+            # --- GARBAGE FILTER (Updated) ---
+            if ([string]::IsNullOrWhiteSpace($line) -or $line -match "^Name" -or $line -match "^----") { continue }
+            if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:") { continue }
+            # FIX: Ignore the specific "No package found" message so it isn't parsed as an app
+            if ($line -match "No package found matching input criteria") { continue }
+            
+            $n=$null; $i=$null; $v=$null
+            
+            # METHOD A: Column Slicing (If header was found)
+            if ($idxId -gt 0 -and $line.Length -gt $idxId) {
+                $n = $line.Substring(0, $idxId).Trim()
+                $rest = $line.Substring($idxId).Trim()
+                $parts = $rest -split "\s+"
+                if ($parts.Count -ge 2) {
+                    $i = $parts[0]
+                    $v = $parts[1]
+                }
+            }
+            
+            # METHOD B: Greedy Regex (Fallback)
+            if (-not $n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)') {
+                 $n = $matches[1].Trim()
+                 $i = $matches[2].Trim()
+                 $v = $matches[3].Trim()
+            }
+
+            # Add to List (Strict Validation)
+            # We ensure ID is at least 2 chars and doesn't contain common junk words
+            if ($n -and $i -and $i.Length -gt 2 -and $i -notmatch "Tag:" -and $i -notmatch "Moniker:" -and $i -notmatch "input") {
+                 [void]$lstWinget.Items.Add([PSCustomObject]@{ 
+                    Name = $n
+                    Id = $i
+                    Version = $v
+                    Available = "-"
+                    Source = "winget" 
+                })
+            }
+        }
+    }
+    catch {
+        [System.Windows.Forms.MessageBox]::Show("Search failed: $($_.Exception.Message)", "Error", "OK", "Error")
     }
     
+    # Clean "No Results" Message
+    if ($lstWinget.Items.Count -eq 0) {
+        [void]$lstWinget.Items.Add([PSCustomObject]@{ Name="No packages found matching input"; Id=""; Version=""; Available=""; Source="" })
+    }
+
     $lblWingetStatus.Visibility = "Hidden"
 })
 
