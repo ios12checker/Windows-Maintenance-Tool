@@ -4818,12 +4818,12 @@ $Script:StartWingetAction = {
             $cmd = ""
 
             # === ROUTING LOGIC ===
-            if ($src -eq "winget") {
+            if ($src -eq "winget" -or $src -eq "msstore") {
                 if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
                 if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
                 if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" --accept-source-agreements --disable-interactivity" }
             }
-            elseif ($src -eq "pypi") {
+            elseif ($src -eq "pip") {
                 if ($act -eq "Install")   { $cmd = "pip install `"$id`"" }
                 if ($act -eq "Update")    { $cmd = "pip install --upgrade `"$id`"" }
                 if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
@@ -4834,41 +4834,41 @@ $Script:StartWingetAction = {
                 if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
             }
             elseif ($src -eq "chocolatey") {
-                # Chocolatey uses -y to skip confirmation prompts
                 if ($act -eq "Install")   { $cmd = "choco install `"$id`" -y" }
                 if ($act -eq "Update")    { $cmd = "choco upgrade `"$id`" -y" }
                 if ($act -eq "Uninstall") { $cmd = "choco uninstall `"$id`" -y" }
             }
+            elseif ($src -eq "scoop") {
+                if ($act -eq "Install")   { $cmd = "scoop install `"$id`"" }
+                if ($act -eq "Update")    { $cmd = "scoop update `"$id`"" }
+                if ($act -eq "Uninstall") { $cmd = "scoop uninstall `"$id`"" }
+            }
+            elseif ($src -eq "gem") {
+                if ($act -eq "Install")   { $cmd = "gem install `"$id`"" }
+                if ($act -eq "Update")    { $cmd = "gem update `"$id`"" }
+                if ($act -eq "Uninstall") { $cmd = "gem uninstall `"$id`"" }
+            }
+            elseif ($src -eq "cargo") {
+                # Cargo updates are essentially re-installs with --force
+                if ($act -eq "Install")   { $cmd = "cargo install `"$id`"" }
+                if ($act -eq "Update")    { $cmd = "cargo install `"$id`" --force" }
+                if ($act -eq "Uninstall") { $cmd = "cargo uninstall `"$id`"" }
+            }
 
             if ($cmd) {
-                # 1. Log the action to the GUI
                 Write-Output "[$src] $act : $($item.Name)..."
                 Write-Output "Running: $cmd"
 
-                # 2. Smart-Split the command string
-                # This Regex splits by space but keeps "Quoted Strings" together
-                # (Prevents errors if an App ID has a space in it)
+                # Parse and run command
                 $parts = [regex]::Matches($cmd, '("[^"]*"|\S+)').Value
-                
                 if ($parts.Count -gt 0) {
                     $exe = $parts[0]
-                    # Get arguments and strip quotes (PowerShell adds them back automatically)
                     $argList = $parts[1..($parts.Count - 1)] | ForEach-Object { $_.Trim('"') }
-
-                    # 3. Run safely using the Call Operator '&'
                     try {
-                        # 2>&1 ensures errors are captured in $output
                         $output = & $exe $argList 2>&1
-                        
-                        # 4. Print the output to the GUI log
-                        if ($output) { 
-                            $output | ForEach-Object { Write-Output $_ } 
-                        }
-                    } catch {
-                        Write-Output "Error: $($_.Exception.Message)"
-                    }
+                        if ($output) { $output | ForEach-Object { Write-Output $_ } }
+                    } catch { Write-Output "Error: $($_.Exception.Message)" }
                 }
-
                 Write-Output "--------------------------------"
             }
         }
@@ -4880,7 +4880,6 @@ $Script:StartWingetAction = {
 function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
-    # Force default if missing
     if (-not $settings.EnabledProviders) { 
         $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "chocolatey") -Force
     }
@@ -4889,25 +4888,10 @@ function Show-ProviderManager {
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="400" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#252526">
+        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#252526">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#DDD"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
         <Style TargetType="CheckBox"><Setter Property="Foreground" Value="White"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
-        <Style TargetType="Button">
-            <Setter Property="Background" Value="#333"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Padding" Value="10,5"/>
-            <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" CornerRadius="3">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
-                        </Border>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -4919,39 +4903,54 @@ function Show-ProviderManager {
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
                 <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Windows Package Manager (CLI)" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Windows Package Manager" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkMsStore" Grid.Column="0"/>
                 <TextBlock Text="MS Store" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Microsoft Store Apps (via Winget)" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Microsoft Store Apps" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkPip" Grid.Column="0"/>
                 <TextBlock Text="Python (Pip)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblPipStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnInstallPip" Content="Install Python" Grid.Column="3" Visibility="Collapsed"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkNpm" Grid.Column="0"/>
                 <TextBlock Text="Node (Npm)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnInstallNpm" Content="Install Node.js" Grid.Column="3" Visibility="Collapsed"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkChoco" Grid.Column="0"/>
                 <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblChocoStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnInstallChoco" Content="Install Choco" Grid.Column="3" Visibility="Collapsed"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkScoop" Grid.Column="0"/>
+                <TextBlock Text="Scoop" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblScoopStatus" Text="Checking..." Grid.Column="2"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkGem" Grid.Column="0"/>
+                <TextBlock Text="Ruby (Gem)" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblGemStatus" Text="Checking..." Grid.Column="2"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkCargo" Grid.Column="0"/>
+                <TextBlock Text="Rust (Cargo)" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblCargoStatus" Text="Checking..." Grid.Column="2"/>
             </Grid>
         </StackPanel>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Name="btnSave" Content="Save &amp; Close" Background="#007ACC" Width="120"/>
+            <Button Name="btnSave" Content="Save &amp; Close" Background="#007ACC" Width="120" Height="30" Foreground="White"/>
         </StackPanel>
     </Grid>
 </Window>
@@ -4960,52 +4959,60 @@ function Show-ProviderManager {
     $win = [Windows.Markup.XamlReader]::Load($reader)
 
     function Get-WinCtrl($name) { $win.FindName($name) }
-    $chkMsStore = Get-WinCtrl "chkMsStore"
-    $chkPip   = Get-WinCtrl "chkPip"
-    $chkNpm   = Get-WinCtrl "chkNpm"
-    $chkChoco = Get-WinCtrl "chkChoco"
     
-    # Set Checkboxes
-    if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
-    if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
-    if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
+    $chkMsStore = Get-WinCtrl "chkMsStore"
+    $chkPip     = Get-WinCtrl "chkPip"
+    $chkNpm     = Get-WinCtrl "chkNpm"
+    $chkChoco   = Get-WinCtrl "chkChoco"
+    $chkScoop   = Get-WinCtrl "chkScoop"
+    $chkGem     = Get-WinCtrl "chkGem"
+    $chkCargo   = Get-WinCtrl "chkCargo"
+    
+    # Load settings
+    if ("msstore" -in $enabled)    { $chkMsStore.IsChecked = $true }
+    if ("pip" -in $enabled)        { $chkPip.IsChecked = $true }
+    if ("npm" -in $enabled)        { $chkNpm.IsChecked = $true }
     if ("chocolatey" -in $enabled) { $chkChoco.IsChecked = $true }
+    if ("scoop" -in $enabled)      { $chkScoop.IsChecked = $true }
+    if ("gem" -in $enabled)        { $chkGem.IsChecked = $true }
+    if ("cargo" -in $enabled)      { $chkCargo.IsChecked = $true }
 
-    # Check Installed Status
-    function Test-IsCommand($cmd) { return (Get-Command $cmd -ErrorAction SilentlyContinue) }
+    # Helper for status check
+    function Set-Status($cmd, $lbl) {
+        if (Get-Command $cmd -ErrorAction SilentlyContinue) {
+            (Get-WinCtrl $lbl).Text = "Installed"
+            (Get-WinCtrl $lbl).Foreground = "LightGreen"
+        } else {
+            (Get-WinCtrl $lbl).Text = "Not Found"
+            (Get-WinCtrl $lbl).Foreground = "Orange"
+        }
+    }
 
-    if (Test-IsCommand "pip") { (Get-WinCtrl "lblPipStatus").Text = "Installed"; (Get-WinCtrl "lblPipStatus").Foreground = "LightGreen" } 
-    else { (Get-WinCtrl "lblPipStatus").Text = "Not Found"; (Get-WinCtrl "lblPipStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallPip").Visibility = "Visible" }
+    Set-Status "pip" "lblPipStatus"
+    Set-Status "npm" "lblNpmStatus"
+    Set-Status "choco" "lblChocoStatus"
+    Set-Status "scoop" "lblScoopStatus"
+    Set-Status "gem" "lblGemStatus"
+    Set-Status "cargo" "lblCargoStatus"
 
-    if (Test-IsCommand "npm") { (Get-WinCtrl "lblNpmStatus").Text = "Installed"; (Get-WinCtrl "lblNpmStatus").Foreground = "LightGreen" } 
-    else { (Get-WinCtrl "lblNpmStatus").Text = "Not Found"; (Get-WinCtrl "lblNpmStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallNpm").Visibility = "Visible" }
-
-    if (Test-IsCommand "choco") { (Get-WinCtrl "lblChocoStatus").Text = "Installed"; (Get-WinCtrl "lblChocoStatus").Foreground = "LightGreen" } 
-    else { (Get-WinCtrl "lblChocoStatus").Text = "Not Found"; (Get-WinCtrl "lblChocoStatus").Foreground = "Orange"; (Get-WinCtrl "btnInstallChoco").Visibility = "Visible" }
-
-    # Wire Up Buttons
-    (Get-WinCtrl "btnInstallPip").Add_Click({ Start-Process "winget" -ArgumentList "install Python.Python.3 --accept-source-agreements"; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
-    (Get-WinCtrl "btnInstallNpm").Add_Click({ Start-Process "winget" -ArgumentList "install OpenJS.NodeJS --accept-source-agreements"; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
-    (Get-WinCtrl "btnInstallChoco").Add_Click({ Start-Process "powershell" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"[System.Net.ServicePointManager]::SecurityProtocol = 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))`"" -Verb RunAs; [System.Windows.Forms.MessageBox]::Show("Restart tool after install.", "Info") })
-
-    # --- FIX: Save Logic ---
+    # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
         $newEnabled = @("winget") 
         if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
-        if ($chkPip.IsChecked) { $newEnabled += "pip" }
-        if ($chkNpm.IsChecked) { $newEnabled += "npm" }
-        if ($chkChoco.IsChecked) { $newEnabled += "chocolatey" }
+        if ($chkPip.IsChecked)     { $newEnabled += "pip" }
+        if ($chkNpm.IsChecked)     { $newEnabled += "npm" }
+        if ($chkChoco.IsChecked)   { $newEnabled += "chocolatey" }
+        if ($chkScoop.IsChecked)   { $newEnabled += "scoop" }
+        if ($chkGem.IsChecked)     { $newEnabled += "gem" }
+        if ($chkCargo.IsChecked)   { $newEnabled += "cargo" }
         
-        # Load fresh settings again to ensure we don't overwrite other changes
         $current = Get-WmtSettings
         $current.EnabledProviders = $newEnabled
-        
-        # Call the CORRECT save function
         Save-WmtSettings -Settings $current
         $win.Close()
     })
 
-    $win.ShowDialog()
+    $win.ShowDialog() | Out-Null
 }
 
 $btnWingetUpdateSel.Add_Click({ 
@@ -5225,6 +5232,136 @@ $btnWingetScan.Add_Click({
                     if(!$l){continue}; $p=$l -split "\|"; if($p.Count -ge 4){ $n=$p[0]; if($IgnoreList -contains $n){continue}; [PSCustomObject]@{Source="chocolatey";Name=$n;Id=$n;Version=$p[1];Available=$p[2]} } 
                 }
             } catch { Write-Output "LOG:Choco check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # E. SCOOP WORKER
+    # Checks 'scoop status' for updates
+    if ("scoop" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Scoop..."
+            try {
+                # Scoop status lists updates: Name, Current, Latest
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c scoop status")
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit()
+
+                $lines = $out -split "`r`n"
+                foreach ($line in $lines) {
+                    $line = $line.Trim()
+                    # Skip headers and "Scoop is up to date" messages
+                    if ([string]::IsNullOrWhiteSpace($line) -or $line -match "^Name\s+Version" -or $line -match "^----" -or $line -match "Scoop is up to date") { continue }
+                    
+                    # Parse rows: "aria2   1.35.0   1.36.0"
+                    if ($line -match '^(\S+)\s+(\S+)\s+(\S+)') {
+                        $n = $matches[1]
+                        $v = $matches[2]
+                        $l = $matches[3]
+
+                        if ($IgnoreList -contains $n) { continue }
+                        
+                        [PSCustomObject]@{
+                            Source    = "scoop"
+                            Name      = $n
+                            Id        = $n
+                            Version   = $v
+                            Available = $l
+                        }
+                    }
+                }
+            } catch { Write-Output "LOG:Scoop check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # F. RUBY GEMS WORKER
+    # Checks 'gem outdated'
+    if ("gem" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Ruby Gems..."
+            try {
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c gem outdated")
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit()
+
+                $lines = $out -split "`r`n"
+                foreach ($line in $lines) {
+                    # Format is usually: fastlane (2.150.0 < 2.150.1)
+                    if ($line -match '^(\S+)\s+\(([\d\.]+)\s+<\s+([\d\.]+)\)') {
+                        $n = $matches[1]
+                        $v = $matches[2]
+                        $a = $matches[3]
+
+                        if ($IgnoreList -contains $n) { continue }
+
+                        [PSCustomObject]@{
+                            Source    = "gem"
+                            Name      = $n
+                            Id        = $n
+                            Version   = $v
+                            Available = $a
+                        }
+                    }
+                }
+            } catch { Write-Output "LOG:Gem check failed." }
+        }).AddArgument($ignoreList)
+        [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
+    }
+
+    # G. CARGO WORKER (RUST)
+    # Checks 'cargo install --list'
+    if ("cargo" -in $enabled) {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($IgnoreList)
+            Write-Output "LOG:Scanning Cargo..."
+            try {
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c cargo install --list")
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit()
+
+                $lines = $out -split "`r`n"
+                foreach ($line in $lines) {
+                    # Output format: "package-name v1.2.3:"
+                    if ($line -match '^([a-zA-Z0-9_\-]+)\s+v([\d\.]+):') {
+                        $n = $matches[1]
+                        $v = $matches[2]
+
+                        if ($IgnoreList -contains $n) { continue }
+
+                        # Cargo doesn't list "Available" version by default without network calls
+                        # We list it so users can see installed packages. 
+                        # To update in Cargo, you re-install, so we mark Available as 'Check'
+                        [PSCustomObject]@{
+                            Source    = "cargo"
+                            Name      = $n
+                            Id        = $n
+                            Version   = $v
+                            Available = "?" 
+                        }
+                    }
+                }
+            } catch { Write-Output "LOG:Cargo check failed." }
         }).AddArgument($ignoreList)
         [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
     }
