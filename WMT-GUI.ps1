@@ -4793,86 +4793,163 @@ $script:ScanTimer.Add_Tick({
 
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
-    param($ListItems, $ActionName)
+    param($ListItems, $ActionName, $CmdTemplate)
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
     
-    $btnWingetScan.IsEnabled = $false; $btnWingetUpdateSel.IsEnabled = $false
-    $lblWingetStatus.Text = "$ActionName in progress..."; $lblWingetStatus.Visibility = "Visible"
+    # UI Updates
+    $btnWingetScan.IsEnabled = $false
+    $btnWingetUpdateSel.IsEnabled = $false
+    $lblWingetStatus.Text = "$ActionName in progress..."
+    $lblWingetStatus.Visibility = "Visible"
     
+    # 1. Define the Job Arguments
     $jobArgs = @{
-        Items = $ListItems | Select-Object Source, Name, Id
+        Items = $ListItems | Select-Object -Property Source, Name, Id -Unique
         ActionName = $ActionName
+        CmdTemplate = $CmdTemplate
+        TempPath = $env:TEMP
     }
 
+    # 2. Start the Background Job
     $script:WingetJob = Start-Job -ArgumentList $jobArgs -ScriptBlock {
         param($ArgsDict)
         $items = $ArgsDict.Items
         $act   = $ArgsDict.ActionName
+        $tmpl  = $ArgsDict.CmdTemplate
+        $temp  = $ArgsDict.TempPath
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
         foreach ($item in $items) {
-            $src = $item.Source
-            $id  = $item.Id
-            $cmd = ""
+            $id   = $item.Id
+            $name = $item.Name
+            $src  = $item.Source
+            $cmd  = ""
+            $userCmd = "" # Command to use if we fail back to User Mode
 
-            # === ROUTING LOGIC ===
-            if ($src -eq "winget" -or $src -eq "msstore") {
-                if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
-                if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" --accept-source-agreements --accept-package-agreements --disable-interactivity" }
-                if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" --accept-source-agreements --disable-interactivity" }
+            # --- COMMAND GENERATION LOGIC ---
+            if ($tmpl) {
+                # If a specific template was passed, use it (Manual Override)
+                $cmd = $tmpl -f $id
+                $userCmd = $cmd -replace "--disable-interactivity", "" 
             }
-            elseif ($src -eq "pip") {
-                if ($act -eq "Install")   { $cmd = "pip install `"$id`"" }
-                if ($act -eq "Update")    { $cmd = "pip install --upgrade `"$id`"" }
-                if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
-            }
-            elseif ($src -eq "npm") {
-                if ($act -eq "Install")   { $cmd = "npm install -g `"$id`"" }
-                if ($act -eq "Update")    { $cmd = "npm update -g `"$id`"" }
-                if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
-            }
-            elseif ($src -eq "chocolatey") {
-                if ($act -eq "Install")   { $cmd = "choco install `"$id`" -y" }
-                if ($act -eq "Update")    { $cmd = "choco upgrade `"$id`" -y" }
-                if ($act -eq "Uninstall") { $cmd = "choco uninstall `"$id`" -y" }
-            }
-            elseif ($src -eq "scoop") {
-                if ($act -eq "Install")   { $cmd = "scoop install `"$id`"" }
-                if ($act -eq "Update")    { $cmd = "scoop update `"$id`"" }
-                if ($act -eq "Uninstall") { $cmd = "scoop uninstall `"$id`"" }
-            }
-            elseif ($src -eq "gem") {
-                if ($act -eq "Install")   { $cmd = "gem install `"$id`"" }
-                if ($act -eq "Update")    { $cmd = "gem update `"$id`"" }
-                if ($act -eq "Uninstall") { $cmd = "gem uninstall `"$id`"" }
-            }
-            elseif ($src -eq "cargo") {
-                # Cargo updates are essentially re-installs with --force
-                if ($act -eq "Install")   { $cmd = "cargo install `"$id`"" }
-                if ($act -eq "Update")    { $cmd = "cargo install `"$id`" --force" }
-                if ($act -eq "Uninstall") { $cmd = "cargo uninstall `"$id`"" }
+            else {
+                # SMART GENERATION (Handles Agreements & Sources)
+                if ($src -eq "winget" -or $src -eq "msstore") {
+                    $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
+                    $userFlags = "--accept-source-agreements --accept-package-agreements" # Visible mode needs no disable-interactivity
+                    
+                    if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" $flags";   $userCmd = "winget install --id `"$id`" $userFlags" }
+                    if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" $flags";   $userCmd = "winget upgrade --id `"$id`" $userFlags" }
+                    if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" $flags"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
+                }
+                elseif ($src -eq "pip") {
+                    if ($act -eq "Install")   { $cmd = "pip install `"$id`"" }
+                    if ($act -eq "Update")    { $cmd = "pip install --upgrade `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
+                    $userCmd = $cmd
+                }
+                elseif ($src -eq "npm") {
+                    if ($act -eq "Install")   { $cmd = "npm install -g `"$id`"" }
+                    if ($act -eq "Update")    { $cmd = "npm update -g `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
+                    $userCmd = $cmd
+                }
+                elseif ($src -eq "chocolatey") {
+                    if ($act -eq "Install")   { $cmd = "choco install `"$id`" -y" }
+                    if ($act -eq "Update")    { $cmd = "choco upgrade `"$id`" -y" }
+                    if ($act -eq "Uninstall") { $cmd = "choco uninstall `"$id`" -y" }
+                    $userCmd = $cmd
+                }
             }
 
             if ($cmd) {
-                Write-Output "[$src] $act : $($item.Name)..."
-                Write-Output "Running: $cmd"
-
-                # Parse and run command
-                $parts = [regex]::Matches($cmd, '("[^"]*"|\S+)').Value
-                if ($parts.Count -gt 0) {
-                    $exe = $parts[0]
-                    $argList = $parts[1..($parts.Count - 1)] | ForEach-Object { $_.Trim('"') }
+                Write-Output "LOG:[$act] Processing: $name ($src)..."
+                
+                # --- ATTEMPT 1: ADMIN (Hidden) ---
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $pInfo.FileName = "powershell.exe"
+                $pInfo.Arguments = "-Command $cmd"
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.RedirectStandardError = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $stdout = $p.StandardOutput.ReadToEnd() 
+                $stderr = $p.StandardError.ReadToEnd()
+                $p.WaitForExit()
+                
+                if ($p.ExitCode -eq 0) {
+                    Write-Output "LOG:Success."
+                } 
+                else {
+                    # --- ATTEMPT 2: USER MODE (Visible Fallback) ---
+                    # Useful for Spotify or apps that refuse Admin rights
+                    Write-Output "LOG:Action Failed (Code $($p.ExitCode)). Retrying as User..."
+                    
+                    $rand = [Guid]::NewGuid().ToString()
+                    $batPath = "$temp\WMT_Fix_${id}_${rand}.bat"
+                    
+                    $batContent = @"
+@echo off
+title $act $name (User Mode)
+echo WMT-GUI: Starting User-Mode action for $name...
+echo.
+$userCmd
+echo.
+echo Done.
+timeout /t 3
+(goto) 2>nul & del "%~f0"
+"@
+                    Set-Content -Path $batPath -Value $batContent -Encoding Ascii
+                    
                     try {
-                        $output = & $exe $argList 2>&1
-                        if ($output) { $output | ForEach-Object { Write-Output $_ } }
-                    } catch { Write-Output "Error: $($_.Exception.Message)" }
+                        Start-Process "explorer.exe" -ArgumentList "`"$batPath`""
+                        Write-Output "LOG:Launched User-Mode window for $name."
+                    } catch {
+                        Write-Output "LOG:Retry failed: $($_.Exception.Message)"
+                    }
                 }
-                Write-Output "--------------------------------"
             }
         }
     }
+
+    # 3. Setup the Monitoring Timer
+    if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+    $script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    
+    $script:WingetTimer.Add_Tick({
+        if ($script:WingetJob.HasMoreData) {
+            $results = Receive-Job -Job $script:WingetJob
+            foreach ($line in $results) {
+                if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] }
+            }
+        }
+
+        if ($script:WingetJob.State -ne 'Running') {
+            $script:WingetTimer.Stop()
+            
+            # Final Drain
+            $results = Receive-Job -Job $script:WingetJob
+            foreach ($line in $results) {
+                if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] }
+            }
+            
+            Remove-Job -Job $script:WingetJob
+            $script:WingetJob = $null
+            
+            $lblWingetStatus.Visibility = "Hidden"
+            $btnWingetScan.IsEnabled = $true
+            $btnWingetUpdateSel.IsEnabled = $true
+            
+            # Refresh List (Simulate Click)
+            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+    })
+    
     $script:WingetTimer.Start()
 }
 
@@ -5014,23 +5091,6 @@ function Show-ProviderManager {
 
     $win.ShowDialog() | Out-Null
 }
-
-$btnWingetUpdateSel.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update"
-})
-
-$btnWingetInstall.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install"
-})
-
-$btnWingetUninstall.Add_Click({ 
-    $selected = @($lstWinget.SelectedItems)
-    if ($selected.Count -eq 0) { return }
-
-    if ([System.Windows.Forms.MessageBox]::Show("Uninstall $($selected.Count) packages?", "Confirm", "YesNo") -eq "Yes") {
-        & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall"
-    }
-})
 
 # ---------------------------------------------------------
 # PARALLEL SCAN ENGINE
@@ -5705,28 +5765,25 @@ $btnWingetFind.Add_Click({
     $script:SearchTimer.Start()
 })
 
+# 1. Update Selected (Removed CmdTemplate to allow smart logic)
 $btnWingetUpdateSel.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update" -CmdTemplate "winget upgrade --id {0}"
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update"
 })
 
+# 2. Install Selected (Removed CmdTemplate so it includes --accept-agreements)
 $btnWingetInstall.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install" -CmdTemplate "winget install --id {0}"
+    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install"
 })
 
+# 3. Uninstall Selected
 $btnWingetUninstall.Add_Click({ 
-    # 1. Capture selected items immediately to a standard array
     $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -eq 0) { return }
 
-    if ($selected.Count -gt 0) { 
-        # 2. Confirm action
-        $msg = "Are you sure you want to uninstall $($selected.Count) application(s)?"
-        $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Uninstall", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        
-        if ($res -eq "Yes") { 
-            # 3. Pass the array to the action handler with quoted ID template
-            & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall" -CmdTemplate "winget uninstall --id `"{0}`""
-        } 
-    } 
+    $msg = "Are you sure you want to uninstall $($selected.Count) application(s)?"
+    if ([System.Windows.Forms.MessageBox]::Show($msg, "Confirm", "YesNo", "Warning") -eq "Yes") {
+        & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall"
+    }
 })
 
 # --- System Health ---
