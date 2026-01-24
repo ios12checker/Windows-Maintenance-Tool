@@ -4821,42 +4821,98 @@ $Script:StartWingetAction = {
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
+        # --- ERROR DICTIONARY ---
+        $ErrorCodes = @{
+            "0"          = "Success"
+            "0x0"        = "Success"
+            "3010"       = "Reboot Required"
+            "1602"       = "Cancelled by User"
+            "1618"       = "Another Installation in Progress"
+            
+            # Winget Specific
+            "0x8a150001" = "Invalid Argument"; "0x8a150002" = "Internal Failure"; "0x8a150003" = "Source Corrupted (Trying auto-fix...)"
+            "0x8a150004" = "Installer Failed"; "0x8a150005" = "Hash Mismatch";    "0x8a150006" = "Not Applicable"
+            "0x8a150007" = "Launch Failed";    "0x8a150008" = "Manifest Missing"; "0x8a150009" = "Invalid Manifest"
+            "0x8a15000a" = "Unsupported Type"; "0x8a15000b" = "Package Not Found";"0x8a15000c" = "Vendor Error"
+            "0x8a15000d" = "Download Failed";  "0x8a15000e" = "Installer Hash Mismatch"; "0x8a15000f" = "Data Missing"
+            "0x8a150014" = "Network Error"
+            "0x80070002" = "File Not Found";   "0x80070003" = "Path Not Found";   "0x80070005" = "Access Denied"
+            "0x80070490" = "Element Not Found";"0x80072ee7" = "DNS Lookup Fail";  "0x80072f8f" = "SSL Cert Error"
+            "1603"       = "Fatal MSI Error"
+        }
+
+        # Helper: Execute Command & Return Process
+        function Run-WingetCmd ($command) {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pInfo.FileName = "powershell.exe"
+            $pInfo.Arguments = "-Command $command"
+            $pInfo.RedirectStandardOutput = $true
+            $pInfo.RedirectStandardError = $true
+            $pInfo.UseShellExecute = $false
+            $pInfo.CreateNoWindow = $true
+            $proc = [System.Diagnostics.Process]::Start($pInfo)
+            $proc.WaitForExit()
+            return $proc
+        }
+
         foreach ($item in $items) {
             $id   = $item.Id
             $name = $item.Name
             $src  = $item.Source
             $cmd  = ""
-            $userCmd = "" # Command to use if we fail back to User Mode
+            $userCmd = "" 
 
-            # --- COMMAND GENERATION LOGIC ---
+            # --- COMMAND GENERATION ---
             if ($tmpl) {
-                # If a specific template was passed, use it (Manual Override)
                 $cmd = $tmpl -f $id
                 $userCmd = $cmd -replace "--disable-interactivity", "" 
             }
             else {
-                # SMART GENERATION (Handles Agreements & Sources)
+                # --- WINGET / MSSTORE ---
                 if ($src -eq "winget" -or $src -eq "msstore") {
                     $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
-                    $userFlags = "--accept-source-agreements --accept-package-agreements" # Visible mode needs no disable-interactivity
-                    
+                    $userFlags = "--accept-source-agreements --accept-package-agreements"
                     if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" $flags";   $userCmd = "winget install --id `"$id`" $userFlags" }
                     if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" $flags";   $userCmd = "winget upgrade --id `"$id`" $userFlags" }
                     if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" $flags"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
                 }
-                elseif ($src -eq "pip") {
+                # --- SCOOP (Likely requires User Mode) ---
+                elseif ($src -eq "scoop") {
+                    if ($act -eq "Install")   { $cmd = "scoop install `"$id`"" }
+                    if ($act -eq "Update")    { $cmd = "scoop update `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "scoop uninstall `"$id`"" }
+                    $userCmd = $cmd # Scoop commands are same for user
+                }
+                # --- RUBY GEMS ---
+                elseif ($src -eq "ruby" -or $src -eq "gem") {
+                    if ($act -eq "Install")   { $cmd = "gem install `"$id`"" }
+                    if ($act -eq "Update")    { $cmd = "gem update `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "gem uninstall `"$id`"" }
+                    $userCmd = $cmd
+                }
+                # --- RUST CARGO ---
+                elseif ($src -eq "cargo" -or $src -eq "rust") {
+                    if ($act -eq "Install")   { $cmd = "cargo install `"$id`"" }
+                    if ($act -eq "Update")    { $cmd = "cargo install --force `"$id`"" } # Cargo needs force to overwrite/update binaries
+                    if ($act -eq "Uninstall") { $cmd = "cargo uninstall `"$id`"" }
+                    $userCmd = $cmd
+                }
+                # --- PYTHON PIP ---
+                elseif ($src -eq "pip" -or $src -eq "pip3") {
                     if ($act -eq "Install")   { $cmd = "pip install `"$id`"" }
                     if ($act -eq "Update")    { $cmd = "pip install --upgrade `"$id`"" }
                     if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
                     $userCmd = $cmd
                 }
+                # --- NODE NPM ---
                 elseif ($src -eq "npm") {
                     if ($act -eq "Install")   { $cmd = "npm install -g `"$id`"" }
                     if ($act -eq "Update")    { $cmd = "npm update -g `"$id`"" }
                     if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
                     $userCmd = $cmd
                 }
-                elseif ($src -eq "chocolatey") {
+                # --- CHOCOLATEY ---
+                elseif ($src -eq "chocolatey" -or $src -eq "choco") {
                     if ($act -eq "Install")   { $cmd = "choco install `"$id`" -y" }
                     if ($act -eq "Update")    { $cmd = "choco upgrade `"$id`" -y" }
                     if ($act -eq "Uninstall") { $cmd = "choco uninstall `"$id`" -y" }
@@ -4866,48 +4922,68 @@ $Script:StartWingetAction = {
 
             if ($cmd) {
                 Write-Output "LOG:[$act] Processing: $name ($src)..."
+
+                # 1. RUN COMMAND (First Attempt - Admin)
+                $p = Run-WingetCmd $cmd
                 
-                # --- ATTEMPT 1: ADMIN (Hidden) ---
-                $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $pInfo.FileName = "powershell.exe"
-                $pInfo.Arguments = "-Command $cmd"
-                $pInfo.RedirectStandardOutput = $true
-                $pInfo.RedirectStandardError = $true
-                $pInfo.UseShellExecute = $false
-                $pInfo.CreateNoWindow = $true
+                $hex = "0x{0:x}" -f $p.ExitCode
                 
-                $p = [System.Diagnostics.Process]::Start($pInfo)
-                $stdout = $p.StandardOutput.ReadToEnd() 
-                $stderr = $p.StandardError.ReadToEnd()
-                $p.WaitForExit()
-                
+                # --- AUTO-FIX: SOURCE CORRUPTION ---
+                if ($hex -eq "0x8a150003") {
+                    Write-Output "LOG:Detected Source Corruption. Resetting Winget Sources..."
+                    $fixP = Run-WingetCmd "winget source reset --force"
+                    if ($fixP.ExitCode -eq 0) {
+                        Write-Output "LOG:Sources reset successfully. Retrying action..."
+                        $p = Run-WingetCmd $cmd
+                        $hex = "0x{0:x}" -f $p.ExitCode 
+                    }
+                }
+
+                # --- CHECK FINAL RESULT ---
                 if ($p.ExitCode -eq 0) {
                     Write-Output "LOG:Success."
-                } 
+                }
+                elseif ($p.ExitCode -eq 3010) {
+                    Write-Output "LOG:Success (Reboot Required to complete)."
+                }
+                elseif ($p.ExitCode -eq 1602) {
+                    Write-Output "LOG:Action Cancelled by User."
+                }
                 else {
-                    # --- ATTEMPT 2: USER MODE (Visible Fallback) ---
-                    # Useful for Spotify or apps that refuse Admin rights
-                    Write-Output "LOG:Action Failed (Code $($p.ExitCode)). Retrying as User..."
+                    # --- FAILURE HANDLING ---
+                    $dec = "$($p.ExitCode)"
+                    $errDesc = "Unknown Error"
                     
+                    if ($ErrorCodes.ContainsKey($hex)) { $errDesc = $ErrorCodes[$hex] }
+                    elseif ($ErrorCodes.ContainsKey($dec)) { $errDesc = $ErrorCodes[$dec] }
+
+                    if ($dec -eq "1603") {
+                        Write-Output "LOG:Installer Failed (1603). Retrying in Interactive Mode (Look for popup)..."
+                    } else {
+                        Write-Output "LOG:Failed [$hex] $errDesc. Retrying as User..."
+                    }
+                    
+                    # --- RETRY AS USER (Fallback) ---
+                    # Handles Scoop (needs user rights) and Spotify (hates Admin)
                     $rand = [Guid]::NewGuid().ToString()
                     $batPath = "$temp\WMT_Fix_${id}_${rand}.bat"
-                    
                     $batContent = @"
 @echo off
 title $act $name (User Mode)
-echo WMT-GUI: Starting User-Mode action for $name...
+echo WMT-GUI: Re-launching $name...
+echo.
+echo NOTE: If this is Scoop or Spotify, this usually fixes the error.
+echo If an installer window appears, please click through it.
 echo.
 $userCmd
 echo.
 echo Done.
-timeout /t 3
+timeout /t 5
 (goto) 2>nul & del "%~f0"
 "@
                     Set-Content -Path $batPath -Value $batContent -Encoding Ascii
-                    
                     try {
                         Start-Process "explorer.exe" -ArgumentList "`"$batPath`""
-                        Write-Output "LOG:Launched User-Mode window for $name."
                     } catch {
                         Write-Output "LOG:Retry failed: $($_.Exception.Message)"
                     }
@@ -4916,7 +4992,7 @@ timeout /t 3
         }
     }
 
-    # 3. Setup the Monitoring Timer
+    # 3. Setup Timer
     if ($script:WingetTimer) { $script:WingetTimer.Stop() }
     $script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
@@ -4928,28 +5004,18 @@ timeout /t 3
                 if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] }
             }
         }
-
         if ($script:WingetJob.State -ne 'Running') {
             $script:WingetTimer.Stop()
-            
-            # Final Drain
             $results = Receive-Job -Job $script:WingetJob
-            foreach ($line in $results) {
-                if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] }
-            }
-            
+            foreach ($line in $results) { if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] } }
             Remove-Job -Job $script:WingetJob
             $script:WingetJob = $null
-            
             $lblWingetStatus.Visibility = "Hidden"
             $btnWingetScan.IsEnabled = $true
             $btnWingetUpdateSel.IsEnabled = $true
-            
-            # Refresh List (Simulate Click)
             $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
         }
     })
-    
     $script:WingetTimer.Start()
 }
 
