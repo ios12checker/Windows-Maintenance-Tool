@@ -5115,7 +5115,7 @@ $btnWingetScan.Add_Click({
 
     # Get Settings
     $settings = Get-WmtSettings
-    $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget", "msstore", "pip", "npm", "chocolatey") }
+    $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget") }
     $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
 
     # Reset Task List
@@ -5123,62 +5123,62 @@ $btnWingetScan.Add_Click({
 
     # --- DEFINE PROVIDER WORKERS ---
 
-    # A. WINGET WORKER
+    # A. WINGET & MSSTORE WORKER
     if ("winget" -in $enabled -or "msstore" -in $enabled) {
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
             param($Enabled, $IgnoreList)
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-            function Log($m){ Write-Output "LOG:$m" }
-            
-            Log "Scanning Winget & Store..."
-
-            # OPTIMIZATION: Check if we can skip the slow MS Store
-            # If "msstore" is NOT in the enabled list, we force winget to look ONLY at the winget source.
-            $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements"
-            if ("msstore" -notin $Enabled) {
-                $wArgs += " --source winget"
-                Log "Skipping MS Store source (optimization enabled)"
+            function Test-Ignored($n, $i) {
+                if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
+                return $false
             }
 
-            # OPTIMIZATION: Run winget directly (Removes PowerShell wrapper overhead)
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pInfo.FileName = "winget"
-            $pInfo.Arguments = $wArgs
-            $pInfo.RedirectStandardOutput = $true
-            $pInfo.UseShellExecute = $false
-            $pInfo.CreateNoWindow = $true
-            $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            # WINGET / MSSTORE
+            $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements"
+            if ("msstore" -notin $Enabled) { $wArgs += " --source winget" }
             
-            $p = [System.Diagnostics.Process]::Start($pInfo)
-            $out = $p.StandardOutput.ReadToEnd()
-            $p.WaitForExit()
-            
-            if (-not [string]::IsNullOrWhiteSpace($out)) {
-                $lines = $out -split "`r`n"
-                $idxId = -1
-                foreach($l in $lines){ if($l -match "Name\s+Id\s+Version"){$idxId=$l.IndexOf("Id"); break} }
+            try {
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $pInfo.FileName = "winget"
+                $pInfo.Arguments = $wArgs
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                
+                $p = [System.Diagnostics.Process]::Start($pInfo)
+                $out = $p.StandardOutput.ReadToEnd()
+                $p.WaitForExit()
+                
+                if (-not [string]::IsNullOrWhiteSpace($out)) {
+                    $lines = $out -split "`r`n"
+                    $idxId = -1
+                    foreach($l in $lines){ if($l -match "Name\s+Id\s+Version"){$idxId=$l.IndexOf("Id"); break} }
 
-                foreach($line in $lines){
-                    $line=$line.Trim(); if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
-                    $n=$null;$i=$null;$v=$null;$a=$null;$s="winget"
-                    
-                    if($idxId -gt 0 -and $line.Length -gt $idxId){
-                        $n=$line.Substring(0,$idxId).Trim(); $rest=$line.Substring($idxId).Trim(); $parts=$rest -split "\s+"
-                        if($parts.Count -ge 4){$i=$parts[0];$v=$parts[1];$a=$parts[2];$s=$parts[3]}
-                        elseif($parts.Count -ge 3){$i=$parts[0];$v=$parts[1];$a=$parts[2]}
-                    }
-                    if(!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)'){
-                        $n=$matches[1].Trim();$i=$matches[2].Trim();$v=$matches[3].Trim();$a=$matches[4].Trim();$s=$matches[5].Trim()
-                    }
-                    if($n -and $i -and $i.Length -gt 2){
-                        if($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)){continue}
-                        if($s -eq "msstore"){$s="msstore"}else{$s="winget"}
-                        if($v -eq "Unknown"){$v="?"}
-                        [PSCustomObject]@{Source=$s;Name=$n;Id=$i;Version=$v;Available=$a}
+                    foreach($line in $lines){
+                        $line=$line.Trim(); if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
+                        $n=$null;$i=$null;$v=$null;$a=$null;$s="winget"
+                        
+                        if($idxId -gt 0 -and $line.Length -gt $idxId){
+                            $n=$line.Substring(0,$idxId).Trim(); $rest=$line.Substring($idxId).Trim(); $parts=$rest -split "\s+"
+                            if($parts.Count -ge 4){$i=$parts[0];$v=$parts[1];$a=$parts[2];$s=$parts[3]}
+                            elseif($parts.Count -ge 3){$i=$parts[0];$v=$parts[1];$a=$parts[2]}
+                        }
+                        if(!$n -and $line -match '^(.+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)\s+([^\s]+)'){
+                            $n=$matches[1].Trim();$i=$matches[2].Trim();$v=$matches[3].Trim();$a=$matches[4].Trim();$s=$matches[5].Trim()
+                        }
+                        if($n -and $i -and $i.Length -gt 2){
+                            # CHANGED: Updated function call here
+                            if(Test-Ignored $n $i){continue}
+                            
+                            if($s -eq "msstore"){$s="msstore"}else{$s="winget"}
+                            if($v -eq "Unknown"){$v="?"}
+                            [PSCustomObject]@{Source=$s;Name=$n;Id=$i;Version=$v;Available=$a}
+                        }
                     }
                 }
-            }
+            } catch { Write-Output "LOG:Winget check failed." }
         }).AddArgument($enabled).AddArgument($ignoreList)
         
         [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
@@ -5218,7 +5218,7 @@ $btnWingetScan.Add_Click({
         [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell=$ps; AsyncResult=$ps.BeginInvoke() })
     }
 
-    # D. CHOCO WORKER
+    # D. CHOCOLATEY WORKER
     if ("chocolatey" -in $enabled) {
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
@@ -5237,14 +5237,12 @@ $btnWingetScan.Add_Click({
     }
 
     # E. SCOOP WORKER
-    # Checks 'scoop status' for updates
     if ("scoop" -in $enabled) {
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
             param($IgnoreList)
             Write-Output "LOG:Scanning Scoop..."
             try {
-                # Scoop status lists updates: Name, Current, Latest
                 $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c scoop status")
                 $pInfo.RedirectStandardOutput = $true
                 $pInfo.UseShellExecute = $false
@@ -5257,24 +5255,12 @@ $btnWingetScan.Add_Click({
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
                     $line = $line.Trim()
-                    # Skip headers and "Scoop is up to date" messages
                     if ([string]::IsNullOrWhiteSpace($line) -or $line -match "^Name\s+Version" -or $line -match "^----" -or $line -match "Scoop is up to date") { continue }
                     
-                    # Parse rows: "aria2   1.35.0   1.36.0"
                     if ($line -match '^(\S+)\s+(\S+)\s+(\S+)') {
-                        $n = $matches[1]
-                        $v = $matches[2]
-                        $l = $matches[3]
-
+                        $n = $matches[1]; $v = $matches[2]; $l = $matches[3]
                         if ($IgnoreList -contains $n) { continue }
-                        
-                        [PSCustomObject]@{
-                            Source    = "scoop"
-                            Name      = $n
-                            Id        = $n
-                            Version   = $v
-                            Available = $l
-                        }
+                        [PSCustomObject]@{ Source="scoop"; Name=$n; Id=$n; Version=$v; Available=$l }
                     }
                 }
             } catch { Write-Output "LOG:Scoop check failed." }
@@ -5283,7 +5269,6 @@ $btnWingetScan.Add_Click({
     }
 
     # F. RUBY GEMS WORKER
-    # Checks 'gem outdated'
     if ("gem" -in $enabled) {
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
@@ -5301,21 +5286,10 @@ $btnWingetScan.Add_Click({
 
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
-                    # Format is usually: fastlane (2.150.0 < 2.150.1)
                     if ($line -match '^(\S+)\s+\(([\d\.]+)\s+<\s+([\d\.]+)\)') {
-                        $n = $matches[1]
-                        $v = $matches[2]
-                        $a = $matches[3]
-
+                        $n = $matches[1]; $v = $matches[2]; $a = $matches[3]
                         if ($IgnoreList -contains $n) { continue }
-
-                        [PSCustomObject]@{
-                            Source    = "gem"
-                            Name      = $n
-                            Id        = $n
-                            Version   = $v
-                            Available = $a
-                        }
+                        [PSCustomObject]@{ Source="gem"; Name=$n; Id=$n; Version=$v; Available=$a }
                     }
                 }
             } catch { Write-Output "LOG:Gem check failed." }
@@ -5324,7 +5298,6 @@ $btnWingetScan.Add_Click({
     }
 
     # G. CARGO WORKER (RUST)
-    # Checks 'cargo install --list'
     if ("cargo" -in $enabled) {
         $ps = [PowerShell]::Create()
         [void]$ps.AddScript({
@@ -5342,23 +5315,10 @@ $btnWingetScan.Add_Click({
 
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
-                    # Output format: "package-name v1.2.3:"
                     if ($line -match '^([a-zA-Z0-9_\-]+)\s+v([\d\.]+):') {
-                        $n = $matches[1]
-                        $v = $matches[2]
-
+                        $n = $matches[1]; $v = $matches[2]
                         if ($IgnoreList -contains $n) { continue }
-
-                        # Cargo doesn't list "Available" version by default without network calls
-                        # We list it so users can see installed packages. 
-                        # To update in Cargo, you re-install, so we mark Available as 'Check'
-                        [PSCustomObject]@{
-                            Source    = "cargo"
-                            Name      = $n
-                            Id        = $n
-                            Version   = $v
-                            Available = "?" 
-                        }
+                        [PSCustomObject]@{ Source="cargo"; Name=$n; Id=$n; Version=$v; Available="?" }
                     }
                 }
             } catch { Write-Output "LOG:Cargo check failed." }
