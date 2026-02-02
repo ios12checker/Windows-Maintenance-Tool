@@ -4,7 +4,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-All-in-one Windows maintenance and optimization toolkit. Features system repair, performance tweaks, bloatware removal, software management, and more. Runs locally with a modern dark GUI.
+All-in-one Windows maintenance and optimization toolkit. Features system repair, performance tweaks, bloatware removal, software management, and more.
 
 ---
 
