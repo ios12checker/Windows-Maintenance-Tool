@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "4.12"
+$AppVersion = "5.0"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -3941,46 +3941,84 @@ function Show-TaskManager {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Maintenance Tool v$AppVersion" Height="850" Width="1200"
-        WindowStartupLocation="CenterScreen" Background="#121212" Foreground="#E0E0E0">
+        WindowStartupLocation="CenterScreen" Background="#0D1117" Foreground="#E6EDF3"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="ClearType"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
 
     <Window.Resources>
-        <SolidColorBrush x:Key="BgDark" Color="#121212"/>
-        <SolidColorBrush x:Key="BgPanel" Color="#1E1E1E"/>
-        <SolidColorBrush x:Key="BgHover" Color="#333333"/>
-        <SolidColorBrush x:Key="BorderBrush" Color="#333333"/>
-        <SolidColorBrush x:Key="Accent" Color="#007ACC"/>
-        <SolidColorBrush x:Key="TextPrimary" Color="#E0E0E0"/>
-        <SolidColorBrush x:Key="TextSecondary" Color="#AAAAAA"/>
-        
-        <SolidColorBrush x:Key="BtnGreen" Color="#006600"/>
-        <SolidColorBrush x:Key="BtnRed" Color="#802020"/>
-        <SolidColorBrush x:Key="BtnBlue" Color="#004444"/>
-        <SolidColorBrush x:Key="BtnYellow" Color="#B8860B"/>
+        <!-- Modern Color Palette (GitHub Dark inspired) -->
+        <SolidColorBrush x:Key="BgDark" Color="#0D1117"/>
+        <SolidColorBrush x:Key="BgPanel" Color="#161B22"/>
+        <SolidColorBrush x:Key="BgElevated" Color="#21262D"/>
+        <SolidColorBrush x:Key="BgHover" Color="#30363D"/>
+        <SolidColorBrush x:Key="BorderBrush" Color="#30363D"/>
+        <SolidColorBrush x:Key="BorderAccent" Color="#58A6FF"/>
+        <SolidColorBrush x:Key="Accent" Color="#58A6FF"/>
+        <SolidColorBrush x:Key="AccentHover" Color="#79C0FF"/>
+        <SolidColorBrush x:Key="TextPrimary" Color="#E6EDF3"/>
+        <SolidColorBrush x:Key="TextSecondary" Color="#8B949E"/>
+        <SolidColorBrush x:Key="TextMuted" Color="#6E7681"/>
+        <SolidColorBrush x:Key="Success" Color="#238636"/>
+        <SolidColorBrush x:Key="SuccessHover" Color="#2EA043"/>
+        <SolidColorBrush x:Key="Danger" Color="#DA3633"/>
+        <SolidColorBrush x:Key="DangerHover" Color="#F85149"/>
+        <SolidColorBrush x:Key="Warning" Color="#D29922"/>
+        <SolidColorBrush x:Key="Info" Color="#1F6FEB"/>
 
+        <!-- Subtle Shadow Effects (reduced for clarity) -->
+        <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
+
+        <!-- Modern TextBox (crisp text) -->
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="{StaticResource BgPanel}"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="BorderBrush" Value="#444"/>
-            <Setter Property="Padding" Value="5"/>
+            <Setter Property="Background" Value="#0D1117"/>
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,6"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+            <Style.Triggers>
+                <Trigger Property="IsFocused" Value="True">
+                    <Setter Property="BorderBrush" Value="#58A6FF"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
+        <!-- Modern Navigation Button (crisp text) -->
         <Style TargetType="Button" x:Key="NavBtn">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#CCCCCC"/>
+            <Setter Property="Foreground" Value="#8B949E"/>
             <Setter Property="BorderThickness" Value="0"/>
-            <Setter Property="Height" Value="40"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Margin" Value="2"/>
             <Setter Property="HorizontalContentAlignment" Value="Left"/>
-            <Setter Property="Padding" Value="15,0"/>
+            <Setter Property="Padding" Value="12,0"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4">
-                            <ContentPresenter VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
-                        </Border>
+                        <Grid>
+                            <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" UseLayoutRounding="True">
+                                <ContentPresenter VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                            </Border>
+                            <!-- Active Indicator Bar (left side) -->
+                            <Border Name="Indicator" Width="3" Background="#58A6FF" HorizontalAlignment="Left" 
+                                    CornerRadius="2,0,0,2" Visibility="{TemplateBinding Tag}" UseLayoutRounding="True"/>
+                        </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource BgHover}"/>
-                                <Setter Property="Foreground" Value="White"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#21262D"/>
+                                <Setter Property="Foreground" Value="#E6EDF3"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -3988,62 +4026,177 @@ function Show-TaskManager {
             </Setter>
         </Style>
 
+        <!-- Modern Action Button (clean, no blur) -->
         <Style TargetType="Button" x:Key="ActionBtn">
-            <Setter Property="Background" Value="#2D2D30"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Height" Value="35"/>
+            <Setter Property="Background" Value="#21262D"/>
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Height" Value="32"/>
             <Setter Property="Margin" Value="4"/>
             <Setter Property="FontSize" Value="12"/>
+            <Setter Property="FontWeight" Value="Normal"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="3" BorderBrush="#444" BorderThickness="1">
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" 
+                                BorderBrush="#30363D" BorderThickness="1">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16,0"/>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource Accent}"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#30363D"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="#8B949E"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Bd" Property="Background" Value="#222"/>
-                                <Setter Property="Foreground" Value="#555"/>
+                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
+                                <Setter Property="Foreground" Value="#6E7681"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
         </Style>
-        
+
+        <!-- Success/Green Button -->
         <Style TargetType="Button" x:Key="PositiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="{StaticResource BtnGreen}"/>
-        </Style>
-        <Style TargetType="Button" x:Key="DestructiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="{StaticResource BtnRed}"/>
-        </Style>
-        <Style TargetType="Button" x:Key="UtilityBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="{StaticResource BtnBlue}"/>
-        </Style>
-        <Style TargetType="Button" x:Key="WarningBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="{StaticResource BtnYellow}"/>
+            <Setter Property="Background" Value="#238636"/>
+            <Setter Property="BorderBrush" Value="#2EA043"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#2EA043"/>
+                    <Setter Property="BorderBrush" Value="#3FB950"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
+        <!-- Danger/Red Button -->
+        <Style TargetType="Button" x:Key="DestructiveBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="#DA3633"/>
+            <Setter Property="BorderBrush" Value="#F85149"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#F85149"/>
+                    <Setter Property="BorderBrush" Value="#FF7B72"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Warning/Yellow Button -->
+        <Style TargetType="Button" x:Key="WarningBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="#D29922"/>
+            <Setter Property="BorderBrush" Value="#E3B341"/>
+            <Setter Property="Foreground" Value="#0D1117"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#E3B341"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Info/Blue Button -->
+        <Style TargetType="Button" x:Key="UtilityBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="#1F6FEB"/>
+            <Setter Property="BorderBrush" Value="#58A6FF"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#58A6FF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Accent Button -->
+        <Style TargetType="Button" x:Key="AccentBtn" BasedOn="{StaticResource ActionBtn}">
+            <Setter Property="Background" Value="#58A6FF"/>
+            <Setter Property="BorderBrush" Value="#79C0FF"/>
+            <Setter Property="Foreground" Value="#0D1117"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#79C0FF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- Modern ListView Item (crisp text) -->
         <Style x:Key="FwItem" TargetType="ListViewItem">
             <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,6"/>
+            <Setter Property="Margin" Value="2,1"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Style.Triggers>
-                <Trigger Property="ItemsControl.AlternationIndex" Value="0"><Setter Property="Background" Value="{StaticResource BgPanel}"/></Trigger>
-                <Trigger Property="ItemsControl.AlternationIndex" Value="1"><Setter Property="Background" Value="#252526"/></Trigger>
-                <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{StaticResource Accent}"/><Setter Property="Foreground" Value="White"/></Trigger>
-                <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{StaticResource BgHover}"/></Trigger>
+                <Trigger Property="ItemsControl.AlternationIndex" Value="0">
+                    <Setter Property="Background" Value="#161B22"/>
+                </Trigger>
+                <Trigger Property="ItemsControl.AlternationIndex" Value="1">
+                    <Setter Property="Background" Value="#0D1117"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="#1F6FEB"/>
+                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="FontWeight" Value="Medium"/>
+                </Trigger>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#30363D"/>
+                </Trigger>
             </Style.Triggers>
+        </Style>
+
+        <!-- Card Style Border (clean, crisp) -->
+        <Style x:Key="CardStyle" TargetType="Border">
+            <Setter Property="Background" Value="#161B22"/>
+            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="4"/>
+            <Setter Property="Margin" Value="6"/>
+            <Setter Property="Padding" Value="16"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+        </Style>
+
+        <!-- Section Header Text (crisp) -->
+        <Style x:Key="SectionHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="26"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Margin" Value="0,0,0,16"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+        </Style>
+
+        <!-- Subsection Header (crisp) -->
+        <Style x:Key="SubHeader" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="#8B949E"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+            <Setter Property="FontFamily" Value="Segoe UI, Arial"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
         </Style>
     </Window.Resources>
 
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="240"/>
+            <ColumnDefinition Width="260"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
+        <!-- Sidebar -->
         <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid>
                 <Grid.RowDefinitions>
@@ -4053,274 +4206,589 @@ function Show-TaskManager {
                     <RowDefinition Height="Auto"/> 
                 </Grid.RowDefinitions>
 
-                <StackPanel Grid.Row="0" Margin="10,20,10,10">
-                    <TextBlock Text="GLOBAL SEARCH" FontSize="10" Foreground="{StaticResource TextSecondary}" FontWeight="Bold" Margin="2,0,0,5"/>
-                    <TextBox Name="txtGlobalSearch" Height="30" ToolTip="Type to search for any function within the app"/>
-                </StackPanel>
+                <!-- Header/Search -->
+                <Border Grid.Row="0" Background="#0D1117" Margin="16,20,16,12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1">
+                    <StackPanel Margin="12">
+                        <TextBlock Text="🔍 Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." BorderThickness="0"/>
+                    </StackPanel>
+                </Border>
 
-                <StackPanel Name="pnlNavButtons" Grid.Row="1" Margin="0,10,0,0">
-                    <Button Name="btnTabUpdates" Content="Updates (Winget)" Style="{StaticResource NavBtn}" Tag="pnlUpdates"/>
-                    <Button Name="btnTabHealth" Content="System Health" Style="{StaticResource NavBtn}" Tag="pnlHealth"/>
-                    <Button Name="btnTabNetwork" Content="Network &amp; DNS" Style="{StaticResource NavBtn}" Tag="pnlNetwork"/>
-                    <Button Name="btnTabFirewall" Content="Firewall Manager" Style="{StaticResource NavBtn}" Tag="pnlFirewall"/>
-                    <Button Name="btnTabDrivers" Content="Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
-                    <Button Name="btnTabCleanup" Content="Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
-                    <Button Name="btnTabUtils" Content="Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
-                    <Button Name="btnTabSupport" Content="Support &amp; Credits" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
-                    <Button Name="btnNavDownloads" Content="Release Downloads" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
+                <!-- Navigation -->
+                <StackPanel Grid.Row="1" Margin="8,8,8,0">
+                    <TextBlock Text="NAVIGATION" Style="{StaticResource SubHeader}" Margin="12,0,0,4"/>
+                    <StackPanel Name="pnlNavButtons">
+                        <Button Name="btnTabUpdates" Content="⬇️  Updates" Style="{StaticResource NavBtn}" Tag="pnlUpdates"/>
+                        <Button Name="btnTabTweaks" Content="⚡  Tweaks" Style="{StaticResource NavBtn}" Tag="pnlTweaks"/>
+                        <Button Name="btnTabHealth" Content="💓  System Health" Style="{StaticResource NavBtn}" Tag="pnlHealth"/>
+                        <Button Name="btnTabNetwork" Content="🌐  Network &amp; DNS" Style="{StaticResource NavBtn}" Tag="pnlNetwork"/>
+                        <Button Name="btnTabFirewall" Content="🔥  Firewall" Style="{StaticResource NavBtn}" Tag="pnlFirewall"/>
+                        <Button Name="btnTabDrivers" Content="🔧  Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
+                        <Button Name="btnTabCleanup" Content="🧹  Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
+                        <Button Name="btnTabUtils" Content="🛠️  Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
+                        <Button Name="btnTabSupport" Content="💝  Support" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
+                        <Button Name="btnNavDownloads" Content="📊  Download Stats" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
+                    </StackPanel>
                 </StackPanel>
                 
-                <ListBox Name="lstSearchResults" Grid.Row="2" Background="#111" BorderThickness="0" Foreground="Cyan" Visibility="Collapsed" Margin="5"/>
+                <ListBox Name="lstSearchResults" Grid.Row="2" Background="#0D1117" BorderThickness="0" Foreground="#58A6FF" Visibility="Collapsed" Margin="8"/>
 
-                <StackPanel Grid.Row="3" Margin="10">
-                    <TextBlock Text="LOG OUTPUT" FontSize="10" Foreground="{StaticResource TextSecondary}" FontWeight="Bold"/>
-                    <TextBox Name="LogBox" Height="290" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas" FontSize="11" Background="#111" Foreground="#0F0" BorderThickness="0"/>
-                </StackPanel>
+                <!-- Log Panel -->
+                <Border Grid.Row="3" Background="#0D1117" Margin="12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1" MaxHeight="280">
+                    <Grid>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+                        <Border Grid.Row="0" Background="#161B22" CornerRadius="8,8,0,0" Padding="12,8">
+                            <TextBlock Text="📋 Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
+                        </Border>
+                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="8" UseLayoutRounding="True">
+                            <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
+                                     Background="Transparent" Foreground="#3FB950" BorderThickness="0" Padding="4"
+                                     SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"/>
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
             </Grid>
         </Border>
 
         <Border Grid.Column="1" Background="{StaticResource BgDark}">
             <Grid Margin="20">
                 
+                <!-- UPDATES PANEL -->
                 <Grid Name="pnlUpdates" Visibility="Visible">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
                     
-                    <Grid Grid.Row="0" Margin="0,0,0,15">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="300"/></Grid.ColumnDefinitions>
-                        <StackPanel>
-                             <StackPanel Orientation="Horizontal">
-                                 <TextBlock Name="lblWingetTitle" Text="Updates:" FontSize="24" Foreground="White" FontWeight="Light" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                             </StackPanel>
-                             <TextBlock Name="lblWingetStatus" Text="Scanning..." Foreground="Yellow" Visibility="Hidden" Margin="0,5,0,0"/>
-                        </StackPanel>
-                        <Grid Grid.Column="1">
-                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                             <TextBox Name="txtWingetSearch" Grid.Column="0" Height="30" VerticalContentAlignment="Center" Text="Search new packages..."/>
-                             <Button Name="btnWingetFind" Grid.Column="1" Content="Find" Width="60" Height="30" Background="{StaticResource Accent}" Foreground="White" ToolTip="Search repository"/>
+                    <!-- Header Card -->
+                    <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="320"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="⬇️" FontSize="28" Margin="0,0,12,0"/>
+                                    <StackPanel>
+                                        <TextBlock Name="lblWingetTitle" Text="Package Updates" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                        <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                            <Grid Grid.Column="1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox Name="txtWingetSearch" Grid.Column="0" Height="40" VerticalContentAlignment="Center" Text="Search packages..."/>
+                                <Button Name="btnWingetFind" Grid.Column="1" Content="🔍" Width="44" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}"/>
+                            </Grid>
                         </Grid>
-                    </Grid>
+                    </Border>
 
-                    <ListView Name="lstWinget" Grid.Row="1" Background="{StaticResource BgPanel}" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
-                        <ListView.View>
-                             <GridView>
-                                <GridViewColumn Header="Source" Width="80" DisplayMemberBinding="{Binding Source}"/>
-                                <GridViewColumn Header="Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
-                                <GridViewColumn Header="Id" Width="200" DisplayMemberBinding="{Binding Id}"/>
-                                <GridViewColumn Header="Version" Width="100" DisplayMemberBinding="{Binding Version}"/>
-                                <GridViewColumn Header="Available" Width="100" DisplayMemberBinding="{Binding Available}"/>
-                            </GridView>
-                        </ListView.View>
-                    </ListView>
+                    <!-- List Card -->
+                    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
+                        <ListView Name="lstWinget" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="Source" Width="90" DisplayMemberBinding="{Binding Source}"/>
+                                    <GridViewColumn Header="Package Name" Width="280" DisplayMemberBinding="{Binding Name}"/>
+                                    <GridViewColumn Header="ID" Width="220" DisplayMemberBinding="{Binding Id}"/>
+                                    <GridViewColumn Header="Installed" Width="110" DisplayMemberBinding="{Binding Version}"/>
+                                    <GridViewColumn Header="Latest" Width="110" DisplayMemberBinding="{Binding Available}"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
 
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Name="btnManageProviders" Content="Providers" Width="100" Style="{StaticResource ActionBtn}" Background="#555" Margin="0,0,10,0" ToolTip="Enable/Disable package managers"/>
-                        <Button Name="btnWingetScan" Content="Refresh All" Width="150" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnWingetUpdateSel" Content="Update Selected" Width="150" Style="{StaticResource PositiveBtn}"/>
-                        <Button Name="btnWingetInstall" Content="Install Selected" Width="150" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
-                        <Button Name="btnWingetUninstall" Content="Uninstall Selected" Width="150" Style="{StaticResource DestructiveBtn}"/>
-                        <Button Name="btnWingetIgnore" Content="Ignore Selected" Width="140" Style="{StaticResource WarningBtn}"/>
-                        <Button Name="btnWingetUnignore" Content="Manage Ignored" Width="140" Style="{StaticResource ActionBtn}"/>
-                    </StackPanel>
-                </Grid>
-
-                <StackPanel Name="pnlHealth" Visibility="Collapsed">
-                    <TextBlock Text="System Health" FontSize="24" Margin="0,0,0,20"/>
-                    <WrapPanel>
-                        <Button Name="btnSFC" Content="SFC Scan" Width="220" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDISMCheck" Content="DISM Check" Width="220" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDISMRestore" Content="DISM Restore" Width="220" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCHKDSK" Content="CHKDSK" Width="220" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
-                </StackPanel>
-
-                <StackPanel Name="pnlNetwork" Visibility="Collapsed">
-                    <TextBlock Text="Network &amp; DNS" FontSize="24" Margin="0,0,0,20"/>
-                    
-                    <TextBlock Text="General Tools" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel Margin="0,0,0,15">
-                        <Button Name="btnNetInfo" Content="Show IP Config" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFlushDNS" Content="Flush DNS" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnResetWifi" Content="Restart Wi-Fi" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnNetRepair" Content="Full Network Repair" Width="180" Style="{StaticResource WarningBtn}" Background="#8B8000"/>
-                        <Button Name="btnRouteTable" Content="Save Routing Table" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnRouteView" Content="View Routing Table" Width="180" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
-                    
-                    <TextBlock Text="DNS Presets" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel Margin="0,0,0,15">
-                        <Button Name="btnDnsGoogle" Content="Google (8.8.8.8)" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDnsCloudflare" Content="Cloudflare (1.1.1.1)" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDnsQuad9" Content="Quad9 (9.9.9.9)" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDnsAuto" Content="Auto (DHCP)" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDnsCustom" Content="Custom DNS..." Width="180" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
-
-                    <TextBlock Text="DNS Encryption (DoH)" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel Margin="0,0,0,15">
-                        <Button Name="btnDohAuto" Content="Enable DoH (All)" Width="250" Style="{StaticResource UtilityBtn}"/>
-                        <Button Name="btnDohDisable" Content="Disable DoH" Width="180" Style="{StaticResource DestructiveBtn}" Background="#660000"/>
-                    </WrapPanel>
-
-                    <TextBlock Text="Hosts File" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel>
-                        <Button Name="btnHostsUpdate" Content="Download AdBlock" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnHostsEdit" Content="Edit Hosts" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnHostsBackup" Content="Backup Hosts" Width="180" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnHostsRestore" Content="Restore Hosts" Width="180" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
-                </StackPanel>
-
-                <Grid Name="pnlFirewall" Visibility="Collapsed">
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                    <Grid Grid.Row="0" Margin="0,0,0,10">
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="200"/></Grid.ColumnDefinitions>
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="Firewall Manager" FontSize="24" Margin="0,0,20,0"/>
-                            <TextBlock Name="lblFwStatus" Text="Loading..." Foreground="Yellow" Visibility="Collapsed"/>
+                    <!-- Action Bar -->
+                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Name="btnManageProviders" Content="⚙️ Providers" Style="{StaticResource ActionBtn}" ToolTip="Manage package sources"/>
+                            <Button Name="btnShowCatalog" Content="📦 Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
+                            <Button Name="btnWingetScan" Content="🔄 Refresh All" Style="{StaticResource AccentBtn}"/>
+                            <Button Name="btnWingetUpdateSel" Content="⬆️ Update Selected" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnWingetInstall" Content="⬇️ Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
+                            <Button Name="btnWingetUninstall" Content="🗑️ Uninstall" Style="{StaticResource DestructiveBtn}"/>
+                            <Button Name="btnWingetIgnore" Content="🚫 Ignore" Style="{StaticResource WarningBtn}"/>
+                            <Button Name="btnWingetUnignore" Content="📋 Manage Ignored" Style="{StaticResource ActionBtn}"/>
                         </StackPanel>
-                        <TextBox Name="txtFwSearch" Grid.Column="1" Text="Search Rules..." ToolTip="Type rule name or port to search"/>
-                    </Grid>
-                    
-                    <ListView Name="lstFirewall" Grid.Row="1" Background="{StaticResource BgPanel}" Foreground="#DDD" BorderThickness="1" BorderBrush="#333" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
-                        <ListView.View>
-                            <GridView>
-                                <GridViewColumn Header="Name" Width="350" DisplayMemberBinding="{Binding Name}"/>
-                                <GridViewColumn Header="Dir" Width="60" DisplayMemberBinding="{Binding Direction}"/>
-                                <GridViewColumn Header="Action" Width="60">
-                                    <GridViewColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Text="{Binding Action}" FontWeight="Bold">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Setter Property="Foreground" Value="White"/>
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding Action}" Value="Allow"><Setter Property="Foreground" Value="#00FF00"/></DataTrigger>
-                                                            <DataTrigger Binding="{Binding Action}" Value="Block"><Setter Property="Foreground" Value="#FF3333"/></DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
-                                        </DataTemplate>
-                                    </GridViewColumn.CellTemplate>
-                                </GridViewColumn>
-                                <GridViewColumn Header="Enabled" Width="60">
-                                    <GridViewColumn.CellTemplate>
-                                        <DataTemplate>
-                                            <TextBlock Text="{Binding Enabled}" FontWeight="Bold">
-                                                <TextBlock.Style>
-                                                    <Style TargetType="TextBlock">
-                                                        <Setter Property="Foreground" Value="White"/>
-                                                        <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding Enabled}" Value="True"><Setter Property="Foreground" Value="#00FF00"/></DataTrigger>
-                                                            <DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="Foreground" Value="#FF3333"/></DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
-                                                </TextBlock.Style>
-                                            </TextBlock>
-                                        </DataTemplate>
-                                    </GridViewColumn.CellTemplate>
-                                </GridViewColumn>
-                                <GridViewColumn Header="Proto" Width="60" DisplayMemberBinding="{Binding Protocol}"/>
-                                <GridViewColumn Header="Port" Width="80" DisplayMemberBinding="{Binding LocalPort}"/>
-                            </GridView>
-                        </ListView.View>
-                    </ListView>
-
-                    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
-                        <Button Name="btnFwRefresh" Content="Reload" Width="100" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwAdd" Content="Add Rule" Width="100" Style="{StaticResource PositiveBtn}"/>
-                        <Button Name="btnFwEdit" Content="Modify" Width="100" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwEnable" Content="Enable" Width="80" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwDisable" Content="Disable" Width="80" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwDelete" Content="Delete" Width="80" Style="{StaticResource DestructiveBtn}"/>
-                        <Button Name="btnFwExport" Content="Export" Width="90" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwImport" Content="Import" Width="90" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwDefaults" Content="Restore Defaults" Width="140" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnFwPurge" Content="Delete All" Width="100" Style="{StaticResource DestructiveBtn}" Background="#7A1F1F"/>
-                    </StackPanel>
+                    </Border>
                 </Grid>
 
+                <!-- SOFTWARE CATALOG PANEL (Initially Hidden) -->
+                <Grid Name="pnlCatalog" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Header -->
+                    <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="300"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="📦" FontSize="28" Margin="0,0,12,0"/>
+                                <StackPanel>
+                                    <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                    <TextBlock Text="Curated selection of popular applications" Foreground="{StaticResource TextSecondary}" FontSize="13"/>
+                                </StackPanel>
+                            </StackPanel>
+                            <Grid Grid.Column="1">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox Name="txtCatalogSearch" Grid.Column="0" Height="40" VerticalContentAlignment="Center" Text="Search catalog..." ToolTip="Type to filter applications by name or description"/>
+                                <Button Name="btnCatalogSearch" Grid.Column="1" Content="🔍" Width="44" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}" ToolTip="Search the catalog"/>
+                            </Grid>
+                        </Grid>
+                    </Border>
+
+                    <!-- Category Filter -->
+                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="6,0,6,12">
+                        <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
+                        <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
+                        <Button Name="btnCatDev" Content="Development" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
+                        <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
+                        <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
+                        <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
+                        <Button Name="btnCatSecurity" Content="Security" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Antivirus, password managers, security tools"/>
+                    </StackPanel>
+
+                    <!-- Catalog List -->
+                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
+                        <ListView Name="lstCatalog" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="Category" Width="100" DisplayMemberBinding="{Binding Category}"/>
+                                    <GridViewColumn Header="Name" Width="200" DisplayMemberBinding="{Binding Name}"/>
+                                    <GridViewColumn Header="Description" Width="350" DisplayMemberBinding="{Binding Description}"/>
+                                    <GridViewColumn Header="Source" Width="80" DisplayMemberBinding="{Binding Source}"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
+
+                    <!-- Actions -->
+                    <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Name="btnBackToUpdates" Content="⬅️ Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
+                            <Button Name="btnCatalogInstall" Content="⬇️ Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
+                            <Button Name="btnCatalogSelectAll" Content="✓ Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
+                            <Button Name="btnCatalogClear" Content="✗ Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- TWEAKS PANEL -->
+                <StackPanel Name="pnlTweaks" Visibility="Collapsed">
+                    <!-- Performance Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                <TextBlock Text="⚡" FontSize="32" Margin="0,0,12,0"/>
+                                <TextBlock Text="Performance Tweaks" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock Text="POWER &amp; PERFORMANCE" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnPerfServicesManual" Content="📋 Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
+                                <Button Name="btnPerfServicesRevert" Content="↩️ Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
+                                <Button Name="btnPerfDisableHibernate" Content="🌙 Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Disable hibernation and delete hiberfil.sys. Frees up several GB of disk space equal to your RAM size."/>
+                                <Button Name="btnPerfEnableHibernate" Content="💤 Enable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Re-enable hibernation mode. Allows your PC to save state and power off completely, resuming faster than a full boot."/>
+                                <Button Name="btnPerfDisableSuperfetch" Content="🚫 Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Disable SysMain (Superfetch) service. Prevents Windows from pre-loading apps into RAM. Can help on systems with low RAM or SSDs."/>
+                                <Button Name="btnPerfEnableSuperfetch" Content="✓ Enable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Enable SysMain (Superfetch) service. Pre-loads frequently used apps into RAM for faster launch times on HDDs."/>
+                                <Button Name="btnPerfDisableMemCompress" Content="🗜️ Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Disable memory compression. RAM stores data uncompressed. May improve performance on high-RAM systems."/>
+                                <Button Name="btnPerfEnableMemCompress" Content="✓ Enable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Enable memory compression. Windows compresses inactive RAM pages to free up physical memory for active apps."/>
+                                <Button Name="btnPerfUltimatePower" Content="🔋 Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- AppX Bloatware Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🗑️ APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
+                            <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+                            <ListView Name="lstAppxPackages" Height="200" Background="#0D1117" BorderBrush="#30363D" BorderThickness="1" SelectionMode="Multiple">
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
+                                        <GridViewColumn Header="Package" Width="300" DisplayMemberBinding="{Binding Package}"/>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                            <WrapPanel Margin="0,12,0,0">
+                                <Button Name="btnAppxLoad" Content="🔄 Load Apps" Style="{StaticResource ActionBtn}" ToolTip="Scan for installed UWP/Modern apps that can be removed. Populates the list above with removable bloatware."/>
+                                <Button Name="btnAppxRemoveSel" Content="🗑️ Remove Selected" Style="{StaticResource DestructiveBtn}" ToolTip="Remove the selected apps from your system. These apps can be reinstalled from the Microsoft Store if needed later."/>
+                                <Button Name="btnAppxRemoveAll" Content="⚠️ Remove All" Style="{StaticResource DestructiveBtn}" ToolTip="Remove ALL listed apps at once. This is faster but be careful - only click if you're sure you don't need any of these apps!"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Windows Features Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🪟 WINDOWS OPTIONAL FEATURES" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnFeatHyperV" Content="Hyper-V" Style="{StaticResource ActionBtn}" ToolTip="Microsoft's hardware virtualization platform. Create and run virtual machines. Requires Pro/Enterprise edition and CPU virtualization support."/>
+                                <Button Name="btnFeatWSL" Content="WSL" Style="{StaticResource ActionBtn}" ToolTip="Windows Subsystem for Linux. Run Linux command-line tools and apps directly on Windows without a VM. Popular for developers."/>
+                                <Button Name="btnFeatSandbox" Content="Sandbox" Style="{StaticResource ActionBtn}" ToolTip="Windows Sandbox - a lightweight, temporary desktop environment to safely run untrusted apps. Discards all changes when closed. Requires Pro/Enterprise."/>
+                                <Button Name="btnFeatDotNet35" Content=".NET 3.5" Style="{StaticResource ActionBtn}" ToolTip=".NET Framework 3.5 (includes 2.0 and 3.0). Required for many older Windows applications and some games."/>
+                                <Button Name="btnFeatNFS" Content="NFS Client" Style="{StaticResource ActionBtn}" ToolTip="Network File System client. Allows Windows to connect to Linux/UNIX NFS file shares and NAS devices."/>
+                                <Button Name="btnFeatTelnet" Content="Telnet" Style="{StaticResource ActionBtn}" ToolTip="Telnet client for command-line remote connections. Not secure (unencrypted) - use SSH when possible."/>
+                                <Button Name="btnFeatIIS" Content="IIS" Style="{StaticResource ActionBtn}" ToolTip="Internet Information Services - Microsoft's web server. Host websites locally, useful for web development."/>
+                                <Button Name="btnFeatLegacy" Content="Legacy Media" Style="{StaticResource ActionBtn}" ToolTip="Windows Media Player and DirectPlay. Required for some older games and media playback."/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Services Management Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="⚙️ SERVICES MANAGEMENT" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnSvcOptimize" Content="🚀 Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
+                                <Button Name="btnSvcRestore" Content="↩️ Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
+                                <Button Name="btnSvcView" Content="📋 View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Scheduled Tasks Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="⏰ SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+                            <WrapPanel>
+                                <Button Name="btnTasksDisableTelemetry" Content="🚫 Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
+                                <Button Name="btnTasksRestore" Content="↩️ Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
+                                <Button Name="btnTasksView" Content="📋 View Tasks" Style="{StaticResource ActionBtn}" ToolTip="View telemetry-related scheduled tasks in a grid. Shows task name, path, and current enabled/disabled state."/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Windows Update Presets Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🔄 WINDOWS UPDATE PRESETS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnWUDefault" Content="✓ Default" Style="{StaticResource ActionBtn}" ToolTip="Standard Windows Update behavior. Feature and security updates install automatically. Recommended for most users."/>
+                                <Button Name="btnWUSecurity" Content="🔒 Security Only" Style="{StaticResource UtilityBtn}" ToolTip="Defer feature updates for 1 year, install security updates only. Get new features later while staying secure. Good for stability."/>
+                                <Button Name="btnWUDisable" Content="🚫 Disable All" Style="{StaticResource DestructiveBtn}" ToolTip="Completely disable Windows Update. NOT RECOMMENDED - your system will become vulnerable to security threats. Use with caution."/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- SYSTEM HEALTH PANEL -->
+                <StackPanel Name="pnlHealth" Visibility="Collapsed">
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                                <TextBlock Text="💓" FontSize="32" Margin="0,0,12,0"/>
+                                <TextBlock Text="System Health" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock Text="WINDOWS REPAIR TOOLS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnSFC" Content="🔍 SFC Scan" Style="{StaticResource ActionBtn}" ToolTip="System File Checker - repairs corrupted system files"/>
+                                <Button Name="btnDISMCheck" Content="✓ DISM Check" Style="{StaticResource ActionBtn}" ToolTip="Check Windows image health"/>
+                                <Button Name="btnDISMRestore" Content="🔧 DISM Restore" Style="{StaticResource UtilityBtn}" ToolTip="Repair Windows image"/>
+                                <Button Name="btnCHKDSK" Content="💾 CHKDSK" Style="{StaticResource ActionBtn}" ToolTip="Check disk for errors (requires reboot)"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- NETWORK PANEL -->
+                <StackPanel Name="pnlNetwork" Visibility="Collapsed">
+                    <!-- Header Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Text="🌐" FontSize="32" Margin="0,0,12,0"/>
+                            <TextBlock Text="Network &amp; DNS" Style="{StaticResource SectionHeader}" Margin="0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- General Tools Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🔧 DIAGNOSTIC TOOLS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnNetInfo" Content="📊 IP Config" Style="{StaticResource ActionBtn}" ToolTip="Display network configuration"/>
+                                <Button Name="btnFlushDNS" Content="🧹 Flush DNS" Style="{StaticResource ActionBtn}" ToolTip="Clear DNS cache"/>
+                                <Button Name="btnResetWifi" Content="📡 Restart Wi-Fi" Style="{StaticResource ActionBtn}" ToolTip="Reset wireless adapters"/>
+                                <Button Name="btnNetRepair" Content="🔧 Full Repair" Style="{StaticResource WarningBtn}" ToolTip="Comprehensive network reset"/>
+                                <Button Name="btnRouteTable" Content="💾 Save Routes" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnRouteView" Content="📋 View Routes" Style="{StaticResource ActionBtn}"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- DNS Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🌍 DNS SERVERS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnDnsGoogle" Content="Google DNS" Style="{StaticResource ActionBtn}" ToolTip="8.8.8.8 / 8.8.4.4"/>
+                                <Button Name="btnDnsCloudflare" Content="Cloudflare" Style="{StaticResource ActionBtn}" ToolTip="1.1.1.1 / 1.0.0.1"/>
+                                <Button Name="btnDnsQuad9" Content="Quad9" Style="{StaticResource ActionBtn}" ToolTip="9.9.9.9"/>
+                                <Button Name="btnDnsAuto" Content="Auto (DHCP)" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}"/>
+                            </WrapPanel>
+                            
+                            <TextBlock Text="🔒 DNS OVER HTTPS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
+                            <WrapPanel>
+                                <Button Name="btnDohAuto" Content="✓ Enable DoH" Style="{StaticResource PositiveBtn}" ToolTip="Enable DNS encryption for all providers"/>
+                                <Button Name="btnDohDisable" Content="✗ Disable DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Disable DNS encryption"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Hosts File Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="📄 HOSTS FILE MANAGER" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnHostsUpdate" Content="⬇️ Download AdBlock" Style="{StaticResource PositiveBtn}" ToolTip="Download and merge ad-blocking hosts"/>
+                                <Button Name="btnHostsEdit" Content="✏️ Edit Hosts" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnHostsBackup" Content="💾 Backup" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnHostsRestore" Content="↩️ Restore" Style="{StaticResource ActionBtn}"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- FIREWALL PANEL -->
+                <Grid Name="pnlFirewall" Visibility="Collapsed">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    
+                    <!-- Header Card -->
+                    <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="240"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="🔥" FontSize="32" Margin="0,0,12,0"/>
+                                <StackPanel>
+                                    <TextBlock Text="Firewall Manager" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                    <TextBlock Name="lblFwStatus" Text="Ready" Foreground="#D29922" FontSize="13" Visibility="Collapsed"/>
+                                </StackPanel>
+                            </StackPanel>
+                            <TextBox Name="txtFwSearch" Grid.Column="1" Text="🔍 Search rules..." ToolTip="Filter by name or port"/>
+                        </Grid>
+                    </Border>
+                    
+                    <!-- Rules List Card -->
+                    <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
+                        <ListView Name="lstFirewall" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="Rule Name" Width="360" DisplayMemberBinding="{Binding Name}"/>
+                                    <GridViewColumn Header="Direction" Width="70" DisplayMemberBinding="{Binding Direction}"/>
+                                    <GridViewColumn Header="Action" Width="70">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Action}" FontWeight="Bold">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Action}" Value="Allow"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
+                                                                <DataTrigger Binding="{Binding Action}" Value="Block"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                    <GridViewColumn Header="Status" Width="70">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <TextBlock Text="{Binding Enabled}" FontWeight="Bold">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="TextBlock">
+                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding Enabled}" Value="True"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
+                                                                <DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
+                                    <GridViewColumn Header="Protocol" Width="70" DisplayMemberBinding="{Binding Protocol}"/>
+                                    <GridViewColumn Header="Port" Width="90" DisplayMemberBinding="{Binding LocalPort}"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
+
+                    <!-- Actions Card -->
+                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button Name="btnFwRefresh" Content="🔄 Reload" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwAdd" Content="➕ Add Rule" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnFwEdit" Content="✏️ Edit" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwEnable" Content="✓ Enable" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDisable" Content="✗ Disable" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDelete" Content="🗑️ Delete" Style="{StaticResource DestructiveBtn}"/>
+                            <Button Name="btnFwExport" Content="💾 Export" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwImport" Content="📥 Import" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDefaults" Content="↩️ Defaults" Style="{StaticResource WarningBtn}"/>
+                            <Button Name="btnFwPurge" Content="⚠️ Delete All" Style="{StaticResource DestructiveBtn}"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- DRIVERS PANEL -->
                 <StackPanel Name="pnlDrivers" Visibility="Collapsed">
-                    <TextBlock Text="Drivers" FontSize="24" Margin="0,0,0,20"/>
-                    <WrapPanel>
-                        <Button Name="btnDrvReport" Content="Generate Driver Report" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvBackup" Content="Export Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvGhost" Content="Remove Ghost Devices" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvClean" Content="Clean Old Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvRestore" Content="Restore Drivers" Width="200" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
-                    <WrapPanel Margin="0,10,0,0">
-                        <Button Name="btnDrvDisableWU" Content="Disable Driver Updates" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvEnableWU" Content="Enable Driver Updates" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvDisableMeta" Content="Disable Device Metadata" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDrvEnableMeta" Content="Enable Device Metadata" Width="200" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                                <TextBlock Text="🔧" FontSize="32" Margin="0,0,12,0"/>
+                                <TextBlock Text="Driver Management" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock Text="📊 DRIVER TOOLS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnDrvReport" Content="📋 Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
+                                <Button Name="btnDrvBackup" Content="💾 Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
+                                <Button Name="btnDrvGhost" Content="👻 Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
+                                <Button Name="btnDrvClean" Content="🧹 Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
+                                <Button Name="btnDrvRestore" Content="↩️ Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
+                            </WrapPanel>
+                            <TextBlock Text="⚙️ WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
+                            <WrapPanel>
+                                <Button Name="btnDrvDisableWU" Content="🚫 Disable Auto-Drivers" Style="{StaticResource DestructiveBtn}" ToolTip="Stop Windows Update from installing drivers"/>
+                                <Button Name="btnDrvEnableWU" Content="✓ Enable Auto-Drivers" Style="{StaticResource PositiveBtn}" ToolTip="Allow Windows Update to install drivers"/>
+                                <Button Name="btnDrvDisableMeta" Content="🚫 Disable Metadata" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDrvEnableMeta" Content="✓ Enable Metadata" Style="{StaticResource ActionBtn}"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
+                <!-- CLEANUP PANEL -->
                 <StackPanel Name="pnlCleanup" Visibility="Collapsed">
-                    <TextBlock Text="System Cleanup" FontSize="24" Margin="0,0,0,20"/>
-                    <WrapPanel>
-                        <Button Name="btnCleanDisk" Content="Disk Cleanup" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCleanTemp" Content="Delete Temp Files" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCleanShortcuts" Content="Fix Shortcuts" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnCleanReg" Content="Clean Registry Keys" Width="200" Style="{StaticResource WarningBtn}"/>
-                        <Button Name="btnCleanXbox" Content="Clean Xbox Data" Width="200" Style="{StaticResource ActionBtn}"/>
-                    </WrapPanel>
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                                <TextBlock Text="🧹" FontSize="32" Margin="0,0,12,0"/>
+                                <TextBlock Text="System Cleanup" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock Text="🗑️ CLEANUP TOOLS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnCleanDisk" Content="💿 Disk Cleanup" Style="{StaticResource ActionBtn}" ToolTip="Windows built-in cleanup utility"/>
+                                <Button Name="btnCleanTemp" Content="🌡️ Delete Temp Files" Style="{StaticResource ActionBtn}" ToolTip="Clear temp folders"/>
+                                <Button Name="btnCleanShortcuts" Content="🔗 Fix Shortcuts" Style="{StaticResource ActionBtn}" ToolTip="Remove broken shortcuts"/>
+                                <Button Name="btnCleanReg" Content="⚠️ Clean Registry" Style="{StaticResource WarningBtn}" ToolTip="Remove obsolete registry entries"/>
+                                <Button Name="btnCleanXbox" Content="🎮 Clean Xbox Data" Style="{StaticResource ActionBtn}" ToolTip="Clear Xbox app cache"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
+                <!-- UTILITIES PANEL -->
                 <StackPanel Name="pnlUtils" Visibility="Collapsed">
-                    <TextBlock Text="Utilities" FontSize="24" Margin="0,0,0,20"/>
-                    
-                    <TextBlock Text="System &amp; Activation" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel Margin="0,0,0,15">
-                        <Button Name="btnUtilSysInfo" Content="System Info Report" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnUtilTrim" Content="Trim SSD" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnUtilMas" Content="MAS Activation" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnTaskManager" Content="Task Scheduler Manager" Width="200" Style="{StaticResource UtilityBtn}"/>
-                        <Button Name="btnCtxBuilder" Content="Custom Context Menu" Width="200" Style="{StaticResource UtilityBtn}"/>
-                    </WrapPanel>
+                    <!-- System Tools Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
+                                <TextBlock Text="🛠️" FontSize="32" Margin="0,0,12,0"/>
+                                <TextBlock Text="System Tools" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock Text="📊 SYSTEM INFO &amp; MAINTENANCE" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnUtilSysInfo" Content="📋 System Report" Style="{StaticResource ActionBtn}" ToolTip="Generate detailed system report"/>
+                                <Button Name="btnUtilTrim" Content="✂️ Trim SSD" Style="{StaticResource ActionBtn}" ToolTip="Optimize SSD performance"/>
+                                <Button Name="btnUtilMas" Content="🔑 MAS Activation" Style="{StaticResource UtilityBtn}" ToolTip="Microsoft Activation Scripts"/>
+                                <Button Name="btnTaskManager" Content="⏰ Task Scheduler" Style="{StaticResource ActionBtn}" ToolTip="Manage scheduled tasks"/>
+                                <Button Name="btnCtxBuilder" Content="📁 Context Menu" Style="{StaticResource ActionBtn}" ToolTip="Customize right-click menu"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
 
-                    <TextBlock Text="Repairs &amp; Settings" Foreground="{StaticResource TextSecondary}" Margin="5"/>
-                    <WrapPanel>
-                        <Button Name="btnUpdateRepair" Content="Reset Windows Update" Width="200" Style="{StaticResource WarningBtn}" Background="#8B8000"/>
-                        <Button Name="btnUpdateServices" Content="Restart Update Services" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDotNetEnable" Content="Set .NET RollForward" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnDotNetDisable" Content="Unset .NET RollForward" Width="200" Style="{StaticResource ActionBtn}"/>
-                        <Button Name="btnInstallGpedit" Content="Install Gpedit (Home)" Width="200" Style="{StaticResource UtilityBtn}"/>
-                    </WrapPanel>
+                    <!-- Repairs Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🔧 REPAIRS &amp; SETTINGS" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnUpdateRepair" Content="🔄 Reset Windows Update" Style="{StaticResource WarningBtn}" ToolTip="Fix Windows Update issues"/>
+                                <Button Name="btnUpdateServices" Content="🔄 Restart Services" Style="{StaticResource ActionBtn}" ToolTip="Restart update-related services"/>
+                                <Button Name="btnDotNetEnable" Content="✓ Enable .NET RollForward" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDotNetDisable" Content="✗ Disable .NET RollForward" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnInstallGpedit" Content="📜 Install Gpedit" Style="{StaticResource UtilityBtn}" ToolTip="Add Group Policy to Home editions"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
+                <!-- SUPPORT PANEL -->
                 <StackPanel Name="pnlSupport" Visibility="Collapsed">
-                    <TextBlock Text="Support &amp; Credits" FontSize="24" Margin="0,0,0,20"/>
-                    <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="16" FontWeight="Bold"/>
-                    
-                    <TextBlock Text="Credits:" FontWeight="Bold" Margin="0,10,0,5"/>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                        <TextBlock Text="- Author: " Foreground="#AAA" VerticalAlignment="Center"/>
-                        <Button Name="btnCreditLilBattiCLI" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
-                        <TextBlock Text=" | Contributor: " Foreground="#AAA" VerticalAlignment="Center"/>
-                        <Button Name="btnCreditChaythonCLI" Content="Chaython" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                        <TextBlock Text="- GUI Design &amp; Implementation: " Foreground="#AAA" VerticalAlignment="Center"/>
-                        <Button Name="btnCreditChaythonGUI" Content="Chaython" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
-                    </StackPanel>
-                    <StackPanel Orientation="Horizontal" Margin="0,0,0,5">
-                        <TextBlock Text="- Feature Integration &amp; Updates: " Foreground="#AAA" VerticalAlignment="Center"/>
-                         <Button Name="btnCreditIos12checker" Content="Lil_Batti" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
-                        <TextBlock Text=" &amp; " Foreground="#AAA" VerticalAlignment="Center"/>
-                       <Button Name="btnCreditChaythonFeatures" Content="Chaython" Foreground="#00BFFF" Background="Transparent" BorderThickness="0" Cursor="Hand" FontSize="12"/>
-                    </StackPanel>
+                    <!-- Header Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
+                                <TextBlock Text="💝" FontSize="32" Margin="0,0,12,0"/>
+                                <StackPanel>
+                                    <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                    <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
 
-                    <TextBlock Text="License: MIT License" Foreground="#666" Margin="0,10,0,0" FontSize="10"/>
-                    <TextBlock Text="Copyright (c) 2026" Foreground="#666" FontSize="10"/>
-                    
-                    <StackPanel Orientation="Horizontal" Margin="0,20,0,0">
-                         <Button Name="btnSupportDiscord" Content="Join Discord" Width="180" Style="{StaticResource ActionBtn}" Background="#5865F2"/>
-                         <Button Name="btnSupportIssue" Content="Report Issue" Width="180" Style="{StaticResource ActionBtn}"/>
-                         <Button Name="btnDonateIos12" Content="Sponsor Lil_Batti" Width="160" Style="{StaticResource ActionBtn}" Background="#2EA043"/>
-                         <Button Name="btnDonate" Content="Sponsor Chaython" Width="160" Style="{StaticResource ActionBtn}" Background="#2EA043"/>
-                    </StackPanel>
+                    <!-- Credits Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="👥 CONTRIBUTORS" Style="{StaticResource SubHeader}"/>
+                            <StackPanel Margin="0,8,0,0">
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="Author: " Foreground="{StaticResource TextSecondary}" Width="120"/>
+                                    <Button Name="btnCreditLilBattiCLI" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                </StackPanel>
+                                <StackPanel Orientation="Horizontal" Margin="0,4">
+                                    <TextBlock Text="GUI &amp; Features: " Foreground="{StaticResource TextSecondary}" Width="120"/>
+                                    <Button Name="btnCreditChaythonGUI" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                </StackPanel>
+                            </StackPanel>
+                            <TextBlock Text="📜 MIT License • Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Support Actions Card -->
+                    <Border Style="{StaticResource CardStyle}">
+                        <StackPanel>
+                            <TextBlock Text="🤝 GET INVOLVED" Style="{StaticResource SubHeader}"/>
+                            <WrapPanel>
+                                <Button Name="btnSupportDiscord" Content="💬 Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
+                                <Button Name="btnSupportIssue" Content="🐛 Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
+                                <Button Name="btnDonateIos12" Content="💚 Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
+                                <Button Name="btnDonate" Content="💙 Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
             </Grid>
@@ -4470,8 +4938,8 @@ Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2
 # ==========================================
 # 5. LOGIC & EVENTS
 # ==========================================
-$TabButtons = @("btnTabUpdates","btnTabHealth","btnTabNetwork","btnTabFirewall","btnTabDrivers","btnTabCleanup","btnTabUtils","btnTabSupport")
-$Panels     = @("pnlUpdates","pnlHealth","pnlNetwork","pnlFirewall","pnlDrivers","pnlCleanup","pnlUtils","pnlSupport")
+$TabButtons = @("btnTabUpdates","btnTabTweaks","btnTabHealth","btnTabNetwork","btnTabFirewall","btnTabDrivers","btnTabCleanup","btnTabUtils","btnTabSupport")
+$Panels     = @("pnlUpdates","pnlTweaks","pnlHealth","pnlNetwork","pnlFirewall","pnlDrivers","pnlCleanup","pnlUtils","pnlSupport")
 
 # --- INITIALIZE ALL CONTROLS ---
 $btnManageProviders = Get-Ctrl "btnManageProviders"
@@ -4573,11 +5041,26 @@ $pnlNavButtons = Get-Ctrl "pnlNavButtons"
 foreach ($btnName in $TabButtons) {
     (Get-Ctrl $btnName).Add_Click({
         param($s,$e)
+        # Hide all panels
         foreach ($p in $Panels) { (Get-Ctrl $p).Visibility = "Collapsed" }
-        foreach ($b in $TabButtons) { (Get-Ctrl $b).Background = "Transparent"; (Get-Ctrl $b).Foreground = "#CCCCCC" }
-        $target = (Get-Ctrl $s.Tag)
+        # Reset all nav buttons
+        foreach ($b in $TabButtons) { 
+            $btn = Get-Ctrl $b
+            $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
+            $btn.Foreground = "#8B949E"
+            $btn.FontWeight = "Normal"
+            $btn.Tag = "Collapsed"  # Hide indicator
+        }
+        # Show target panel (derive from button name: btnTabUpdates -> pnlUpdates)
+        $panelName = $s.Name -replace "btnTab", "pnl"
+        if ($s.Name -eq "btnNavDownloads") { $panelName = "pnlSupport" }
+        $target = (Get-Ctrl $panelName)
         $target.Visibility = "Visible"
-        $s.Background = "#333"; $s.Foreground = "White"
+        # Set active state on clicked button
+        $s.Background = "#21262D"
+        $s.Foreground = "#E6EDF3"
+        $s.FontWeight = "SemiBold"
+        $s.Tag = "Visible"  # Show indicator
         if ($s.Name -eq "btnTabFirewall") { $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
         if ($s.Name -eq "btnTabUpdates") {
              if ($lstWinget.Items.Count -eq 0) { 
@@ -4841,8 +5324,8 @@ $Script:StartWingetAction = {
             "1603"       = "Fatal MSI Error"
         }
 
-        # Helper: Execute Command & Return Process
-        function Run-WingetCmd ($command) {
+        # Helper: Execute Command & Stream Output in Real-Time
+        function Invoke-WingetCmd ($command) {
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "powershell.exe"
             $pInfo.Arguments = "-Command $command"
@@ -4851,7 +5334,32 @@ $Script:StartWingetAction = {
             $pInfo.UseShellExecute = $false
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
-            $proc.WaitForExit()
+            
+            # Stream output in real-time while process runs
+            while (-not $proc.HasExited) {
+                while ($proc.StandardOutput.Peek() -gt -1) {
+                    $line = $proc.StandardOutput.ReadLine()
+                    if ($line) { Write-Output "LOG:  > $line" }
+                }
+                Start-Sleep -Milliseconds 100
+            }
+            
+            # Get remaining output after exit
+            $remaining = $proc.StandardOutput.ReadToEnd()
+            if ($remaining) {
+                foreach ($line in ($remaining -split "`r`n")) {
+                    if ($line) { Write-Output "LOG:  > $line" }
+                }
+            }
+            
+            # Also capture errors
+            $errOutput = $proc.StandardError.ReadToEnd()
+            if ($errOutput) {
+                foreach ($line in ($errOutput -split "`r`n")) {
+                    if ($line) { Write-Output "LOG:  ! $line" }
+                }
+            }
+            
             return $proc
         }
 
@@ -4921,33 +5429,36 @@ $Script:StartWingetAction = {
             }
 
             if ($cmd) {
-                Write-Output "LOG:[$act] Processing: $name ($src)..."
+                Write-Output "LOG:[$act] Starting: $name ($src)..."
+                Write-Output "LOG:[$act] Command: $userCmd"
 
                 # 1. RUN COMMAND (First Attempt - Admin)
-                $p = Run-WingetCmd $cmd
+                Write-Output "LOG:[$act] Running... (this may take a while)"
+                $p = Invoke-WingetCmd $cmd
+                Write-Output "LOG:[$act] Process completed with exit code: $($p.ExitCode)"
                 
                 $hex = "0x{0:x}" -f $p.ExitCode
                 
                 # --- AUTO-FIX: SOURCE CORRUPTION ---
                 if ($hex -eq "0x8a150003") {
-                    Write-Output "LOG:Detected Source Corruption. Resetting Winget Sources..."
-                    $fixP = Run-WingetCmd "winget source reset --force"
+                    Write-Output "LOG:[$act] WARNING: Detected Winget Source Corruption. Auto-fixing..."
+                    $fixP = Invoke-WingetCmd "winget source reset --force"
                     if ($fixP.ExitCode -eq 0) {
-                        Write-Output "LOG:Sources reset successfully. Retrying action..."
-                        $p = Run-WingetCmd $cmd
+                        Write-Output "LOG:[$act] Sources reset. Retrying $name..."
+                        $p = Invoke-WingetCmd $cmd
                         $hex = "0x{0:x}" -f $p.ExitCode 
                     }
                 }
 
                 # --- CHECK FINAL RESULT ---
                 if ($p.ExitCode -eq 0) {
-                    Write-Output "LOG:Success."
+                    Write-Output "LOG:[$act] SUCCESS: $name"
                 }
                 elseif ($p.ExitCode -eq 3010) {
-                    Write-Output "LOG:Success (Reboot Required to complete)."
+                    Write-Output "LOG:[$act] SUCCESS: $name (Reboot Required to complete)"
                 }
                 elseif ($p.ExitCode -eq 1602) {
-                    Write-Output "LOG:Action Cancelled by User."
+                    Write-Output "LOG:[$act] CANCELLED: $name (by User)"
                 }
                 else {
                     # --- FAILURE HANDLING ---
@@ -4958,9 +5469,9 @@ $Script:StartWingetAction = {
                     elseif ($ErrorCodes.ContainsKey($dec)) { $errDesc = $ErrorCodes[$dec] }
 
                     if ($dec -eq "1603") {
-                        Write-Output "LOG:Installer Failed (1603). Retrying in Interactive Mode (Look for popup)..."
+                        Write-Output "LOG:[$act] FAILED (1603): $name - Retrying in Interactive Mode (Look for popup)..."
                     } else {
-                        Write-Output "LOG:Failed [$hex] $errDesc. Retrying as User..."
+                        Write-Output "LOG:[$act] FAILED [$hex] $errDesc - Retrying as User..."
                     }
                     
                     # --- RETRY AS USER (Fallback) ---
@@ -5261,7 +5772,9 @@ $btnWingetScan.Add_Click({
             }
 
             # WINGET / MSSTORE
-            $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements"
+            # REMOVED: --include-unknown (causes hangs on apps with unknown versions)
+            # ADDED: --disable-interactivity to prevent any prompts
+            $wArgs = "list --upgrade-available --accept-source-agreements --disable-interactivity"
             if ("msstore" -notin $Enabled) { $wArgs += " --source winget" }
             
             try {
@@ -5269,13 +5782,19 @@ $btnWingetScan.Add_Click({
                 $pInfo.FileName = "winget"
                 $pInfo.Arguments = $wArgs
                 $pInfo.RedirectStandardOutput = $true
+                $pInfo.RedirectStandardError = $true
                 $pInfo.UseShellExecute = $false
                 $pInfo.CreateNoWindow = $true
                 $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
                 
                 $p = [System.Diagnostics.Process]::Start($pInfo)
+                # ADDED: 60 second timeout to prevent hanging forever
+                if (-not $p.WaitForExit(60000)) {
+                    Write-Output "LOG:Winget scan timed out after 60 seconds."
+                    try { $p.Kill() } catch {}
+                    return
+                }
                 $out = $p.StandardOutput.ReadToEnd()
-                $p.WaitForExit()
                 
                 if (-not [string]::IsNullOrWhiteSpace($out)) {
                     $lines = $out -split "`r`n"
@@ -5318,7 +5837,9 @@ $btnWingetScan.Add_Click({
             Write-Output "LOG:Scanning Pip..."
             try {
                 $pInfo=New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pip list --outdated --format=json"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
-                $p=[System.Diagnostics.Process]::Start($pInfo); $json=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                $p=[System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Pip scan timed out."; return }
+                $json=$p.StandardOutput.ReadToEnd()
                 if($json.Trim().StartsWith("[")){ 
                     $pkgs=$json|ConvertFrom-Json; foreach($p in $pkgs){ if($IgnoreList -contains $p.name){continue}; [PSCustomObject]@{Source="pip";Name=$p.name;Id=$p.name;Version=$p.version;Available=$p.latest_version} } 
                 }
@@ -5335,7 +5856,9 @@ $btnWingetScan.Add_Click({
             Write-Output "LOG:Scanning Npm..."
             try {
                 $pInfo=New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
-                $p=[System.Diagnostics.Process]::Start($pInfo); $json=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                $p=[System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Npm scan timed out."; return }
+                $json=$p.StandardOutput.ReadToEnd()
                 if($json.Trim().StartsWith("{")){ 
                     $pkgs=$json|ConvertFrom-Json; foreach($k in $pkgs.PSObject.Properties.Name){ if($IgnoreList -contains $k){continue}; $o=$pkgs.$k; [PSCustomObject]@{Source="npm";Name=$k;Id=$k;Version=$o.current;Available=$o.latest} } 
                 }
@@ -5352,7 +5875,9 @@ $btnWingetScan.Add_Click({
             Write-Output "LOG:Scanning Chocolatey..."
             try {
                 $pInfo=New-Object System.Diagnostics.ProcessStartInfo("choco", "outdated -r"); $pInfo.RedirectStandardOutput=$true; $pInfo.UseShellExecute=$false; $pInfo.CreateNoWindow=$true
-                $p=[System.Diagnostics.Process]::Start($pInfo); $out=$p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                $p=[System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(60000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Chocolatey scan timed out."; return }
+                $out=$p.StandardOutput.ReadToEnd()
                 $lines=$out -split "`r`n"
                 foreach($l in $lines){ 
                     if(!$l){continue}; $p=$l -split "\|"; if($p.Count -ge 4){ $n=$p[0]; if($IgnoreList -contains $n){continue}; [PSCustomObject]@{Source="chocolatey";Name=$n;Id=$n;Version=$p[1];Available=$p[2]} } 
@@ -5375,8 +5900,8 @@ $btnWingetScan.Add_Click({
                 $pInfo.CreateNoWindow = $true
                 
                 $p = [System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Scoop scan timed out."; return }
                 $out = $p.StandardOutput.ReadToEnd()
-                $p.WaitForExit()
 
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
@@ -5407,8 +5932,8 @@ $btnWingetScan.Add_Click({
                 $pInfo.CreateNoWindow = $true
                 
                 $p = [System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Gem scan timed out."; return }
                 $out = $p.StandardOutput.ReadToEnd()
-                $p.WaitForExit()
 
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
@@ -5436,8 +5961,8 @@ $btnWingetScan.Add_Click({
                 $pInfo.CreateNoWindow = $true
                 
                 $p = [System.Diagnostics.Process]::Start($pInfo)
+                if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Cargo scan timed out."; return }
                 $out = $p.StandardOutput.ReadToEnd()
-                $p.WaitForExit()
 
                 $lines = $out -split "`r`n"
                 foreach ($line in $lines) {
@@ -6231,6 +6756,355 @@ $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checke
 $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
 
 $btnNavDownloads.Add_Click({ Show-DownloadStats })
+
+# ==========================================
+# TWEAKS & OPTIMIZATION FUNCTIONS
+# ==========================================
+
+# --- PERFORMANCE TWEAKS WITH REVERT ---
+$btnPerfServicesManual.Add_Click({
+    Invoke-UiCommand {
+        Write-GuiLog "Optimizing services to Manual..."
+        $services = @('DiagTrack', 'dmwappushservice', 'MapsBroker', 'lfsvc', 'SharedAccess', 'WbioSrvc', 'WMPNetworkSvc', 'icssvc', 'WpnService', 'PcaSvc', 'SessionEnv', 'TermService', 'UmRdpService', 'RemoteRegistry', 'RemoteAccess', 'shpamsvc', 'TapiSrv', 'TabletInputService', 'lmhosts', 'SNMPTrap', 'WebClient', 'WerSvc', 'Wecsvc', 'SDRSVC', 'fdPHost', 'FDResPub', 'HomeGroupListener', 'HomeGroupProvider', 'upnphost', 'SSDPSRV', 'swprv', 'smphost', 'SysMain', 'TrkWks', 'WMPNetworkSvc', 'WMPNetworkSvc', 'iphlpsvc', 'MSiSCSI', 'WSearch', 'WinRM', 'XblAuthManager', 'XblGameSave', 'XboxNetApiSvc')
+        foreach ($svc in $services) {
+            try {
+                $service = Get-Service -Name $svc -ErrorAction SilentlyContinue
+                if ($service -and $service.StartType -eq 'Automatic') {
+                    Set-Service -Name $svc -StartupType Manual -ErrorAction SilentlyContinue
+                    Write-GuiLog "Set $svc to Manual"
+                }
+            } catch {}
+        }
+        Write-GuiLog "Services optimization complete!"
+    } "Optimizing services..."
+})
+
+$btnPerfServicesRevert.Add_Click({
+    Invoke-UiCommand {
+        Write-GuiLog "Reverting services to default..."
+        $services = @('DiagTrack', 'dmwappushservice', 'MapsBroker', 'WpnService', 'PcaSvc', 'WerSvc', 'SysMain', 'WSearch', 'XblAuthManager', 'XblGameSave', 'XboxNetApiSvc', 'iphlpsvc')
+        foreach ($svc in $services) {
+            try {
+                Set-Service -Name $svc -StartupType Automatic -ErrorAction SilentlyContinue
+                Write-GuiLog "Set $svc to Automatic"
+            } catch {}
+        }
+        Write-GuiLog "Services restored to default!"
+    } "Reverting services..."
+})
+
+$btnPerfDisableHibernate.Add_Click({
+    Invoke-UiCommand {
+        powercfg /hibernate off
+        Write-GuiLog "Hibernation disabled. Disk space freed."
+    } "Disabling hibernation..."
+})
+
+$btnPerfEnableHibernate.Add_Click({
+    Invoke-UiCommand {
+        powercfg /hibernate on
+        Write-GuiLog "Hibernation enabled."
+    } "Enabling hibernation..."
+})
+
+$btnPerfDisableSuperfetch.Add_Click({
+    Invoke-UiCommand {
+        Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
+        Set-Service -Name SysMain -StartupType Disabled
+        Write-GuiLog "Superfetch/SysMain disabled."
+    } "Disabling Superfetch..."
+})
+
+$btnPerfEnableSuperfetch.Add_Click({
+    Invoke-UiCommand {
+        Set-Service -Name SysMain -StartupType Automatic
+        Start-Service -Name SysMain -ErrorAction SilentlyContinue
+        Write-GuiLog "Superfetch/SysMain enabled."
+    } "Enabling Superfetch..."
+})
+
+$btnPerfDisableMemCompress.Add_Click({
+    Invoke-UiCommand {
+        Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+        Write-GuiLog "Memory compression disabled."
+    } "Disabling memory compression..."
+})
+
+$btnPerfEnableMemCompress.Add_Click({
+    Invoke-UiCommand {
+        Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
+        Write-GuiLog "Memory compression enabled."
+    } "Enabling memory compression..."
+})
+
+$btnPerfUltimatePower.Add_Click({
+    Invoke-UiCommand {
+        powercfg -duplicatescheme e9a42b02-d5df-448d-aa00-03f14749eb61
+        powercfg /setactive e9a42b02-d5df-448d-aa00-03f14749eb61
+        Write-GuiLog "Ultimate Performance power plan enabled."
+    } "Enabling Ultimate Performance..."
+})
+
+# --- APPX BLOATWARE REMOVAL ---
+$script:AppxList = @(
+    [PSCustomObject]@{Name="Xbox App"; Package="Microsoft.XboxApp"},
+    [PSCustomObject]@{Name="Xbox Gaming Overlay"; Package="Microsoft.XboxGamingOverlay"},
+    [PSCustomObject]@{Name="Xbox Game Bar"; Package="Microsoft.XboxGameOverlay"},
+    [PSCustomObject]@{Name="Xbox Live"; Package="Microsoft.XboxSpeechToTextOverlay"},
+    [PSCustomObject]@{Name="Xbox Identity Provider"; Package="Microsoft.XboxIdentityProvider"},
+    [PSCustomObject]@{Name="Microsoft Solitaire"; Package="Microsoft.MicrosoftSolitaireCollection"},
+    [PSCustomObject]@{Name="Microsoft Office Hub"; Package="Microsoft.MicrosoftOfficeHub"},
+    [PSCustomObject]@{Name="OneNote"; Package="Microsoft.Office.OneNote"},
+    [PSCustomObject]@{Name="Mail & Calendar"; Package="microsoft.windowscommunicationsapps"},
+    [PSCustomObject]@{Name="People"; Package="Microsoft.People"},
+    [PSCustomObject]@{Name="Skype"; Package="Microsoft.SkypeApp"},
+    [PSCustomObject]@{Name="Maps"; Package="Microsoft.WindowsMaps"},
+    [PSCustomObject]@{Name="Weather"; Package="Microsoft.BingWeather"},
+    [PSCustomObject]@{Name="News"; Package="Microsoft.BingNews"},
+    [PSCustomObject]@{Name="Sports"; Package="Microsoft.BingSports"},
+    [PSCustomObject]@{Name="Finance"; Package="Microsoft.BingFinance"},
+    [PSCustomObject]@{Name="Movies & TV"; Package="Microsoft.ZuneVideo"},
+    [PSCustomObject]@{Name="Groove Music"; Package="Microsoft.ZuneMusic"},
+    [PSCustomObject]@{Name="Get Help"; Package="Microsoft.GetHelp"},
+    [PSCustomObject]@{Name="Get Started"; Package="Microsoft.Getstarted"},
+    [PSCustomObject]@{Name="Feedback Hub"; Package="Microsoft.WindowsFeedbackHub"},
+    [PSCustomObject]@{Name="Mixed Reality Portal"; Package="Microsoft.MixedReality.Portal"},
+    [PSCustomObject]@{Name="3D Viewer"; Package="Microsoft.Microsoft3DViewer"},
+    [PSCustomObject]@{Name="Paint 3D"; Package="Microsoft.MSPaint"},
+    [PSCustomObject]@{Name="Phone Link"; Package="Microsoft.YourPhone"},
+    [PSCustomObject]@{Name="Quick Assist"; Package="MicrosoftCorporationII.QuickAssist"},
+    [PSCustomObject]@{Name="Family Safety"; Package="MicrosoftCorporationII.MicrosoftFamily"}
+)
+
+$btnAppxLoad.Add_Click({
+    $lstAppxPackages.Items.Clear()
+    foreach ($app in $script:AppxList) {
+        $installed = Get-AppxPackage -Name $app.Package -ErrorAction SilentlyContinue
+        if ($installed) {
+            [void]$lstAppxPackages.Items.Add($app)
+        }
+    }
+    Write-GuiLog "Loaded $($lstAppxPackages.Items.Count) removable apps."
+})
+
+$btnAppxRemoveSel.Add_Click({
+    $selected = $lstAppxPackages.SelectedItems
+    if ($selected.Count -eq 0) { return }
+    Invoke-UiCommand {
+        param($apps)
+        foreach ($app in $apps) {
+            try {
+                Remove-AppxPackage -Package (Get-AppxPackage -Name $app.Package).PackageFullName -ErrorAction SilentlyContinue
+                Write-GuiLog "Removed: $($app.Name)"
+            } catch {
+                Write-GuiLog "Failed to remove: $($app.Name)"
+            }
+        }
+    } "Removing selected apps..." -ArgumentList $selected
+})
+
+$btnAppxRemoveAll.Add_Click({
+    if ([System.Windows.Forms.MessageBox]::Show("Remove ALL listed apps? This cannot be undone easily.", "Confirm", "YesNo", "Warning") -eq "Yes") {
+        $btnAppxRemoveSel.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
+})
+
+# --- WINDOWS FEATURES TOGGLE ---
+$btnFeatHyperV.Add_Click({ Switch-WindowsFeature "Microsoft-Hyper-V-All" "Hyper-V" })
+$btnFeatWSL.Add_Click({ Switch-WindowsFeature "Microsoft-Windows-Subsystem-Linux" "WSL" })
+$btnFeatSandbox.Add_Click({ Switch-WindowsFeature "Containers-DisposableClientVM" "Windows Sandbox" })
+$btnFeatDotNet35.Add_Click({ Switch-WindowsFeature "NetFx3" ".NET Framework 3.5" })
+$btnFeatNFS.Add_Click({ Switch-WindowsFeature "ServicesForNFS-ClientOnly" "NFS Client" })
+$btnFeatTelnet.Add_Click({ Switch-WindowsFeature "TelnetClient" "Telnet Client" })
+$btnFeatIIS.Add_Click({ Switch-WindowsFeature "IIS-WebServerRole" "IIS Web Server" })
+$btnFeatLegacy.Add_Click({ Switch-WindowsFeature "WindowsMediaPlayer" "Legacy Media" })
+
+function Switch-WindowsFeature($FeatureName, $DisplayName) {
+    Invoke-UiCommand {
+        param($fn, $dn)
+        $feature = Get-WindowsOptionalFeature -Online -FeatureName $fn -ErrorAction SilentlyContinue
+        if ($feature.State -eq 'Enabled') {
+            Disable-WindowsOptionalFeature -Online -FeatureName $fn -NoRestart -ErrorAction SilentlyContinue | Out-Null
+            Write-GuiLog "Disabled: $dn"
+        } else {
+            Enable-WindowsOptionalFeature -Online -FeatureName $fn -All -NoRestart -ErrorAction SilentlyContinue | Out-Null
+            Write-GuiLog "Enabled: $dn"
+        }
+    } "Toggling $DisplayName..." -ArgumentList $FeatureName, $DisplayName
+}
+
+# --- SERVICES MANAGEMENT ---
+$btnSvcOptimize.Add_Click({ $btnPerfServicesManual.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
+$btnSvcRestore.Add_Click({ $btnPerfServicesRevert.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
+
+$btnSvcView.Add_Click({
+    Get-Service | Select-Object Name, DisplayName, StartType, Status | Out-GridView -Title "Windows Services"
+})
+
+# --- SCHEDULED TASKS WITH REVERT ---
+$script:TelemetryTasks = @(
+    "\Microsoft\Windows\Application Experience\Microsoft Compatibility Appraiser",
+    "\Microsoft\Windows\Application Experience\ProgramDataUpdater",
+    "\Microsoft\Windows\Autochk\Proxy",
+    "\Microsoft\Windows\Customer Experience Improvement Program\Consolidator",
+    "\Microsoft\Windows\Customer Experience Improvement Program\UsbCeip",
+    "\Microsoft\Windows\DiskDiagnostic\Microsoft-Windows-DiskDiagnosticDataCollector",
+    "\Microsoft\Windows\Feedback\Siuf\DmClient",
+    "\Microsoft\Windows\Feedback\Siuf\DmClientOnScenarioDownload",
+    "\Microsoft\Windows\Windows Error Reporting\QueueReporting"
+)
+
+$btnTasksDisableTelemetry.Add_Click({
+    Invoke-UiCommand {
+        param($tasks)
+        foreach ($task in $tasks) {
+            try {
+                Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+                Write-GuiLog "Disabled: $task"
+            } catch {}
+        }
+        Write-GuiLog "Telemetry tasks disabled!"
+    } "Disabling telemetry tasks..." -ArgumentList $script:TelemetryTasks
+})
+
+$btnTasksRestore.Add_Click({
+    Invoke-UiCommand {
+        param($tasks)
+        foreach ($task in $tasks) {
+            try {
+                Enable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+                Write-GuiLog "Enabled: $task"
+            } catch {}
+        }
+        Write-GuiLog "Telemetry tasks restored!"
+    } "Restoring telemetry tasks..." -ArgumentList $script:TelemetryTasks
+})
+
+$btnTasksView.Add_Click({
+    Get-ScheduledTask | Where-Object { $_.TaskPath -eq "\Microsoft\Windows\Application Experience\" -or $_.TaskPath -eq "\Microsoft\Windows\Customer Experience Improvement Program\" } | 
+        Select-Object TaskName, TaskPath, State | Out-GridView -Title "Telemetry Tasks"
+})
+
+# --- WINDOWS UPDATE PRESETS ---
+$btnWUDefault.Add_Click({
+    Invoke-UiCommand {
+        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DeferFeatureUpdates" -ErrorAction SilentlyContinue
+        Remove-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DeferQualityUpdates" -ErrorAction SilentlyContinue
+        Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Update set to Default."
+    } "Applying default Windows Update settings..."
+})
+
+$btnWUSecurity.Add_Click({
+    Invoke-UiCommand {
+        New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Force | Out-Null
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DeferFeatureUpdates" -Value 1
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate" -Name "DeferFeatureUpdatesPeriodInDays" -Value 365
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Value 0 -ErrorAction SilentlyContinue
+        Set-Service -Name wuauserv -StartupType Automatic -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Update set to Security Only (deferring features)."
+    } "Applying security-only update settings..."
+})
+
+$btnWUDisable.Add_Click({
+    if ([System.Windows.Forms.MessageBox]::Show("Disable ALL Windows Updates? This is not recommended for security.", "Warning", "YesNo", "Warning") -eq "Yes") {
+        Invoke-UiCommand {
+            Set-Service -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
+            Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+            New-Item -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Force | Out-Null
+            Set-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU" -Name "NoAutoUpdate" -Value 1
+            Write-GuiLog "Windows Update DISABLED."
+        } "Disabling Windows Update..."
+    }
+})
+
+# --- SOFTWARE CATALOG ---
+$script:SoftwareCatalog = @(
+    [PSCustomObject]@{Category="Browsers"; Name="Google Chrome"; Description="Fast, secure web browser"; Source="winget"; Id="Google.Chrome"},
+    [PSCustomObject]@{Category="Browsers"; Name="Mozilla Firefox"; Description="Privacy-focused browser"; Source="winget"; Id="Mozilla.Firefox"},
+    [PSCustomObject]@{Category="Browsers"; Name="Microsoft Edge"; Description="Chromium-based browser"; Source="winget"; Id="Microsoft.Edge"},
+    [PSCustomObject]@{Category="Browsers"; Name="Brave"; Description="Privacy-focused Chromium browser"; Source="winget"; Id="Brave.Brave"},
+    [PSCustomObject]@{Category="Development"; Name="Visual Studio Code"; Description="Popular code editor"; Source="winget"; Id="Microsoft.VisualStudioCode"},
+    [PSCustomObject]@{Category="Development"; Name="Git"; Description="Version control system"; Source="winget"; Id="Git.Git"},
+    [PSCustomObject]@{Category="Development"; Name="Node.js"; Description="JavaScript runtime"; Source="winget"; Id="OpenJS.NodeJS"},
+    [PSCustomObject]@{Category="Development"; Name="Python"; Description="Programming language"; Source="winget"; Id="Python.Python.3"},
+    [PSCustomObject]@{Category="Development"; Name="Notepad++"; Description="Advanced text editor"; Source="winget"; Id="Notepad++.Notepad++"},
+    [PSCustomObject]@{Category="Utilities"; Name="7-Zip"; Description="File archiver"; Source="winget"; Id="7zip.7zip"},
+    [PSCustomObject]@{Category="Utilities"; Name="WinRAR"; Description="Archive manager"; Source="winget"; Id="RARLab.WinRAR"},
+    [PSCustomObject]@{Category="Utilities"; Name="Everything"; Description="Fast file search"; Source="winget"; Id="voidtools.Everything"},
+    [PSCustomObject]@{Category="Utilities"; Name="PowerToys"; Description="Microsoft productivity tools"; Source="winget"; Id="Microsoft.PowerToys"},
+    [PSCustomObject]@{Category="Utilities"; Name="HWiNFO"; Description="Hardware monitoring"; Source="winget"; Id="REALiX.HWiNFO"},
+    [PSCustomObject]@{Category="Multimedia"; Name="VLC Media Player"; Description="Universal media player"; Source="winget"; Id="VideoLAN.VLC"},
+    [PSCustomObject]@{Category="Multimedia"; Name="Spotify"; Description="Music streaming"; Source="winget"; Id="Spotify.Spotify"},
+    [PSCustomObject]@{Category="Multimedia"; Name="OBS Studio"; Description="Streaming/recording software"; Source="winget"; Id="OBSProject.OBSStudio"},
+    [PSCustomObject]@{Category="Multimedia"; Name="GIMP"; Description="Image editor"; Source="winget"; Id="GIMP.GIMP"},
+    [PSCustomObject]@{Category="Gaming"; Name="Steam"; Description="Game platform"; Source="winget"; Id="Valve.Steam"},
+    [PSCustomObject]@{Category="Gaming"; Name="Discord"; Description="Chat for gamers"; Source="winget"; Id="Discord.Discord"},
+    [PSCustomObject]@{Category="Gaming"; Name="Epic Games Launcher"; Description="Epic game store"; Source="winget"; Id="EpicGames.EpicGamesLauncher"},
+    [PSCustomObject]@{Category="Security"; Name="Malwarebytes"; Description="Anti-malware"; Source="winget"; Id="Malwarebytes.Malwarebytes"},
+    [PSCustomObject]@{Category="Security"; Name="Bitwarden"; Description="Password manager"; Source="winget"; Id="Bitwarden.Bitwarden"}
+)
+
+$btnShowCatalog.Add_Click({
+    $pnlUpdates.Visibility = "Collapsed"
+    $pnlCatalog.Visibility = "Visible"
+    $lstCatalog.Items.Clear()
+    foreach ($item in $script:SoftwareCatalog) {
+        [void]$lstCatalog.Items.Add($item)
+    }
+})
+
+$btnBackToUpdates.Add_Click({
+    $pnlCatalog.Visibility = "Collapsed"
+    $pnlUpdates.Visibility = "Visible"
+})
+
+$btnCatalogSearch.Add_Click({
+    $query = $txtCatalogSearch.Text.ToLower()
+    $lstCatalog.Items.Clear()
+    $filtered = $script:SoftwareCatalog | Where-Object { $_.Name -like "*$query*" -or $_.Description -like "*$query*" }
+    foreach ($item in $filtered) { [void]$lstCatalog.Items.Add($item) }
+})
+
+$btnCatAll.Add_Click({
+    $lstCatalog.Items.Clear()
+    foreach ($item in $script:SoftwareCatalog) { [void]$lstCatalog.Items.Add($item) }
+})
+
+$btnCatBrowsers.Add_Click({ Get-CatalogByCategory "Browsers" })
+$btnCatDev.Add_Click({ Get-CatalogByCategory "Development" })
+$btnCatUtils.Add_Click({ Get-CatalogByCategory "Utilities" })
+$btnCatMedia.Add_Click({ Get-CatalogByCategory "Multimedia" })
+$btnCatGames.Add_Click({ Get-CatalogByCategory "Gaming" })
+$btnCatSecurity.Add_Click({ Get-CatalogByCategory "Security" })
+
+function Get-CatalogByCategory($Category) {
+    $lstCatalog.Items.Clear()
+    $filtered = $script:SoftwareCatalog | Where-Object { $_.Category -eq $Category }
+    foreach ($item in $filtered) { [void]$lstCatalog.Items.Add($item) }
+}
+
+$btnCatalogInstall.Add_Click({
+    $selected = $lstCatalog.SelectedItems
+    if ($selected.Count -eq 0) { return }
+    Invoke-UiCommand {
+        param($items)
+        foreach ($item in $items) {
+            Write-GuiLog "Installing: $($item.Name)..."
+            $proc = Start-Process -FilePath "winget" -ArgumentList "install --id `"$($item.Id)`" --accept-source-agreements --accept-package-agreements --silent" -Wait -PassThru
+            if ($proc.ExitCode -eq 0) {
+                Write-GuiLog "Installed: $($item.Name)"
+            } else {
+                Write-GuiLog "Failed: $($item.Name)"
+            }
+        }
+    } "Installing software..." -ArgumentList $selected
+})
+
+$btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
+$btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
 
 # --- LAUNCH ---
 $window.Add_Loaded({ 
