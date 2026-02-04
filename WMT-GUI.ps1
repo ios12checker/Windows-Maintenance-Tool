@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0"
+$AppVersion = "5.0.1"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -346,20 +346,23 @@ function Start-UpdateCheckBackground {
                     if ($remoteVer -gt $localVer) {
                         if ($lb) { $lb.AppendText(" -> Update Available!`n"); $lb.ScrollToEnd() }
                         
-                        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
-                        $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
-                        
-                        if ($mbRes -eq "Yes") {
-                            $remoteContent = $jobResult.Content
-                            $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
-                            $backupPath = Join-Path (Get-DataPath) $backupName
-                            Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
-                            Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
+                        # Use Dispatcher to show dialog on UI thread
+                        $window.Dispatcher.Invoke([Action]{
+                            $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+                            $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                             
-                            [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information)
-                            Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
-                            exit
-                        }
+                            if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                $remoteContent = $jobResult.Content
+                                $backupName = "$(Split-Path $PSCommandPath -Leaf).bak"
+                                $backupPath = Join-Path (Get-DataPath) $backupName
+                                Copy-Item -Path $PSCommandPath -Destination $backupPath -Force
+                                Set-Content -Path $PSCommandPath -Value $remoteContent -Encoding UTF8
+                                
+                                [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                                Start-Process powershell.exe -ArgumentList "-File `"$PSCommandPath`""
+                                $window.Close()
+                            }
+                        })
                     } else {
                         if ($lb) { $lb.AppendText(" -> System is up to date.`n"); $lb.ScrollToEnd() }
                     }
@@ -2884,8 +2887,8 @@ function Invoke-ShortcutFix {
 
     # 2. CONFIRMATION PROMPT
     $msg = "You are about to apply the following actions:`n`n"
-    if ($toFix.Count -gt 0) { $msg += "• Fix: $($toFix.Count) shortcut(s)`n" }
-    if ($toDel.Count -gt 0) { $msg += "• DELETE: $($toDel.Count) shortcut(s)`n" }
+    if ($toFix.Count -gt 0) { $msg += "Fix: $($toFix.Count) shortcut(s)`n" }
+    if ($toDel.Count -gt 0) { $msg += "Delete: $($toDel.Count) shortcut(s)`n" }
     $msg += "`nAre you sure you want to continue?"
 
     $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButton]::YesNo, [System.Windows.Forms.MessageBoxImage]::Warning)
@@ -3940,7 +3943,7 @@ function Show-TaskManager {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Windows Maintenance Tool v$AppVersion" Height="850" Width="1200"
+        Title="Windows Maintenance Tool v$AppVersion" Height="900" Width="1280" MinHeight="800" MinWidth="1100"
         WindowStartupLocation="CenterScreen" Background="#0D1117" Foreground="#E6EDF3"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13"
         TextOptions.TextFormattingMode="Display"
@@ -4207,9 +4210,9 @@ function Show-TaskManager {
                 </Grid.RowDefinitions>
 
                 <!-- Header/Search -->
-                <Border Grid.Row="0" Background="#0D1117" Margin="16,20,16,12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1">
+                <Border Name="bdQuickFind" Grid.Row="0" Background="#0D1117" Margin="16,20,16,12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1" Cursor="IBeam">
                     <StackPanel Margin="12">
-                        <TextBlock Text="🔍 Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                         <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." BorderThickness="0"/>
                     </StackPanel>
                 </Border>
@@ -4218,16 +4221,16 @@ function Show-TaskManager {
                 <StackPanel Grid.Row="1" Margin="8,8,8,0">
                     <TextBlock Text="NAVIGATION" Style="{StaticResource SubHeader}" Margin="12,0,0,4"/>
                     <StackPanel Name="pnlNavButtons">
-                        <Button Name="btnTabUpdates" Content="⬇️  Updates" Style="{StaticResource NavBtn}" Tag="pnlUpdates"/>
-                        <Button Name="btnTabTweaks" Content="⚡  Tweaks" Style="{StaticResource NavBtn}" Tag="pnlTweaks"/>
-                        <Button Name="btnTabHealth" Content="💓  System Health" Style="{StaticResource NavBtn}" Tag="pnlHealth"/>
-                        <Button Name="btnTabNetwork" Content="🌐  Network &amp; DNS" Style="{StaticResource NavBtn}" Tag="pnlNetwork"/>
-                        <Button Name="btnTabFirewall" Content="🔥  Firewall" Style="{StaticResource NavBtn}" Tag="pnlFirewall"/>
-                        <Button Name="btnTabDrivers" Content="🔧  Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
-                        <Button Name="btnTabCleanup" Content="🧹  Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
-                        <Button Name="btnTabUtils" Content="🛠️  Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
-                        <Button Name="btnTabSupport" Content="💝  Support" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
-                        <Button Name="btnNavDownloads" Content="📊  Download Stats" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
+                        <Button Name="btnTabUpdates" Content="Updates" Style="{StaticResource NavBtn}" Tag="pnlUpdates"/>
+                        <Button Name="btnTabTweaks" Content="Tweaks" Style="{StaticResource NavBtn}" Tag="pnlTweaks"/>
+                        <Button Name="btnTabHealth" Content="System Health" Style="{StaticResource NavBtn}" Tag="pnlHealth"/>
+                        <Button Name="btnTabNetwork" Content="Network &amp; DNS" Style="{StaticResource NavBtn}" Tag="pnlNetwork"/>
+                        <Button Name="btnTabFirewall" Content="Firewall" Style="{StaticResource NavBtn}" Tag="pnlFirewall"/>
+                        <Button Name="btnTabDrivers" Content="Drivers" Style="{StaticResource NavBtn}" Tag="pnlDrivers"/>
+                        <Button Name="btnTabCleanup" Content="Cleanup" Style="{StaticResource NavBtn}" Tag="pnlCleanup"/>
+                        <Button Name="btnTabUtils" Content="Utilities" Style="{StaticResource NavBtn}" Tag="pnlUtils"/>
+                        <Button Name="btnTabSupport" Content="Support" Style="{StaticResource NavBtn}" Tag="pnlSupport"/>
+                        <Button Name="btnNavDownloads" Content="Download Stats" Style="{StaticResource NavBtn}" ToolTip="Show latest release download counts"/>
                     </StackPanel>
                 </StackPanel>
                 
@@ -4241,7 +4244,7 @@ function Show-TaskManager {
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
                         <Border Grid.Row="0" Background="#161B22" CornerRadius="8,8,0,0" Padding="12,8">
-                            <TextBlock Text="📋 Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
+                            <TextBlock Text="Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
                         </Border>
                         <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="8" UseLayoutRounding="True">
                             <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
@@ -4272,12 +4275,9 @@ function Show-TaskManager {
                                 <ColumnDefinition Width="320"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel VerticalAlignment="Center">
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="⬇️" FontSize="28" Margin="0,0,12,0"/>
-                                    <StackPanel>
-                                        <TextBlock Name="lblWingetTitle" Text="Package Updates" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                        <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
-                                    </StackPanel>
+                                <StackPanel>
+                                    <TextBlock Name="lblWingetTitle" Text="Package Updates" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                    <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
                                 </StackPanel>
                             </StackPanel>
                             <Grid Grid.Column="1">
@@ -4286,7 +4286,7 @@ function Show-TaskManager {
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBox Name="txtWingetSearch" Grid.Column="0" Height="40" VerticalContentAlignment="Center" Text="Search packages..."/>
-                                <Button Name="btnWingetFind" Grid.Column="1" Content="🔍" Width="44" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}"/>
+                                <Button Name="btnWingetFind" Grid.Column="1" Content="Search" Width="100" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}"/>
                             </Grid>
                         </Grid>
                     </Border>
@@ -4310,14 +4310,14 @@ function Show-TaskManager {
                     <!-- Action Bar -->
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Name="btnManageProviders" Content="⚙️ Providers" Style="{StaticResource ActionBtn}" ToolTip="Manage package sources"/>
-                            <Button Name="btnShowCatalog" Content="📦 Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
-                            <Button Name="btnWingetScan" Content="🔄 Refresh All" Style="{StaticResource AccentBtn}"/>
-                            <Button Name="btnWingetUpdateSel" Content="⬆️ Update Selected" Style="{StaticResource PositiveBtn}"/>
-                            <Button Name="btnWingetInstall" Content="⬇️ Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
-                            <Button Name="btnWingetUninstall" Content="🗑️ Uninstall" Style="{StaticResource DestructiveBtn}"/>
-                            <Button Name="btnWingetIgnore" Content="🚫 Ignore" Style="{StaticResource WarningBtn}"/>
-                            <Button Name="btnWingetUnignore" Content="📋 Manage Ignored" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnManageProviders" Content="Providers" Style="{StaticResource ActionBtn}" ToolTip="Manage package sources"/>
+                            <Button Name="btnShowCatalog" Content="Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
+                            <Button Name="btnWingetScan" Content="Refresh All" Style="{StaticResource AccentBtn}"/>
+                            <Button Name="btnWingetUpdateSel" Content="Update Selected" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnWingetInstall" Content="Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
+                            <Button Name="btnWingetUninstall" Content="Uninstall" Style="{StaticResource DestructiveBtn}"/>
+                            <Button Name="btnWingetIgnore" Content="Ignore" Style="{StaticResource WarningBtn}"/>
+                            <Button Name="btnWingetUnignore" Content="Manage Ignored" Style="{StaticResource ActionBtn}"/>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -4338,12 +4338,9 @@ function Show-TaskManager {
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="300"/>
                             </Grid.ColumnDefinitions>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="📦" FontSize="28" Margin="0,0,12,0"/>
-                                <StackPanel>
-                                    <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                    <TextBlock Text="Curated selection of popular applications" Foreground="{StaticResource TextSecondary}" FontSize="13"/>
-                                </StackPanel>
+                            <StackPanel>
+                                <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                <TextBlock Text="Curated selection of popular applications" Foreground="{StaticResource TextSecondary}" FontSize="13"/>
                             </StackPanel>
                             <Grid Grid.Column="1">
                                 <Grid.ColumnDefinitions>
@@ -4351,7 +4348,7 @@ function Show-TaskManager {
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBox Name="txtCatalogSearch" Grid.Column="0" Height="40" VerticalContentAlignment="Center" Text="Search catalog..." ToolTip="Type to filter applications by name or description"/>
-                                <Button Name="btnCatalogSearch" Grid.Column="1" Content="🔍" Width="44" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}" ToolTip="Search the catalog"/>
+                                <Button Name="btnCatalogSearch" Grid.Column="1" Content="Search" Width="100" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}" ToolTip="Search the catalog"/>
                             </Grid>
                         </Grid>
                     </Border>
@@ -4385,10 +4382,10 @@ function Show-TaskManager {
                     <!-- Actions -->
                     <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Name="btnBackToUpdates" Content="⬅️ Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
-                            <Button Name="btnCatalogInstall" Content="⬇️ Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
-                            <Button Name="btnCatalogSelectAll" Content="✓ Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
-                            <Button Name="btnCatalogClear" Content="✗ Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
+                            <Button Name="btnBackToUpdates" Content="Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
+                            <Button Name="btnCatalogInstall" Content="Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
+                            <Button Name="btnCatalogSelectAll" Content="Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
+                            <Button Name="btnCatalogClear" Content="Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -4398,21 +4395,20 @@ function Show-TaskManager {
                     <!-- Performance Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                                <TextBlock Text="⚡" FontSize="32" Margin="0,0,12,0"/>
+                            <StackPanel Margin="0,0,0,12">
                                 <TextBlock Text="Performance Tweaks" Style="{StaticResource SectionHeader}" Margin="0"/>
                             </StackPanel>
                             <TextBlock Text="POWER &amp; PERFORMANCE" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnPerfServicesManual" Content="📋 Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
-                                <Button Name="btnPerfServicesRevert" Content="↩️ Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
-                                <Button Name="btnPerfDisableHibernate" Content="🌙 Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Disable hibernation and delete hiberfil.sys. Frees up several GB of disk space equal to your RAM size."/>
-                                <Button Name="btnPerfEnableHibernate" Content="💤 Enable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Re-enable hibernation mode. Allows your PC to save state and power off completely, resuming faster than a full boot."/>
-                                <Button Name="btnPerfDisableSuperfetch" Content="🚫 Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Disable SysMain (Superfetch) service. Prevents Windows from pre-loading apps into RAM. Can help on systems with low RAM or SSDs."/>
-                                <Button Name="btnPerfEnableSuperfetch" Content="✓ Enable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Enable SysMain (Superfetch) service. Pre-loads frequently used apps into RAM for faster launch times on HDDs."/>
-                                <Button Name="btnPerfDisableMemCompress" Content="🗜️ Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Disable memory compression. RAM stores data uncompressed. May improve performance on high-RAM systems."/>
-                                <Button Name="btnPerfEnableMemCompress" Content="✓ Enable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Enable memory compression. Windows compresses inactive RAM pages to free up physical memory for active apps."/>
-                                <Button Name="btnPerfUltimatePower" Content="🔋 Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
+                                <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
+                                <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
+                                <Button Name="btnPerfDisableHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Disable hibernation and delete hiberfil.sys. Frees up several GB of disk space equal to your RAM size."/>
+                                <Button Name="btnPerfEnableHibernate" Content="Enable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Re-enable hibernation mode. Allows your PC to save state and power off completely, resuming faster than a full boot."/>
+                                <Button Name="btnPerfDisableSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Disable SysMain (Superfetch) service. Prevents Windows from pre-loading apps into RAM. Can help on systems with low RAM or SSDs."/>
+                                <Button Name="btnPerfEnableSuperfetch" Content="Enable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Enable SysMain (Superfetch) service. Pre-loads frequently used apps into RAM for faster launch times on HDDs."/>
+                                <Button Name="btnPerfDisableMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Disable memory compression. RAM stores data uncompressed. May improve performance on high-RAM systems."/>
+                                <Button Name="btnPerfEnableMemCompress" Content="Enable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Enable memory compression. Windows compresses inactive RAM pages to free up physical memory for active apps."/>
+                                <Button Name="btnPerfUltimatePower" Content="Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4420,7 +4416,7 @@ function Show-TaskManager {
                     <!-- AppX Bloatware Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🗑️ APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
+                            <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
                             <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
                             <ListView Name="lstAppxPackages" Height="200" Background="#0D1117" BorderBrush="#30363D" BorderThickness="1" SelectionMode="Multiple">
                                 <ListView.View>
@@ -4431,9 +4427,9 @@ function Show-TaskManager {
                                 </ListView.View>
                             </ListView>
                             <WrapPanel Margin="0,12,0,0">
-                                <Button Name="btnAppxLoad" Content="🔄 Load Apps" Style="{StaticResource ActionBtn}" ToolTip="Scan for installed UWP/Modern apps that can be removed. Populates the list above with removable bloatware."/>
-                                <Button Name="btnAppxRemoveSel" Content="🗑️ Remove Selected" Style="{StaticResource DestructiveBtn}" ToolTip="Remove the selected apps from your system. These apps can be reinstalled from the Microsoft Store if needed later."/>
-                                <Button Name="btnAppxRemoveAll" Content="⚠️ Remove All" Style="{StaticResource DestructiveBtn}" ToolTip="Remove ALL listed apps at once. This is faster but be careful - only click if you're sure you don't need any of these apps!"/>
+                                <Button Name="btnAppxLoad" Content="Load Apps" Style="{StaticResource ActionBtn}" ToolTip="Scan for installed UWP/Modern apps that can be removed. Populates the list above with removable bloatware."/>
+                                <Button Name="btnAppxRemoveSel" Content="Remove Selected" Style="{StaticResource DestructiveBtn}" ToolTip="Remove the selected apps from your system. These apps can be reinstalled from the Microsoft Store if needed later."/>
+                                <Button Name="btnAppxRemoveAll" Content="Remove All" Style="{StaticResource DestructiveBtn}" ToolTip="Remove ALL listed apps at once. This is faster but be careful - only click if you're sure you don't need any of these apps!"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4441,7 +4437,7 @@ function Show-TaskManager {
                     <!-- Windows Features Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🪟 WINDOWS OPTIONAL FEATURES" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="WINDOWS OPTIONAL FEATURES" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
                                 <Button Name="btnFeatHyperV" Content="Hyper-V" Style="{StaticResource ActionBtn}" ToolTip="Microsoft's hardware virtualization platform. Create and run virtual machines. Requires Pro/Enterprise edition and CPU virtualization support."/>
                                 <Button Name="btnFeatWSL" Content="WSL" Style="{StaticResource ActionBtn}" ToolTip="Windows Subsystem for Linux. Run Linux command-line tools and apps directly on Windows without a VM. Popular for developers."/>
@@ -4458,11 +4454,11 @@ function Show-TaskManager {
                     <!-- Services Management Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="⚙️ SERVICES MANAGEMENT" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="SERVICES MANAGEMENT" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnSvcOptimize" Content="🚀 Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
-                                <Button Name="btnSvcRestore" Content="↩️ Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
-                                <Button Name="btnSvcView" Content="📋 View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
+                                <Button Name="btnSvcOptimize" Content="Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
+                                <Button Name="btnSvcRestore" Content="Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
+                                <Button Name="btnSvcView" Content="View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4470,12 +4466,12 @@ function Show-TaskManager {
                     <!-- Scheduled Tasks Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="⏰ SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
                             <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnTasksDisableTelemetry" Content="🚫 Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
-                                <Button Name="btnTasksRestore" Content="↩️ Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
-                                <Button Name="btnTasksView" Content="📋 View Tasks" Style="{StaticResource ActionBtn}" ToolTip="View telemetry-related scheduled tasks in a grid. Shows task name, path, and current enabled/disabled state."/>
+                                <Button Name="btnTasksDisableTelemetry" Content="Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
+                                <Button Name="btnTasksRestore" Content="Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
+                                <Button Name="btnTasksView" Content="View Tasks" Style="{StaticResource ActionBtn}" ToolTip="View telemetry-related scheduled tasks in a grid. Shows task name, path, and current enabled/disabled state."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4483,11 +4479,11 @@ function Show-TaskManager {
                     <!-- Windows Update Presets Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🔄 WINDOWS UPDATE PRESETS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="WINDOWS UPDATE PRESETS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnWUDefault" Content="✓ Default" Style="{StaticResource ActionBtn}" ToolTip="Standard Windows Update behavior. Feature and security updates install automatically. Recommended for most users."/>
-                                <Button Name="btnWUSecurity" Content="🔒 Security Only" Style="{StaticResource UtilityBtn}" ToolTip="Defer feature updates for 1 year, install security updates only. Get new features later while staying secure. Good for stability."/>
-                                <Button Name="btnWUDisable" Content="🚫 Disable All" Style="{StaticResource DestructiveBtn}" ToolTip="Completely disable Windows Update. NOT RECOMMENDED - your system will become vulnerable to security threats. Use with caution."/>
+                                <Button Name="btnWUDefault" Content="Default" Style="{StaticResource ActionBtn}" ToolTip="Standard Windows Update behavior. Feature and security updates install automatically. Recommended for most users."/>
+                                <Button Name="btnWUSecurity" Content="Security Only" Style="{StaticResource UtilityBtn}" ToolTip="Defer feature updates for 1 year, install security updates only. Get new features later while staying secure. Good for stability."/>
+                                <Button Name="btnWUDisable" Content="Disable All" Style="{StaticResource DestructiveBtn}" ToolTip="Completely disable Windows Update. NOT RECOMMENDED - your system will become vulnerable to security threats. Use with caution."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4497,16 +4493,15 @@ function Show-TaskManager {
                 <StackPanel Name="pnlHealth" Visibility="Collapsed">
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                                <TextBlock Text="💓" FontSize="32" Margin="0,0,12,0"/>
+                            <StackPanel Margin="0,0,0,20">
                                 <TextBlock Text="System Health" Style="{StaticResource SectionHeader}" Margin="0"/>
                             </StackPanel>
                             <TextBlock Text="WINDOWS REPAIR TOOLS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnSFC" Content="🔍 SFC Scan" Style="{StaticResource ActionBtn}" ToolTip="System File Checker - repairs corrupted system files"/>
-                                <Button Name="btnDISMCheck" Content="✓ DISM Check" Style="{StaticResource ActionBtn}" ToolTip="Check Windows image health"/>
-                                <Button Name="btnDISMRestore" Content="🔧 DISM Restore" Style="{StaticResource UtilityBtn}" ToolTip="Repair Windows image"/>
-                                <Button Name="btnCHKDSK" Content="💾 CHKDSK" Style="{StaticResource ActionBtn}" ToolTip="Check disk for errors (requires reboot)"/>
+                                <Button Name="btnSFC" Content="SFC Scan" Style="{StaticResource ActionBtn}" ToolTip="System File Checker - repairs corrupted system files"/>
+                                <Button Name="btnDISMCheck" Content="DISM Check" Style="{StaticResource ActionBtn}" ToolTip="Check Windows image health"/>
+                                <Button Name="btnDISMRestore" Content="DISM Restore" Style="{StaticResource UtilityBtn}" ToolTip="Repair Windows image"/>
+                                <Button Name="btnCHKDSK" Content="CHKDSK" Style="{StaticResource ActionBtn}" ToolTip="Check disk for errors (requires reboot)"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4516,8 +4511,7 @@ function Show-TaskManager {
                 <StackPanel Name="pnlNetwork" Visibility="Collapsed">
                     <!-- Header Card -->
                     <Border Style="{StaticResource CardStyle}">
-                        <StackPanel Orientation="Horizontal">
-                            <TextBlock Text="🌐" FontSize="32" Margin="0,0,12,0"/>
+                        <StackPanel>
                             <TextBlock Text="Network &amp; DNS" Style="{StaticResource SectionHeader}" Margin="0"/>
                         </StackPanel>
                     </Border>
@@ -4525,14 +4519,14 @@ function Show-TaskManager {
                     <!-- General Tools Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🔧 DIAGNOSTIC TOOLS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="DIAGNOSTIC TOOLS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnNetInfo" Content="📊 IP Config" Style="{StaticResource ActionBtn}" ToolTip="Display network configuration"/>
-                                <Button Name="btnFlushDNS" Content="🧹 Flush DNS" Style="{StaticResource ActionBtn}" ToolTip="Clear DNS cache"/>
-                                <Button Name="btnResetWifi" Content="📡 Restart Wi-Fi" Style="{StaticResource ActionBtn}" ToolTip="Reset wireless adapters"/>
-                                <Button Name="btnNetRepair" Content="🔧 Full Repair" Style="{StaticResource WarningBtn}" ToolTip="Comprehensive network reset"/>
-                                <Button Name="btnRouteTable" Content="💾 Save Routes" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnRouteView" Content="📋 View Routes" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnNetInfo" Content="IP Config" Style="{StaticResource ActionBtn}" ToolTip="Display network configuration"/>
+                                <Button Name="btnFlushDNS" Content="Flush DNS" Style="{StaticResource ActionBtn}" ToolTip="Clear DNS cache"/>
+                                <Button Name="btnResetWifi" Content="Restart Wi-Fi" Style="{StaticResource ActionBtn}" ToolTip="Reset wireless adapters"/>
+                                <Button Name="btnNetRepair" Content="Full Repair" Style="{StaticResource WarningBtn}" ToolTip="Comprehensive network reset"/>
+                                <Button Name="btnRouteTable" Content="Save Routes" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnRouteView" Content="View Routes" Style="{StaticResource ActionBtn}"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4540,7 +4534,7 @@ function Show-TaskManager {
                     <!-- DNS Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🌍 DNS SERVERS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="DNS SERVERS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
                                 <Button Name="btnDnsGoogle" Content="Google DNS" Style="{StaticResource ActionBtn}" ToolTip="8.8.8.8 / 8.8.4.4"/>
                                 <Button Name="btnDnsCloudflare" Content="Cloudflare" Style="{StaticResource ActionBtn}" ToolTip="1.1.1.1 / 1.0.0.1"/>
@@ -4549,10 +4543,10 @@ function Show-TaskManager {
                                 <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}"/>
                             </WrapPanel>
                             
-                            <TextBlock Text="🔒 DNS OVER HTTPS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
+                            <TextBlock Text="DNS OVER HTTPS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDohAuto" Content="✓ Enable DoH" Style="{StaticResource PositiveBtn}" ToolTip="Enable DNS encryption for all providers"/>
-                                <Button Name="btnDohDisable" Content="✗ Disable DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Disable DNS encryption"/>
+                                <Button Name="btnDohAuto" Content="Enable DoH" Style="{StaticResource PositiveBtn}" ToolTip="Enable DNS encryption for all providers"/>
+                                <Button Name="btnDohDisable" Content="Disable DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Disable DNS encryption"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4560,12 +4554,12 @@ function Show-TaskManager {
                     <!-- Hosts File Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="📄 HOSTS FILE MANAGER" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="HOSTS FILE MANAGER" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnHostsUpdate" Content="⬇️ Download AdBlock" Style="{StaticResource PositiveBtn}" ToolTip="Download and merge ad-blocking hosts"/>
-                                <Button Name="btnHostsEdit" Content="✏️ Edit Hosts" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnHostsBackup" Content="💾 Backup" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnHostsRestore" Content="↩️ Restore" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnHostsUpdate" Content="Download AdBlock" Style="{StaticResource PositiveBtn}" ToolTip="Download and merge ad-blocking hosts"/>
+                                <Button Name="btnHostsEdit" Content="Edit Hosts" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnHostsBackup" Content="Backup" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnHostsRestore" Content="Restore" Style="{StaticResource ActionBtn}"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4586,14 +4580,11 @@ function Show-TaskManager {
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="240"/>
                             </Grid.ColumnDefinitions>
-                            <StackPanel Orientation="Horizontal">
-                                <TextBlock Text="🔥" FontSize="32" Margin="0,0,12,0"/>
-                                <StackPanel>
-                                    <TextBlock Text="Firewall Manager" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                    <TextBlock Name="lblFwStatus" Text="Ready" Foreground="#D29922" FontSize="13" Visibility="Collapsed"/>
-                                </StackPanel>
+                            <StackPanel>
+                                <TextBlock Text="Firewall Manager" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                <TextBlock Name="lblFwStatus" Text="Ready" Foreground="#D29922" FontSize="13" Visibility="Collapsed"/>
                             </StackPanel>
-                            <TextBox Name="txtFwSearch" Grid.Column="1" Text="🔍 Search rules..." ToolTip="Filter by name or port"/>
+                            <TextBox Name="txtFwSearch" Grid.Column="1" Text="Search rules..." ToolTip="Filter by name or port"/>
                         </Grid>
                     </Border>
                     
@@ -4648,16 +4639,16 @@ function Show-TaskManager {
                     <!-- Actions Card -->
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Name="btnFwRefresh" Content="🔄 Reload" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwAdd" Content="➕ Add Rule" Style="{StaticResource PositiveBtn}"/>
-                            <Button Name="btnFwEdit" Content="✏️ Edit" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwEnable" Content="✓ Enable" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwDisable" Content="✗ Disable" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwDelete" Content="🗑️ Delete" Style="{StaticResource DestructiveBtn}"/>
-                            <Button Name="btnFwExport" Content="💾 Export" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwImport" Content="📥 Import" Style="{StaticResource ActionBtn}"/>
-                            <Button Name="btnFwDefaults" Content="↩️ Defaults" Style="{StaticResource WarningBtn}"/>
-                            <Button Name="btnFwPurge" Content="⚠️ Delete All" Style="{StaticResource DestructiveBtn}"/>
+                            <Button Name="btnFwRefresh" Content="Reload" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwAdd" Content="Add Rule" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnFwEdit" Content="Edit" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwEnable" Content="Enable" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDisable" Content="Disable" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDelete" Content="Delete" Style="{StaticResource DestructiveBtn}"/>
+                            <Button Name="btnFwExport" Content="Export" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwImport" Content="Import" Style="{StaticResource ActionBtn}"/>
+                            <Button Name="btnFwDefaults" Content="Defaults" Style="{StaticResource WarningBtn}"/>
+                            <Button Name="btnFwPurge" Content="Delete All" Style="{StaticResource DestructiveBtn}"/>
                         </StackPanel>
                     </Border>
                 </Grid>
@@ -4666,24 +4657,23 @@ function Show-TaskManager {
                 <StackPanel Name="pnlDrivers" Visibility="Collapsed">
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                                <TextBlock Text="🔧" FontSize="32" Margin="0,0,12,0"/>
+                            <StackPanel Margin="0,0,0,20">
                                 <TextBlock Text="Driver Management" Style="{StaticResource SectionHeader}" Margin="0"/>
                             </StackPanel>
-                            <TextBlock Text="📊 DRIVER TOOLS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="DRIVER TOOLS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnDrvReport" Content="📋 Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
-                                <Button Name="btnDrvBackup" Content="💾 Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
-                                <Button Name="btnDrvGhost" Content="👻 Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
-                                <Button Name="btnDrvClean" Content="🧹 Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
-                                <Button Name="btnDrvRestore" Content="↩️ Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
+                                <Button Name="btnDrvReport" Content="Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
+                                <Button Name="btnDrvBackup" Content="Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
+                                <Button Name="btnDrvGhost" Content="Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
+                                <Button Name="btnDrvClean" Content="Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
+                                <Button Name="btnDrvRestore" Content="Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
                             </WrapPanel>
-                            <TextBlock Text="⚙️ WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
+                            <TextBlock Text="WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDrvDisableWU" Content="🚫 Disable Auto-Drivers" Style="{StaticResource DestructiveBtn}" ToolTip="Stop Windows Update from installing drivers"/>
-                                <Button Name="btnDrvEnableWU" Content="✓ Enable Auto-Drivers" Style="{StaticResource PositiveBtn}" ToolTip="Allow Windows Update to install drivers"/>
-                                <Button Name="btnDrvDisableMeta" Content="🚫 Disable Metadata" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDrvEnableMeta" Content="✓ Enable Metadata" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDrvDisableWU" Content="Disable Auto-Drivers" Style="{StaticResource DestructiveBtn}" ToolTip="Stop Windows Update from installing drivers"/>
+                                <Button Name="btnDrvEnableWU" Content="Enable Auto-Drivers" Style="{StaticResource PositiveBtn}" ToolTip="Allow Windows Update to install drivers"/>
+                                <Button Name="btnDrvDisableMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDrvEnableMeta" Content="Enable Metadata" Style="{StaticResource ActionBtn}"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4693,17 +4683,16 @@ function Show-TaskManager {
                 <StackPanel Name="pnlCleanup" Visibility="Collapsed">
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                                <TextBlock Text="🧹" FontSize="32" Margin="0,0,12,0"/>
+                            <StackPanel Margin="0,0,0,20">
                                 <TextBlock Text="System Cleanup" Style="{StaticResource SectionHeader}" Margin="0"/>
                             </StackPanel>
-                            <TextBlock Text="🗑️ CLEANUP TOOLS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="CLEANUP TOOLS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnCleanDisk" Content="💿 Disk Cleanup" Style="{StaticResource ActionBtn}" ToolTip="Windows built-in cleanup utility"/>
-                                <Button Name="btnCleanTemp" Content="🌡️ Delete Temp Files" Style="{StaticResource ActionBtn}" ToolTip="Clear temp folders"/>
-                                <Button Name="btnCleanShortcuts" Content="🔗 Fix Shortcuts" Style="{StaticResource ActionBtn}" ToolTip="Remove broken shortcuts"/>
-                                <Button Name="btnCleanReg" Content="⚠️ Clean Registry" Style="{StaticResource WarningBtn}" ToolTip="Remove obsolete registry entries"/>
-                                <Button Name="btnCleanXbox" Content="🎮 Clean Xbox Data" Style="{StaticResource ActionBtn}" ToolTip="Clear Xbox app cache"/>
+                                <Button Name="btnCleanDisk" Content="Disk Cleanup" Style="{StaticResource ActionBtn}" ToolTip="Windows built-in cleanup utility"/>
+                                <Button Name="btnCleanTemp" Content="Delete Temp Files" Style="{StaticResource ActionBtn}" ToolTip="Clear temp folders"/>
+                                <Button Name="btnCleanShortcuts" Content="Fix Shortcuts" Style="{StaticResource ActionBtn}" ToolTip="Remove broken shortcuts"/>
+                                <Button Name="btnCleanReg" Content="Clean Registry" Style="{StaticResource WarningBtn}" ToolTip="Remove obsolete registry entries"/>
+                                <Button Name="btnCleanXbox" Content="Clean Xbox Data" Style="{StaticResource ActionBtn}" ToolTip="Clear Xbox app cache"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4714,17 +4703,16 @@ function Show-TaskManager {
                     <!-- System Tools Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,20">
-                                <TextBlock Text="🛠️" FontSize="32" Margin="0,0,12,0"/>
+                            <StackPanel Margin="0,0,0,20">
                                 <TextBlock Text="System Tools" Style="{StaticResource SectionHeader}" Margin="0"/>
                             </StackPanel>
-                            <TextBlock Text="📊 SYSTEM INFO &amp; MAINTENANCE" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="SYSTEM INFO &amp; MAINTENANCE" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnUtilSysInfo" Content="📋 System Report" Style="{StaticResource ActionBtn}" ToolTip="Generate detailed system report"/>
-                                <Button Name="btnUtilTrim" Content="✂️ Trim SSD" Style="{StaticResource ActionBtn}" ToolTip="Optimize SSD performance"/>
-                                <Button Name="btnUtilMas" Content="🔑 MAS Activation" Style="{StaticResource UtilityBtn}" ToolTip="Microsoft Activation Scripts"/>
-                                <Button Name="btnTaskManager" Content="⏰ Task Scheduler" Style="{StaticResource ActionBtn}" ToolTip="Manage scheduled tasks"/>
-                                <Button Name="btnCtxBuilder" Content="📁 Context Menu" Style="{StaticResource ActionBtn}" ToolTip="Customize right-click menu"/>
+                                <Button Name="btnUtilSysInfo" Content="System Report" Style="{StaticResource ActionBtn}" ToolTip="Generate detailed system report"/>
+                                <Button Name="btnUtilTrim" Content="Trim SSD" Style="{StaticResource ActionBtn}" ToolTip="Optimize SSD performance"/>
+                                <Button Name="btnUtilMas" Content="MAS Activation" Style="{StaticResource UtilityBtn}" ToolTip="Microsoft Activation Scripts"/>
+                                <Button Name="btnTaskManager" Content="Task Scheduler" Style="{StaticResource ActionBtn}" ToolTip="Manage scheduled tasks"/>
+                                <Button Name="btnCtxBuilder" Content="Context Menu" Style="{StaticResource ActionBtn}" ToolTip="Customize right-click menu"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4732,13 +4720,13 @@ function Show-TaskManager {
                     <!-- Repairs Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🔧 REPAIRS &amp; SETTINGS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="REPAIRS &amp; SETTINGS" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnUpdateRepair" Content="🔄 Reset Windows Update" Style="{StaticResource WarningBtn}" ToolTip="Fix Windows Update issues"/>
-                                <Button Name="btnUpdateServices" Content="🔄 Restart Services" Style="{StaticResource ActionBtn}" ToolTip="Restart update-related services"/>
-                                <Button Name="btnDotNetEnable" Content="✓ Enable .NET RollForward" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDotNetDisable" Content="✗ Disable .NET RollForward" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnInstallGpedit" Content="📜 Install Gpedit" Style="{StaticResource UtilityBtn}" ToolTip="Add Group Policy to Home editions"/>
+                                <Button Name="btnUpdateRepair" Content="Reset Windows Update" Style="{StaticResource WarningBtn}" ToolTip="Fix Windows Update issues"/>
+                                <Button Name="btnUpdateServices" Content="Restart Services" Style="{StaticResource ActionBtn}" ToolTip="Restart update-related services"/>
+                                <Button Name="btnDotNetEnable" Content="Enable .NET RollForward" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnDotNetDisable" Content="Disable .NET RollForward" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnInstallGpedit" Content="Install Gpedit" Style="{StaticResource UtilityBtn}" ToolTip="Add Group Policy to Home editions"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4749,12 +4737,9 @@ function Show-TaskManager {
                     <!-- Header Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
-                                <TextBlock Text="💝" FontSize="32" Margin="0,0,12,0"/>
-                                <StackPanel>
-                                    <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                    <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
-                                </StackPanel>
+                            <StackPanel Margin="0,0,0,12">
+                                <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
+                                <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -4762,7 +4747,7 @@ function Show-TaskManager {
                     <!-- Credits Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="👥 CONTRIBUTORS" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="CONTRIBUTORS" Style="{StaticResource SubHeader}"/>
                             <StackPanel Margin="0,8,0,0">
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
                                     <TextBlock Text="Author: " Foreground="{StaticResource TextSecondary}" Width="120"/>
@@ -4773,19 +4758,19 @@ function Show-TaskManager {
                                     <Button Name="btnCreditChaythonGUI" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                             </StackPanel>
-                            <TextBlock Text="📜 MIT License • Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
+                            <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
                         </StackPanel>
                     </Border>
 
                     <!-- Support Actions Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
-                            <TextBlock Text="🤝 GET INVOLVED" Style="{StaticResource SubHeader}"/>
+                            <TextBlock Text="GET INVOLVED" Style="{StaticResource SubHeader}"/>
                             <WrapPanel>
-                                <Button Name="btnSupportDiscord" Content="💬 Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
-                                <Button Name="btnSupportIssue" Content="🐛 Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
-                                <Button Name="btnDonateIos12" Content="💚 Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
-                                <Button Name="btnDonate" Content="💙 Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
+                                <Button Name="btnSupportDiscord" Content="Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
+                                <Button Name="btnSupportIssue" Content="Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
+                                <Button Name="btnDonateIos12" Content="Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
+                                <Button Name="btnDonate" Content="Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -4834,6 +4819,8 @@ Set-ButtonIcon "btnTabDrivers" "M7,17L10.5,12.5L5,9.6V17H7M12,21L14.6,16.3L9.5,1
 Set-ButtonIcon "btnTabCleanup" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Cleanup" "Disk cleanup, Temp files, Shortcuts, Registry" 18
 Set-ButtonIcon "btnTabUtils" "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.7,20.3C23.1,19.9 23.1,19.3 22.7,19Z" "Utilities" "System Info, SSD Trim, Activation, Task Scheduler" 18
 Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
+# Tweaks tab icon (lightning bolt / flash icon)
+Set-ButtonIcon "btnTabTweaks" "M7,2V13H10V22L17,10H13L17,2H7M10,4H14L11,10H15L10.5,17V12H7V4H10Z" "Tweaks" "System optimization and performance tweaks" 18 "#FFD700"
 $btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
 $btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
 # (Ban Icon for Ignore)
@@ -4890,8 +4877,8 @@ Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 
 Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
 Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
 Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
-(Get-Ctrl "btnWingetFind").Width = 80
-Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Find" "Search Winget"
+(Get-Ctrl "btnWingetFind").Width = 100
+Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
@@ -4939,13 +4926,14 @@ Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2
 # 5. LOGIC & EVENTS
 # ==========================================
 $TabButtons = @("btnTabUpdates","btnTabTweaks","btnTabHealth","btnTabNetwork","btnTabFirewall","btnTabDrivers","btnTabCleanup","btnTabUtils","btnTabSupport")
-$Panels     = @("pnlUpdates","pnlTweaks","pnlHealth","pnlNetwork","pnlFirewall","pnlDrivers","pnlCleanup","pnlUtils","pnlSupport")
+$Panels     = @("pnlUpdates","pnlCatalog","pnlTweaks","pnlHealth","pnlNetwork","pnlFirewall","pnlDrivers","pnlCleanup","pnlUtils","pnlSupport")
 
 # --- INITIALIZE ALL CONTROLS ---
 $btnManageProviders = Get-Ctrl "btnManageProviders"
 $btnManageProviders.Add_Click({ Show-ProviderManager })
 $btnWingetScan = Get-Ctrl "btnWingetScan"
 $btnWingetUpdateSel = Get-Ctrl "btnWingetUpdateSel"
+$btnWingetUpdateAll = Get-Ctrl "btnWingetUpdateAll"
 $btnWingetInstall = Get-Ctrl "btnWingetInstall"
 $btnWingetUninstall = Get-Ctrl "btnWingetUninstall"
 $btnWingetFind = Get-Ctrl "btnWingetFind"
@@ -4954,14 +4942,52 @@ $txtWingetSearch = Get-Ctrl "txtWingetSearch"
 $lblWingetStatus = Get-Ctrl "lblWingetStatus"
 $lblWingetTitle = Get-Ctrl "lblWingetTitle"
 $cmbPackageManager = Get-Ctrl "cmbPackageManager"
-$cmbPackageManager.Add_SelectionChanged({ 
-    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-})
+if ($cmbPackageManager) {
+    $cmbPackageManager.Add_SelectionChanged({ 
+        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
+    })
+}
 
 $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
 $btnDISMRestore = Get-Ctrl "btnDISMRestore"
 $btnCHKDSK = Get-Ctrl "btnCHKDSK"
+
+$btnPerfServicesManual = Get-Ctrl "btnPerfServicesManual"
+$btnPerfServicesRevert = Get-Ctrl "btnPerfServicesRevert"
+$btnPerfDisableHibernate = Get-Ctrl "btnPerfDisableHibernate"
+$btnPerfEnableHibernate = Get-Ctrl "btnPerfEnableHibernate"
+$btnPerfDisableSuperfetch = Get-Ctrl "btnPerfDisableSuperfetch"
+$btnPerfEnableSuperfetch = Get-Ctrl "btnPerfEnableSuperfetch"
+$btnPerfDisableMemCompress = Get-Ctrl "btnPerfDisableMemCompress"
+$btnPerfEnableMemCompress = Get-Ctrl "btnPerfEnableMemCompress"
+$btnPerfUltimatePower = Get-Ctrl "btnPerfUltimatePower"
+
+$btnAppxLoad = Get-Ctrl "btnAppxLoad"
+$btnAppxRemoveSel = Get-Ctrl "btnAppxRemoveSel"
+$btnAppxRemoveAll = Get-Ctrl "btnAppxRemoveAll"
+$lstAppxPackages = Get-Ctrl "lstAppxPackages"
+
+$btnFeatHyperV = Get-Ctrl "btnFeatHyperV"
+$btnFeatWSL = Get-Ctrl "btnFeatWSL"
+$btnFeatSandbox = Get-Ctrl "btnFeatSandbox"
+$btnFeatDotNet35 = Get-Ctrl "btnFeatDotNet35"
+$btnFeatNFS = Get-Ctrl "btnFeatNFS"
+$btnFeatTelnet = Get-Ctrl "btnFeatTelnet"
+$btnFeatIIS = Get-Ctrl "btnFeatIIS"
+$btnFeatLegacy = Get-Ctrl "btnFeatLegacy"
+
+$btnSvcOptimize = Get-Ctrl "btnSvcOptimize"
+$btnSvcRestore = Get-Ctrl "btnSvcRestore"
+$btnSvcView = Get-Ctrl "btnSvcView"
+
+$btnTasksDisableTelemetry = Get-Ctrl "btnTasksDisableTelemetry"
+$btnTasksRestore = Get-Ctrl "btnTasksRestore"
+$btnTasksView = Get-Ctrl "btnTasksView"
+
+$btnWUDefault = Get-Ctrl "btnWUDefault"
+$btnWUSecurity = Get-Ctrl "btnWUSecurity"
+$btnWUDisable = Get-Ctrl "btnWUDisable"
 
 $btnNetInfo = Get-Ctrl "btnNetInfo"
 $btnFlushDNS = Get-Ctrl "btnFlushDNS"
@@ -5022,6 +5048,24 @@ $btnTaskManager = Get-Ctrl "btnTaskManager"
 $btnInstallGpedit = Get-Ctrl "btnInstallGpedit"
 $btnCtxBuilder = Get-Ctrl "btnCtxBuilder"
 
+$pnlUpdates = Get-Ctrl "pnlUpdates"
+$pnlCatalog = Get-Ctrl "pnlCatalog"
+$lstCatalog = Get-Ctrl "lstCatalog"
+$txtCatalogSearch = Get-Ctrl "txtCatalogSearch"
+$btnShowCatalog = Get-Ctrl "btnShowCatalog"
+$btnBackToUpdates = Get-Ctrl "btnBackToUpdates"
+$btnCatalogSearch = Get-Ctrl "btnCatalogSearch"
+$btnCatalogInstall = Get-Ctrl "btnCatalogInstall"
+$btnCatalogSelectAll = Get-Ctrl "btnCatalogSelectAll"
+$btnCatalogClear = Get-Ctrl "btnCatalogClear"
+$btnCatAll = Get-Ctrl "btnCatAll"
+$btnCatBrowsers = Get-Ctrl "btnCatBrowsers"
+$btnCatDev = Get-Ctrl "btnCatDev"
+$btnCatUtils = Get-Ctrl "btnCatUtils"
+$btnCatMedia = Get-Ctrl "btnCatMedia"
+$btnCatGames = Get-Ctrl "btnCatGames"
+$btnCatSecurity = Get-Ctrl "btnCatSecurity"
+
 $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
@@ -5033,9 +5077,36 @@ $btnCreditChaythonGUI = Get-Ctrl "btnCreditChaythonGUI"
 $btnCreditChaythonFeatures = Get-Ctrl "btnCreditChaythonFeatures"
 $btnCreditIos12checker = Get-Ctrl "btnCreditIos12checker"
 
+$bdQuickFind = Get-Ctrl "bdQuickFind"
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
 $lstSearchResults = Get-Ctrl "lstSearchResults"
 $pnlNavButtons = Get-Ctrl "pnlNavButtons"
+$LogBox = Get-Ctrl "LogBox"
+if ($LogBox) {
+    $LogBox.Add_TextChanged({ param($s,$e) $s.ScrollToEnd() })
+}
+
+# Quick Find placeholder + focus behavior
+$script:QuickFindPlaceholder = "Search tools..."
+if ($txtGlobalSearch) {
+    $txtGlobalSearch.Text = $script:QuickFindPlaceholder
+    $txtGlobalSearch.Foreground = "#6E7681"
+    $txtGlobalSearch.Add_GotFocus({
+        if ($txtGlobalSearch.Text -eq $script:QuickFindPlaceholder) {
+            $txtGlobalSearch.Text = ""
+            $txtGlobalSearch.Foreground = "#E6EDF3"
+        }
+    })
+    $txtGlobalSearch.Add_LostFocus({
+        if ([string]::IsNullOrWhiteSpace($txtGlobalSearch.Text)) {
+            $txtGlobalSearch.Text = $script:QuickFindPlaceholder
+            $txtGlobalSearch.Foreground = "#6E7681"
+        }
+    })
+}
+if ($bdQuickFind -and $txtGlobalSearch) {
+    $bdQuickFind.Add_MouseLeftButtonDown({ $txtGlobalSearch.Focus() })
+}
 
 # --- TABS LOGIC ---
 foreach ($btnName in $TabButtons) {
@@ -5156,7 +5227,7 @@ Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "b
 
 $txtGlobalSearch.Add_TextChanged({
     $q = $txtGlobalSearch.Text
-    if ($q.Length -gt 1) {
+    if ($q.Length -gt 1 -and $q -ne $script:QuickFindPlaceholder) {
         $pnlNavButtons.Visibility = "Collapsed"
         $lstSearchResults.Visibility = "Visible"
         $lstSearchResults.Items.Clear()
@@ -5220,7 +5291,9 @@ $miRefresh.Add_Click({
 $lstWinget.ContextMenu = $ctxMenu
 
 # --- WINGET ---
-$txtWingetSearch.Add_GotFocus({ if ($txtWingetSearch.Text -eq "Search new packages...") { $txtWingetSearch.Text="" } })
+$txtWingetSearch.Add_GotFocus({
+    if ($txtWingetSearch.Text -in @("Search packages...", "Search new packages...")) { $txtWingetSearch.Text = "" }
+})
 $txtWingetSearch.Add_TextChanged({
     # If the user starts typing and the only item is our status message, clear it
     if ($lstWinget.Items.Count -eq 1 -and $lstWinget.Items[0].Name -eq "No updates available") {
@@ -5228,51 +5301,6 @@ $txtWingetSearch.Add_TextChanged({
     }
 })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
-
-# 1. SETUP TIMER FOR BACKGROUND POLLING
-$script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-
-$script:ScanTimer.Add_Tick({
-    if ($script:AsyncScan -and $script:AsyncScan.IsCompleted) {
-        $script:ScanTimer.Stop()
-        
-        try {
-            $results = $script:AsyncScanPS.EndInvoke($script:AsyncScan)
-            $script:AsyncScanPS.Dispose()
-            
-            # Process Results
-            foreach ($item in $results) {
-                # --- CRITICAL FIX: Skip null items to prevent crash ---
-                if ($null -eq $item) { continue }
-
-                if ($item -is [string] -and $item.StartsWith("LOG:")) {
-                    Write-GuiLog ($item.Substring(4))
-                }
-                elseif ($item.PSObject.Properties["Name"]) {
-                    [void]$lstWingetUpdates.Items.Add($item)
-                }
-            }
-        } catch {
-            Write-GuiLog "Scan Thread Error: $($_.Exception.Message)"
-        }
-
-        # UI Cleanup
-        $lblWingetStatus.Visibility = "Hidden"
-        $btnWingetScan.IsEnabled = $true
-        $btnWingetUpdateAll.IsEnabled = $true
-        $btnWingetUpdateSel.IsEnabled = $true
-        
-        if ($lstWingetUpdates.Items.Count -eq 0) {
-             Write-GuiLog "System is up to date."
-        } else {
-             Write-GuiLog "Scan Complete. Found $($lstWingetUpdates.Items.Count) updates."
-        }
-        
-        $script:AsyncScan = $null
-        $script:AsyncScanPS = $null
-    }
-})
 
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
@@ -5725,7 +5753,7 @@ $script:ScanTimer.Add_Tick({
             
             $lblWingetStatus.Visibility = "Hidden"
             $btnWingetScan.IsEnabled = $true
-            $btnWingetUpdateAll.IsEnabled = $true
+            if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
             $btnWingetUpdateSel.IsEnabled = $true
             
             if ($lstWinget.Items.Count -eq 0) {
@@ -5744,7 +5772,7 @@ $btnWingetScan.Add_Click({
     $lblWingetStatus.Visibility = "Visible"
     $lstWinget.Items.Clear()
     $btnWingetScan.IsEnabled = $false
-    $btnWingetUpdateAll.IsEnabled = $false
+    if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
     $btnWingetUpdateSel.IsEnabled = $false
     
     Write-GuiLog " "
@@ -5802,7 +5830,10 @@ $btnWingetScan.Add_Click({
                     foreach($l in $lines){ if($l -match "Name\s+Id\s+Version"){$idxId=$l.IndexOf("Id"); break} }
 
                     foreach($line in $lines){
-                        $line=$line.Trim(); if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
+                        $line=$line.Trim()
+                        if(!$line -or $line -match "^-+" -or $line -match "^Name\s+Id"){continue}
+                        # Filter winget status messages that look like data rows
+                        if($line -match "explicit targeting" -or $line -match "following packages have an upgrade available"){continue}
                         $n=$null;$i=$null;$v=$null;$a=$null;$s="winget"
                         
                         if($idxId -gt 0 -and $line.Length -gt $idxId){
@@ -6222,7 +6253,7 @@ $script:SearchTimer.Add_Tick({
 
 # 2. THE BUTTON CLICK (Starts the Thread)
 $btnWingetFind.Add_Click({
-    if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -eq "Search new packages...") { return }
+    if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -in @("Search packages...", "Search new packages...")) { return }
 
     # UI Prep
     $query = $txtWingetSearch.Text
@@ -6622,14 +6653,18 @@ $btnFwRefresh.Add_Click({
     $lblFwStatus.Visibility="Collapsed"
 })
 $txtFwSearch.Add_TextChanged({
-    $q=$txtFwSearch.Text; $lstFw.Items.Clear();
-    if($q -ne "Search Rules..." -and $q){
+    $q = $txtFwSearch.Text
+    $lstFw.Items.Clear()
+    if ($q -and $q -notin @("Search Rules...", "Search rules...")) {
         $AllFw | Where-Object { $_.DisplayName -match $q -or $_.LocalPort -match $q } | ForEach-Object { [void]$lstFw.Items.Add($_) }
     } else {
         $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
     }
 })
-$txtFwSearch.Add_GotFocus({ $t=$txtFwSearch; if($t.Text -eq "Search Rules..."){$t.Text=""} })
+$txtFwSearch.Add_GotFocus({
+    $t = $txtFwSearch
+    if ($t.Text -in @("Search Rules...", "Search rules...")) { $t.Text = "" }
+})
 $btnFwAdd.Add_Click({ $d=Show-RuleDialog "Add Rule"; if($d){ try{New-NetFirewallRule -DisplayName $d.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port -ErrorAction Stop; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))}catch{[System.Windows.MessageBox]::Show("Err: $_")} } })
 $btnFwEdit.Add_Click({ if($lstFw.SelectedItem){ $d=Show-RuleDialog "Edit" $lstFw.SelectedItem; if($d){ try{Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))}catch{[System.Windows.MessageBox]::Show("Err: $_")} } } })
 $btnFwEnable.Add_Click({ if($lstFw.SelectedItem){ Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Enabled True; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
@@ -6745,17 +6780,17 @@ $btnUpdateRepair.Add_Click({ Invoke-WindowsUpdateRepairFull })
 $btnCtxBuilder.Add_Click({ Show-ContextMenuBuilder })
 
 # --- Support ---
-$btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" })
-$btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" })
-$btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" })
-$btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" })
-$btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" })
-$btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" })
-$btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" })
+if ($btnSupportDiscord) { $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" }) }
+if ($btnSupportIssue) { $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" }) }
+if ($btnDonateIos12) { $btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" }) }
+if ($btnCreditLilBattiCLI) { $btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnCreditChaythonFeatures) { $btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" }) }
+if ($btnCreditChaythonCLI) { $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
+if ($btnCreditChaythonGUI) { $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
+if ($btnCreditIos12checker) { $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnDonate) { $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" }) }
 
-$btnNavDownloads.Add_Click({ Show-DownloadStats })
+if ($btnNavDownloads) { $btnNavDownloads.Add_Click({ Show-DownloadStats }) }
 
 # ==========================================
 # TWEAKS & OPTIMIZATION FUNCTIONS
@@ -7047,38 +7082,40 @@ $script:SoftwareCatalog = @(
     [PSCustomObject]@{Category="Security"; Name="Bitwarden"; Description="Password manager"; Source="winget"; Id="Bitwarden.Bitwarden"}
 )
 
-$btnShowCatalog.Add_Click({
-    $pnlUpdates.Visibility = "Collapsed"
-    $pnlCatalog.Visibility = "Visible"
-    $lstCatalog.Items.Clear()
-    foreach ($item in $script:SoftwareCatalog) {
-        [void]$lstCatalog.Items.Add($item)
-    }
-})
+if ($btnShowCatalog -and $btnBackToUpdates -and $btnCatalogSearch -and $btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $btnCatAll -and $btnCatBrowsers -and $btnCatDev -and $btnCatUtils -and $btnCatMedia -and $btnCatGames -and $btnCatSecurity -and $pnlCatalog -and $lstCatalog -and $txtCatalogSearch) {
+    $btnShowCatalog.Add_Click({
+        $pnlUpdates.Visibility = "Collapsed"
+        $pnlCatalog.Visibility = "Visible"
+        $lstCatalog.Items.Clear()
+        foreach ($item in $script:SoftwareCatalog) {
+            [void]$lstCatalog.Items.Add($item)
+        }
+    })
 
-$btnBackToUpdates.Add_Click({
-    $pnlCatalog.Visibility = "Collapsed"
-    $pnlUpdates.Visibility = "Visible"
-})
+    $btnBackToUpdates.Add_Click({
+        $pnlCatalog.Visibility = "Collapsed"
+        $pnlUpdates.Visibility = "Visible"
+    })
 
-$btnCatalogSearch.Add_Click({
-    $query = $txtCatalogSearch.Text.ToLower()
-    $lstCatalog.Items.Clear()
-    $filtered = $script:SoftwareCatalog | Where-Object { $_.Name -like "*$query*" -or $_.Description -like "*$query*" }
-    foreach ($item in $filtered) { [void]$lstCatalog.Items.Add($item) }
-})
+    $btnCatalogSearch.Add_Click({
+        $query = $txtCatalogSearch.Text.ToLower()
+        $lstCatalog.Items.Clear()
+        $filtered = $script:SoftwareCatalog | Where-Object { $_.Name -like "*$query*" -or $_.Description -like "*$query*" }
+        foreach ($item in $filtered) { [void]$lstCatalog.Items.Add($item) }
+    })
 
-$btnCatAll.Add_Click({
-    $lstCatalog.Items.Clear()
-    foreach ($item in $script:SoftwareCatalog) { [void]$lstCatalog.Items.Add($item) }
-})
+    $btnCatAll.Add_Click({
+        $lstCatalog.Items.Clear()
+        foreach ($item in $script:SoftwareCatalog) { [void]$lstCatalog.Items.Add($item) }
+    })
 
-$btnCatBrowsers.Add_Click({ Get-CatalogByCategory "Browsers" })
-$btnCatDev.Add_Click({ Get-CatalogByCategory "Development" })
-$btnCatUtils.Add_Click({ Get-CatalogByCategory "Utilities" })
-$btnCatMedia.Add_Click({ Get-CatalogByCategory "Multimedia" })
-$btnCatGames.Add_Click({ Get-CatalogByCategory "Gaming" })
-$btnCatSecurity.Add_Click({ Get-CatalogByCategory "Security" })
+    $btnCatBrowsers.Add_Click({ Get-CatalogByCategory "Browsers" })
+    $btnCatDev.Add_Click({ Get-CatalogByCategory "Development" })
+    $btnCatUtils.Add_Click({ Get-CatalogByCategory "Utilities" })
+    $btnCatMedia.Add_Click({ Get-CatalogByCategory "Multimedia" })
+    $btnCatGames.Add_Click({ Get-CatalogByCategory "Gaming" })
+    $btnCatSecurity.Add_Click({ Get-CatalogByCategory "Security" })
+}
 
 function Get-CatalogByCategory($Category) {
     $lstCatalog.Items.Clear()
@@ -7086,25 +7123,27 @@ function Get-CatalogByCategory($Category) {
     foreach ($item in $filtered) { [void]$lstCatalog.Items.Add($item) }
 }
 
-$btnCatalogInstall.Add_Click({
-    $selected = $lstCatalog.SelectedItems
-    if ($selected.Count -eq 0) { return }
-    Invoke-UiCommand {
-        param($items)
-        foreach ($item in $items) {
-            Write-GuiLog "Installing: $($item.Name)..."
-            $proc = Start-Process -FilePath "winget" -ArgumentList "install --id `"$($item.Id)`" --accept-source-agreements --accept-package-agreements --silent" -Wait -PassThru
-            if ($proc.ExitCode -eq 0) {
-                Write-GuiLog "Installed: $($item.Name)"
-            } else {
-                Write-GuiLog "Failed: $($item.Name)"
+if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lstCatalog) {
+    $btnCatalogInstall.Add_Click({
+        $selected = $lstCatalog.SelectedItems
+        if ($selected.Count -eq 0) { return }
+        Invoke-UiCommand {
+            param($items)
+            foreach ($item in $items) {
+                Write-GuiLog "Installing: $($item.Name)..."
+                $proc = Start-Process -FilePath "winget" -ArgumentList "install --id `"$($item.Id)`" --accept-source-agreements --accept-package-agreements --silent" -Wait -PassThru
+                if ($proc.ExitCode -eq 0) {
+                    Write-GuiLog "Installed: $($item.Name)"
+                } else {
+                    Write-GuiLog "Failed: $($item.Name)"
+                }
             }
-        }
-    } "Installing software..." -ArgumentList $selected
-})
+        } "Installing software..." -ArgumentList $selected
+    })
 
-$btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
-$btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
+    $btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
+    $btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
+}
 
 # --- LAUNCH ---
 $window.Add_Loaded({ 
@@ -7117,3 +7156,4 @@ $window.Add_Loaded({
 
 # 3. Show the Window
 $window.ShowDialog() | Out-Null
+
