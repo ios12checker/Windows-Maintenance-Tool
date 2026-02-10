@@ -9,7 +9,8 @@ All-in-one Windows maintenance and optimization toolkit. Features system repair,
 ---
 
 ## 📸 Screenshots
-<img width="1261" height="888" alt="image" src="https://github.com/user-attachments/assets/94a6c153-4147-468a-97af-afce9269acd5" />
+<img width="1261" height="891" alt="image" src="https://github.com/user-attachments/assets/26b6d5e6-4ab7-44ef-89eb-5e7cd01706ab" />
+
 
 
 ---
