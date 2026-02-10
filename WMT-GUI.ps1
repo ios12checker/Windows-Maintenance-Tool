@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.1"
+$AppVersion = "5.0.2"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -4391,7 +4391,8 @@ function Show-TaskManager {
                 </Grid>
 
                 <!-- TWEAKS PANEL -->
-                <StackPanel Name="pnlTweaks" Visibility="Collapsed">
+                <ScrollViewer Name="pnlTweaks" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                    <StackPanel>
                     <!-- Performance Card -->
                     <Border Style="{StaticResource CardStyle}">
                         <StackPanel>
@@ -4487,7 +4488,8 @@ function Show-TaskManager {
                             </WrapPanel>
                         </StackPanel>
                     </Border>
-                </StackPanel>
+                    </StackPanel>
+                </ScrollViewer>
 
                 <!-- SYSTEM HEALTH PANEL -->
                 <StackPanel Name="pnlHealth" Visibility="Collapsed">
