@@ -6,6 +6,7 @@
 
 All-in-one Windows maintenance and optimization toolkit. Features system repair, performance tweaks, bloatware removal, software management, and more.
 
+*A Reminder for everyone, im currently in school, and im trying to do the fixes/updates fast, so all issues can be fixed. Thanks for the understanding.
 ---
 
 ## 📸 Screenshots
