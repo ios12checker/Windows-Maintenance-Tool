@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.2"
+$AppVersion = "5.0.3"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -6162,47 +6162,67 @@ $btnWingetUnignore.Add_Click({
     }
 })
 
-# --- LISTVIEW SORTING LOGIC ---
+# --- WINGET LISTVIEW SORTING LOGIC ---
 $lstWinget = Get-Ctrl "lstWinget"
 $script:LastSortHeader = ""
 $script:SortAscending = $true
 
-$sortBlock = {
-    param($src, $e) 
+$sortBlock = [System.Windows.RoutedEventHandler]{
+    param($sender, $e) 
     
-    # Check if the clicked element is a Column Header
-    if ($e.OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) {
-        $header = $e.OriginalSource.Column.Header
-        
-        # Ignore clicks on padding/empty space
-        if ([string]::IsNullOrWhiteSpace($header)) { return }
+    # Safely define the arrows using their Character Codes
+    $upArrow = [char]0x25B2
+    $downArrow = [char]0x25BC
 
-        # Toggle Sort Direction if clicking the same header
-        if ($script:LastSortHeader -eq $header) {
+    if ($e.OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) {
+        $column = $e.OriginalSource.Column
+        $rawHeader = $column.Header -as [string]
+        
+        if ([string]::IsNullOrWhiteSpace($rawHeader)) { return }
+
+        # Clean the header name
+        $cleanHeader = $rawHeader -replace " [$upArrow$downArrow]", ''
+
+        if ($script:LastSortHeader -eq $cleanHeader) {
             $script:SortAscending = -not $script:SortAscending
         } else {
             $script:SortAscending = $true
-            $script:LastSortHeader = $header
+            $script:LastSortHeader = $cleanHeader
         }
 
-        # Get Items
-        $items = @($lstWinget.Items)
-        $lstWinget.Items.Clear()
+        # Remove arrows from ALL columns
+        foreach ($col in $sender.View.Columns) {
+            if ($col.Header -is [string]) {
+                $col.Header = $col.Header -replace " [$upArrow$downArrow]", ''
+            }
+        }
 
-        # Perform Sort
+        # Add the correct arrow to the clicked column
         if ($script:SortAscending) {
-            $sorted = $items | Sort-Object -Property $header
+            $column.Header = "$cleanHeader $upArrow"
         } else {
-            $sorted = $items | Sort-Object -Property $header -Descending
+            $column.Header = "$cleanHeader $downArrow"
         }
 
-        # Repopulate
-        $sorted | ForEach-Object { $lstWinget.Items.Add($_) }
+        # Sort and repopulate
+        $items = @($sender.Items)
+        $sender.Items.Clear()
+
+        if ($script:SortAscending) {
+            $sorted = $items | Sort-Object -Property $cleanHeader
+        } else {
+            $sorted = $items | Sort-Object -Property $cleanHeader -Descending
+        }
+
+        foreach ($item in $sorted) {
+            [void]$sender.Items.Add($item)
+        }
     }
 }
 
-# Attach the Click Handler to the ListView headers
-$lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
+if ($lstWinget) {
+    $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
+}
 
 # ---------------------------------------------------------
 # HIGH-PERFORMANCE THREADED SEARCH
@@ -6654,6 +6674,77 @@ $btnFwRefresh.Add_Click({
     $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
     $lblFwStatus.Visibility="Collapsed"
 })
+# --- FIREWALL LISTVIEW SORTING LOGIC ---
+$script:FwLastSortHeader = ""
+$script:FwSortAscending = $true
+
+$fwSortHandler = [System.Windows.RoutedEventHandler]{
+    param($sender, $e) 
+    
+    # Safely define the arrows using their Character Codes
+    $upArrow = [char]0x25B2
+    $downArrow = [char]0x25BC
+
+    if ($e.OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) {
+        $column = $e.OriginalSource.Column
+        $rawHeader = $column.Header -as [string]
+        
+        if ([string]::IsNullOrWhiteSpace($rawHeader)) { return }
+
+        # 1. Clean the header name (remove existing arrows using the char variables)
+        $cleanHeader = $rawHeader -replace " [$upArrow$downArrow]", ''
+
+        # 2. Toggle Sort Direction
+        if ($script:FwLastSortHeader -eq $cleanHeader) {
+            $script:FwSortAscending = -not $script:FwSortAscending
+        } else {
+            $script:FwSortAscending = $true
+            $script:FwLastSortHeader = $cleanHeader
+        }
+
+        # 3. Map to actual property using the CLEAN header
+        $propName = $cleanHeader
+        switch ($cleanHeader) {
+            "Rule Name" { $propName = "Name" }
+            "Status"    { $propName = "Enabled" }
+            "Port"      { $propName = "LocalPort" }
+        }
+
+        # 4. Remove arrows from ALL columns to reset their visual state
+        foreach ($col in $sender.View.Columns) {
+            if ($col.Header -is [string]) {
+                $col.Header = $col.Header -replace " [$upArrow$downArrow]", ''
+            }
+        }
+
+        # 5. Add the correct arrow to the clicked column
+        if ($script:FwSortAscending) {
+            $column.Header = "$cleanHeader $upArrow"
+        } else {
+            $column.Header = "$cleanHeader $downArrow"
+        }
+
+        # 6. Sort and repopulate
+        $items = @($sender.Items)
+        $sender.Items.Clear()
+
+        if ($script:FwSortAscending) {
+            $sorted = $items | Sort-Object -Property $propName
+        } else {
+            $sorted = $items | Sort-Object -Property $propName -Descending
+        }
+
+        foreach ($item in $sorted) {
+            [void]$sender.Items.Add($item)
+        }
+    }
+}
+
+if ($lstFw) {
+    $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler)
+}
+
+# --- FIREWALL SEARCH ---
 $txtFwSearch.Add_TextChanged({
     $q = $txtFwSearch.Text
     $lstFw.Items.Clear()
