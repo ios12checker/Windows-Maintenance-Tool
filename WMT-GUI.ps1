@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.2"
+$AppVersion = "5.0.3"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -184,6 +184,9 @@ function Save-WmtSettings {
             WingetIgnore     = $Settings.WingetIgnore
             LoadWinapp2      = [bool]$Settings.LoadWinapp2
             EnabledProviders = $Settings.EnabledProviders
+            Theme            = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
+            WindowState      = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
+            WindowBounds     = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     } catch {
@@ -204,6 +207,14 @@ function Get-WmtSettings {
         WingetIgnore     = @()
         LoadWinapp2      = $false 
         EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey")
+        Theme            = "dark"
+        WindowState      = "Normal"
+        WindowBounds     = @{
+            Top    = 0
+            Left   = 0
+            Width  = 1280
+            Height = 820
+        }
     }
     
     if (Test-Path $path) {
@@ -224,6 +235,16 @@ function Get-WmtSettings {
             }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
+            if ($json.PSObject.Properties["Theme"] -and $json.Theme) { $defaults.Theme = [string]$json.Theme }
+            if ($json.PSObject.Properties["WindowState"] -and $json.WindowState) { $defaults.WindowState = [string]$json.WindowState }
+            if ($json.PSObject.Properties["WindowBounds"] -and $json.WindowBounds) {
+                $defaults.WindowBounds = @{
+                    Top    = [double]$json.WindowBounds.Top
+                    Left   = [double]$json.WindowBounds.Left
+                    Width  = [double]$json.WindowBounds.Width
+                    Height = [double]$json.WindowBounds.Height
+                }
+            }
         } catch { 
             Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
         }
@@ -3943,7 +3964,7 @@ function Show-TaskManager {
 [xml]$xaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Windows Maintenance Tool v$AppVersion" Height="900" Width="1280" MinHeight="800" MinWidth="1100"
+        Title="Windows Maintenance Tool v$AppVersion" Height="820" Width="1280" MinHeight="620" MinWidth="960"
         WindowStartupLocation="CenterScreen" Background="#0D1117" Foreground="#E6EDF3"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13"
         TextOptions.TextFormattingMode="Display"
@@ -4195,7 +4216,7 @@ function Show-TaskManager {
 
     <Grid>
         <Grid.ColumnDefinitions>
-            <ColumnDefinition Width="260"/>
+            <ColumnDefinition Width="300"/>
             <ColumnDefinition Width="*"/>
         </Grid.ColumnDefinitions>
 
@@ -4206,14 +4227,17 @@ function Show-TaskManager {
                     <RowDefinition Height="Auto"/> 
                     <RowDefinition Height="Auto"/> 
                     <RowDefinition Height="*"/>    
-                    <RowDefinition Height="Auto"/> 
+                    <RowDefinition Height="6"/>
+                    <RowDefinition Height="240"/>
                 </Grid.RowDefinitions>
 
                 <!-- Header/Search -->
-                <Border Name="bdQuickFind" Grid.Row="0" Background="#0D1117" Margin="16,20,16,12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1" Cursor="IBeam">
+                <Border Name="bdQuickFind" Grid.Row="0" Background="{StaticResource BgDark}" Margin="16,20,16,12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Cursor="IBeam">
                     <StackPanel Margin="12">
                         <TextBlock Text="Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." BorderThickness="0"/>
+                        <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." VerticalContentAlignment="Center"
+                                 Background="{StaticResource BgPanel}" Foreground="{StaticResource TextPrimary}"
+                                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="10,0"/>
                     </StackPanel>
                 </Border>
 
@@ -4234,19 +4258,23 @@ function Show-TaskManager {
                     </StackPanel>
                 </StackPanel>
                 
-                <ListBox Name="lstSearchResults" Grid.Row="2" Background="#0D1117" BorderThickness="0" Foreground="#58A6FF" Visibility="Collapsed" Margin="8"/>
+                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{StaticResource BgDark}" BorderThickness="0" Foreground="{StaticResource Accent}" Visibility="Collapsed" Margin="8"/>
+
+                <GridSplitter Grid.Row="3" Height="8" Margin="12,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                              Background="Transparent" Cursor="SizeNS" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
+                              ShowsPreview="True"/>
 
                 <!-- Log Panel -->
-                <Border Grid.Row="3" Background="#0D1117" Margin="12" CornerRadius="8" BorderBrush="#30363D" BorderThickness="1" MaxHeight="280">
+                <Border Grid.Row="4" Background="{StaticResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" MinHeight="140">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Border Grid.Row="0" Background="#161B22" CornerRadius="8,8,0,0" Padding="12,8">
+                        <Border Grid.Row="0" Background="{StaticResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
                             <TextBlock Text="Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
                         </Border>
-                        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Margin="8" UseLayoutRounding="True">
+                        <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True">
                             <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
                                      Background="Transparent" Foreground="#3FB950" BorderThickness="0" Padding="4"
                                      SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"/>
@@ -4278,6 +4306,10 @@ function Show-TaskManager {
                                 <StackPanel>
                                     <TextBlock Name="lblWingetTitle" Text="Package Updates" Style="{StaticResource SectionHeader}" Margin="0"/>
                                     <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0" VerticalAlignment="Center">
+                                        <ProgressBar Name="pbWingetProgress" Width="260" Height="8" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
+                                        <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
+                                    </StackPanel>
                                 </StackPanel>
                             </StackPanel>
                             <Grid Grid.Column="1">
@@ -4419,7 +4451,7 @@ function Show-TaskManager {
                         <StackPanel>
                             <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
                             <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
-                            <ListView Name="lstAppxPackages" Height="200" Background="#0D1117" BorderBrush="#30363D" BorderThickness="1" SelectionMode="Multiple">
+                            <ListView Name="lstAppxPackages" Height="200" Background="{StaticResource BgDark}" Foreground="{StaticResource TextPrimary}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
                                 <ListView.View>
                                     <GridView>
                                         <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
@@ -4771,6 +4803,7 @@ function Show-TaskManager {
                             <WrapPanel>
                                 <Button Name="btnSupportDiscord" Content="Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
                                 <Button Name="btnSupportIssue" Content="Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
+                                <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" ToolTip="Switch between dark and light theme"/>
                                 <Button Name="btnDonateIos12" Content="Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
                                 <Button Name="btnDonate" Content="Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
                             </WrapPanel>
@@ -4791,6 +4824,83 @@ $reader = (New-Object System.Xml.XmlNodeReader $xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 
 function Get-Ctrl { param($Name) return $window.FindName($Name) }
+
+# --- THEME PALETTES ---
+$script:CurrentTheme = "dark"
+$script:ThemePalettes = @{
+    dark = @{
+        BgDark      = "#0D1117"
+        BgPanel     = "#161B22"
+        BgElevated  = "#21262D"
+        BgHover     = "#30363D"
+        BorderBrush = "#30363D"
+        BorderAccent= "#58A6FF"
+        Accent      = "#58A6FF"
+        AccentHover = "#79C0FF"
+        TextPrimary = "#E6EDF3"
+        TextSecondary = "#8B949E"
+        TextMuted   = "#6E7681"
+        Success     = "#238636"
+        SuccessHover= "#2EA043"
+        Danger      = "#DA3633"
+        DangerHover = "#F85149"
+        Warning     = "#D29922"
+        Info        = "#1F6FEB"
+        LogText     = "#3FB950"
+    }
+    light = @{
+        BgDark      = "#F5F7FA"
+        BgPanel     = "#FFFFFF"
+        BgElevated  = "#EEF2F7"
+        BgHover     = "#E2E8F0"
+        BorderBrush = "#CBD5E1"
+        BorderAccent= "#2563EB"
+        Accent      = "#2563EB"
+        AccentHover = "#3B82F6"
+        TextPrimary = "#0F172A"
+        TextSecondary = "#334155"
+        TextMuted   = "#64748B"
+        Success     = "#15803D"
+        SuccessHover= "#16A34A"
+        Danger      = "#B91C1C"
+        DangerHover = "#DC2626"
+        Warning     = "#B45309"
+        Info        = "#1D4ED8"
+        LogText     = "#166534"
+    }
+}
+
+function Set-WmtTheme {
+    param([string]$Theme = "dark")
+    if (-not $script:ThemePalettes.ContainsKey($Theme)) { $Theme = "dark" }
+    $palette = $script:ThemePalettes[$Theme]
+
+    foreach ($key in $palette.Keys) {
+        if ($key -eq "LogText") { continue }
+        $brush = $window.Resources[$key]
+        if ($brush -is [System.Windows.Media.SolidColorBrush]) {
+            $brush.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key])
+        }
+    }
+
+    $window.Background = $window.Resources["BgDark"]
+    $window.Foreground = $window.Resources["TextPrimary"]
+
+    $logBoxCtrl = Get-Ctrl "LogBox"
+    if ($logBoxCtrl) { $logBoxCtrl.Foreground = $palette.LogText }
+
+    $quickFindCtrl = Get-Ctrl "txtGlobalSearch"
+    if ($quickFindCtrl -and $quickFindCtrl.Text -eq $script:QuickFindPlaceholder) {
+        $quickFindCtrl.Foreground = $window.Resources["TextMuted"]
+    }
+
+    $toggleBtn = Get-Ctrl "btnToggleTheme"
+    if ($toggleBtn) {
+        $toggleBtn.Content = if ($Theme -eq "dark") { "Light Mode" } else { "Dark Mode" }
+    }
+
+    $script:CurrentTheme = $Theme
+}
 
 # --- ICON INJECTION SYSTEM (SILENT + TOOLTIPS) ---
 function Set-ButtonIcon {
@@ -4943,6 +5053,8 @@ $lstWinget = Get-Ctrl "lstWinget"
 $txtWingetSearch = Get-Ctrl "txtWingetSearch"
 $lblWingetStatus = Get-Ctrl "lblWingetStatus"
 $lblWingetTitle = Get-Ctrl "lblWingetTitle"
+$pbWingetProgress = Get-Ctrl "pbWingetProgress"
+$lblWingetProgress = Get-Ctrl "lblWingetProgress"
 $cmbPackageManager = Get-Ctrl "cmbPackageManager"
 if ($cmbPackageManager) {
     $cmbPackageManager.Add_SelectionChanged({ 
@@ -5070,6 +5182,7 @@ $btnCatSecurity = Get-Ctrl "btnCatSecurity"
 
 $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
+$btnToggleTheme = Get-Ctrl "btnToggleTheme"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
 $btnDonateIos12 = Get-Ctrl "btnDonateIos12"
 $btnDonate = Get-Ctrl "btnDonate"
@@ -5083,26 +5196,30 @@ $bdQuickFind = Get-Ctrl "bdQuickFind"
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
 $lstSearchResults = Get-Ctrl "lstSearchResults"
 $pnlNavButtons = Get-Ctrl "pnlNavButtons"
+$svLog = Get-Ctrl "svLog"
 $LogBox = Get-Ctrl "LogBox"
 if ($LogBox) {
-    $LogBox.Add_TextChanged({ param($s,$e) $s.ScrollToEnd() })
+    $LogBox.Add_TextChanged({
+        param($s,$e)
+        if ($svLog) { $svLog.ScrollToEnd() } else { $s.ScrollToEnd() }
+    })
 }
 
 # Quick Find placeholder + focus behavior
 $script:QuickFindPlaceholder = "Search tools..."
 if ($txtGlobalSearch) {
     $txtGlobalSearch.Text = $script:QuickFindPlaceholder
-    $txtGlobalSearch.Foreground = "#6E7681"
+    $txtGlobalSearch.Foreground = $window.Resources["TextMuted"]
     $txtGlobalSearch.Add_GotFocus({
         if ($txtGlobalSearch.Text -eq $script:QuickFindPlaceholder) {
             $txtGlobalSearch.Text = ""
-            $txtGlobalSearch.Foreground = "#E6EDF3"
+            $txtGlobalSearch.Foreground = $window.Resources["TextPrimary"]
         }
     })
     $txtGlobalSearch.Add_LostFocus({
         if ([string]::IsNullOrWhiteSpace($txtGlobalSearch.Text)) {
             $txtGlobalSearch.Text = $script:QuickFindPlaceholder
-            $txtGlobalSearch.Foreground = "#6E7681"
+            $txtGlobalSearch.Foreground = $window.Resources["TextMuted"]
         }
     })
 }
@@ -5309,16 +5426,41 @@ $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
     
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
+    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id -Unique)
+    $totalItems = $uniqueItems.Count
     
     # UI Updates
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
+    if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $false }
+    if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $false }
     $lblWingetStatus.Text = "$ActionName in progress..."
     $lblWingetStatus.Visibility = "Visible"
+    $script:WingetActiveAction = $ActionName
+    $script:WingetActionStartedAt = Get-Date
+    $script:WingetProgressTotal = $totalItems
+    $script:WingetProgressDone = 0
+    $script:WingetProgressSuccess = 0
+    $script:WingetProgressSkipped = 0
+    $script:WingetProgressFailed = 0
+    $script:WingetCurrentIndex = 0
+    $script:WingetCurrentItemName = ""
+    $script:WingetCompletedIndexes = @{}
+    if ($pbWingetProgress) {
+        $pbWingetProgress.Minimum = 0
+        $pbWingetProgress.Maximum = [Math]::Max(1, $totalItems)
+        $pbWingetProgress.Value = 0
+        $pbWingetProgress.IsIndeterminate = $false
+        $pbWingetProgress.Visibility = "Visible"
+    }
+    if ($lblWingetProgress) {
+        $lblWingetProgress.Text = "0/$totalItems done | 0 success | 0 skipped | 0 failed"
+        $lblWingetProgress.Visibility = "Visible"
+    }
     
     # 1. Define the Job Arguments
     $jobArgs = @{
-        Items = $ListItems | Select-Object -Property Source, Name, Id -Unique
+        Items = $uniqueItems
         ActionName = $ActionName
         CmdTemplate = $CmdTemplate
         TempPath = $env:TEMP
@@ -5365,11 +5507,15 @@ $Script:StartWingetAction = {
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
             
-            # Stream output in real-time while process runs
+            # Stream output/error in real-time while process runs
             while (-not $proc.HasExited) {
                 while ($proc.StandardOutput.Peek() -gt -1) {
                     $line = $proc.StandardOutput.ReadLine()
                     if ($line) { Write-Output "LOG:  > $line" }
+                }
+                while ($proc.StandardError.Peek() -gt -1) {
+                    $line = $proc.StandardError.ReadLine()
+                    if ($line) { Write-Output "LOG:  ! $line" }
                 }
                 Start-Sleep -Milliseconds 100
             }
@@ -5382,7 +5528,7 @@ $Script:StartWingetAction = {
                 }
             }
             
-            # Also capture errors
+            # Also capture any remaining errors
             $errOutput = $proc.StandardError.ReadToEnd()
             if ($errOutput) {
                 foreach ($line in ($errOutput -split "`r`n")) {
@@ -5393,12 +5539,111 @@ $Script:StartWingetAction = {
             return $proc
         }
 
+        function Invoke-WingetLive ($argsLine) {
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pInfo.FileName = "winget"
+            $pInfo.Arguments = $argsLine
+            $pInfo.RedirectStandardOutput = $true
+            $pInfo.RedirectStandardError = $true
+            $pInfo.UseShellExecute = $false
+            $pInfo.CreateNoWindow = $true
+            $proc = [System.Diagnostics.Process]::Start($pInfo)
+
+            $outBuf = New-Object System.Text.StringBuilder
+            $errBuf = New-Object System.Text.StringBuilder
+            $lastLine = ""
+            $lastPct = -1
+            $lastBeat = Get-Date
+
+            while ((-not $proc.HasExited) -or $proc.StandardOutput.Peek() -gt -1 -or $proc.StandardError.Peek() -gt -1) {
+                $hadData = $false
+
+                while ($proc.StandardOutput.Peek() -gt -1) {
+                    $hadData = $true
+                    $ch = [char]$proc.StandardOutput.Read()
+                    if ($ch -eq "`r" -or $ch -eq "`n") {
+                        $line = $outBuf.ToString().Trim()
+                        [void]$outBuf.Clear()
+                        if ($line) {
+                            if ($line -match "(\d+)%") {
+                                $pct = [int]$matches[1]
+                                if ($pct -ne $lastPct) {
+                                    $lastPct = $pct
+                                    Write-Output "LOG:  [winget] Progress: $pct%"
+                                }
+                            }
+                            elseif ($line -ne $lastLine) {
+                                $lastLine = $line
+                                Write-Output "LOG:  > $line"
+                            }
+                        }
+                    } else {
+                        [void]$outBuf.Append($ch)
+                    }
+                }
+
+                while ($proc.StandardError.Peek() -gt -1) {
+                    $hadData = $true
+                    $ch = [char]$proc.StandardError.Read()
+                    if ($ch -eq "`r" -or $ch -eq "`n") {
+                        $line = $errBuf.ToString().Trim()
+                        [void]$errBuf.Clear()
+                        if ($line) {
+                            if ($line -match "(\d+)%") {
+                                $pct = [int]$matches[1]
+                                if ($pct -ne $lastPct) {
+                                    $lastPct = $pct
+                                    Write-Output "LOG:  [winget] Progress: $pct%"
+                                }
+                            }
+                            elseif ($line -ne $lastLine) {
+                                $lastLine = $line
+                                Write-Output "LOG:  ! $line"
+                            }
+                        }
+                    } else {
+                        [void]$errBuf.Append($ch)
+                    }
+                }
+
+                $now = Get-Date
+                if ((-not $hadData) -and ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 8)) {
+                    Write-Output "LOG:  [winget] still running..."
+                    $lastBeat = $now
+                }
+
+                if (-not $hadData) {
+                    Start-Sleep -Milliseconds 80
+                }
+            }
+
+            $tailOut = $outBuf.ToString().Trim()
+            if ($tailOut) { Write-Output "LOG:  > $tailOut" }
+            $tailErr = $errBuf.ToString().Trim()
+            if ($tailErr) { Write-Output "LOG:  ! $tailErr" }
+
+            return $proc
+        }
+
+        function Invoke-VisibleCmd ($command, $title) {
+            if ([string]::IsNullOrWhiteSpace($title)) { $title = "WMT Package Update" }
+            $safeTitle = ($title -replace '"', '') -replace '[\r\n]', ' '
+            $cmdLine = "/c title $safeTitle && $command"
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle Normal
+            return $proc
+        }
+
+        $total = @($items).Count
+        $index = 0
         foreach ($item in $items) {
+            $index++
             $id   = $item.Id
             $name = $item.Name
             $src  = $item.Source
             $cmd  = ""
             $userCmd = "" 
+            $wingetArgs = $null
+            Write-Output "PROGRESS:${index}/${total}:$name"
 
             # --- COMMAND GENERATION ---
             if ($tmpl) {
@@ -5410,9 +5655,9 @@ $Script:StartWingetAction = {
                 if ($src -eq "winget" -or $src -eq "msstore") {
                     $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
                     $userFlags = "--accept-source-agreements --accept-package-agreements"
-                    if ($act -eq "Install")   { $cmd = "winget install --id `"$id`" $flags";   $userCmd = "winget install --id `"$id`" $userFlags" }
-                    if ($act -eq "Update")    { $cmd = "winget upgrade --id `"$id`" $flags";   $userCmd = "winget upgrade --id `"$id`" $userFlags" }
-                    if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$id`" $flags"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
+                    if ($act -eq "Install")   { $wingetArgs = "install --id `"$id`" $flags";   $cmd = "winget $wingetArgs"; $userCmd = "winget install --id `"$id`" $userFlags" }
+                    if ($act -eq "Update")    { $wingetArgs = "upgrade --id `"$id`" $flags";   $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`" $userFlags" }
+                    if ($act -eq "Uninstall") { $wingetArgs = "uninstall --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
                 }
                 # --- SCOOP (Likely requires User Mode) ---
                 elseif ($src -eq "scoop") {
@@ -5459,13 +5704,30 @@ $Script:StartWingetAction = {
             }
 
             if ($cmd) {
-                Write-Output "LOG:[$act] Starting: $name ($src)..."
+                Write-Output "LOG:[$act][$index/$total] Starting: $name ($src)..."
                 Write-Output "LOG:[$act] Command: $userCmd"
 
                 # 1. RUN COMMAND (First Attempt - Admin)
-                Write-Output "LOG:[$act] Running... (this may take a while)"
-                $p = Invoke-WingetCmd $cmd
-                Write-Output "LOG:[$act] Process completed with exit code: $($p.ExitCode)"
+                $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
+                $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
+                $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
+                $useVisibleWindow = ($isPipUpdate -or $isChocoUpdate -or $isPythonUpdate)
+
+                if ($useVisibleWindow) {
+                    $windowTag = "Package"
+                    if ($isPipUpdate) { $windowTag = "PIP" }
+                    elseif ($isChocoUpdate) { $windowTag = "Chocolatey" }
+                    elseif ($isPythonUpdate) { $windowTag = "Python" }
+                    Write-Output "LOG:[$act] Launching visible $windowTag window for: $name"
+                    $p = Invoke-VisibleCmd $cmd "WMT $windowTag Update - $name"
+                } elseif ($wingetArgs -and ($src -eq "winget" -or $src -eq "msstore")) {
+                    Write-Output "LOG:[$act] Running winget with live output..."
+                    $p = Invoke-WingetLive $wingetArgs
+                } else {
+                    Write-Output "LOG:[$act] Running... (this may take a while)"
+                    $p = Invoke-WingetCmd $cmd
+                }
+                Write-Output "LOG:[$act][$index/$total] Process completed with exit code: $($p.ExitCode)"
                 
                 $hex = "0x{0:x}" -f $p.ExitCode
                 
@@ -5474,21 +5736,28 @@ $Script:StartWingetAction = {
                     Write-Output "LOG:[$act] WARNING: Detected Winget Source Corruption. Auto-fixing..."
                     $fixP = Invoke-WingetCmd "winget source reset --force"
                     if ($fixP.ExitCode -eq 0) {
-                        Write-Output "LOG:[$act] Sources reset. Retrying $name..."
-                        $p = Invoke-WingetCmd $cmd
+                        Write-Output "LOG:[$act][$index/$total] Sources reset. Retrying $name..."
+                        if ($wingetArgs -and ($src -eq "winget" -or $src -eq "msstore")) {
+                            $p = Invoke-WingetLive $wingetArgs
+                        } else {
+                            $p = Invoke-WingetCmd $cmd
+                        }
                         $hex = "0x{0:x}" -f $p.ExitCode 
                     }
                 }
 
                 # --- CHECK FINAL RESULT ---
                 if ($p.ExitCode -eq 0) {
-                    Write-Output "LOG:[$act] SUCCESS: $name"
+                    Write-Output "LOG:[$act][$index/$total] SUCCESS: $name"
+                    Write-Output "RESULT:${index}:SUCCESS:$name"
                 }
                 elseif ($p.ExitCode -eq 3010) {
-                    Write-Output "LOG:[$act] SUCCESS: $name (Reboot Required to complete)"
+                    Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (Reboot Required to complete)"
+                    Write-Output "RESULT:${index}:SUCCESS:$name"
                 }
                 elseif ($p.ExitCode -eq 1602) {
-                    Write-Output "LOG:[$act] CANCELLED: $name (by User)"
+                    Write-Output "LOG:[$act][$index/$total] CANCELLED: $name (by User)"
+                    Write-Output "RESULT:${index}:CANCELLED:$name"
                 }
                 else {
                     # --- FAILURE HANDLING ---
@@ -5498,10 +5767,28 @@ $Script:StartWingetAction = {
                     if ($ErrorCodes.ContainsKey($hex)) { $errDesc = $ErrorCodes[$hex] }
                     elseif ($ErrorCodes.ContainsKey($dec)) { $errDesc = $ErrorCodes[$dec] }
 
+                    # Known non-retry outcomes: avoid opening fallback user-mode consoles.
+                    if ($hex -eq "0x8a150006") {
+                        Write-Output "LOG:[$act][$index/$total] SKIPPED [$hex] ${errDesc} - $name"
+                        Write-Output "RESULT:${index}:SKIPPED:$name"
+                        continue
+                    }
+                    if ($hex -eq "0x8a15000b" -or $dec -eq "1618") {
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (no user-mode retry)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+
+                    if ($useVisibleWindow) {
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (see visible window output)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+
                     if ($dec -eq "1603") {
-                        Write-Output "LOG:[$act] FAILED (1603): $name - Retrying in Interactive Mode (Look for popup)..."
+                        Write-Output "LOG:[$act][$index/$total] FAILED (1603): $name - Retrying in Interactive Mode (Look for popup)..."
                     } else {
-                        Write-Output "LOG:[$act] FAILED [$hex] $errDesc - Retrying as User..."
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] $errDesc - Retrying as User..."
                     }
                     
                     # --- RETRY AS USER (Fallback) ---
@@ -5528,7 +5815,12 @@ timeout /t 5
                     } catch {
                         Write-Output "LOG:Retry failed: $($_.Exception.Message)"
                     }
+                    Write-Output "RESULT:${index}:FAILED:$name"
                 }
+            }
+            else {
+                Write-Output "LOG:[$act][$index/$total] SKIPPED: No command generated for source '$src' ($name)"
+                Write-Output "RESULT:${index}:SKIPPED:$name"
             }
         }
     }
@@ -5537,24 +5829,120 @@ timeout /t 5
     if ($script:WingetTimer) { $script:WingetTimer.Stop() }
     $script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $processWingetLines = {
+        param($lines)
+        foreach ($line in $lines) {
+            if ($line -match "^RESULT:(\d+):(SUCCESS|SKIPPED|FAILED|CANCELLED):(.*)$") {
+                $doneIndex = [int]$matches[1]
+                $result = $matches[2]
+                if (-not $script:WingetCompletedIndexes.ContainsKey($doneIndex)) {
+                    $script:WingetCompletedIndexes[$doneIndex] = $true
+                    $script:WingetProgressDone++
+                    if ($result -eq "SUCCESS") {
+                        $script:WingetProgressSuccess++
+                    }
+                    elseif ($result -eq "SKIPPED") {
+                        $script:WingetProgressSkipped++
+                    }
+                    else {
+                        $script:WingetProgressFailed++
+                    }
+                    if ($pbWingetProgress) { $pbWingetProgress.Value = [Math]::Min($pbWingetProgress.Maximum, $script:WingetProgressDone) }
+                    if ($lblWingetProgress) {
+                        $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
+                    }
+                }
+                continue
+            }
+            if ($line -match "^PROGRESS:(\d+)/(\d+):(.+)$") {
+                $i = [int]$matches[1]
+                $t = [int]$matches[2]
+                $n = $matches[3]
+                $script:WingetCurrentIndex = $i
+                $script:WingetCurrentItemName = $n
+                $lblWingetStatus.Text = "$($script:WingetActiveAction) ${i}/${t}: $n"
+                if ($pbWingetProgress -and $i -gt 1 -and $pbWingetProgress.Value -lt ($i - 1)) {
+                    $pbWingetProgress.Value = $i - 1
+                }
+                continue
+            }
+            if ($line -match "^LOG:(.*)") {
+                $logMsg = $matches[1].Trim()
+                if ($logMsg -match "^\[[^\]]+\]\[(\d+)/(\d+)\]\s+(SUCCESS|SKIPPED|FAILED|CANCELLED)\b") {
+                    $doneIndex = [int]$matches[1]
+                    $result = $matches[3]
+                    if (-not $script:WingetCompletedIndexes.ContainsKey($doneIndex)) {
+                        $script:WingetCompletedIndexes[$doneIndex] = $true
+                        $script:WingetProgressDone++
+                        if ($result -eq "SUCCESS") {
+                            $script:WingetProgressSuccess++
+                        }
+                        elseif ($result -eq "SKIPPED") {
+                            $script:WingetProgressSkipped++
+                        }
+                        else {
+                            $script:WingetProgressFailed++
+                        }
+                        if ($pbWingetProgress) { $pbWingetProgress.Value = [Math]::Min($pbWingetProgress.Maximum, $script:WingetProgressDone) }
+                        if ($lblWingetProgress) {
+                            $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
+                        }
+                    }
+                }
+                Write-GuiLog $logMsg
+            }
+        }
+    }
     
     $script:WingetTimer.Add_Tick({
+        if (-not $script:WingetJob) { return }
         if ($script:WingetJob.HasMoreData) {
             $results = Receive-Job -Job $script:WingetJob
-            foreach ($line in $results) {
-                if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] }
+            if ($results) {
+                & $processWingetLines $results
             }
+        }
+        if ($script:WingetJob.State -eq 'Running' -and $script:WingetActionStartedAt -and $script:WingetCurrentItemName) {
+            $elapsed = (Get-Date) - $script:WingetActionStartedAt
+            $elapsedText = [string]::Format("{0:mm\\:ss}", $elapsed)
+            $curIdx = [Math]::Max(1, $script:WingetCurrentIndex)
+            $lblWingetStatus.Text = "$($script:WingetActiveAction) ${curIdx}/$($script:WingetProgressTotal): $($script:WingetCurrentItemName)  (${elapsedText})"
         }
         if ($script:WingetJob.State -ne 'Running') {
             $script:WingetTimer.Stop()
             $results = Receive-Job -Job $script:WingetJob
-            foreach ($line in $results) { if ($line -match "^LOG:(.*)") { Write-GuiLog $matches[1] } }
+            if ($results) {
+                & $processWingetLines $results
+            }
             Remove-Job -Job $script:WingetJob
             $script:WingetJob = $null
-            $lblWingetStatus.Visibility = "Hidden"
+            if ($script:WingetActiveAction) {
+                if ($script:WingetProgressDone -lt $script:WingetProgressTotal) {
+                    $missing = $script:WingetProgressTotal - $script:WingetProgressDone
+                    $script:WingetProgressDone = $script:WingetProgressTotal
+                    $script:WingetProgressFailed += $missing
+                    Write-GuiLog "[$($script:WingetActiveAction)] Warning: $missing item(s) ended without explicit result; marked as failed."
+                }
+                $lblWingetStatus.Text = "$($script:WingetActiveAction) completed. $($script:WingetProgressDone)/$($script:WingetProgressTotal) done."
+                Write-GuiLog "[$($script:WingetActiveAction)] Completed."
+            }
+            if ($pbWingetProgress) { $pbWingetProgress.Value = $script:WingetProgressDone }
+            if ($lblWingetProgress) {
+                $lblWingetProgress.Text = "$($script:WingetProgressDone)/$($script:WingetProgressTotal) done | $($script:WingetProgressSuccess) success | $($script:WingetProgressSkipped) skipped | $($script:WingetProgressFailed) failed"
+            }
             $btnWingetScan.IsEnabled = $true
             $btnWingetUpdateSel.IsEnabled = $true
-            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+            if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
+            if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
+            if ($script:WingetProgressSuccess -gt 0) {
+                Write-GuiLog "Action finished. $($script:WingetProgressSuccess) successful change(s). Refreshing package list..."
+                if ($btnWingetScan) {
+                    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                }
+            } else {
+                Write-GuiLog "Action finished. No successful changes detected; skipping auto-refresh."
+            }
+            $script:WingetActiveAction = $null
         }
     })
     $script:WingetTimer.Start()
@@ -5754,9 +6142,13 @@ $script:ScanTimer.Add_Tick({
             $script:ScanTimer.Stop()
             
             $lblWingetStatus.Visibility = "Hidden"
+            if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
+            if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
             $btnWingetScan.IsEnabled = $true
             if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
             $btnWingetUpdateSel.IsEnabled = $true
+            $lstWinget.Items.Refresh()
+            $lstWinget.UpdateLayout()
             
             if ($lstWinget.Items.Count -eq 0) {
                  Write-GuiLog "System is up to date."
@@ -5770,12 +6162,17 @@ $script:ScanTimer.Add_Tick({
 # 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
     # UI Prep
+    $lblWingetTitle.Text = "Package Updates"
     $lblWingetStatus.Text = "Scanning all providers..."
     $lblWingetStatus.Visibility = "Visible"
+    if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
+    if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
     $lstWinget.Items.Clear()
     $btnWingetScan.IsEnabled = $false
     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
     $btnWingetUpdateSel.IsEnabled = $false
+    $btnWingetInstall.Visibility = "Collapsed"
+    $btnWingetUpdateSel.Visibility = "Visible"
     
     Write-GuiLog " "
     Write-GuiLog "Starting Parallel Scan..."
@@ -6164,45 +6561,93 @@ $btnWingetUnignore.Add_Click({
 
 # --- LISTVIEW SORTING LOGIC ---
 $lstWinget = Get-Ctrl "lstWinget"
-$script:LastSortHeader = ""
-$script:SortAscending = $true
+$script:WingetSortChain = New-Object System.Collections.ArrayList
 
-$sortBlock = {
-    param($src, $e) 
-    
-    # Check if the clicked element is a Column Header
-    if ($e.OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) {
-        $header = $e.OriginalSource.Column.Header
-        
-        # Ignore clicks on padding/empty space
-        if ([string]::IsNullOrWhiteSpace($header)) { return }
+function Get-CleanHeader {
+    param([object]$Header)
+    if ($null -eq $Header) { return "" }
+    return ([string]$Header -replace '\s+[▲▼]$', '').Trim()
+}
 
-        # Toggle Sort Direction if clicking the same header
-        if ($script:LastSortHeader -eq $header) {
-            $script:SortAscending = -not $script:SortAscending
+function Update-GridViewHeaders {
+    param([System.Windows.Controls.ListView]$ListView, [string]$ActiveHeader, [bool]$Ascending)
+    if (-not $ListView -or -not $ListView.View -or -not ($ListView.View -is [System.Windows.Controls.GridView])) { return }
+    foreach ($col in $ListView.View.Columns) {
+        $clean = Get-CleanHeader $col.Header
+        if ($clean -eq $ActiveHeader) {
+            $col.Header = if ($Ascending) { "$clean ▲" } else { "$clean ▼" }
         } else {
-            $script:SortAscending = $true
-            $script:LastSortHeader = $header
+            $col.Header = $clean
         }
-
-        # Get Items
-        $items = @($lstWinget.Items)
-        $lstWinget.Items.Clear()
-
-        # Perform Sort
-        if ($script:SortAscending) {
-            $sorted = $items | Sort-Object -Property $header
-        } else {
-            $sorted = $items | Sort-Object -Property $header -Descending
-        }
-
-        # Repopulate
-        $sorted | ForEach-Object { $lstWinget.Items.Add($_) }
     }
 }
 
-# Attach the Click Handler to the ListView headers
-$lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $sortBlock)
+function Set-SortChainPrimary {
+    param(
+        [System.Collections.ArrayList]$Chain,
+        [string]$PropertyName
+    )
+    if (-not $Chain -or [string]::IsNullOrWhiteSpace($PropertyName)) { return $false }
+
+    $existingIndex = -1
+    for ($i = 0; $i -lt $Chain.Count; $i++) {
+        if ($Chain[$i].Property -eq $PropertyName) { $existingIndex = $i; break }
+    }
+
+    if ($existingIndex -eq 0) {
+        $Chain[0].Descending = -not [bool]$Chain[0].Descending
+        return [bool](-not $Chain[0].Descending)
+    }
+
+    if ($existingIndex -gt 0) { $Chain.RemoveAt($existingIndex) }
+    $entry = [PSCustomObject]@{ Property = $PropertyName; Descending = $false }
+    $Chain.Insert(0, $entry)
+    return $true
+}
+
+function Set-ListViewSort {
+    param(
+        [System.Windows.Controls.ListView]$ListView,
+        [System.Collections.ArrayList]$Chain
+    )
+    if (-not $ListView -or -not $Chain -or $Chain.Count -eq 0) { return }
+    $items = @($ListView.Items)
+    if ($items.Count -eq 0) { return }
+
+    $sortSpec = foreach ($rule in $Chain) {
+        @{ Expression = $rule.Property; Descending = [bool]$rule.Descending }
+    }
+    $sorted = $items | Sort-Object -Property $sortSpec
+    $ListView.Items.Clear()
+    foreach ($item in $sorted) { [void]$ListView.Items.Add($item) }
+}
+
+function Resolve-WingetSortProperty {
+    param([string]$Header)
+    switch ($Header) {
+        "Package Name" { return "Name" }
+        "Installed"    { return "Version" }
+        "Latest"       { return "Available" }
+        default        { return $Header }
+    }
+}
+
+if ($lstWinget) {
+    $wingetSortHandler = [System.Windows.RoutedEventHandler]{
+        param($src, $e)
+        if ($e.OriginalSource -isnot [System.Windows.Controls.GridViewColumnHeader]) { return }
+        $header = Get-CleanHeader $e.OriginalSource.Column.Header
+        if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+        $propName = Resolve-WingetSortProperty $header
+        if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+        $isAscending = Set-SortChainPrimary -Chain $script:WingetSortChain -PropertyName $propName
+        Update-GridViewHeaders -ListView $lstWinget -ActiveHeader $header -Ascending:$isAscending
+        Set-ListViewSort -ListView $lstWinget -Chain $script:WingetSortChain
+    }
+    $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $wingetSortHandler)
+}
 
 # ---------------------------------------------------------
 # HIGH-PERFORMANCE THREADED SEARCH
@@ -6389,9 +6834,45 @@ $btnWingetFind.Add_Click({
     $script:SearchTimer.Start()
 })
 
+function Test-WingetRestartRiskItem {
+    param($Item)
+    if (-not $Item) { return $false }
+    $id = [string]$Item.Id
+    $name = [string]$Item.Name
+    $eaIdPattern = '(?i)(ElectronicArts|EA\.Desktop|EADesktop|EAapp)'
+    $eaNamePattern = '(?i)\b(EA app|Electronic Arts|EA Desktop)\b'
+    return ($id -match $eaIdPattern -or $name -match $eaNamePattern)
+}
+
+function Show-WingetRestartRiskWarning {
+    param(
+        [object[]]$Items,
+        [string]$Action = "Update"
+    )
+    if ($Action -ne "Update") { return $true }
+    $risky = @($Items | Where-Object { Test-WingetRestartRiskItem $_ })
+    if ($risky.Count -eq 0) { return $true }
+
+    $pkgNames = @($risky | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
+    } | Select-Object -Unique)
+    $joined = ($pkgNames -join ", ")
+    if ([string]::IsNullOrWhiteSpace($joined)) { $joined = "the selected EA package" }
+
+    $msg = "Warning: Updating $joined may trigger a Windows restart (installer behavior outside WMT control).`n`nDo you want to continue?"
+    $res = [System.Windows.MessageBox]::Show($msg, "Restart Warning", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
+    return ($res -eq [System.Windows.MessageBoxResult]::Yes)
+}
+
 # 1. Update Selected (Removed CmdTemplate to allow smart logic)
 $btnWingetUpdateSel.Add_Click({ 
-    & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Update"
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -eq 0) { return }
+    if (-not (Show-WingetRestartRiskWarning -Items $selected -Action "Update")) {
+        Write-GuiLog "[Update] Cancelled by user after restart warning."
+        return
+    }
+    & $Script:StartWingetAction -ListItems $selected -ActionName "Update"
 })
 
 # 2. Install Selected (Removed CmdTemplate so it includes --accept-agreements)
@@ -6654,6 +7135,39 @@ $btnFwRefresh.Add_Click({
     $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
     $lblFwStatus.Visibility="Collapsed"
 })
+
+# --- FIREWALL LISTVIEW SORTING LOGIC ---
+$script:FirewallSortChain = New-Object System.Collections.ArrayList
+function Resolve-FirewallSortProperty {
+    param([string]$Header)
+    switch ($Header) {
+        "Rule Name" { return "Name" }
+        "Direction" { return "Direction" }
+        "Action"    { return "Action" }
+        "Status"    { return "Enabled" }
+        "Protocol"  { return "Protocol" }
+        "Port"      { return "LocalPort" }
+        default     { return $Header }
+    }
+}
+
+if ($lstFw) {
+    $fwSortHandler = [System.Windows.RoutedEventHandler]{
+        param($src, $e)
+        if ($e.OriginalSource -isnot [System.Windows.Controls.GridViewColumnHeader]) { return }
+        $header = Get-CleanHeader $e.OriginalSource.Column.Header
+        if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+        $propName = Resolve-FirewallSortProperty $header
+        if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+        $isAscending = Set-SortChainPrimary -Chain $script:FirewallSortChain -PropertyName $propName
+        Update-GridViewHeaders -ListView $lstFw -ActiveHeader $header -Ascending:$isAscending
+        Set-ListViewSort -ListView $lstFw -Chain $script:FirewallSortChain
+    }
+    $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler)
+}
+
 $txtFwSearch.Add_TextChanged({
     $q = $txtFwSearch.Text
     $lstFw.Items.Clear()
@@ -6790,6 +7304,15 @@ if ($btnCreditChaythonFeatures) { $btnCreditChaythonFeatures.Add_Click({ Start-P
 if ($btnCreditChaythonCLI) { $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
 if ($btnCreditChaythonGUI) { $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
 if ($btnCreditIos12checker) { $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnToggleTheme) {
+    $btnToggleTheme.Add_Click({
+        $nextTheme = if ($script:CurrentTheme -eq "dark") { "light" } else { "dark" }
+        Set-WmtTheme -Theme $nextTheme
+        $settings = Get-WmtSettings
+        $settings.Theme = $nextTheme
+        Save-WmtSettings -Settings $settings
+    })
+}
 if ($btnDonate) { $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" }) }
 
 if ($btnNavDownloads) { $btnNavDownloads.Add_Click({ Show-DownloadStats }) }
@@ -6959,12 +7482,46 @@ $btnFeatLegacy.Add_Click({ Switch-WindowsFeature "WindowsMediaPlayer" "Legacy Me
 function Switch-WindowsFeature($FeatureName, $DisplayName) {
     Invoke-UiCommand {
         param($fn, $dn)
+        if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {
+            Write-GuiLog "PowerShell feature cmdlets unavailable; trying DISM fallback..."
+            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            if ($featureInfo -match "State\\s*:\\s*Enabled") {
+                dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
+                else { throw "DISM failed to disable $dn (code $LASTEXITCODE)." }
+            } else {
+                dism /Online /Enable-Feature /FeatureName:$fn /All /NoRestart | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-GuiLog "Enabled: $dn (DISM)" }
+                else { throw "DISM failed to enable $dn (code $LASTEXITCODE). Windows source files may be required." }
+            }
+            return
+        }
+
         $feature = Get-WindowsOptionalFeature -Online -FeatureName $fn -ErrorAction SilentlyContinue
-        if ($feature.State -eq 'Enabled') {
-            Disable-WindowsOptionalFeature -Online -FeatureName $fn -NoRestart -ErrorAction SilentlyContinue | Out-Null
+
+        # Some systems report NetFx3 as unknown to PowerShell even when DISM can toggle it.
+        if (-not $feature) {
+            if ($fn -ne "NetFx3") { throw "Feature name $fn is unknown." }
+
+            Write-GuiLog "$dn not detected via PowerShell; trying DISM fallback..."
+            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            if ($featureInfo -match "State\\s*:\\s*Enabled") {
+                dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
+                else { throw "DISM failed to disable $dn (code $LASTEXITCODE)." }
+            } else {
+                dism /Online /Enable-Feature /FeatureName:$fn /All /NoRestart | Out-Null
+                if ($LASTEXITCODE -eq 0) { Write-GuiLog "Enabled: $dn (DISM)" }
+                else { throw "DISM failed to enable $dn (code $LASTEXITCODE). Windows source files may be required." }
+            }
+            return
+        }
+
+        if ($feature.State -eq "Enabled") {
+            Disable-WindowsOptionalFeature -Online -FeatureName $fn -NoRestart -ErrorAction Stop | Out-Null
             Write-GuiLog "Disabled: $dn"
         } else {
-            Enable-WindowsOptionalFeature -Online -FeatureName $fn -All -NoRestart -ErrorAction SilentlyContinue | Out-Null
+            Enable-WindowsOptionalFeature -Online -FeatureName $fn -All -NoRestart -ErrorAction Stop | Out-Null
             Write-GuiLog "Enabled: $dn"
         }
     } "Toggling $DisplayName..." -ArgumentList $FeatureName, $DisplayName
@@ -7149,11 +7706,57 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
 
 # --- LAUNCH ---
 $window.Add_Loaded({ 
+    $settings = Get-WmtSettings
+
+    # Restore persisted window geometry/state when valid
+    if ($settings.WindowBounds) {
+        $wb = $settings.WindowBounds
+        if ($wb.Width -ge $window.MinWidth -and $wb.Height -ge $window.MinHeight) {
+            $window.Width = [double]$wb.Width
+            $window.Height = [double]$wb.Height
+        }
+        if (($wb.Left -ne 0 -or $wb.Top -ne 0) -and $settings.WindowState -ne "Maximized") {
+            $window.Left = [double]$wb.Left
+            $window.Top = [double]$wb.Top
+        }
+    }
+
+    Set-WmtTheme -Theme $settings.Theme
+    if ($settings.WindowState -eq "Maximized") {
+        $window.WindowState = [System.Windows.WindowState]::Maximized
+    }
+
     # 1. Click the Updates tab by default
     (Get-Ctrl "btnTabUpdates").RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
     
     # 2. Trigger the background update check
     Start-UpdateCheckBackground
+})
+
+$window.Add_Closing({
+    try {
+        $settings = Get-WmtSettings
+        $settings.Theme = $script:CurrentTheme
+        $settings.WindowState = [string]$window.WindowState
+
+        $rb = if ($window.WindowState -eq [System.Windows.WindowState]::Normal) { $null } else { $window.RestoreBounds }
+        if ($rb) {
+            $settings.WindowBounds = @{
+                Top    = [double]$rb.Top
+                Left   = [double]$rb.Left
+                Width  = [double]$rb.Width
+                Height = [double]$rb.Height
+            }
+        } else {
+            $settings.WindowBounds = @{
+                Top    = [double]$window.Top
+                Left   = [double]$window.Left
+                Width  = [double]$window.Width
+                Height = [double]$window.Height
+            }
+        }
+        Save-WmtSettings -Settings $settings
+    } catch {}
 })
 
 # 3. Show the Window
