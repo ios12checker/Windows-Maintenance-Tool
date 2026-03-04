@@ -105,11 +105,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "WMT-GUI.ps1"
 
 | File | Location |
 |------|----------|
-| Installed_Drivers.txt | Desktop |
-| System_Info_YYYY-MM-DD.txt | Desktop |
-| Network_Info_YYYY-MM-DD.txt | Desktop |
-| Driver_List_YYYY-MM-DD.txt | Desktop |
-| routing_table_YYYY-MM-DD.txt | Desktop |
+| Installed_Drivers.txt | Data folder |
+| System_Info_YYYY-MM-DD.txt | Data folder |
+| Network_Info_YYYY-MM-DD.txt | Data folder |
+| Driver_List_YYYY-MM-DD.txt | Data folder |
+| routing_table_YYYY-MM-DD.txt | Data folder |
 | RegistryBackup_YYYY-MM-DD_HH-MM.reg | Data folder |
 | hosts_backup_* | Data folder |
 | settings.json | Data folder |
