@@ -169,6 +169,12 @@ MIT Licensed — see [LICENSE](LICENSE).
 
 ---
 
+## 💬 Community
+
+[![Discord](https://img.shields.io/badge/Discord-Join%20Us-7289DA?logo=discord)](https://discord.gg/bCQqKHGxja)
+
+---
+
 ## 🤝 Contributing
 
 Issues and PRs welcome! Please include:
