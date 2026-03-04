@@ -1,5 +1,5 @@
 <#
-    Windows Maintenance Tool - GUi Edition
+    Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
     GUI thanks to https://github.com/Chaython
@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.3"
+$AppVersion = "5.0.4"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -4389,7 +4389,7 @@ function Show-TaskManager {
                     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="6,0,6,12">
                         <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
                         <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
-                        <Button Name="btnCatDev" Content="Development" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
+                        <Button Name="btnCatDev" Content="Development" Width="Auto" MinWidth="120" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
                         <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
                         <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
                         <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
