@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.0.4"
+$AppVersion = "5.0.5"
 $ErrorActionPreference = "SilentlyContinue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
@@ -1150,10 +1150,14 @@ function Show-AdvancedCleanupSelection {
     # --- FORM SETUP ---
     $form = New-Object System.Windows.Forms.Form
     $form.Text = "Advanced Cleanup Selection"
-    $form.Size = New-Object System.Drawing.Size(650, 850)
+    $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $formWidth = [Math]::Min(650, [Math]::Max(560, $workArea.Width - 60))
+    $formHeight = [Math]::Min(850, [Math]::Max(520, $workArea.Height - 80))
+    $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
+    $form.MinimumSize = New-Object System.Drawing.Size(560, 520)
     $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = 'FixedDialog'
-    $form.MaximizeBox = $false
+    $form.FormBorderStyle = 'Sizable'
+    $form.MaximizeBox = $true
     $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.ForeColor = "White"
 
@@ -1177,12 +1181,21 @@ function Show-AdvancedCleanupSelection {
     $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
     $txtSearch.ForeColor = "White"
     $txtSearch.BorderStyle = "FixedSingle"
+    $txtSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($txtSearch)
     
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Search:"
     $lblSearch.AutoSize = $true; $lblSearch.Location = "370, 15"
+    $lblSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($lblSearch)
+
+    $layoutTopPanel = {
+        $txtSearch.Left = [Math]::Max(240, $topPanel.ClientSize.Width - $txtSearch.Width - 20)
+        $lblSearch.Left = [Math]::Max(170, $txtSearch.Left - $lblSearch.PreferredWidth - 8)
+    }
+    $topPanel.Add_SizeChanged({ & $layoutTopPanel })
+    & $layoutTopPanel
 
     # --- 2. BOTTOM PANEL (Buttons) ---
     $btnPanel = New-Object System.Windows.Forms.Panel
@@ -1194,6 +1207,7 @@ function Show-AdvancedCleanupSelection {
     $btnClean.Size = "140, 35"; $btnClean.Location = "470, 12"
     $btnClean.BackColor = "SeaGreen"; $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
     $btnClean.DialogResult = "OK"
+    $btnClean.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnClean)
 
     $btnCancel = New-Object System.Windows.Forms.Button
@@ -1201,7 +1215,15 @@ function Show-AdvancedCleanupSelection {
     $btnCancel.Size = "100, 35"; $btnCancel.Location = "360, 12"
     $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
     $btnCancel.DialogResult = "Cancel"
+    $btnCancel.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnCancel)
+
+    $layoutButtonPanel = {
+        $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
+        $btnCancel.Left = [Math]::Max(0, $btnClean.Left - $btnCancel.Width - 10)
+    }
+    $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
+    & $layoutButtonPanel
 
     # --- 3. MAIN CONTENT PANEL ---
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -2542,25 +2564,153 @@ function Invoke-RegistryTask {
 
 function Invoke-SSDTrim {
     Invoke-UiCommand {
-        $ssds = Get-PhysicalDisk | Where-Object MediaType -eq 'SSD'
-        if (-not $ssds) { Write-Output "No SSDs detected."; return }
         $log = Join-Path (Get-DataPath) ("SSD_OPTIMIZE_{0}.log" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))
         $out = @("SSD Optimize Log - $(Get-Date)")
-        foreach ($ssd in $ssds) {
-            $disk = Get-Disk | Where-Object { $_.FriendlyName -eq $ssd.FriendlyName }
-            if ($disk) {
-                # FIX: Use scriptblock for null check
-                $vols = $disk | Get-Partition | Get-Volume | Where-Object { $null -ne $_.DriveLetter }
-                foreach ($v in $vols) {
-                    $out += "Optimizing $($v.DriveLetter):"
-                    $out += Optimize-Volume -DriveLetter $v.DriveLetter -ReTrim -Verbose 4>&1
+
+        $volumes = Get-Volume -ErrorAction SilentlyContinue | Where-Object {
+            $null -ne $_.DriveLetter -and $_.DriveType -eq 'Fixed'
+        }
+        if (-not $volumes -or $volumes.Count -eq 0) {
+            $out += "No fixed volumes with drive letters were found."
+            $out | Out-File -FilePath $log -Encoding UTF8
+            Write-Output "SSD optimization skipped. Log: $log"
+            return
+        }
+
+        $optimized = 0
+        $skipped = 0
+        $failed = 0
+
+        foreach ($v in $volumes) {
+            $driveLetter = [string]$v.DriveLetter
+            $mediaType = "Unknown"
+
+            try {
+                $part = Get-Partition -DriveLetter $v.DriveLetter -ErrorAction Stop | Select-Object -First 1
+                if ($part) {
+                    $disk = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
+                    if ($disk -and $disk.MediaType) { $mediaType = [string]$disk.MediaType }
+                }
+            } catch {}
+
+            if ($mediaType -notin @("SSD", "SCM", "Unspecified", "Unknown")) {
+                $out += "Skipping $driveLetter`: (MediaType=$mediaType)"
+                $skipped++
+                continue
+            }
+
+            $mediaTypeLabel = switch ($mediaType) {
+                "Unknown" { "Unknown (treated as SSD)" }
+                "Unspecified" { "Unspecified (treated as SSD)" }
+                default { $mediaType }
+            }
+            $out += "Optimizing $driveLetter`: (MediaType=$mediaTypeLabel)"
+
+            try {
+                $result = Optimize-Volume -DriveLetter $v.DriveLetter -ReTrim -Verbose -ErrorAction Stop 4>&1 | Out-String
+                if (-not [string]::IsNullOrWhiteSpace($result)) { $out += $result.TrimEnd() }
+                $optimized++
+            } catch {
+                $out += "Optimize-Volume failed on $driveLetter`: $($_.Exception.Message)"
+                try {
+                    $fallback = (& defrag "$driveLetter`:" /L 2>&1 | Out-String).TrimEnd()
+                    if (-not [string]::IsNullOrWhiteSpace($fallback)) { $out += $fallback }
+                    $out += "Fallback completed on $driveLetter`: defrag /L"
+                    $optimized++
+                } catch {
+                    $out += "Fallback failed on $driveLetter`: $($_.Exception.Message)"
+                    $failed++
                 }
             }
         }
+
+        $out += "Summary: optimized=$optimized, skipped=$skipped, failed=$failed"
         $out | Out-File -FilePath $log -Encoding UTF8
-        Write-Output "SSD optimization complete. Log: $log"
+        if ($failed -gt 0) {
+            Write-Output "SSD optimization completed with some failures. Log: $log"
+        } else {
+            Write-Output "SSD optimization complete. Log: $log"
+        }
     } "Running SSD Trim/ReTrim..."
 }
+
+function Start-SSDTrimConsole {
+    $consoleScript = @'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$ErrorActionPreference = "Continue"
+
+Write-Host "WMT: SSD Trim/ReTrim started at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+Write-Host ""
+
+$volumes = Get-Volume -ErrorAction SilentlyContinue |
+    Where-Object { $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed" } |
+    Sort-Object DriveLetter -Unique
+
+if (-not $volumes -or $volumes.Count -eq 0) {
+    Write-Host "No fixed volumes with drive letters were found."
+    Write-Host ""
+    [void](Read-Host "Press Enter to close")
+    exit
+}
+
+$optimized = 0
+$skipped = 0
+$failed = 0
+
+foreach ($v in $volumes) {
+    $driveLetter = [string]$v.DriveLetter
+    $mediaType = "Unknown"
+
+    try {
+        $part = Get-Partition -DriveLetter $v.DriveLetter -ErrorAction Stop | Select-Object -First 1
+        if ($part) {
+            $disk = Get-Disk -Number $part.DiskNumber -ErrorAction Stop
+            if ($disk -and $disk.MediaType) { $mediaType = [string]$disk.MediaType }
+        }
+    } catch {}
+
+    if ($mediaType -notin @("SSD", "SCM", "Unspecified", "Unknown")) {
+        Write-Host "Skipping $driveLetter`: (MediaType=$mediaType)"
+        $skipped++
+        continue
+    }
+
+    $mediaTypeLabel = switch ($mediaType) {
+        "Unknown" { "Unknown (treated as SSD)" }
+        "Unspecified" { "Unspecified (treated as SSD)" }
+        default { $mediaType }
+    }
+
+    Write-Host ""
+    Write-Host "Optimizing $driveLetter`: (MediaType=$mediaTypeLabel)"
+
+    try {
+        Optimize-Volume -DriveLetter $v.DriveLetter -ReTrim -Verbose -ErrorAction Stop
+        $optimized++
+    } catch {
+        Write-Warning "Optimize-Volume failed on $driveLetter`: $($_.Exception.Message)"
+        try {
+            defrag "$driveLetter`:" /L
+            Write-Host "Fallback completed on $driveLetter`: defrag /L"
+            $optimized++
+        } catch {
+            Write-Warning "Fallback failed on $driveLetter`: $($_.Exception.Message)"
+            $failed++
+        }
+    }
+}
+
+Write-Host ""
+Write-Host "Summary: optimized=$optimized, skipped=$skipped, failed=$failed"
+Write-Host ""
+[void](Read-Host "Press Enter to close")
+'@
+
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($consoleScript))
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -WindowStyle Normal
+    Write-GuiLog "[Trim] Opened live SSD trim console window."
+}
+
 function Show-BrokenShortcuts {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
@@ -7288,7 +7438,7 @@ $btnInstallGpedit.Add_Click({ Start-GpeditInstall })
 $btnUtilTrim.Add_Click({
     $res = [System.Windows.MessageBox]::Show("Run SSD Trim/ReTrim now? This will optimize all detected SSD volumes.","Trim SSD",[System.Windows.MessageBoxButton]::YesNo,[System.Windows.MessageBoxImage]::Question)
     if ($res -ne "Yes") { return }
-    Start-Process -FilePath "powershell.exe" -ArgumentList '-NoProfile -NoExit -ExecutionPolicy Bypass -Command "Get-PhysicalDisk | Where-Object MediaType -eq ''SSD'' | ForEach-Object { Get-Disk | Where-Object { $_.FriendlyName -eq $_.FriendlyName } | Get-Partition | Get-Volume | Where-Object DriveLetter -ne $null | ForEach-Object { Optimize-Volume -DriveLetter $_.DriveLetter -ReTrim -Verbose } }"' -Verb RunAs -WindowStyle Normal
+    Start-SSDTrimConsole
 })
 $btnUtilSysInfo.Add_Click({ Invoke-SystemReports })
 $btnUtilMas.Add_Click({ Invoke-MASActivation })
