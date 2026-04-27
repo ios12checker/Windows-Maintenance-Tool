@@ -8229,14 +8229,37 @@ $btnWingetScan.Add_Click({
                         $pInfo.UseShellExecute = $false
                         $pInfo.CreateNoWindow = $true
                         $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-
                         $p = [System.Diagnostics.Process]::Start($pInfo)
+                        
                         if (-not $p.WaitForExit($timeoutMs)) {
                             Write-Output "LOG:$SourceName scan timed out after $([int]($timeoutMs / 1000)) seconds."
                             try { $p.Kill() } catch {}
                             return
                         }
+                        
                         $out = $p.StandardOutput.ReadToEnd()
+    
+                        # --- AUTO-ACCEPT & AUTO-REFRESH LOGIC ---
+                        if ($p.ExitCode -eq -1978335231 -or $p.ExitCode -eq -1978335229) { 
+                            Write-Output "LOG:$SourceName connection failed (Code: $($p.ExitCode)). Auto-accepting agreements and refreshing..."
+                            
+                            # 1. Force accept agreements via dummy search
+                            $fixInfo1 = New-Object System.Diagnostics.ProcessStartInfo("winget", "search `"Spotify`" --source $SourceName --accept-source-agreements")
+                            $fixInfo1.CreateNoWindow = $true; $fixInfo1.UseShellExecute = $false
+                            $fixP1 = [System.Diagnostics.Process]::Start($fixInfo1); $fixP1.WaitForExit()
+                            
+                            # 2. Force source update/refresh
+                            $fixInfo2 = New-Object System.Diagnostics.ProcessStartInfo("winget", "source update --name $SourceName")
+                            $fixInfo2.CreateNoWindow = $true; $fixInfo2.UseShellExecute = $false
+                            $fixP2 = [System.Diagnostics.Process]::Start($fixInfo2); $fixP2.WaitForExit()
+                            
+                            # 3. Retry the original scan
+                            Write-Output "LOG:$SourceName refreshed. Retrying scan..."
+                            $p = [System.Diagnostics.Process]::Start($pInfo)
+                            $p.WaitForExit($timeoutMs) | Out-Null
+                            $out = $p.StandardOutput.ReadToEnd()
+                        }
+    
                         if ($p.ExitCode -ne 0) {
                             Write-Output "LOG:$SourceName scan exited with code $($p.ExitCode)."
                         }
