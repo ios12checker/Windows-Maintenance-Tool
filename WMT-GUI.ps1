@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.4"
+$AppVersion = "5.5"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -267,7 +267,7 @@ function Get-WmtSettings {
         RegistryScan     = @{}
         WingetIgnore     = @()
         LoadWinapp2      = $false 
-        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey")
+        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey", "scoop", "gem", "cargo")
         Theme            = "dark"
         WindowState      = "Normal"
         WindowBounds     = @{
@@ -7663,9 +7663,9 @@ $Script:StartWingetAction = {
                 }
                 # --- PYTHON PIP ---
                 elseif ($src -eq "pip" -or $src -eq "pip3") {
-                    if ($act -eq "Install") { $cmd = "pip install `"$id`"" }
-                    if ($act -eq "Update") { $cmd = "pip install --upgrade `"$id`"" }
-                    if ($act -eq "Uninstall") { $cmd = "pip uninstall -y `"$id`"" }
+                    if ($act -eq "Install") { $cmd = "python -m pip install `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "python -m pip install --upgrade `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "python -m pip uninstall -y `"$id`"" }
                     $userCmd = $cmd
                 }
                 # --- NODE NPM ---
