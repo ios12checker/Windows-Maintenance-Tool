@@ -267,7 +267,7 @@ function Get-WmtSettings {
         RegistryScan     = @{}
         WingetIgnore     = @()
         LoadWinapp2      = $false 
-        EnabledProviders = @("winget", "msstore", "pip", "npm", "chocolatey", "scoop", "gem", "cargo")
+        EnabledProviders = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
         Theme            = "dark"
         WindowState      = "Normal"
         WindowBounds     = @{
@@ -7976,7 +7976,7 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "chocolatey") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey") -Force
     }
     $enabled = $settings.EnabledProviders
 
@@ -8019,6 +8019,13 @@ function Show-ProviderManager {
                 <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
             </Grid>
 
+            <!-- PNPM -->
+            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkPnpm" Grid.Column="0"/>
+                <TextBlock Text="pnpm" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblPnpmStatus" Text="Checking..." Grid.Column="2"/>
+            </Grid>
+
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkChoco" Grid.Column="0"/>
                 <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
@@ -8058,6 +8065,7 @@ function Show-ProviderManager {
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkPip = Get-WinCtrl "chkPip"
     $chkNpm = Get-WinCtrl "chkNpm"
+    $chkPnpm = Get-WinCtrl "chkPnpm"  
     $chkChoco = Get-WinCtrl "chkChoco"
     $chkScoop = Get-WinCtrl "chkScoop"
     $chkGem = Get-WinCtrl "chkGem"
@@ -8067,6 +8075,7 @@ function Show-ProviderManager {
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
     if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
+    if ("pnpm" -in $enabled) { $chkPnpm.IsChecked = $true }
     if ("chocolatey" -in $enabled) { $chkChoco.IsChecked = $true }
     if ("scoop" -in $enabled) { $chkScoop.IsChecked = $true }
     if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
@@ -8086,6 +8095,7 @@ function Show-ProviderManager {
 
     Set-Status "pip" "lblPipStatus"
     Set-Status "npm" "lblNpmStatus"
+    Set-Status "pnpm" "lblPnpmStatus"
     Set-Status "choco" "lblChocoStatus"
     Set-Status "scoop" "lblScoopStatus"
     Set-Status "gem" "lblGemStatus"
@@ -8097,6 +8107,7 @@ function Show-ProviderManager {
             if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
             if ($chkPip.IsChecked) { $newEnabled += "pip" }
             if ($chkNpm.IsChecked) { $newEnabled += "npm" }
+            if ($chkPnpm.IsChecked) { $newEnabled += "pnpm" } 
             if ($chkChoco.IsChecked) { $newEnabled += "chocolatey" }
             if ($chkScoop.IsChecked) { $newEnabled += "scoop" }
             if ($chkGem.IsChecked) { $newEnabled += "gem" }
@@ -8207,8 +8218,15 @@ $btnWingetScan.Add_Click({
 
         # Get Settings
         $settings = Get-WmtSettings
-        $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget") }
+        $enabled = if ($settings.EnabledProviders -and $settings.EnabledProviders.Count -gt 0) { 
+            $settings.EnabledProviders 
+        }
+        else { 
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") 
+        }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
+
+        Write-GuiLog "Enabled providers: $($enabled -join ', ')"
 
         # Reset Task List
         $script:ActiveScans.Clear()
@@ -8484,6 +8502,69 @@ $btnWingetScan.Add_Click({
                     }
                     catch { Write-Output "LOG:Cargo check failed." }
                 }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # H. PNPM WORKER (Improved + More Reliable)
+        if ("pnpm" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    Write-Output "LOG:Scanning Pnpm..."
+
+                    try {
+                        # 1. Try in current directory (project level)
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pnpm outdated --format json 2>nul")
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        
+                        if ($p.WaitForExit(35000)) {
+                            $json = $p.StandardOutput.ReadToEnd().Trim()
+                            if ($json -and $json.StartsWith("[")) {
+                                $pkgs = $json | ConvertFrom-Json
+                                foreach ($pkg in $pkgs) {
+                                    if ($IgnoreList -contains $pkg.name) { continue }
+                                    [PSCustomObject]@{
+                                        Source    = "pnpm"
+                                        Name      = $pkg.name
+                                        Id        = $pkg.name
+                                        Version   = $pkg.current
+                                        Available = $pkg.latest
+                                    }
+                                }
+                            }
+                        }
+
+                        # 2. Also try global packages
+                        $pInfoG = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pnpm outdated -g --format json 2>nul")
+                        $pInfoG.RedirectStandardOutput = $true
+                        $pInfoG.UseShellExecute = $false
+                        $pInfoG.CreateNoWindow = $true
+                        $pg = [System.Diagnostics.Process]::Start($pInfoG)
+                        if ($pg.WaitForExit(15000)) {
+                            $jsonG = $pg.StandardOutput.ReadToEnd().Trim()
+                            if ($jsonG -and $jsonG.StartsWith("[")) {
+                                $pkgsG = $jsonG | ConvertFrom-Json
+                                foreach ($pkg in $pkgsG) {
+                                    if ($IgnoreList -contains $pkg.name) { continue }
+                                    [PSCustomObject]@{
+                                        Source    = "pnpm (global)"
+                                        Name      = $pkg.name
+                                        Id        = $pkg.name
+                                        Version   = $pkg.current
+                                        Available = $pkg.latest
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Pnpm check failed or pnpm not installed."
+                    }
+                }).AddArgument($ignoreList)
+
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
@@ -8798,8 +8879,18 @@ $btnWingetFind.Add_Click({
 
         # Get Settings
         $settings = Get-WmtSettings
-        $enabled = if ($settings.EnabledProviders) { $settings.EnabledProviders } else { @("winget", "msstore", "pip", "npm", "chocolatey") }
+        
+        $enabled = if ($settings.EnabledProviders -and $settings.EnabledProviders.Count -gt 0) { 
+            $settings.EnabledProviders 
+        }
+        else { 
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") 
+        }
 
+        Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+        
+        # Reset Task List
+        $script:ActiveScans.Clear()
         # 3. DEFINE THE WORKER THREAD SCRIPT
         # This contains the EXACT logic that worked for you before.
         $scriptBlock = {
