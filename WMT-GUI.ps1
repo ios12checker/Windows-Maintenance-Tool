@@ -3388,19 +3388,288 @@ function Invoke-DriverReport {
 }
 
 function Invoke-ExportDrivers {
-    Invoke-UiCommand {
-        $path = Join-Path (Get-DataPath) ("Drivers_Backup_{0}" -f (Get-Date -Format "yyyyMMdd_HHmm"))
-        New-Item -ItemType Directory -Path $path -Force | Out-Null
-        $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", "*", """$path""" -NoNewWindow -Wait -PassThru
-        if ($proc.ExitCode -eq 0) {
-            Write-Output "Drivers exported to $path"
-            [System.Windows.MessageBox]::Show("Drivers exported to:`n$path", "Export Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    # 1. Write to the bottom left (Activity Log) that it's running
+    Write-GuiLog "Starting Driver Export Tool in a new window..."
+
+    # 2. Grab WMT data path
+    $wmtPath = try { Get-DataPath } catch { Join-Path $env:PUBLIC "WMT_Exports" }
+
+    # 3. Create the script block for the new visible window
+    $code = @"
+`$DataPath = "$wmtPath"
+"@ + @'
+
+$Host.UI.RawUI.WindowTitle = "Driver Export Tool - Background Process"
+Write-Host "Initializing Driver Export Tool GUI..." -ForegroundColor Cyan
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+# ============================================================
+# FAST NATIVE SCAN
+# ============================================================
+Write-Host "Scanning for 3rd-party drivers..." -ForegroundColor Yellow
+$sysDrivers = Get-WindowsDriver -Online -All | Where-Object { $_.Inbox -eq $false }
+$drivers = @()
+
+foreach ($d in $sysDrivers) {
+    $c = "$($d.ClassName) $($d.ProviderName)".ToLower()
+    $norm = "Other"
+    
+    if ($c -match "display|graphics|nvidia|amd|intel.*graphics") { $norm = "Display" }
+    elseif ($c -match "net|network|wifi|ethernet|realtek|broadcom|intel.*network") { $norm = "Network" }
+    elseif ($c -match "audio|sound") { $norm = "Audio" }
+    elseif ($c -match "storage|sata|nvme|raid|disk") { $norm = "Storage" }
+    elseif ($c -match "usb") { $norm = "USB" }
+    elseif ($c -match "print") { $norm = "Printer" }
+    elseif ($c -match "system|chipset|acpi") { $norm = "System" }
+
+    $dateString = if ($d.Date) { $d.Date.ToString("yyyy-MM-dd") } else { "" }
+
+    $drivers += [pscustomobject]@{
+        PublishedName = $d.Driver
+        OriginalName  = $d.OriginalFileName
+        Class         = $norm
+        Provider      = $d.ProviderName
+        Version       = $d.Version
+        Date          = $dateString
+    }
+}
+
+if (-not $drivers -or $drivers.Count -eq 0) {
+    [System.Windows.Forms.MessageBox]::Show("No 3rd-party drivers found to export.", "Info") | Out-Null
+    exit
+}
+
+# ============================================================
+# GUI SETUP & THEMING
+# ============================================================
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Driver Export Tool"
+$form.ClientSize = New-Object System.Drawing.Size(900, 680)
+$form.StartPosition = "CenterScreen"
+
+# --- Z-Order Trick: Pop to front, then allow backgrounding ---
+$form.Add_Shown({
+    $form.TopMost = $true
+    $form.TopMost = $false
+    $form.Activate()
+})
+
+# Main Theme Colors
+$form.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0D1117")
+$form.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
+
+$tree = New-Object System.Windows.Forms.TreeView
+$tree.Size = "250,580"
+$tree.Location = "10,40"
+$tree.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
+$tree.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
+$tree.BorderStyle = "FixedSingle"
+$form.Controls.Add($tree)
+
+$list = New-Object System.Windows.Forms.ListView
+$list.Size = "620,580"
+$list.Location = "270,40"
+$list.View = "Details"
+$list.CheckBoxes = $true
+$list.FullRowSelect = $true
+$list.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
+$list.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
+$list.BorderStyle = "FixedSingle"
+
+$list.Columns.Add("Driver", 250)
+$list.Columns.Add("Provider", 150)
+$list.Columns.Add("Version", 100)
+$list.Columns.Add("Date", 80)
+$form.Controls.Add($list)
+
+$txtSearch = New-Object System.Windows.Forms.TextBox
+$txtSearch.Location = "270,10"
+$txtSearch.Width = 300
+$txtSearch.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
+$txtSearch.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
+$txtSearch.BorderStyle = "FixedSingle"
+$form.Controls.Add($txtSearch)
+
+$groups = $drivers | Group-Object Class | Sort-Object Name
+$root = $tree.Nodes.Add("All ($($drivers.Count))")
+
+foreach ($g in $groups) {
+    $n = $root.Nodes.Add("$($g.Name) ($($g.Count))")
+    $n.Tag = $g.Name
+}
+$root.Expand()
+
+function Update-List {
+    $list.Items.Clear()
+    $filter = $tree.SelectedNode.Tag
+    $search = $txtSearch.Text.ToLower()
+
+    $filtered = $drivers
+    if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
+    if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
+
+    foreach ($d in $filtered) {
+        $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
+        $cleanName = Split-Path $rawName -Leaf
+        
+        $item = $list.Items.Add($cleanName)
+        $item.SubItems.Add($d.Provider)
+        $item.SubItems.Add($d.Version)
+        $item.SubItems.Add($d.Date)
+        $item.Tag = $d
+    }
+}
+
+$tree.Add_AfterSelect({ Update-List })
+$txtSearch.Add_TextChanged({ Update-List })
+Update-List
+
+$statusLabel = New-Object System.Windows.Forms.Label
+$statusLabel.Text = "Ready"
+$statusLabel.Location = "10,635"
+$statusLabel.AutoSize = $true
+$statusLabel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#58A6FF") # Accent Blue
+$statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($statusLabel)
+
+# Helper function for buttons
+function Set-BtnStyle($b, $bgHex, $fgHex) {
+    $b.FlatStyle = "Flat"
+    $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($bgHex)
+    $b.ForeColor = [System.Drawing.ColorTranslator]::FromHtml($fgHex)
+    $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#30363D")
+}
+
+$btnExportSel = New-Object System.Windows.Forms.Button
+$btnExportSel.Text = "Export Selected"
+$btnExportSel.Location = "620,635"
+$btnExportSel.Size = "130, 30"
+Set-BtnStyle $btnExportSel "#238636" "#FFFFFF" # Success Green
+$form.Controls.Add($btnExportSel)
+
+$btnExportAll = New-Object System.Windows.Forms.Button
+$btnExportAll.Text = "Export All"
+$btnExportAll.Location = "760,635"
+$btnExportAll.Size = "130, 30"
+Set-BtnStyle $btnExportAll "#21262D" "#E6EDF3" # Standard Action Button
+$form.Controls.Add($btnExportAll)
+
+# ============================================================
+# EXPORT LOGIC (Reusable Block)
+# ============================================================
+$DoExport = {
+    param($driversToExport)
+
+    $statusLabel.Text = "Running..."
+    Write-Host "Starting export of $($driversToExport.Count) driver(s)..." -ForegroundColor Cyan
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $form.Enabled = $false
+    $exportPath = Join-Path $DataPath "Drivers_Backup_$(Get-Date -Format yyyyMMdd_HHmm)"
+    New-Item -ItemType Directory -Path $exportPath -Force | Out-Null
+
+    $pForm = New-Object System.Windows.Forms.Form
+    $pForm.Text = "Exporting..."
+    $pForm.Size = "400,120"
+    $pForm.StartPosition = "CenterParent"
+    $pForm.ControlBox = $false
+    $pForm.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0D1117")
+    $pForm.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
+    
+    $bar = New-Object System.Windows.Forms.ProgressBar
+    $bar.Dock = "Top"
+    $bar.Maximum = $driversToExport.Count
+    $pForm.Controls.Add($bar)
+
+    $lbl = New-Object System.Windows.Forms.Label
+    $lbl.Dock = "Fill"
+    $lbl.TextAlign = "MiddleCenter"
+    $lbl.Text = "Initializing export..."
+    $pForm.Controls.Add($lbl)
+
+    # Parenting the progress form to our main form
+    $pForm.Show($form)
+    [System.Windows.Forms.Application]::DoEvents()
+
+    $done = 0
+
+    foreach ($drv in $driversToExport) {
+        $dir = Join-Path $exportPath $drv.Class
+        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        
+        Write-Host "Exporting $($drv.PublishedName) to $dir" -ForegroundColor Green
+        
+        $process = Start-Process pnputil -ArgumentList "/export-driver", $drv.PublishedName, "`"$dir`"" -WindowStyle Normal -PassThru
+        
+        while (-not $process.HasExited) {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 50
         }
-        else {
-            Write-Output "Export failed (pnputil exit $($proc.ExitCode))."
-            [System.Windows.MessageBox]::Show("Export failed (pnputil exit $($proc.ExitCode)).", "Export Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+
+        $done++
+        $lbl.Text = "Exporting... $done / $($driversToExport.Count) drivers complete"
+        $bar.Value = $done
+        [System.Windows.Forms.Application]::DoEvents() 
+    }
+
+    $pForm.Close()
+    
+    $statusLabel.Text = "Done!"
+    $form.Enabled = $true
+    [System.Windows.Forms.Application]::DoEvents()
+
+    Write-Host "Export complete!" -ForegroundColor Cyan
+    
+    # Passing $form as the first argument ensures the MessageBox stays explicitly on top of our GUI!
+    [System.Windows.Forms.MessageBox]::Show($form, "Export Complete!`n`nSaved to:`n$exportPath", "Success") | Out-Null
+}
+
+# --- Button Actions ---
+$btnExportSel.Add_Click({
+    try {
+        $selected = @()
+        foreach ($i in $list.Items) {
+            if ($i.Checked) { $selected += $i.Tag }
         }
-    } "Exporting drivers to data folder..."
+        
+        if ($selected.Count -eq 0) {
+            # Passed $form to parent the warning popup
+            [System.Windows.Forms.MessageBox]::Show($form, "Please select at least one driver to export.", "Warning") | Out-Null
+            return
+        }
+        
+        & $DoExport -driversToExport $selected
+    } catch {
+        $statusLabel.Text = "Error"
+        Write-Host "Error during export: $($_.Exception.Message)" -ForegroundColor Red
+        # Passed $form to parent the error popup
+        [System.Windows.Forms.MessageBox]::Show($form, "An error occurred during export:`n`n$($_.Exception.Message)", "Error") | Out-Null
+        $form.Enabled = $true
+    }
+})
+
+$btnExportAll.Add_Click({
+    try {
+        & $DoExport -driversToExport $drivers
+    } catch {
+        $statusLabel.Text = "Error"
+        Write-Host "Error during export: $($_.Exception.Message)" -ForegroundColor Red
+        # Passed $form to parent the error popup
+        [System.Windows.Forms.MessageBox]::Show($form, "An error occurred during export:`n`n$($_.Exception.Message)", "Error") | Out-Null
+        $form.Enabled = $true
+    }
+})
+
+Write-Host "Launching GUI..." -ForegroundColor Green
+$form.ShowDialog() | Out-Null
+'@
+
+    # 4. Launch in a highly visible, interactive PowerShell window
+    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($code))
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -EncodedCommand $encoded"
 }
 
 function Show-GhostDevicesDialog {
@@ -6948,11 +7217,32 @@ $lstFw = Get-Ctrl "lstFirewall"
 $txtFwSearch = Get-Ctrl "txtFwSearch"
 $lblFwStatus = Get-Ctrl "lblFwStatus"
 
+# --- BIND DRIVER TAB BUTTONS ---
 $btnDrvReport = Get-Ctrl "btnDrvReport"
+if ($btnDrvReport) { $btnDrvReport.Add_Click({ Invoke-DriverReport }) }
+
 $btnDrvBackup = Get-Ctrl "btnDrvBackup"
+if ($btnDrvBackup) { 
+    $btnDrvBackup.Add_Click({ 
+            # Disable button immediately to prevent double-clicks
+            $this.IsEnabled = $false 
+        
+            Invoke-ExportDrivers 
+        
+            # Freeze this specific UI thread for 1 second, then re-enable
+            Start-Sleep -Seconds 1
+            $this.IsEnabled = $true
+        }) 
+}
+
 $btnDrvGhost = Get-Ctrl "btnDrvGhost"
+if ($btnDrvGhost) { $btnDrvGhost.Add_Click({ Show-GhostDevicesDialog }) }
+
 $btnDrvClean = Get-Ctrl "btnDrvClean"
+if ($btnDrvClean) { $btnDrvClean.Add_Click({ Show-DriverCleanupDialog }) }
+
 $btnDrvRestore = Get-Ctrl "btnDrvRestore"
+if ($btnDrvRestore) { $btnDrvRestore.Add_Click({ Invoke-RestoreDrivers }) }
 $btnDrvDisableWU = Get-Ctrl "btnDrvDisableWU"
 $btnDrvEnableWU = Get-Ctrl "btnDrvEnableWU"
 $btnDrvDisableMeta = Get-Ctrl "btnDrvDisableMeta"
@@ -9385,11 +9675,6 @@ $btnFwDefaults.Add_Click({ Invoke-FirewallDefaults; $btnFwRefresh.RaiseEvent((Ne
 $btnFwPurge.Add_Click({ Invoke-FirewallPurge; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 
 # --- Drivers ---
-$btnDrvReport.Add_Click({ Invoke-DriverReport })
-$btnDrvBackup.Add_Click({ Invoke-ExportDrivers })
-$btnDrvGhost.Add_Click({ Show-GhostDevicesDialog })
-$btnDrvClean.Add_Click({ Show-DriverCleanupDialog })
-$btnDrvRestore.Add_Click({ Invoke-RestoreDrivers })
 $btnDrvDisableWU.Add_Click({
         $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
         if ($res -ne "Yes") { return }
