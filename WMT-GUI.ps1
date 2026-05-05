@@ -1707,6 +1707,15 @@ function Invoke-TempCleanup {
     # With @() forcing the array, .Count is guaranteed to be >= 1 here.
     $ruleWeight = 100.0 / ($selections.Count)
 
+    # --- HELPER: FILE SIZE FORMATTER ---
+    function Format-FileSize {
+        param([long]$Bytes)
+        if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+        if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+        if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+        return "$Bytes B"
+    }
+
     # --- HELPER: ROBUST CLEANER ---
     function Invoke-RobustClean {
         param($Path, $Pattern = "*", $Recurse = $true, $RuleName = "System File")
@@ -1732,11 +1741,12 @@ function Invoke-TempCleanup {
                         $fInfo.Delete() 
                     }
                     else {
-                        # Add to preview list
+                        # Add to preview list with dynamic size formatting
                         $previewList.Add([PSCustomObject]@{
                                 RuleName = $RuleName
                                 FilePath = $file
-                                SizeMB   = [math]::Round($size / 1MB, 4)
+                                SizeStr  = Format-FileSize $size
+                                RawBytes = $size
                             })
                     }
 
@@ -1827,7 +1837,8 @@ function Invoke-TempCleanup {
                                                 $previewList.Add([PSCustomObject]@{
                                                         RuleName = "Recycle Bin"
                                                         FilePath = $path
-                                                        SizeMB   = [math]::Round($size / 1MB, 4)
+                                                        SizeStr  = Format-FileSize $size
+                                                        RawBytes = $size
                                                     })
                                             }
                                             $stats.Deleted++
@@ -1861,9 +1872,9 @@ function Invoke-TempCleanup {
 
             $diffBytes = $stats.Bytes - $startBytes
             if ($diffBytes -gt 0) {
-                $itemMB = [math]::Round($diffBytes / 1MB, 2)
+                $itemStr = Format-FileSize $diffBytes
                 $verb = if ($isAnalyze) { "Found" } else { "Cleaned" }
-                Write-GuiLog "$verb $itemName : $itemMB MB"
+                Write-GuiLog "$verb $itemName : $itemStr"
             }
         }
     }
@@ -1875,14 +1886,14 @@ function Invoke-TempCleanup {
     }
 
     # 5. FINAL REPORT & PREVIEW
-    $finalMB = [math]::Round($stats.Bytes / 1MB, 2)
+    $finalTotalFormatted = Format-FileSize $stats.Bytes
     
     if ($isAnalyze) {
-        Write-GuiLog "Total Found: $finalMB MB"
+        Write-GuiLog "Total Found: $finalTotalFormatted"
         
         if ($previewList.Count -gt 0) {
             $gridForm = New-Object System.Windows.Forms.Form
-            $gridForm.Text = "Cleanup Analysis Preview ($finalMB MB Total)"
+            $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total)"
             $gridForm.Size = "800,650"
             $gridForm.StartPosition = "CenterScreen"
             $gridForm.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
@@ -1965,19 +1976,93 @@ function Invoke-TempCleanup {
             $grid.GridColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
             $grid.RowHeadersVisible = $false
             $grid.SelectionMode = "FullRowSelect"
-            $grid.AutoSizeColumnsMode = "Fill"
             
+            # 1. Set global mode to Fill (prevents the black void on the right)
+            $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
+            
+            # --- Dictionary to cache exact byte sizes behind the scenes ---
+            $exactSizes = @{}
+
             $dt = New-Object System.Data.DataTable
             $dt.Columns.Add("RuleName", [string]) | Out-Null
             $dt.Columns.Add("FilePath", [string]) | Out-Null
-            $dt.Columns.Add("SizeMB", [double]) | Out-Null
+            $dt.Columns.Add("Size", [string]) | Out-Null
             
             foreach ($item in $previewList) {
-                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.SizeMB) | Out-Null
+                $exactSizes[$item.FilePath] = $item.RawBytes 
+                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.SizeStr) | Out-Null
             }
             $grid.DataSource = $dt
             
-            # --- 3. ACTION LOGIC ---
+            # 2. BULLETPROOF COLUMN SIZING (Must happen AFTER $grid.DataSource = $dt)
+            # Lock the side columns to exactly fit their contents + headers
+            $grid.Columns["RuleName"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
+            $grid.Columns["Size"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
+            # Force FilePath to soak up 100% of the remaining space
+            $grid.Columns["FilePath"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
+
+            # --- 3. CONTEXT MENU ---
+            $ctxMenu = New-Object System.Windows.Forms.ContextMenuStrip
+            $ctxMenu.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+            $ctxMenu.ForeColor = "White"
+            $ctxMenu.ShowImageMargin = $false 
+            $ctxMenu.ShowCheckMargin = $false 
+
+            $menuOpen = $ctxMenu.Items.Add("Go to file [Open folder]")
+            $menuDelete = $ctxMenu.Items.Add("Delete file")
+
+            $menuOpen.Add_Click({
+                    if ($grid.SelectedRows.Count -gt 0) {
+                        $path = $grid.SelectedRows[0].Cells["FilePath"].Value
+                        if (Test-Path -LiteralPath $path) {
+                            Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
+                        }
+                    }
+                })
+
+            $menuDelete.Add_Click({
+                    if ($grid.SelectedRows.Count -gt 0) {
+                        $freedBytes = 0
+                        $rowsToRemove = New-Object System.Collections.ArrayList
+
+                        foreach ($row in $grid.SelectedRows) {
+                            $path = $row.Cells["FilePath"].Value
+                            $bytes = $exactSizes[$path] 
+                    
+                            try {
+                                if (Test-Path -LiteralPath $path) {
+                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                                    $freedBytes += $bytes
+                                }
+                                $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                            }
+                            catch {
+                                Write-GuiLog "Failed to delete from Context Menu: $path"
+                            }
+                        }
+                
+                        foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                    
+                        if ($freedBytes -gt 0) {
+                            $freedFormatted = Format-FileSize $freedBytes
+                            Write-GuiLog "Manually deleted items from Preview. Recovered: $freedFormatted"
+                        }
+                    }
+                })
+
+            $grid.ContextMenuStrip = $ctxMenu
+
+            $grid.Add_CellMouseDown({
+                    param($s, $e)
+                    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
+                        if (-not $grid.Rows[$e.RowIndex].Selected) {
+                            $grid.ClearSelection()
+                            $grid.Rows[$e.RowIndex].Selected = $true
+                        }
+                    }
+                })
+            
+            # --- 4. ACTION LOGIC (BUTTONS) ---
             $btnClose.Add_Click({ $gridForm.Close() })
 
             $btnCleanSelected.Add_Click({
@@ -1989,12 +2074,12 @@ function Invoke-TempCleanup {
 
                     foreach ($row in $grid.SelectedRows) {
                         $path = $row.Cells["FilePath"].Value
-                        $sizeMB = $row.Cells["SizeMB"].Value
-                    
+                        $bytes = $exactSizes[$path] 
+                
                         try {
                             if (Test-Path -LiteralPath $path) {
                                 Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                $freedBytes += ($sizeMB * 1MB)
+                                $freedBytes += $bytes
                                 $cleanedCount++
                             }
                             $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
@@ -2003,49 +2088,44 @@ function Invoke-TempCleanup {
                             Write-GuiLog "Failed to delete from Analyze: $path"
                         }
                     }
-                
+            
                     foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
-                    $freedMB = [math]::Round($freedBytes / 1MB, 2)
-                    [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedMB MB", "Cleanup Success") | Out-Null
+                    $freedFormatted = Format-FileSize $freedBytes
+                    [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                 })
 
             $btnCleanAll.Add_Click({
                     if ($dt.Rows.Count -eq 0) { return }
-                
+            
                     $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($dt.Rows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
                     if ($confirm -eq "Yes") {
                         $cleanedCount = 0
                         $freedBytes = 0
-                    
+                
                         foreach ($row in $dt.Rows) {
                             $path = $row["FilePath"]
-                            $sizeMB = $row["SizeMB"]
+                            $bytes = $exactSizes[$path] 
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                    $freedBytes += ($sizeMB * 1MB)
+                                    $freedBytes += $bytes
                                     $cleanedCount++
                                 }
                             }
                             catch {}
                         }
-                    
+                
                         $dt.Rows.Clear()
-                        $freedMB = [math]::Round($freedBytes / 1MB, 2)
-                        [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedMB MB", "Cleanup Success") | Out-Null
+                        $freedFormatted = Format-FileSize $freedBytes
+                        [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                     }
                 })
             
-            # --- 4. FORM ASSEMBLY ---
-            # Order and Z-layering is critical here to prevent overlap
+            # --- 5. FORM ASSEMBLY ---
             $gridForm.Controls.Add($gridBtnPanel)
             $gridForm.Controls.Add($grid)
-            $gridBtnPanel.SendToBack() # Forces the Dock=Bottom to anchor properly
-            $grid.BringToFront()       # Forces the Dock=Fill to respect the bottom panel
-            
-            $grid.Columns["RuleName"].FillWeight = 25
-            $grid.Columns["FilePath"].FillWeight = 60
-            $grid.Columns["SizeMB"].FillWeight = 15
+            $gridBtnPanel.SendToBack() 
+            $grid.BringToFront()       
             
             $gridForm.ShowDialog() | Out-Null
         }
@@ -2054,8 +2134,8 @@ function Invoke-TempCleanup {
         }
     }
     else {
-        Write-GuiLog "Total Removed: $finalMB MB"
-        $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
+        Write-GuiLog "Total Removed: $finalTotalFormatted"
+        $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalTotalFormatted"
         [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
     }
 }
