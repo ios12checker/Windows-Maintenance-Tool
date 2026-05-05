@@ -7958,11 +7958,29 @@ $Script:StartWingetAction = {
                     if ($act -eq "Uninstall") { $cmd = "python -m pip uninstall -y `"$id`"" }
                     $userCmd = $cmd
                 }
-                # --- NODE NPM ---
+                # --- NODE NPM & PNPM ---
                 elseif ($src -eq "npm") {
+                    if ($act -eq "Install") { $cmd = "npm install `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "npm update `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "npm uninstall `"$id`"" }
+                    $userCmd = $cmd
+                }
+                elseif ($src -eq "npm (global)") {
                     if ($act -eq "Install") { $cmd = "npm install -g `"$id`"" }
                     if ($act -eq "Update") { $cmd = "npm update -g `"$id`"" }
                     if ($act -eq "Uninstall") { $cmd = "npm uninstall -g `"$id`"" }
+                    $userCmd = $cmd
+                }
+                elseif ($src -eq "pnpm") {
+                    if ($act -eq "Install") { $cmd = "pnpm install `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "pnpm update `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "pnpm remove `"$id`"" }
+                    $userCmd = $cmd
+                }
+                elseif ($src -eq "pnpm (global)") {
+                    if ($act -eq "Install") { $cmd = "pnpm add -g `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "pnpm update -g `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "pnpm remove -g `"$id`"" }
                     $userCmd = $cmd
                 }
                 # --- CHOCOLATEY ---
@@ -7991,7 +8009,8 @@ $Script:StartWingetAction = {
                         "^(winget)$" { "Winget"; break }
                         "^(msstore)$" { "MSStore"; break }
                         "^(pip|pip3)$" { "PIP"; break }
-                        "^(npm)$" { "NPM"; break }
+                        "^(npm|npm \(global\))$" { "NPM"; break }
+                        "^(pnpm|pnpm \(global\))$" { "PNPM"; break }
                         "^(chocolatey|choco)$" { "Chocolatey"; break }
                         "^(scoop)$" { "Scoop"; break }
                         "^(gem|ruby)$" { "RubyGem"; break }
@@ -8680,25 +8699,51 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
     
-        # C. NPM WORKER (unchanged)
+        # C. NPM WORKER
         if ("npm" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
                     param($IgnoreList)
                     Write-Output "LOG:Scanning Npm..."
                     try {
-                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json")
+                        # Local packages
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json 2>nul")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Npm scan timed out."; return }
-                        $json = $p.StandardOutput.ReadToEnd()
-                        if ($json.Trim().StartsWith("{")) { 
-                            $pkgs = $json | ConvertFrom-Json
-                            foreach ($k in $pkgs.PSObject.Properties.Name) {
-                                if ($IgnoreList -contains $k) { continue }
-                                $o = $pkgs.$k
-                                [PSCustomObject]@{Source = "npm"; Name = $k; Id = $k; Version = $o.current; Available = $o.latest }
+                        if ($p.WaitForExit(30000)) { 
+                            $json = $p.StandardOutput.ReadToEnd().Trim()
+                            if ($json -and $json.StartsWith("{")) { 
+                                $pkgs = $json | ConvertFrom-Json
+                                foreach ($k in $pkgs.PSObject.Properties.Name) {
+                                    if ($IgnoreList -contains $k) { continue }
+                                    $o = $pkgs.$k
+                                    [PSCustomObject]@{Source = "npm"; Name = $k; Id = $k; Version = $o.current; Available = $o.latest }
+                                }
                             }
+                        }
+                        else {
+                            try { $p.Kill() } catch {}
+                            Write-Output "LOG:Npm local scan timed out."
+                        }
+
+                        # Global packages
+                        $pInfoG = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated -g --json 2>nul")
+                        $pInfoG.RedirectStandardOutput = $true; $pInfoG.UseShellExecute = $false; $pInfoG.CreateNoWindow = $true
+                        $pg = [System.Diagnostics.Process]::Start($pInfoG)
+                        if ($pg.WaitForExit(30000)) { 
+                            $jsonG = $pg.StandardOutput.ReadToEnd().Trim()
+                            if ($jsonG -and $jsonG.StartsWith("{")) { 
+                                $pkgsG = $jsonG | ConvertFrom-Json
+                                foreach ($k in $pkgsG.PSObject.Properties.Name) {
+                                    if ($IgnoreList -contains $k) { continue }
+                                    $o = $pkgsG.$k
+                                    [PSCustomObject]@{Source = "npm (global)"; Name = $k; Id = $k; Version = $o.current; Available = $o.latest }
+                                }
+                            }
+                        }
+                        else {
+                            try { $pg.Kill() } catch {}
+                            Write-Output "LOG:Npm global scan timed out."
                         }
                     }
                     catch { Write-Output "LOG:Npm check failed." }
