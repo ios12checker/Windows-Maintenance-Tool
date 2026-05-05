@@ -1704,7 +1704,6 @@ function Invoke-TempCleanup {
         Progress = 0.0
     }
     
-    # With @() forcing the array, .Count is guaranteed to be >= 1 here.
     $ruleWeight = 100.0 / ($selections.Count)
 
     # --- HELPER: FILE SIZE FORMATTER ---
@@ -1741,11 +1740,9 @@ function Invoke-TempCleanup {
                         $fInfo.Delete() 
                     }
                     else {
-                        # Add to preview list with dynamic size formatting
                         $previewList.Add([PSCustomObject]@{
                                 RuleName = $RuleName
                                 FilePath = $file
-                                SizeStr  = Format-FileSize $size
                                 RawBytes = $size
                             })
                     }
@@ -1793,7 +1790,6 @@ function Invoke-TempCleanup {
 
             $startBytes = $stats.Bytes
             
-            # FIX: Enforce a maximum of 100 on the progress bar to prevent floating point overrun errors
             $stats.Progress += $ruleWeight
             $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
             
@@ -1837,7 +1833,6 @@ function Invoke-TempCleanup {
                                                 $previewList.Add([PSCustomObject]@{
                                                         RuleName = "Recycle Bin"
                                                         FilePath = $path
-                                                        SizeStr  = Format-FileSize $size
                                                         RawBytes = $size
                                                     })
                                             }
@@ -1930,20 +1925,18 @@ function Invoke-TempCleanup {
             $btnClose.ForeColor = "White"
             $btnClose.FlatStyle = "Flat"
 
-            # Dynamic positioning to survive display scaling / resizing
             $layoutGridButtons = {
                 $btnClose.Left = [Math]::Max(0, $gridBtnPanel.ClientSize.Width - $btnClose.Width - 15)
                 $btnCleanAll.Left = [Math]::Max(0, $btnClose.Left - $btnCleanAll.Width - 10)
                 $btnCleanSelected.Left = [Math]::Max(0, $btnCleanAll.Left - $btnCleanSelected.Width - 10)
                 
-                # Vertically center the buttons in the panel
                 $topPadding = [math]::Round(($gridBtnPanel.Height - $btnClose.Height) / 2)
                 $btnCleanSelected.Top = $topPadding
                 $btnCleanAll.Top = $topPadding
                 $btnClose.Top = $topPadding
             }
             $gridBtnPanel.Add_SizeChanged({ & $layoutGridButtons })
-            & $layoutGridButtons # Execute once to set initial positions
+            & $layoutGridButtons 
 
             $gridBtnPanel.Controls.Add($btnCleanSelected)
             $gridBtnPanel.Controls.Add($btnCleanAll)
@@ -1977,24 +1970,33 @@ function Invoke-TempCleanup {
             $grid.RowHeadersVisible = $false
             $grid.SelectionMode = "FullRowSelect"
             
-            # 1. Set global mode to Fill (prevents the black void on the right)
             $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
             
-            # --- Dictionary to cache exact byte sizes behind the scenes ---
-            $exactSizes = @{}
-
             $dt = New-Object System.Data.DataTable
             $dt.Columns.Add("RuleName", [string]) | Out-Null
             $dt.Columns.Add("FilePath", [string]) | Out-Null
-            $dt.Columns.Add("Size", [string]) | Out-Null
+            # FIX: We changed this to [long] so it sorts mathematically!
+            $dt.Columns.Add("Size", [long]) | Out-Null 
             
             foreach ($item in $previewList) {
-                $exactSizes[$item.FilePath] = $item.RawBytes 
-                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.SizeStr) | Out-Null
+                # We feed the raw numbers directly to the table
+                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.RawBytes) | Out-Null
             }
             $grid.DataSource = $dt
             
-            # 2. BULLETPROOF COLUMN SIZING (Must happen AFTER $grid.DataSource = $dt)
+            # --- THE MAGIC VISUAL TRICK ---
+            # This intercepts the drawing of the grid. If it sees a number in the "Size" column, 
+            # it instantly formats it into KB/MB visually, but the raw numbers stay underneath for sorting!
+            $grid.Add_CellFormatting({
+                    param($s, $e)
+                    if ($e.RowIndex -ge 0 -and $e.ColumnIndex -ge 0 -and $null -ne $e.Value) {
+                        if ($grid.Columns[$e.ColumnIndex].Name -eq "Size") {
+                            $e.Value = Format-FileSize -Bytes $e.Value
+                            $e.FormattingApplied = $true
+                        }
+                    }
+                })
+
             # Lock the side columns to exactly fit their contents + headers
             $grid.Columns["RuleName"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
             $grid.Columns["Size"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
@@ -2027,7 +2029,7 @@ function Invoke-TempCleanup {
 
                         foreach ($row in $grid.SelectedRows) {
                             $path = $row.Cells["FilePath"].Value
-                            $bytes = $exactSizes[$path] 
+                            $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
                     
                             try {
                                 if (Test-Path -LiteralPath $path) {
@@ -2074,7 +2076,7 @@ function Invoke-TempCleanup {
 
                     foreach ($row in $grid.SelectedRows) {
                         $path = $row.Cells["FilePath"].Value
-                        $bytes = $exactSizes[$path] 
+                        $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
                 
                         try {
                             if (Test-Path -LiteralPath $path) {
@@ -2104,7 +2106,7 @@ function Invoke-TempCleanup {
                 
                         foreach ($row in $dt.Rows) {
                             $path = $row["FilePath"]
-                            $bytes = $exactSizes[$path] 
+                            $bytes = $row["Size"] # Now correctly pulls the raw [long]!
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
