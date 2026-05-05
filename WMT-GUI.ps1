@@ -1359,7 +1359,7 @@ function Get-Winapp2Rules {
     
     return $finalList
 }
-
+    
 function Show-AdvancedCleanupSelection {
 
     $currentSettings = Get-WmtSettings
@@ -1423,15 +1423,24 @@ function Show-AdvancedCleanupSelection {
 
     $btnClean = New-Object System.Windows.Forms.Button
     $btnClean.Text = "Clean Selected"
-    $btnClean.Size = "140, 35"; $btnClean.Location = "470, 12"
+    $btnClean.Size = "120, 35"; $btnClean.Location = "490, 12"
     $btnClean.BackColor = "SeaGreen"; $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
-    $btnClean.DialogResult = "OK"
     $btnClean.Anchor = "Top, Right"
+    $btnClean.DialogResult = "OK" # Native close
     $btnPanel.Controls.Add($btnClean)
+
+    $btnAnalyze = New-Object System.Windows.Forms.Button
+    $btnAnalyze.Text = "Analyze"
+    $btnAnalyze.Size = "100, 35"; $btnAnalyze.Location = "380, 12"
+    $btnAnalyze.BackColor = "SteelBlue"; $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
+    $btnAnalyze.Anchor = "Top, Right"
+    $btnAnalyze.DialogResult = "Yes" # Hijacking 'Yes' to act as our Analyze trigger
+    $tt.SetToolTip($btnAnalyze, "Preview files that will be deleted without removing them.")
+    $btnPanel.Controls.Add($btnAnalyze)
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
-    $btnCancel.Size = "100, 35"; $btnCancel.Location = "360, 12"
+    $btnCancel.Size = "90, 35"; $btnCancel.Location = "280, 12"
     $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
     $btnCancel.DialogResult = "Cancel"
     $btnCancel.Anchor = "Top, Right"
@@ -1439,7 +1448,8 @@ function Show-AdvancedCleanupSelection {
 
     $layoutButtonPanel = {
         $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
-        $btnCancel.Left = [Math]::Max(0, $btnClean.Left - $btnCancel.Width - 10)
+        $btnAnalyze.Left = [Math]::Max(0, $btnClean.Left - $btnAnalyze.Width - 10)
+        $btnCancel.Left = [Math]::Max(0, $btnAnalyze.Left - $btnCancel.Width - 10)
     }
     $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
     & $layoutButtonPanel
@@ -1450,6 +1460,10 @@ function Show-AdvancedCleanupSelection {
     $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
+    
+    # FIX 1: Robust Reflection for Double Buffered. Using the 2-argument overload so PowerShell doesn't panic on $null.
+    $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance, NonPublic')
+    if ($prop) { $prop.SetValue($mainPanel, $true) }
 
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
@@ -1481,7 +1495,7 @@ function Show-AdvancedCleanupSelection {
         $allRules = @($internalRules)
 
         if ($IncludeWinapp2) {
-            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Loading..."; $lbl.ForeColor = "Yellow"; $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
+            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Loading Rules..."; $lbl.ForeColor = "Yellow"; $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
             $mainPanel.Controls.Add($lbl); $form.Update()
 
             $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
@@ -1573,6 +1587,8 @@ function Show-AdvancedCleanupSelection {
         $mainPanel.ResumeLayout()
     }
 
+    # FIX 2: Execute rendering directly. Relying on an event like Add_Shown causes variables 
+    # to fall out of scope unless enclosed, leading to a silent pipeline crash.
     & $RenderList -IncludeWinapp2 $isWinapp2Enabled -InteractiveMode $false
 
     # --- SEARCH LOGIC ---
@@ -1596,12 +1612,10 @@ function Show-AdvancedCleanupSelection {
                             }
                         } 
                         elseif ($child.Tag -eq "GROUPHEADER") {
-                            # Hide group headers during search to save space
                             $child.Visible = ($q.Length -eq 0) 
                         }
                     }
                     $ctrl.Visible = $hasVisibleChildren
-                    # Toggle SECTION Header
                     if ($i -gt 0) { $mainPanel.Controls[$i - 1].Visible = $hasVisibleChildren }
                 }
             }
@@ -1617,34 +1631,48 @@ function Show-AdvancedCleanupSelection {
     $form.AcceptButton = $btnClean
     $form.CancelButton = $btnCancel
 
-    if ($form.ShowDialog() -eq "OK") {
+    $guiResult = $form.ShowDialog()
+
+    # FIX 3: Catching the native Form result instead of relying on custom scoped action variables
+    if ($guiResult -in @('OK', 'Yes')) {
         $selectedItems = @()
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            # --- FIX APPLIED HERE ---
-            # Removed "-and $cb.Visible". If it is Checked, we clean it, 
-            # regardless of whether the user has currently filtered it out via Search.
             if ($cb.Checked) { $selectedItems += $cb.Tag }
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
         Save-WmtSettings -Settings $currentSettings
-        return $selectedItems
+        
+        return [PSCustomObject]@{
+            Action = if ($guiResult -eq 'OK') { 'Clean' } else { 'Analyze' }
+            Items  = $selectedItems
+        }
     }
     return $null
 }
 
 function Invoke-TempCleanup {
     # 1. GET SELECTION
-    $selections = Show-AdvancedCleanupSelection
-    if (-not $selections -or $selections.Count -eq 0) { 
-        Write-GuiLog "Cleanup canceled: No items selected."
+    $uiResult = Show-AdvancedCleanupSelection
+    
+    # FIX: Force the returned items into an array @() to prevent PowerShell 
+    # from unrolling single-item selections and losing the .Count property.
+    $selections = @($uiResult.Items)
+
+    if (-not $uiResult -or $selections.Count -eq 0) { 
+        Write-GuiLog "Cleanup/Analysis canceled: No items selected."
         return 
     }
 
+    $isAnalyze = ($uiResult.Action -eq "Analyze")
+    
+    # Generic List for high-performance preview tracking
+    $previewList = New-Object System.Collections.Generic.List[PSCustomObject]
+
     # 2. SETUP PROGRESS UI
     $pForm = New-Object System.Windows.Forms.Form
-    $pForm.Text = "Deep Cleaning System"
+    $pForm.Text = if ($isAnalyze) { "Analyzing System..." } else { "Deep Cleaning System" }
     $pForm.Size = "500,160"
     $pForm.StartPosition = "CenterScreen"
     $pForm.ControlBox = $false
@@ -1676,11 +1704,12 @@ function Invoke-TempCleanup {
         Progress = 0.0
     }
     
+    # With @() forcing the array, .Count is guaranteed to be >= 1 here.
     $ruleWeight = 100.0 / ($selections.Count)
 
     # --- HELPER: ROBUST CLEANER ---
     function Invoke-RobustClean {
-        param($Path, $Pattern = "*", $Recurse = $true)
+        param($Path, $Pattern = "*", $Recurse = $true, $RuleName = "System File")
         
         $Path = [Environment]::ExpandEnvironmentVariables($Path)
         if (-not (Test-Path -LiteralPath $Path)) { return }
@@ -1691,25 +1720,34 @@ function Invoke-TempCleanup {
         $opt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
         
         try {
-            # Use EnumerateFiles for lower memory usage on large folders
             $files = [System.IO.Directory]::EnumerateFiles($Path, $Pattern, $opt)
-            
             $batchCount = 0
 
             foreach ($file in $files) {
                 try {
                     $fInfo = [System.IO.FileInfo]::new($file)
                     $size = $fInfo.Length
-                    $fInfo.Delete() 
+                    
+                    if (-not $isAnalyze) {
+                        $fInfo.Delete() 
+                    }
+                    else {
+                        # Add to preview list
+                        $previewList.Add([PSCustomObject]@{
+                                RuleName = $RuleName
+                                FilePath = $file
+                                SizeMB   = [math]::Round($size / 1MB, 4)
+                            })
+                    }
 
                     $stats.Deleted++
                     $stats.Bytes += $size
                     $batchCount++
 
-                    # OPTIMIZATION: Update UI only every 50 files
                     if ($batchCount -gt 50) {
                         $mb = [math]::Round($stats.Bytes / 1MB, 2)
-                        $pLabel.Text = "Removed: $($stats.Deleted) | Recovered: $mb MB"
+                        $verb = if ($isAnalyze) { "Found" } else { "Removed" }
+                        $pLabel.Text = "${verb}: $($stats.Deleted) | Space: $mb MB"
                         [System.Windows.Forms.Application]::DoEvents()
                         $batchCount = 0
                     }
@@ -1724,7 +1762,9 @@ function Invoke-TempCleanup {
                 
                 foreach ($dir in $dirs) {
                     try {
-                        [System.IO.Directory]::Delete($dir, $false) 
+                        if (-not $isAnalyze) {
+                            [System.IO.Directory]::Delete($dir, $false) 
+                        }
                     }
                     catch {}
                 }
@@ -1734,59 +1774,62 @@ function Invoke-TempCleanup {
     }
 
     # 4. MAIN EXECUTION LOOP
-    Write-GuiLog "--- Starting Cleanup ---"
+    $actionText = if ($isAnalyze) { "Analyzing" } else { "Cleaning" }
+    Write-GuiLog "--- Starting $actionText ---"
     
     try {
         foreach ($item in $selections) {
             if ($pForm.IsDisposed) { break }
 
-            # Snapshot bytes BEFORE this item
             $startBytes = $stats.Bytes
-
-            # Update UI
-            $stats.Progress += $ruleWeight
-            $pBar.Value = [int]$stats.Progress
             
-            # Determine Name for Logging
+            # FIX: Enforce a maximum of 100 on the progress bar to prevent floating point overrun errors
+            $stats.Progress += $ruleWeight
+            $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
+            
             $itemName = if ($item -is [string]) { $item } else { $item.Name }
-            $pLabel.Text = "Cleaning: $itemName"
+            $pLabel.Text = "${actionText}: $itemName"
 
-            # --- A. WINAPP2 RULES (Object) ---
+            # --- A. WINAPP2 RULES ---
             if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
                 foreach ($rule in $item.Paths) {
                     $isRecurse = ($rule.Options -notmatch "REMOVESELF")
-                    Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse
+                    Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse -RuleName $itemName
                 }
             }
-            # --- B. INTERNAL RULES (String) ---
+            # --- B. INTERNAL RULES ---
             else {
                 switch ($item) {
                     "TempFiles" { 
-                        Invoke-RobustClean $env:TEMP
-                        Invoke-RobustClean "$env:SystemRoot\Temp"
+                        Invoke-RobustClean $env:TEMP -RuleName $itemName
+                        Invoke-RobustClean "$env:SystemRoot\Temp" -RuleName $itemName
                     }
                     "RecycleBin" { 
                         try {
-                            # FORCE CLEAN METHOD (COM Object)
                             $shell = New-Object -ComObject Shell.Application
-                            $bin = $shell.Namespace(0xA) # 0xA = Recycle Bin
+                            $bin = $shell.Namespace(0xA)
                             $items = $bin.Items()
                             $count = $items.Count
 
                             if ($count -gt 0) {
-                                Write-GuiLog "Recycle Bin: Force cleaning $count items..."
-                                
+                                Write-GuiLog "Recycle Bin: Processing $count items..."
                                 foreach ($f in $items) {
                                     try {
                                         $path = $f.Path
-                                        
-                                        # Measure Size (Accurately using Get-ChildItem on the real path)
                                         if ($path -and (Test-Path -LiteralPath $path)) {
                                             $size = (Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
                                             $stats.Bytes += $size
                                             
-                                            # Force Delete
-                                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+                                            if (-not $isAnalyze) {
+                                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+                                            }
+                                            else {
+                                                $previewList.Add([PSCustomObject]@{
+                                                        RuleName = "Recycle Bin"
+                                                        FilePath = $path
+                                                        SizeMB   = [math]::Round($size / 1MB, 4)
+                                                    })
+                                            }
                                             $stats.Deleted++
                                         }
                                     }
@@ -1794,35 +1837,33 @@ function Invoke-TempCleanup {
                                 }
                             }
                         }
-                        catch {
-                            Write-GuiLog "Recycle Bin Error: $($_.Exception.Message)"
-                        }
+                        catch { Write-GuiLog "Recycle Bin Error: $($_.Exception.Message)" }
                     }
-                    "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" }
-                    "DNS" { Clear-DnsClientCache -ErrorAction SilentlyContinue }
-                    "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false }
-                    "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" }
-                    "RunMRU" { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue }
-                    "Edge" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" }
-                    "Chrome" { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" }
-                    "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" }
+                    "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" -RuleName $itemName }
+                    "DNS" { if (-not $isAnalyze) { Clear-DnsClientCache -ErrorAction SilentlyContinue } }
+                    "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false -RuleName $itemName }
+                    "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" -RuleName $itemName }
+                    "RunMRU" { if (-not $isAnalyze) { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue } }
+                    "Edge" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" -RuleName $itemName }
+                    "Chrome" { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" -RuleName $itemName }
+                    "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" -RuleName $itemName }
                     "Firefox" { 
                         if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
-                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { Invoke-RobustClean "$($_.FullName)\cache2\entries" }
+                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { 
+                                Invoke-RobustClean "$($_.FullName)\cache2\entries" -RuleName $itemName 
+                            }
                         }
                     }
-                    "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" }
-                    "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" }
+                    "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
+                    "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" -RuleName $itemName }
                 }
             }
 
-            # Calculate difference for this specific item
             $diffBytes = $stats.Bytes - $startBytes
-            
-            # Log it if we actually removed something
             if ($diffBytes -gt 0) {
                 $itemMB = [math]::Round($diffBytes / 1MB, 2)
-                Write-GuiLog "Cleaned $itemName : $itemMB MB"
+                $verb = if ($isAnalyze) { "Found" } else { "Cleaned" }
+                Write-GuiLog "$verb $itemName : $itemMB MB"
             }
         }
     }
@@ -1833,12 +1874,190 @@ function Invoke-TempCleanup {
         $pForm.Close()
     }
 
-    # 5. FINAL REPORT
+    # 5. FINAL REPORT & PREVIEW
     $finalMB = [math]::Round($stats.Bytes / 1MB, 2)
-    Write-GuiLog "Total Removed: $finalMB MB"
     
-    $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
-    [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+    if ($isAnalyze) {
+        Write-GuiLog "Total Found: $finalMB MB"
+        
+        if ($previewList.Count -gt 0) {
+            $gridForm = New-Object System.Windows.Forms.Form
+            $gridForm.Text = "Cleanup Analysis Preview ($finalMB MB Total)"
+            $gridForm.Size = "800,650"
+            $gridForm.StartPosition = "CenterScreen"
+            $gridForm.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+            $gridForm.ForeColor = "White"
+            $gridForm.ShowIcon = $false
+            
+            # --- 1. BOTTOM BUTTON PANEL ---
+            $gridBtnPanel = New-Object System.Windows.Forms.Panel
+            $gridBtnPanel.Dock = "Bottom"
+            $gridBtnPanel.Height = 55
+            $gridBtnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+
+            $btnCleanSelected = New-Object System.Windows.Forms.Button
+            $btnCleanSelected.Text = "Clean Selected"
+            $btnCleanSelected.Size = "120, 32"
+            $btnCleanSelected.Anchor = "Top, Right"
+            $btnCleanSelected.BackColor = "SteelBlue"
+            $btnCleanSelected.ForeColor = "White"
+            $btnCleanSelected.FlatStyle = "Flat"
+
+            $btnCleanAll = New-Object System.Windows.Forms.Button
+            $btnCleanAll.Text = "Clean All"
+            $btnCleanAll.Size = "100, 32"
+            $btnCleanAll.Anchor = "Top, Right"
+            $btnCleanAll.BackColor = "IndianRed"
+            $btnCleanAll.ForeColor = "White"
+            $btnCleanAll.FlatStyle = "Flat"
+
+            $btnClose = New-Object System.Windows.Forms.Button
+            $btnClose.Text = "Close"
+            $btnClose.Size = "80, 32"
+            $btnClose.Anchor = "Top, Right"
+            $btnClose.BackColor = "DimGray"
+            $btnClose.ForeColor = "White"
+            $btnClose.FlatStyle = "Flat"
+
+            # Dynamic positioning to survive display scaling / resizing
+            $layoutGridButtons = {
+                $btnClose.Left = [Math]::Max(0, $gridBtnPanel.ClientSize.Width - $btnClose.Width - 15)
+                $btnCleanAll.Left = [Math]::Max(0, $btnClose.Left - $btnCleanAll.Width - 10)
+                $btnCleanSelected.Left = [Math]::Max(0, $btnCleanAll.Left - $btnCleanSelected.Width - 10)
+                
+                # Vertically center the buttons in the panel
+                $topPadding = [math]::Round(($gridBtnPanel.Height - $btnClose.Height) / 2)
+                $btnCleanSelected.Top = $topPadding
+                $btnCleanAll.Top = $topPadding
+                $btnClose.Top = $topPadding
+            }
+            $gridBtnPanel.Add_SizeChanged({ & $layoutGridButtons })
+            & $layoutGridButtons # Execute once to set initial positions
+
+            $gridBtnPanel.Controls.Add($btnCleanSelected)
+            $gridBtnPanel.Controls.Add($btnCleanAll)
+            $gridBtnPanel.Controls.Add($btnClose)
+
+            # --- 2. THE DATA GRID ---
+            $grid = New-Object System.Windows.Forms.DataGridView
+            $grid.Dock = "Fill"
+            $grid.AllowUserToAddRows = $false
+            $grid.AllowUserToDeleteRows = $false
+            $grid.ReadOnly = $true
+            $grid.MultiSelect = $true
+            $grid.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+            $grid.BorderStyle = "None"
+            
+            $grid.EnableHeadersVisualStyles = $false
+            $grid.ColumnHeadersBorderStyle = "Single"
+            $grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+            $grid.ColumnHeadersDefaultCellStyle.ForeColor = "DeepSkyBlue"
+            $grid.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+            
+            $grid.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+            $grid.DefaultCellStyle.ForeColor = "LightGray"
+            $grid.DefaultCellStyle.SelectionBackColor = "SteelBlue"
+            $grid.DefaultCellStyle.SelectionForeColor = "White"
+            
+            $grid.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+            
+            $grid.CellBorderStyle = "SingleHorizontal"
+            $grid.GridColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
+            $grid.RowHeadersVisible = $false
+            $grid.SelectionMode = "FullRowSelect"
+            $grid.AutoSizeColumnsMode = "Fill"
+            
+            $dt = New-Object System.Data.DataTable
+            $dt.Columns.Add("RuleName", [string]) | Out-Null
+            $dt.Columns.Add("FilePath", [string]) | Out-Null
+            $dt.Columns.Add("SizeMB", [double]) | Out-Null
+            
+            foreach ($item in $previewList) {
+                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.SizeMB) | Out-Null
+            }
+            $grid.DataSource = $dt
+            
+            # --- 3. ACTION LOGIC ---
+            $btnClose.Add_Click({ $gridForm.Close() })
+
+            $btnCleanSelected.Add_Click({
+                    if ($grid.SelectedRows.Count -eq 0) { return }
+                
+                    $cleanedCount = 0
+                    $freedBytes = 0
+                    $rowsToRemove = New-Object System.Collections.ArrayList
+
+                    foreach ($row in $grid.SelectedRows) {
+                        $path = $row.Cells["FilePath"].Value
+                        $sizeMB = $row.Cells["SizeMB"].Value
+                    
+                        try {
+                            if (Test-Path -LiteralPath $path) {
+                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                                $freedBytes += ($sizeMB * 1MB)
+                                $cleanedCount++
+                            }
+                            $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                        }
+                        catch {
+                            Write-GuiLog "Failed to delete from Analyze: $path"
+                        }
+                    }
+                
+                    foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                    $freedMB = [math]::Round($freedBytes / 1MB, 2)
+                    [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedMB MB", "Cleanup Success") | Out-Null
+                })
+
+            $btnCleanAll.Add_Click({
+                    if ($dt.Rows.Count -eq 0) { return }
+                
+                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($dt.Rows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
+                    if ($confirm -eq "Yes") {
+                        $cleanedCount = 0
+                        $freedBytes = 0
+                    
+                        foreach ($row in $dt.Rows) {
+                            $path = $row["FilePath"]
+                            $sizeMB = $row["SizeMB"]
+                            try {
+                                if (Test-Path -LiteralPath $path) {
+                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                                    $freedBytes += ($sizeMB * 1MB)
+                                    $cleanedCount++
+                                }
+                            }
+                            catch {}
+                        }
+                    
+                        $dt.Rows.Clear()
+                        $freedMB = [math]::Round($freedBytes / 1MB, 2)
+                        [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedMB MB", "Cleanup Success") | Out-Null
+                    }
+                })
+            
+            # --- 4. FORM ASSEMBLY ---
+            # Order and Z-layering is critical here to prevent overlap
+            $gridForm.Controls.Add($gridBtnPanel)
+            $gridForm.Controls.Add($grid)
+            $gridBtnPanel.SendToBack() # Forces the Dock=Bottom to anchor properly
+            $grid.BringToFront()       # Forces the Dock=Fill to respect the bottom panel
+            
+            $grid.Columns["RuleName"].FillWeight = 25
+            $grid.Columns["FilePath"].FillWeight = 60
+            $grid.Columns["SizeMB"].FillWeight = 15
+            
+            $gridForm.ShowDialog() | Out-Null
+        }
+        else {
+            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+        }
+    }
+    else {
+        Write-GuiLog "Total Removed: $finalMB MB"
+        $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalMB MB"
+        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+    }
 }
 
 # --- Registry Scan Selection UI ---
