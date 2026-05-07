@@ -20,7 +20,8 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 
 ## Screenshots
 
-<img width="1920" height="1033" alt="image" src="https://github.com/user-attachments/assets/f3a8c0e2-53f9-4bbe-9470-f81d85fa6d4b" />
+<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/e989afcb-2283-49ee-be0d-60cabad7fccf" />
+
 
 
 ## What's New in v5.5
