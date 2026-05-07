@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.4-green)
+![Version](https://img.shields.io/badge/version-v5.5-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -23,52 +23,35 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 <img width="1920" height="1033" alt="image" src="https://github.com/user-attachments/assets/f3a8c0e2-53f9-4bbe-9470-f81d85fa6d4b" />
 
 
-## What's New in v5.4
+## What's New in v5.5
 
-### New My Device Page
+### Package Updater Improvements
 
-- Shows system specifications and device information.
-- Adds quick access to driver checks, RAM cleanup, SSD TRIM, defrag, and Windows Update.
-- Groups common device tools into a single dashboard.
+- Adds `pnpm` as a package update provider.
+- Restores and expands provider support for Winget, Microsoft Store, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo.
+- Adds better scan timeout handling so one slow provider does not leave the UI waiting forever.
+- Improves Winget scan behavior with non-interactive source agreement handling.
+- Uses `python -m pip` for more reliable pip actions across Python environments.
 
-### Rebuilt Startup Manager
+### Driver Exporter Overhaul
 
-- Redesigned Startup Manager with cleaner layout and better readability.
-- Manages startup apps, scheduled tasks, context menu entries, and services in one place.
-- Uses Windows `StartupApproved` registry locations instead of temporary WMT registry keys.
-- Adds service actions including **Automatic**, **Manual**, **Disabled**, and delete where supported.
-- Adds color-coded enabled/disabled state indicators.
+- Replaces the one-click background driver export with a dedicated Driver Export Tool GUI.
+- Runs driver scanning and export work outside the main WMT window so the main app stays responsive.
+- Groups drivers by category, including Display, Network, Audio, Storage, USB, Printer, System, and Other.
+- Adds driver search, selective export, progress feedback, and Export All.
 
-### Rebuilt Restore Manager
+### Cleanup Analyze Preview
 
-- Uses `srclient.dll` for restore point deletion.
-- Supports create, delete, restore, enable, and disable actions.
-- Adds clearer error messages when restore point operations fail.
-
-### New Tweaks
-
-- Taskbar alignment: left or center.
-- Taskbar cleanup: hide Search, Widgets, Task View, and Chat.
-- Taskbar button behavior: never combine or always combine.
-- Clock options: 12-hour, 24-hour, show seconds, hide seconds.
-- Hardware-Accelerated GPU Scheduling (HAGS).
-
-### Cleanup Improvements
-
-- Adds **OneDrive Free Up Space** to remove local OneDrive cached files while keeping cloud copies.
-- Expands registry cleaner safelist coverage for protected/default Windows entries.
-
-### Search Improvements
-
-- Global search now executes tools directly instead of only switching tabs.
-- More tools are indexed and searchable.
-
+- Adds an Analyze button to Advanced Cleanup / Temp File cleanup.
+- Shows a preview window with files that would be deleted before cleanup runs.
+- Supports Clean Selected, Clean All, opening a file's folder, and deleting individual files from the preview.
+- Displays human-readable file sizes.
 
 ## Features
 
 ### Updates and Software
 
-- Scan for package updates from providers such as Winget, Microsoft Store, Chocolatey, pip, npm, and more.
+- Scan for package updates from providers such as Winget, Microsoft Store, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
 - Update packages one at a time with visible progress windows.
 - Search packages before updating.
 - Ignore selected Winget packages.
@@ -118,6 +101,7 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 ### Drivers
 
 - Export installed drivers.
+- Export selected drivers from the Driver Export Tool GUI.
 - Restore drivers from backup.
 - Generate driver reports.
 - Remove ghost devices.
@@ -128,6 +112,7 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 ### Cleanup
 
 - Delete temp files and recycle bin data.
+- Analyze temp/cleanup files before deletion and delete selected results from the preview.
 - Run advanced cleanup selection.
 - Clean browser and Explorer traces.
 - Find and fix broken shortcuts.
@@ -212,6 +197,7 @@ WMT stores generated files in the local `data` folder next to the script.
 
 - Issues: [GitHub Issues](https://github.com/ios12checker/Windows-Maintenance-Tool/issues)
 - Pull Requests: [GitHub Pull Requests](https://github.com/ios12checker/Windows-Maintenance-Tool/pulls)
+- Changelog: [CHANGELOG.md](CHANGELOG.md)
 
 ## Credits
 
