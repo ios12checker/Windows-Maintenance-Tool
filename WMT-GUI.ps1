@@ -154,40 +154,70 @@ function Update-TweakButtonStates {
 
 # Centralized data path for exports (in repo folder)
 function Update-MyDeviceStats {
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem; (Get-Ctrl "txtDeviceOS").Text = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
-        $cpu = Get-CimInstance Win32_Processor; (Get-Ctrl "txtDeviceCPU").Text = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
-        $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); (Get-Ctrl "txtDeviceRAM").Text = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
-        # 4. GPU
-        $gpu = Get-CimInstance Win32_VideoController
-        $gpuText = ""
-        foreach ($g in $gpu) {
-            $vram = 0
-            # Bypass WMI 4GB limit by checking the 64-bit registry key
-            $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
+    # 1. Set placeholder text instantly
+    (Get-Ctrl "txtDeviceOS").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceCPU").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceRAM").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceGPU").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceMotherboard").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceStorage").Text = "Gathering stats..."
+
+    # 2. Start Background Runspace for heavy CIM queries
+    $script:StatsRunspace = [PowerShell]::Create().AddScript({
+            $res = @{}
+            try {
+                $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
+                $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
+                $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); $res.RAM = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
             
-            if ($regMatches) {
-                $reg = $regMatches[0]
-                if ($null -ne $reg.'HardwareInformation.qwMemorySize') {
-                    $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2)
+                # GPU (Includes your registry 4GB limit bypass)
+                $gpu = Get-CimInstance Win32_VideoController
+                $gpuText = ""
+                foreach ($g in $gpu) {
+                    $vram = 0
+                    $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
+                    if ($regMatches) {
+                        $reg = $regMatches[0]
+                        if ($null -ne $reg.'HardwareInformation.qwMemorySize') { $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2) }
+                        elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) { $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2) }
+                    }
+                    if ($vram -eq 0 -or $null -eq $vram) { $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) }
+                    $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
                 }
-                elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) {
-                    $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2)
+                $res.GPU = $gpuText.Trim()
+            
+                $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
+                $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; $res.Storage = $dt.Trim()
+            }
+            catch {}
+            return $res
+        })
+
+    $script:StatsAsyncResult = $script:StatsRunspace.BeginInvoke()
+
+    # 3. Monitor Job using DispatcherTimer (UI Thread safe)
+    $script:StatsTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:StatsTimer.Add_Tick({
+            if ($script:StatsAsyncResult.IsCompleted) {
+                $script:StatsTimer.Stop()
+                try {
+                    $data = $script:StatsRunspace.EndInvoke($script:StatsAsyncResult)
+                    if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
+                
+                    # Apply data to the UI
+                    (Get-Ctrl "txtDeviceOS").Text = $data.OS
+                    (Get-Ctrl "txtDeviceCPU").Text = $data.CPU
+                    (Get-Ctrl "txtDeviceRAM").Text = $data.RAM
+                    (Get-Ctrl "txtDeviceGPU").Text = $data.GPU
+                    (Get-Ctrl "txtDeviceMotherboard").Text = $data.MB
+                    (Get-Ctrl "txtDeviceStorage").Text = $data.Storage
                 }
+                catch {}
+                $script:StatsRunspace.Dispose()
             }
-            
-            # Fallback to standard WMI if registry check fails
-            if ($vram -eq 0 -or $null -eq $vram) { 
-                $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) 
-            }
-            
-            $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
-        }
-        (Get-Ctrl "txtDeviceGPU").Text = $gpuText.Trim()
-        $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; (Get-Ctrl "txtDeviceMotherboard").Text = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
-        $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; (Get-Ctrl "txtDeviceStorage").Text = $dt.Trim()
-    }
-    catch {}
+        })
+    $script:StatsTimer.Start()
 }
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
@@ -10739,7 +10769,7 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
 }
 
 # --- LAUNCH ---
-$window.Add_Loaded({ 
+$window.Add_ContentRendered({
         $settings = Get-WmtSettings
 
         # Restore persisted window geometry/state when valid
