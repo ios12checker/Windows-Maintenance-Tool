@@ -1484,10 +1484,21 @@ function Show-AdvancedCleanupSelection {
     $btnCancel.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnCancel)
 
+    # NEW: Event Logs Button
+    $btnEventLogs = New-Object System.Windows.Forms.Button
+    $btnEventLogs.Text = "Clear Event Logs"
+    $btnEventLogs.Size = "120, 35"
+    $btnEventLogs.Top = 12  # <--- THIS FIXES THE ALIGNMENT
+    $btnEventLogs.BackColor = "Goldenrod"; $btnEventLogs.ForeColor = "White"; $btnEventLogs.FlatStyle = "Flat"
+    $btnEventLogs.Anchor = "Top, Right"
+    $btnPanel.Controls.Add($btnEventLogs)
+
     $layoutButtonPanel = {
         $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
         $btnAnalyze.Left = [Math]::Max(0, $btnClean.Left - $btnAnalyze.Width - 10)
         $btnCancel.Left = [Math]::Max(0, $btnAnalyze.Left - $btnCancel.Width - 10)
+        # Position the new button to the left of the Cancel button
+        $btnEventLogs.Left = [Math]::Max(0, $btnCancel.Left - $btnEventLogs.Width - 10) 
     }
     $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
     & $layoutButtonPanel
@@ -1667,6 +1678,67 @@ function Show-AdvancedCleanupSelection {
         })
 
     $form.AcceptButton = $btnClean
+    # --- EVENT LOGS LOGIC ---
+    # --- ASYNC EVENT LOGS LOGIC ---
+    $btnEventLogs.Add_Click({
+            $confirm = [System.Windows.Forms.MessageBox]::Show(
+                "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete.", 
+                "Confirm Clear Logs", 
+                [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+        
+            if ($confirm -eq "Yes") {
+                # 1. Update UI state so user knows it's working
+                $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+                $btnEventLogs.Enabled = $false
+                $btnEventLogs.Text = "Clearing..."
+
+                # 2. Start Background Runspace
+                $script:EventLogRunspace = [PowerShell]::Create().AddScript({
+                        $logs = wevtutil el
+                        $cleared = 0
+                        foreach ($log in $logs) { 
+                            wevtutil cl "$log" 2>$null
+                            $cleared++
+                        }
+                        return $cleared
+                    })
+
+                $script:EventLogAsyncResult = $script:EventLogRunspace.BeginInvoke()
+
+                # 3. Monitor Job using DispatcherTimer (UI Thread safe)
+                $script:EventLogTimer = New-Object System.Windows.Threading.DispatcherTimer
+                $script:EventLogTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+                $script:EventLogTimer.Add_Tick({
+                        if ($script:EventLogAsyncResult.IsCompleted) {
+                            $script:EventLogTimer.Stop()
+                    
+                            # Restore UI State
+                            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+                            $btnEventLogs.Enabled = $true
+                            $btnEventLogs.Text = "Clear Event Logs"
+
+                            try {
+                                $clearedCount = $script:EventLogRunspace.EndInvoke($script:EventLogAsyncResult)
+                                if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) { $clearedCount = $clearedCount[0] }
+                        
+                                [System.Windows.Forms.MessageBox]::Show("Successfully processed $clearedCount Event Logs.", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                            }
+                            catch {
+                                [System.Windows.Forms.MessageBox]::Show("Error: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                            }
+                    
+                            # Cleanup
+                            $script:EventLogRunspace.Dispose()
+                        }
+                    })
+                $script:EventLogTimer.Start()
+            }
+        })
+
+    $form.AcceptButton = $btnClean
+    $form.CancelButton = $btnCancel
     $form.CancelButton = $btnCancel
 
     $guiResult = $form.ShowDialog()
