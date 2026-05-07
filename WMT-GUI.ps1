@@ -8586,7 +8586,7 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") -Force
     }
     $enabled = $settings.EnabledProviders
 
@@ -8824,7 +8824,7 @@ $btnWingetScan.Add_Click({
         $btnWingetUpdateSel.Visibility = "Visible"
     
         Write-GuiLog " "
-        Write-GuiLog "Starting Parallel Scan (global timeout 90s)..."
+        Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
     
         # --- Load Settings ---
         $settings = Get-WmtSettings
@@ -8843,14 +8843,14 @@ $btnWingetScan.Add_Click({
         $script:ScanCancelled = $false
         $script:ScanStartTime = Get-Date
     
-        # --- Global Timeout Timer (90 seconds) ---
+        # --- Global Timeout Timer (120 seconds) ---
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Dispose() }
         $script:GlobalScanTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:GlobalScanTimer.Interval = [TimeSpan]::FromSeconds(90)
+        $script:GlobalScanTimer.Interval = [TimeSpan]::FromSeconds(120)
         $script:GlobalScanTimer.Add_Tick({
                 if ($script:ActiveScans.Count -gt 0 -and -not $script:ScanCancelled) {
                     $script:ScanCancelled = $true
-                    Write-GuiLog "Global scan timeout reached (90s). Cancelling remaining provider scans."
+                    Write-GuiLog "Global scan timeout reached (120s). Cancelling remaining provider scans."
                     # Stop all still-running runspaces
                     foreach ($task in $script:ActiveScans) {
                         try { $task.PowerShell.Stop() } catch { }
@@ -8865,7 +8865,7 @@ $btnWingetScan.Add_Click({
                     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                     $btnWingetUpdateSel.IsEnabled = $true
                     [System.Windows.MessageBox]::Show(
-                        "Scan timed out after 90 seconds.`n`nThis often happens with the Microsoft Store source.`nTry disabling 'MS Store' in Providers and scan again.",
+                        "Scan timed out after 120 seconds.`n`nThis often happens with the Microsoft Store source.`nTry disabling 'MS Store' in Providers and scan again.",
                         "Scan Timeout", "OK", "Warning"
                     ) | Out-Null
                 }
@@ -10804,4 +10804,3 @@ $window.Add_Closing({
 
 # 3. Show the Window
 $window.ShowDialog() | Out-Null
-
