@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.5"
+$AppVersion = "5.6"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -37,6 +37,14 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+
+# KILL HANGING PACKAGE MANAGERS
+# This silently clears any stuck winget or installer processes before the tool starts.
+# (Removed Write-GuiLog here since the GUI hasn't been built yet)
+try {
+    Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+}
+catch {}
 
 # ENABLE HIGH-DPI AWARENESS (Safe Check)
 if ([Environment]::OSVersion.Version.Major -ge 6) {
