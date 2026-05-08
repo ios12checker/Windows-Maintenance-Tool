@@ -115,21 +115,58 @@ function Write-GuiLog {
 function Invoke-UiCommand {
     param(
         [scriptblock]$Sb, 
-        $Msg = "Processing...", 
+        [string]$Msg = "Processing...", 
         [object[]]$ArgumentList = @()
     )
+
+    # 1. Secure the UI: Show wait cursor and lock the main window
+    # Note: Adjust '$window' if your main form variable has a different name
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-    Write-GuiLog $Msg
-    try { 
-        # Pass arguments to the scriptblock using splatting
-        $res = & $Sb @ArgumentList | Out-String
-        if ($res) { Write-GuiLog $res.Trim() } 
-        else { Write-GuiLog "Done." }
+    $windowWasEnabled = $window.IsEnabled
+    $window.IsEnabled = $false 
+
+    try {
+        # 2. Create an isolated background PowerShell instance
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($Sb)
+        
+        # Add any arguments passed to the function
+        if ($ArgumentList.Count -gt 0) {
+            foreach ($arg in $ArgumentList) {
+                [void]$ps.AddArgument($arg)
+            }
+        }
+
+        # 3. Start the script asynchronously (does not block the UI)
+        $asyncResult = $ps.BeginInvoke()
+
+        # 4. Wait for the task to finish while keeping the UI responsive
+        while (-not $asyncResult.IsCompleted) {
+            Start-Sleep -Milliseconds 50 # Small pause to prevent high CPU usage
+            
+            # This keeps the UI from freezing and showing "Not Responding"
+            [System.Windows.Forms.Application]::DoEvents() 
+        }
+
+        # 5. Gather the final results
+        $result = $ps.EndInvoke($asyncResult)
+
+        # Check for non-terminating errors in the background runspace
+        if ($ps.Streams.Error.Count -gt 0) {
+            Write-Host "Task reported errors: $($ps.Streams.Error.ReadAll() | Out-String)" -ForegroundColor Red
+        }
+
+        # Return the output formatted as a string (matching your original design)
+        return $result | Out-String
     }
-    catch { 
-        Write-GuiLog "ERROR: $($_.Exception.Message)" 
+    finally {
+        # 6. Clean up resources and unlock the UI
+        if ($null -ne $ps) {
+            $ps.Dispose()
+        }
+        $window.IsEnabled = $windowWasEnabled
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
     }
-    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
 function Update-TweakButtonStates {
@@ -1399,7 +1436,6 @@ function Get-Winapp2Rules {
 }
     
 function Show-AdvancedCleanupSelection {
-
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.TempCleanup
     $isWinapp2Enabled = $currentSettings.LoadWinapp2
@@ -1418,7 +1454,7 @@ function Show-AdvancedCleanupSelection {
     $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.ForeColor = "White"
 
-    # --- 1. TOP PANEL (Search) ---
+    # TOP PANEL
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
@@ -1440,11 +1476,10 @@ function Show-AdvancedCleanupSelection {
     $txtSearch.BorderStyle = "FixedSingle"
     $txtSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($txtSearch)
-    
+
     $lblSearch = New-Object System.Windows.Forms.Label
-    $lblSearch.Text = "Search:"
-    $lblSearch.AutoSize = $true; $lblSearch.Location = "370, 15"
-    $lblSearch.Anchor = "Top, Right"
+    $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
+    $lblSearch.Location = "370, 15"; $lblSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($lblSearch)
 
     $layoutTopPanel = {
@@ -1454,42 +1489,37 @@ function Show-AdvancedCleanupSelection {
     $topPanel.Add_SizeChanged({ & $layoutTopPanel })
     & $layoutTopPanel
 
-    # --- 2. BOTTOM PANEL (Buttons) ---
+    # BOTTOM PANEL
     $btnPanel = New-Object System.Windows.Forms.Panel
     $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
     $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
 
     $btnClean = New-Object System.Windows.Forms.Button
-    $btnClean.Text = "Clean Selected"
-    $btnClean.Size = "120, 35"; $btnClean.Location = "490, 12"
-    $btnClean.BackColor = "SeaGreen"; $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
-    $btnClean.Anchor = "Top, Right"
-    $btnClean.DialogResult = "OK" # Native close
+    $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
+    $btnClean.Location = "490, 12"; $btnClean.BackColor = "SeaGreen"
+    $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
+    $btnClean.Anchor = "Top, Right"; $btnClean.DialogResult = "OK"
     $btnPanel.Controls.Add($btnClean)
 
     $btnAnalyze = New-Object System.Windows.Forms.Button
-    $btnAnalyze.Text = "Analyze"
-    $btnAnalyze.Size = "100, 35"; $btnAnalyze.Location = "380, 12"
-    $btnAnalyze.BackColor = "SteelBlue"; $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
-    $btnAnalyze.Anchor = "Top, Right"
-    $btnAnalyze.DialogResult = "Yes" # Hijacking 'Yes' to act as our Analyze trigger
+    $btnAnalyze.Text = "Analyze"; $btnAnalyze.Size = "100, 35"
+    $btnAnalyze.Location = "380, 12"; $btnAnalyze.BackColor = "SteelBlue"
+    $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
+    $btnAnalyze.Anchor = "Top, Right"; $btnAnalyze.DialogResult = "Yes"
     $tt.SetToolTip($btnAnalyze, "Preview files that will be deleted without removing them.")
     $btnPanel.Controls.Add($btnAnalyze)
 
     $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Cancel"
-    $btnCancel.Size = "90, 35"; $btnCancel.Location = "280, 12"
-    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = "Cancel"
-    $btnCancel.Anchor = "Top, Right"
+    $btnCancel.Text = "Cancel"; $btnCancel.Size = "90, 35"
+    $btnCancel.Location = "280, 12"; $btnCancel.BackColor = "DimGray"
+    $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = "Cancel"; $btnCancel.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnCancel)
 
-    # NEW: Event Logs Button
     $btnEventLogs = New-Object System.Windows.Forms.Button
-    $btnEventLogs.Text = "Clear Event Logs"
-    $btnEventLogs.Size = "120, 35"
-    $btnEventLogs.Top = 12  # <--- THIS FIXES THE ALIGNMENT
-    $btnEventLogs.BackColor = "Goldenrod"; $btnEventLogs.ForeColor = "White"; $btnEventLogs.FlatStyle = "Flat"
+    $btnEventLogs.Text = "Clear Event Logs"; $btnEventLogs.Size = "120, 35"
+    $btnEventLogs.Top = 12; $btnEventLogs.BackColor = "Goldenrod"
+    $btnEventLogs.ForeColor = "White"; $btnEventLogs.FlatStyle = "Flat"
     $btnEventLogs.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnEventLogs)
 
@@ -1497,20 +1527,18 @@ function Show-AdvancedCleanupSelection {
         $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
         $btnAnalyze.Left = [Math]::Max(0, $btnClean.Left - $btnAnalyze.Width - 10)
         $btnCancel.Left = [Math]::Max(0, $btnAnalyze.Left - $btnCancel.Width - 10)
-        # Position the new button to the left of the Cancel button
-        $btnEventLogs.Left = [Math]::Max(0, $btnCancel.Left - $btnEventLogs.Width - 10) 
+        $btnEventLogs.Left = [Math]::Max(0, $btnCancel.Left - $btnEventLogs.Width - 10)
     }
     $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
     & $layoutButtonPanel
 
-    # --- 3. MAIN CONTENT PANEL ---
+    # MAIN CONTENT PANEL
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
     $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
-    
-    # FIX 1: Robust Reflection for Double Buffered. Using the 2-argument overload so PowerShell doesn't panic on $null.
+
     $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance, NonPublic')
     if ($prop) { $prop.SetValue($mainPanel, $true) }
 
@@ -1519,81 +1547,73 @@ function Show-AdvancedCleanupSelection {
     $form.Controls.Add($mainPanel)
     $mainPanel.BringToFront()
 
-    # --- INTERNAL RULES ---
+    # --- INTERNAL RULES (static) ---
     $internalRules = @(
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail Cache"; Key = "Thumbnails"; Desc = "Explorer thumbnails"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail Cache"; Key = "Thumbnails"; Desc = "Explorer thumbnails"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
     )
 
-    $RenderList = {
-        param($IncludeWinapp2, $InteractiveMode)
-        
+    $global:checkboxes = @{}
+    $global:sections = @()
+
+    # ------------------------------------------------
+    # Render helper – rebuilds the entire panel from a rule list,
+    # preserving previous checkbox states
+    # ------------------------------------------------
+    $RenderAllRules = {
+        param($allRules)
+
         $mainPanel.SuspendLayout()
         $mainPanel.Controls.Clear()
-        
-        $allRules = @($internalRules)
 
-        if ($IncludeWinapp2) {
-            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Loading Rules..."; $lbl.ForeColor = "Yellow"; $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
-            $mainPanel.Controls.Add($lbl); $form.Update()
-
-            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-            $shouldDownload = $false
-            if (Test-Path $iniPath) {
-                if ((Get-Item $iniPath).LastWriteTime -lt (Get-Date).AddDays(-7) -and $InteractiveMode) {
-                    if ([System.Windows.Forms.MessageBox]::Show("Update Rules?", "Update", "YesNo") -eq "Yes") { $shouldDownload = $true }
-                }
-            }
-            elseif ($InteractiveMode) { $shouldDownload = $true }
-
-            try { $winRules = Get-Winapp2Rules -Download:$shouldDownload; $allRules += $winRules } catch {}
-            if ($mainPanel.Controls.Count -gt 0) { $mainPanel.Controls.RemoveAt(0) }
+        # Preserve current checkbox states
+        $prevStates = @{}
+        foreach ($k in $global:checkboxes.Keys) {
+            $prevStates[$k] = $global:checkboxes[$k].Checked
         }
-
-        $global:checkboxes = @{}
+        $global:checkboxes.Clear()
         $global:sections = @()
 
-        $sections = $allRules | Select-Object -ExpandProperty Section -Unique | Sort-Object
+        $grouped = $allRules | Group-Object Section | Sort-Object Name
+        $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-        $mainControlsToAdd = New-Object System.Collections.Generic.List[System.Windows.Forms.Control]
+        foreach ($group in $grouped) {
+            $sec = $group.Name
 
-        foreach ($sec in $sections) {
             $secPanel = New-Object System.Windows.Forms.Panel
             $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
             $secPanel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
             $secPanel.Tag = "HEADER"
-            
+
             $secChk = New-Object System.Windows.Forms.CheckBox
             $secChk.Text = $sec
             $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
             $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
             $secChk.AutoSize = $true; $secChk.Location = "5, 5"
             $secPanel.Controls.Add($secChk)
-            
-            $mainControlsToAdd.Add($secPanel)
+
+            $controlsToAdd.Add($secPanel)
             $global:sections += $secPanel
 
             $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
             $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
-            $itemFlow.Margin = "25, 0, 0, 0"
-            $itemFlow.Tag = "FLOW"
+            $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
 
-            $secItems = $allRules | Where-Object { $_.Section -eq $sec } | Sort-Object AppGroup, Name
+            $secItems = $group.Group | Sort-Object AppGroup, Name
             $childChecks = @()
             $currentGroup = $null
             $isSecChecked = $true
-
-            $flowControlsToAdd = New-Object System.Collections.Generic.List[System.Windows.Forms.Control]
+            $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
             foreach ($item in $secItems) {
                 if ($item.AppGroup -ne $currentGroup) {
@@ -1609,7 +1629,7 @@ function Show-AdvancedCleanupSelection {
 
                 $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
                 $chk = New-Object System.Windows.Forms.CheckBox
-                
+
                 if ($item.IsInternal) {
                     $chk.Text = $item.Name
                 }
@@ -1618,49 +1638,110 @@ function Show-AdvancedCleanupSelection {
                     $chk.Text = "$cleanName (*)"
                     $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
                 }
-                
+
                 $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
                 $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
-                
-                if ($savedStates.ContainsKey($itemKey)) { $chk.Checked = $savedStates[$itemKey] }
-                else { $chk.Checked = ($item.IsInternal -eq $true) }
-                
+
+                # Restore previous state or use default
+                if ($prevStates.ContainsKey($itemKey)) {
+                    $chk.Checked = $prevStates[$itemKey]
+                }
+                elseif ($savedStates.ContainsKey($itemKey)) {
+                    $chk.Checked = $savedStates[$itemKey]
+                }
+                else {
+                    $chk.Checked = ($item.IsInternal -eq $true)
+                }
+
                 if (-not $chk.Checked) { $isSecChecked = $false }
                 if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
 
                 $flowControlsToAdd.Add($chk)
-                
                 $global:checkboxes[$itemKey] = $chk
                 $childChecks += $chk
             }
 
             $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
-
             $secChk.Checked = $isSecChecked
+
             $secChk.Add_CheckedChanged({
                     param($s, $e)
-                    foreach ($c in $childChecks) { $c.Checked = $sender.Checked }
+                    foreach ($c in $childChecks) { $c.Checked = $s.Checked }
                 }.GetNewClosure())
 
-            $mainControlsToAdd.Add($itemFlow)
+            $controlsToAdd.Add($itemFlow)
         }
 
-        $mainPanel.Controls.AddRange($mainControlsToAdd.ToArray())
+        $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
         $mainPanel.ResumeLayout($true)
     }
 
-    # FIX 2: Execute rendering directly. Relying on an event like Add_Shown causes variables 
-    # to fall out of scope unless enclosed, leading to a silent pipeline crash.
-    & $RenderList -IncludeWinapp2 $isWinapp2Enabled -InteractiveMode $false
+    # Instant render of internal rules only
+    & $RenderAllRules -allRules $internalRules
 
-    # --- SEARCH LOGIC ---
+    # Function to load community rules (maybe with forced download)
+    $loadCommunityRules = {
+        param([switch]$ForceDownload)
+
+        if (-not $chkToggleWinapp2.Checked) { return }
+
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = "Yellow"
+        $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
+        $mainPanel.Controls.Add($lbl)
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+
+        try {
+            if ($ForceDownload) {
+                $winRules = Get-Winapp2Rules -Download:$true
+            }
+            else {
+                $winRules = Get-Winapp2Rules -Download:$false
+            }
+            if ($winRules) {
+                # Merge internal + community and re-render once
+                $combined = @($internalRules) + $winRules
+                & $RenderAllRules -allRules $combined
+            }
+        }
+        catch {}
+        finally {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+            $mainPanel.Controls.Remove($lbl)
+        }
+    }
+
+    # Deferred loading after form is visible
+    $form.Add_Shown({
+            $form.BeginInvoke([Action] {
+                    if ($isWinapp2Enabled) {
+                        & $loadCommunityRules
+                    }
+                })
+        })
+
+    # Toggle handler
+    $chkToggleWinapp2.Add_Click({
+            $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
+            Save-WmtSettings -Settings $currentSettings
+
+            if ($chkToggleWinapp2.Checked) {
+                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+                $forceDownload = -not (Test-Path $iniPath)
+                & $loadCommunityRules -ForceDownload:$forceDownload
+            }
+            else {
+                # Revert to internal rules only
+                & $RenderAllRules -allRules $internalRules
+            }
+        })
+
+    # Search logic
     $txtSearch.Add_TextChanged({
             $q = $txtSearch.Text.ToLower()
             $mainPanel.SuspendLayout()
-        
             for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
                 $ctrl = $mainPanel.Controls[$i]
-            
                 if ($ctrl.Tag -eq "FLOW") {
                     $hasVisibleChildren = $false
                     foreach ($child in $ctrl.Controls) {
@@ -1669,12 +1750,10 @@ function Show-AdvancedCleanupSelection {
                                 $child.Visible = $true
                                 $hasVisibleChildren = $true
                             }
-                            else {
-                                $child.Visible = $false
-                            }
-                        } 
+                            else { $child.Visible = $false }
+                        }
                         elseif ($child.Tag -eq "GROUPHEADER") {
-                            $child.Visible = ($q.Length -eq 0) 
+                            $child.Visible = ($q.Length -eq 0)
                         }
                     }
                     $ctrl.Visible = $hasVisibleChildren
@@ -1684,65 +1763,56 @@ function Show-AdvancedCleanupSelection {
             $mainPanel.ResumeLayout()
         })
 
-    $chkToggleWinapp2.Add_Click({
-            $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-            Save-WmtSettings -Settings $currentSettings
-            & $RenderList -IncludeWinapp2 $chkToggleWinapp2.Checked -InteractiveMode $true
-        })
-
     $form.AcceptButton = $btnClean
-    
-    # --- ASYNC EVENT LOGS LOGIC ---
+    $form.CancelButton = $btnCancel
+
+    # Event Logs handler
     $btnEventLogs.Add_Click({
             $confirm = [System.Windows.Forms.MessageBox]::Show(
-                "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete.", 
-                "Confirm Clear Logs", 
-                [System.Windows.Forms.MessageBoxButtons]::YesNo, 
+                "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete.",
+                "Confirm Clear Logs",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
                 [System.Windows.Forms.MessageBoxIcon]::Warning
             )
-        
             if ($confirm -eq "Yes") {
-                # 1. Update UI state so user knows it's working
                 $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
                 $btnEventLogs.Enabled = $false
                 $btnEventLogs.Text = "Clearing..."
 
-                # 2. Start Background Runspace
                 $script:EventLogRunspace = [PowerShell]::Create().AddScript({
                         $logs = wevtutil el
                         $cleared = 0
-                        foreach ($log in $logs) { 
+                        foreach ($log in $logs) {
                             wevtutil cl "$log" 2>$null
                             $cleared++
                         }
                         return $cleared
                     })
-
                 $script:EventLogAsyncResult = $script:EventLogRunspace.BeginInvoke()
 
-                # 3. Monitor Job using DispatcherTimer (UI Thread safe)
                 $script:EventLogTimer = New-Object System.Windows.Threading.DispatcherTimer
                 $script:EventLogTimer.Interval = [TimeSpan]::FromMilliseconds(250)
                 $script:EventLogTimer.Add_Tick({
                         if ($script:EventLogAsyncResult.IsCompleted) {
                             $script:EventLogTimer.Stop()
-                    
-                            # Restore UI State
                             $form.Cursor = [System.Windows.Forms.Cursors]::Default
                             $btnEventLogs.Enabled = $true
                             $btnEventLogs.Text = "Clear Event Logs"
-
                             try {
                                 $clearedCount = $script:EventLogRunspace.EndInvoke($script:EventLogAsyncResult)
-                                if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) { $clearedCount = $clearedCount[0] }
-                        
-                                [System.Windows.Forms.MessageBox]::Show("Successfully processed $clearedCount Event Logs.", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+                                if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) {
+                                    $clearedCount = $clearedCount[0]
+                                }
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    "Successfully processed $clearedCount Event Logs.",
+                                    "Success", "OK", "Information"
+                                )
                             }
                             catch {
-                                [System.Windows.Forms.MessageBox]::Show("Error: $($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    "Error: $($_.Exception.Message)", "Error", "OK", "Error"
+                                )
                             }
-                    
-                            # Cleanup
                             $script:EventLogRunspace.Dispose()
                         }
                     })
@@ -1750,34 +1820,21 @@ function Show-AdvancedCleanupSelection {
             }
         })
 
-    $form.AcceptButton = $btnClean
-    $form.CancelButton = $btnCancel
-    $form.CancelButton = $btnCancel
-
     $guiResult = $form.ShowDialog()
 
-    # Catching the native Form result instead of relying on custom scoped action variables
     if ($guiResult -in @('OK', 'Yes')) {
-        
-        # OPTIMIZATION: Use a .NET Generic List instead of += standard array
-        $selectedItems = New-Object System.Collections.Generic.List[object]
-        
+        $selectedItems = [System.Collections.Generic.List[object]]::new()
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            
-            # Use .Add() instead of +=
-            if ($cb.Checked) { $selectedItems.Add($cb.Tag) } 
-            
+            if ($cb.Checked) { $selectedItems.Add($cb.Tag) }
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-        
-        # Save settings (Running this in the background / not blocking return)
         Save-WmtSettings -Settings $currentSettings
-        
+
         return [PSCustomObject]@{
             Action = if ($guiResult -eq 'OK') { 'Clean' } else { 'Analyze' }
-            Items  = $selectedItems.ToArray() # Convert back to array for compatibility
+            Items  = $selectedItems.ToArray()
         }
     }
     return $null
@@ -8068,8 +8125,12 @@ $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWing
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
-    
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
+    try {
+        Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+    }
+    catch {}
+
     $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id -Unique)
     $totalItems = $uniqueItems.Count
     
@@ -8947,6 +9008,7 @@ $btnWingetScan.Add_Click({
         if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
         if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
         if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
+    
         $lstWinget.Items.Clear()
         $btnWingetScan.IsEnabled = $false
         if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
@@ -8956,6 +9018,12 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
+
+        # --- NEW: Kill stuck package managers before scanning ---
+        try {
+            Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+        }
+        catch {}
     
         # --- Load Settings ---
         $settings = Get-WmtSettings
