@@ -1565,6 +1565,8 @@ function Show-AdvancedCleanupSelection {
 
         $sections = $allRules | Select-Object -ExpandProperty Section -Unique | Sort-Object
 
+        $mainControlsToAdd = New-Object System.Collections.Generic.List[System.Windows.Forms.Control]
+
         foreach ($sec in $sections) {
             $secPanel = New-Object System.Windows.Forms.Panel
             $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
@@ -1577,8 +1579,8 @@ function Show-AdvancedCleanupSelection {
             $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
             $secChk.AutoSize = $true; $secChk.Location = "5, 5"
             $secPanel.Controls.Add($secChk)
-            $mainPanel.Controls.Add($secPanel)
             
+            $mainControlsToAdd.Add($secPanel)
             $global:sections += $secPanel
 
             $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
@@ -1591,6 +1593,8 @@ function Show-AdvancedCleanupSelection {
             $currentGroup = $null
             $isSecChecked = $true
 
+            $flowControlsToAdd = New-Object System.Collections.Generic.List[System.Windows.Forms.Control]
+
             foreach ($item in $secItems) {
                 if ($item.AppGroup -ne $currentGroup) {
                     $currentGroup = $item.AppGroup
@@ -1600,7 +1604,7 @@ function Show-AdvancedCleanupSelection {
                     $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
                     $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
                     $grpLbl.Tag = "GROUPHEADER"
-                    $itemFlow.Controls.Add($grpLbl)
+                    $flowControlsToAdd.Add($grpLbl)
                 }
 
                 $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
@@ -1624,16 +1628,25 @@ function Show-AdvancedCleanupSelection {
                 if (-not $chk.Checked) { $isSecChecked = $false }
                 if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
 
-                $itemFlow.Controls.Add($chk)
+                $flowControlsToAdd.Add($chk)
+                
                 $global:checkboxes[$itemKey] = $chk
                 $childChecks += $chk
             }
 
+            $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
+
             $secChk.Checked = $isSecChecked
-            $mainPanel.Controls.Add($itemFlow)
-            $secChk.Add_Click({ param($s, $e) foreach ($c in $childChecks) { $c.Checked = $s.Checked } }.GetNewClosure())
+            $secChk.Add_CheckedChanged({
+                    param($s, $e)
+                    foreach ($c in $childChecks) { $c.Checked = $sender.Checked }
+                }.GetNewClosure())
+
+            $mainControlsToAdd.Add($itemFlow)
         }
-        $mainPanel.ResumeLayout()
+
+        $mainPanel.Controls.AddRange($mainControlsToAdd.ToArray())
+        $mainPanel.ResumeLayout($true)
     }
 
     # FIX 2: Execute rendering directly. Relying on an event like Add_Shown causes variables 
@@ -1678,7 +1691,7 @@ function Show-AdvancedCleanupSelection {
         })
 
     $form.AcceptButton = $btnClean
-    # --- EVENT LOGS LOGIC ---
+    
     # --- ASYNC EVENT LOGS LOGIC ---
     $btnEventLogs.Add_Click({
             $confirm = [System.Windows.Forms.MessageBox]::Show(
@@ -1743,20 +1756,28 @@ function Show-AdvancedCleanupSelection {
 
     $guiResult = $form.ShowDialog()
 
-    # FIX 3: Catching the native Form result instead of relying on custom scoped action variables
+    # Catching the native Form result instead of relying on custom scoped action variables
     if ($guiResult -in @('OK', 'Yes')) {
-        $selectedItems = @()
+        
+        # OPTIMIZATION: Use a .NET Generic List instead of += standard array
+        $selectedItems = New-Object System.Collections.Generic.List[object]
+        
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            if ($cb.Checked) { $selectedItems += $cb.Tag }
+            
+            # Use .Add() instead of +=
+            if ($cb.Checked) { $selectedItems.Add($cb.Tag) } 
+            
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
+        
+        # Save settings (Running this in the background / not blocking return)
         Save-WmtSettings -Settings $currentSettings
         
         return [PSCustomObject]@{
             Action = if ($guiResult -eq 'OK') { 'Clean' } else { 'Analyze' }
-            Items  = $selectedItems
+            Items  = $selectedItems.ToArray() # Convert back to array for compatibility
         }
     }
     return $null
