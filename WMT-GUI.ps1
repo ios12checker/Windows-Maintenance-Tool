@@ -115,58 +115,21 @@ function Write-GuiLog {
 function Invoke-UiCommand {
     param(
         [scriptblock]$Sb, 
-        [string]$Msg = "Processing...", 
+        $Msg = "Processing...", 
         [object[]]$ArgumentList = @()
     )
-
-    # 1. Secure the UI: Show wait cursor and lock the main window
-    # Note: Adjust '$window' if your main form variable has a different name
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-    $windowWasEnabled = $window.IsEnabled
-    $window.IsEnabled = $false 
-
-    try {
-        # 2. Create an isolated background PowerShell instance
-        $ps = [powershell]::Create()
-        [void]$ps.AddScript($Sb)
-        
-        # Add any arguments passed to the function
-        if ($ArgumentList.Count -gt 0) {
-            foreach ($arg in $ArgumentList) {
-                [void]$ps.AddArgument($arg)
-            }
-        }
-
-        # 3. Start the script asynchronously (does not block the UI)
-        $asyncResult = $ps.BeginInvoke()
-
-        # 4. Wait for the task to finish while keeping the UI responsive
-        while (-not $asyncResult.IsCompleted) {
-            Start-Sleep -Milliseconds 50 # Small pause to prevent high CPU usage
-            
-            # This keeps the UI from freezing and showing "Not Responding"
-            [System.Windows.Forms.Application]::DoEvents() 
-        }
-
-        # 5. Gather the final results
-        $result = $ps.EndInvoke($asyncResult)
-
-        # Check for non-terminating errors in the background runspace
-        if ($ps.Streams.Error.Count -gt 0) {
-            Write-Host "Task reported errors: $($ps.Streams.Error.ReadAll() | Out-String)" -ForegroundColor Red
-        }
-
-        # Return the output formatted as a string (matching your original design)
-        return $result | Out-String
+    Write-GuiLog $Msg
+    try { 
+        # Pass arguments to the scriptblock using splatting
+        $res = & $Sb @ArgumentList | Out-String
+        if ($res) { Write-GuiLog $res.Trim() } 
+        else { Write-GuiLog "Done." }
     }
-    finally {
-        # 6. Clean up resources and unlock the UI
-        if ($null -ne $ps) {
-            $ps.Dispose()
-        }
-        $window.IsEnabled = $windowWasEnabled
-        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+    catch { 
+        Write-GuiLog "ERROR: $($_.Exception.Message)" 
     }
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
 function Update-TweakButtonStates {
