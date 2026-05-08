@@ -188,6 +188,124 @@ function Update-MyDeviceStats {
             
                 $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
                 $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; $res.Storage = $dt.Trim()
+                # Physical active adapters only
+                
+                $physicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Status -eq "Up" -and
+                    $_.HardwareInterface -eq $true
+                }
+                
+                $netInfo = @()
+                
+                foreach ($nic in $physicalAdapters) {
+                
+                    $ip = Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                
+                    if (-not $ip) { continue }
+                
+                    $route = Get-NetRoute -InterfaceIndex $nic.ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                
+                    $dnsServers = (
+                        Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                    ).ServerAddresses -join ", "
+                
+                    $netInfo += "$($nic.Name) | IP: $($ip.IPAddress)/$($ip.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $($nic.LinkSpeed)"
+                }
+                
+                $res.Network = if ($netInfo) {
+                    $netInfo -join "`r`n"
+                }
+                else {
+                    "No active physical network adapters found."
+                }
+
+                # ==========================================
+                # Battery / Power Information
+                # ==========================================
+                try {
+                    $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+
+                    if ($battery) {
+                        # Current Charge
+                        $charge = $battery.EstimatedChargeRemaining
+                        $res.BatteryCharge = "$charge%"
+
+                        # Charging Status
+                        switch ($battery.BatteryStatus) {
+                            1 { $status = "Discharging" }
+                            2 { $status = "Plugged In / Charging" }
+                            3 { $status = "Fully Charged" }
+                            4 { $status = "Low" }
+                            5 { $status = "Critical" }
+                            6 { $status = "Charging" }
+                            default { $status = "Unknown" }
+                        }
+
+                        $res.BatteryStatus = $status
+
+                        # Estimated Time Remaining
+                        if ($battery.EstimatedRunTime -gt 0 -and $battery.EstimatedRunTime -ne 71582788) {
+                            $hours = [math]::Floor($battery.EstimatedRunTime / 60)
+                            $minutes = $battery.EstimatedRunTime % 60
+                            $res.BatteryTime = "${hours}h ${minutes}m remaining"
+                        }
+                        else {
+                            $res.BatteryTime = "Calculating..."
+                        }
+
+                        # Battery Health
+                        $design = (Get-CimInstance -Namespace root\wmi -Class BatteryStaticData -ErrorAction SilentlyContinue).DesignedCapacity
+                        $full = (Get-CimInstance -Namespace root\wmi -Class BatteryFullChargedCapacity -ErrorAction SilentlyContinue).FullChargedCapacity
+
+                        if ($design -and $full) {
+                            $health = [math]::Round(($full / $design) * 100, 1)
+                            $res.BatteryHealth = "$health% of original capacity"
+                        }
+                        else {
+                            $res.BatteryHealth = "Unavailable"
+                        }
+                    }
+                    else {
+                        $res.BatteryCharge = "Desktop System"
+                        $res.BatteryStatus = "No Battery Detected"
+                        $res.BatteryTime = "N/A"
+                        $res.BatteryHealth = "N/A"
+                    }
+
+                    # Current Power Plan
+                    $powerPlan = powercfg /getactivescheme
+
+                    if ($powerPlan -match '\((.*?)\)') {
+                        $res.PowerPlan = $matches[1]
+                    }
+                    else {
+                        $res.PowerPlan = "Unknown"
+                    }
+                }
+                catch {
+                    $res.BatteryCharge = "Unavailable"
+                    $res.BatteryStatus = "Unavailable"
+                    $res.BatteryTime = "Unavailable"
+                    $res.BatteryHealth = "Unavailable"
+                    $res.PowerPlan = "Unavailable"
+                }
+
+                # # Network information
+                # $net = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback|vEthernet" }
+                # $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+                # $dns = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback" }
+
+                # $netInfo = @()
+                # foreach ($adapter in $net) {
+                #     $route = $routes | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -First 1
+                #     $dnsServers = ($dns | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -ExpandProperty ServerAddresses) -join ", "
+                #     $speed = (Get-NetAdapter -Name $adapter.InterfaceAlias -ErrorAction SilentlyContinue).LinkSpeed
+                #     $netInfo += "$($adapter.InterfaceAlias) | IP: $($adapter.IPAddress)/$($adapter.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $speed"
+                # }
+                # $res.Network = if ($netInfo) { $netInfo -join "`r`n" } else { "No active network adapters found." }
             }
             catch {}
             return $res
@@ -212,6 +330,12 @@ function Update-MyDeviceStats {
                     (Get-Ctrl "txtDeviceGPU").Text = $data.GPU
                     (Get-Ctrl "txtDeviceMotherboard").Text = $data.MB
                     (Get-Ctrl "txtDeviceStorage").Text = $data.Storage
+                    (Get-Ctrl "txtDeviceNetwork").Text = $data.Network
+                    (Get-Ctrl "txtBatteryHealth").Text = "Health: $($data.BatteryHealth)"
+                    (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($data.BatteryCharge)"
+                    (Get-Ctrl "txtBatteryStatus").Text = "Status: $($data.BatteryStatus)"
+                    (Get-Ctrl "txtPowerPlan").Text = "Power Plan: $($data.PowerPlan)"
+                    (Get-Ctrl "txtBatteryTime").Text = "Time Remaining: $($data.BatteryTime)"
                 }
                 catch {}
                 $script:StatsRunspace.Dispose()
@@ -6938,7 +7062,55 @@ function Set-Hags {
                                                 </Border>
 
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
-                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <!-- Network icon (stylised globe + network lines) -->
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+    <Viewbox Width="28" Height="28">
+        <Canvas Width="400" Height="400">
+            <!-- Gradients converted to XAML Resources -->
+            <Canvas.Resources>
+                <LinearGradientBrush x:Key="Path1Brush" StartPoint="0.17,0.83" EndPoint="0.31,0.83">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path2Brush" StartPoint="0.03,0.67" EndPoint="0.45,0.67">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path3Brush" StartPoint="-0.1,0.51" EndPoint="0.6,0.51">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path4Brush" StartPoint="-0.23,0.34" EndPoint="0.74,0.34">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+            </Canvas.Resources>
+
+            <Path Fill="{StaticResource Path1Brush}" Data="M170.4 331c0 7.7 3.4 15.3 9.2 20.3 11.1 9.5 28.4 8.7 38.7-1.7 5-5.1 7.5-12.1 7.4-18.5 0-6.4-2.4-12.4-7.4-17.5-10.3-10.4-27.6-11.1-38.7-1.7-5.5 4.7-8.9 11-8.8 19.1z"/>
+            <Path Fill="{StaticResource Path2Brush}" Data="M281.3 272.7c-10.3 11-20.4 21.8-30.5 32.6-4.4-3.8-8.6-7.7-13.1-11.2-7.8-6.2-16.2-11.3-25.6-14.4-15.1-5-29.1-2.2-42.5 6-8 4.9-15 11.1-21.5 17.9-.3.3-.6.7-1.1 1.3-10.8-10.6-21.4-21-32.3-31.7 4.3-4.1 8.4-8.3 12.8-12.1 12.2-10.9 25.6-19.6 41.1-24.7 24.8-8.2 48.7-5.4 71.9 6.1 14.9 7.4 27.7 17.4 39.7 29 .2.3.6.8 1 1.2z"/>
+            <Path Fill="{StaticResource Path3Brush}" Data="M310.4 253.7c-9.3-7.9-18.1-15.9-27.4-23.3-14.5-11.5-30.3-21-47.7-27.3-14.3-5.2-29.1-7.8-44.3-6.8-18.8 1.2-36.1 7.6-52.3 17.2-17.5 10.4-32.6 23.8-46.7 38.6-.3.3-.6.8-1 1.3-10.8-10.6-21.4-21-32.3-31.7 3.5-3.5 6.9-7 10.3-10.4 14.9-14.7 31-27.7 49-38.2 18.1-10.5 37.2-17.9 57.8-21 24.2-3.6 47.9-1.1 71 6.9 23.7 8.1 45 20.7 64.6 36.5 9.6 7.7 18.6 16.2 27.9 24.4.4.4.9.6 1.5 1.1-10 10.8-20.1 21.7-30.1 32.3z"/>
+            <Path Fill="{StaticResource Path4Brush}" Data="M205.8 69.2c2.8.3 5.6.6 8.4.8 22.6 1.7 44.3 7.4 65.2 16 29.5 12 56.1 29 80.7 49.4 11.8 9.7 22.9 20.3 34.3 30.5.5.5 1.1.9 1.8 1.4-10.4 11.1-20.5 21.9-30.8 32.9-1-.9-2-1.7-2.9-2.6-14.1-13.8-29-26.6-44.9-38.1-20.3-14.7-41.8-27-65.4-35.2-20.4-7.1-41.4-10.4-62.9-9.2-20.8 1.2-40.7 6.6-59.7 15.4-23.8 10.9-44.9 26-64.3 43.6-9 8.1-17.5 16.7-26.3 25.3-.5-.5-1.3-1.2-2.1-2-9.6-9.4-19.1-18.8-28.7-28.2-.3-.3-.7-.6-1.1-.8 0-.1 0-.3 0-.4.6-.5 1.2-1 1.8-1.6 25-26.4 52.2-50 83.8-67.8 28-15.8 57.7-26 89.7-28.5 2.6-.2 5.2-.5 7.8-.7h10z"/>
+        </Canvas>
+    </Viewbox>
+</Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
                                                         <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
@@ -6969,6 +7141,54 @@ function Set-Hags {
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
+
+                                                <!-- Battery / Power Card -->
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <!-- Battery Icon -->
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Viewbox Width="26" Height="26">
+                                                                <Canvas Width="94" Height="236">
+                                                                    <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="7" 
+                                                                          Data="M8 43v151c0 19 17 35 39 35s39-16 39-35V43c0-19-17-35-39-35S8 24 8 43z"/>
+                                                                    
+                                                                    <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="4" 
+                                                                          Data="M36 12h22V5c0-3-5-5-11-5s-11 2-11 5z"/>
+                                                                    
+                                                                    <Ellipse Canvas.Left="8" Canvas.Top="25" Width="78" Height="36" 
+                                                                             Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="5"/>
+
+                                                                    <Path Fill="#0080CC" 
+                                                                          Data="M8 152v42c0 19 17 35 39 35s39-16 39-35v-42c-8 7-22 12-39 12s-31-5-39-12z"/>
+
+                                                                    <Ellipse Canvas.Left="31" Canvas.Top="65" Width="32" Height="32" Fill="#66B3FF"/>
+                                                                    <Path Fill="#99CCFF" Data="M44 72h6v6h6v6h-6v6h-4v-6h-6v-6h6z"/>
+
+                                                                    <Path Fill="#0080CC" Data="M41 120l17 12-14 3 13 14-30-18 15-3-11-13z"/>
+
+                                                                    <Ellipse Canvas.Left="31" Canvas.Top="191" Width="32" Height="32" Fill="#B3D9FF"/>
+                                                                    <Path Fill="#0080CC" Data="M38 204h18v6H38z"/>
+                                                                </Canvas>
+                                                            </Viewbox>
+                                                        </Border>
+
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Plan: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                
 
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
