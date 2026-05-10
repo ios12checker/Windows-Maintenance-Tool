@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.6"
+$AppVersion = "5.7"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -970,7 +970,7 @@ function Invoke-HostsUpdate {
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
 
-        # Capture original ACL to preserve permissions (e.g., Users read access)
+        # Capture original ACL to preserve permissions
         $origAcl = $null
         if (Test-Path $hostsPath) {
             try { $origAcl = Get-Acl -Path $hostsPath } catch {}
@@ -1038,31 +1038,29 @@ function Invoke-HostsUpdate {
         $finalContent = "$userEntries`r`n`r`n# UPDATED: $(Get-Date)`r`n$adBlockContent"
         
         try {
-            Set-Content -Path $hostsPath -Value $finalContent -Encoding UTF8 -Force
+            # FIX: Write file as UTF-8 without Byte Order Mark (BOM)
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($hostsPath, $finalContent, $utf8NoBom)
 
-            # Re-apply original ACL or ensure Users has read access
+            # FIX: Ensure Users have read access using Universal SID (Localization safe)
             try {
-                if ($origAcl) {
-                    Set-Acl -Path $hostsPath -AclObject $origAcl
-                    Write-Output "Restored original permissions on hosts file."
-                }
-                else {
-                    $fs = Get-Acl -Path $hostsPath
-                    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Users", "ReadAndExecute", "Allow")
-                    $fs.SetAccessRule($rule)
-                    Set-Acl -Path $hostsPath -AclObject $fs
-                    Write-Output "Applied Users read permission to hosts file."
-                }
+                $acl = Get-Acl -Path $hostsPath
+                # Get Universal SID for Built-in "Users" group
+                $usersSid = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($usersSid, "ReadAndExecute", "Allow")
+                $acl.SetAccessRule($rule)
+                Set-Acl -Path $hostsPath -AclObject $acl
+                Write-Output "Applied universal read permissions to hosts file."
             }
             catch {
-                Write-Output "Warning: Could not reapply permissions: $($_.Exception.Message)"
+                Write-Output "Warning: Could not strictly apply permissions: $($_.Exception.Message)"
             }
             
             # Validation
             if ((Get-Item $hostsPath).Length -lt 100) { throw "Write verification failed (File empty)." }
             
             ipconfig /flushdns | Out-Null
-            Write-Output "Hosts file updated successfully."
+            Write-Output "Hosts file updated and DNS flushed successfully."
         }
         catch {
             Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
@@ -1075,6 +1073,7 @@ function Invoke-HostsUpdate {
         }
     } "Updating hosts file..."
 }
+
 # --- HOSTS EDITOR ---
 function Show-HostsEditor {
     # 1. SETUP FORM
@@ -1160,7 +1159,7 @@ function Show-HostsEditor {
             }
         })
     
-    # 6. SAVE LOGIC (Modified to use local variables)
+    # 6. SAVE LOGIC
     $SaveAction = {
         param($FormObj, $TextBox, $FilePath, $HighlightScript)
         
@@ -1175,9 +1174,23 @@ function Show-HostsEditor {
                 if ($check -eq "No") { return $false }
             }
             
-            Set-Content -Path $FilePath -Value $TextBox.Text -Encoding UTF8 -Force
-            Start-Process icacls.exe -ArgumentList "`"$FilePath`" /reset" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            # FIX: Write the GUI editor changes without BOM
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($FilePath, $TextBox.Text, $utf8NoBom)
             
+            # FIX: Ensure proper permissions instead of using icacls
+            try {
+                $acl = Get-Acl -Path $FilePath
+                $usersSid = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($usersSid, "ReadAndExecute", "Allow")
+                $acl.SetAccessRule($rule)
+                Set-Acl -Path $FilePath -AclObject $acl
+            }
+            catch {}
+            
+            # Flush DNS cache so immediate changes take effect
+            ipconfig /flushdns | Out-Null
+
             if ((Get-Item $FilePath).Length -eq 0 -and $TextBox.Text.Length -gt 0) {
                 throw "Write failed (0 bytes)."
             }
@@ -1188,7 +1201,7 @@ function Show-HostsEditor {
                 $FormObj.Text = "Hosts File Editor"
             }
             
-            [System.Windows.Forms.MessageBox]::Show("Saved successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            [System.Windows.Forms.MessageBox]::Show("Saved successfully and flushed DNS!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
             
             # Re-apply highlighting
             & $HighlightScript
@@ -1214,10 +1227,10 @@ function Show-HostsEditor {
             }
         })
     
-    # 8. CLOSE PROMPT (FIXED - Pass all required parameters)
+    # 8. CLOSE PROMPT
     $hForm.Add_FormClosing({
             param($src, $e)
-        
+    
             if ($src.Tag -eq $true) {
                 $res = [System.Windows.Forms.MessageBox]::Show(
                     "You have unsaved changes. Save now?", 
@@ -1225,9 +1238,8 @@ function Show-HostsEditor {
                     [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, 
                     [System.Windows.Forms.MessageBoxIcon]::Warning
                 )
-            
+        
                 if ($res -eq "Yes") {
-                    # Pass all required parameters to SaveAction
                     $success = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
                     if (-not $success) {
                         $e.Cancel = $true
@@ -1236,7 +1248,6 @@ function Show-HostsEditor {
                 elseif ($res -eq "Cancel") {
                     $e.Cancel = $true
                 }
-                # If "No", just close without saving
             }
         })
     
