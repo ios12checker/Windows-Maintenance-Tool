@@ -9206,8 +9206,25 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
-
-        # --- NEW: Kill stuck package managers before scanning ---
+        # Pre-scan: sync winget sources (prevents parallel SQLite database locks)
+        try {
+            Write-GuiLog "Pre-refreshing winget sources (this may take a moment)..."
+            
+            # ADDED "--name winget": Bypasses the buggy msstore repository update entirely
+            $wingetArgs = "source update --name winget --accept-source-agreements --disable-interactivity"
+            
+            $refreshProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
+            
+            if ($refreshProc.ExitCode -eq 0) {
+                Write-GuiLog "Winget community source refreshed successfully."
+            }
+            else {
+                Write-GuiLog "Winget source refresh returned exit code $($refreshProc.ExitCode) - continuing anyway."
+            }
+        }
+        catch {
+            Write-GuiLog "Winget source refresh failed: $($_.Exception.Message)"
+        }
         try {
             Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
         }
