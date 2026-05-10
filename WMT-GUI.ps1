@@ -970,12 +970,6 @@ function Invoke-HostsUpdate {
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
 
-        # Capture original ACL to preserve permissions
-        $origAcl = $null
-        if (Test-Path $hostsPath) {
-            try { $origAcl = Get-Acl -Path $hostsPath } catch {}
-        }
-
         # 2. DOWNLOAD HOSTS FILE
         $mirrors = @(
             "https://o0.pages.dev/Lite/hosts.win",
