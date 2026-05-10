@@ -1,108 +1,104 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.5-green)
+![Version](https://img.shields.io/badge/version-v5.6-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
 
-Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, updating, and tuning Windows systems. It is designed for power users, technicians, and end users who want common maintenance actions in one place instead of scattered across Control Panel, Settings, PowerShell, and third-party tools.
+Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, updating, and tuning Windows 10 and Windows 11 systems. It brings common maintenance tasks into one interface instead of spreading them across Settings, Control Panel, PowerShell, Task Scheduler, Registry Editor, and separate utilities.
+
+It is built for technicians, power users, and end users who want practical Windows maintenance tools with clear buttons, visible output, confirmation prompts, and local backups where risky changes are involved.
 
 ## Highlights
 
-- Clean modern GUI with grouped maintenance pages
-- Package update scanning and one-by-one package updates
-- Windows repair tools: SFC, DISM, CHKDSK, WinRE, Windows Update repair
-- Startup Manager for startup apps, scheduled tasks, context menu entries, and services
-- Restore Manager with create, delete, restore, enable, and disable controls
-- My Device dashboard with system specs, driver tools, RAM cleanup, TRIM, and more
-- DNS, firewall, driver, cleanup, and system tweak tools
-- Safety prompts, backups, and revert options for risky operations
+- Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
+- Package updater with Winget, Microsoft Store, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
+- One-by-one package update flow with visible progress windows.
+- My Device dashboard with system specs, storage, network, battery/power, driver tools, RAM cleanup, TRIM, and Windows Update access.
+- Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
+- Restore Manager with create, delete, restore, enable, and disable actions.
+- Advanced Cleanup with analyze/preview mode before deletion.
+- Safety prompts, backups, revert actions, and clearer error messages for risky operations.
 
-## Screenshots
+## Screenshot
 
-<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/e989afcb-2283-49ee-be0d-60cabad7fccf" />
+<img width="1920" height="1034" alt="image" src="https://github.com/user-attachments/assets/9da0ae6e-b5ad-4f43-bbd3-f8a54e35bdfd" />
 
+## What's New in v5.6
 
+### Faster Startup and Better Responsiveness
 
-## What's New in v5.5
+- My Device system statistics now load in a background runspace, so the main GUI stays responsive while hardware, storage, network, and battery details are collected.
+- Startup initialization now waits for content rendering, reducing the white PowerShell/window flash during launch.
+- Stuck `winget` and `msiexec` processes are cleared before package scans/actions to reduce updater lockups.
 
-### Package Updater Improvements
+### Expanded My Device Dashboard
 
-- Adds `pnpm` as a package update provider.
-- Restores and expands provider support for Winget, Microsoft Store, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo.
-- Adds better scan timeout handling so one slow provider does not leave the UI waiting forever.
-- Improves Winget scan behavior with non-interactive source agreement handling.
-- Uses `python -m pip` for more reliable pip actions across Python environments.
+- Added Network Info for the active physical adapter, including IP address, gateway, DNS, and link speed.
+- Added Battery / Power info, including charge level, status, estimated runtime, battery health, and active power plan.
 
-### Driver Exporter Overhaul
+### Cleanup Improvements
 
-- Replaces the one-click background driver export with a dedicated Driver Export Tool GUI.
-- Runs driver scanning and export work outside the main WMT window so the main app stays responsive.
-- Groups drivers by category, including Display, Network, Audio, Storage, USB, Printer, System, and Other.
-- Adds driver search, selective export, progress feedback, and Export All.
+- Added **Clear Event Logs** to Advanced Cleanup.
+- Event log clearing uses elevated `wevtutil` in a background runspace so the cleanup window does not freeze.
 
-### Cleanup Analyze Preview
-
-- Adds an Analyze button to Advanced Cleanup / Temp File cleanup.
-- Shows a preview window with files that would be deleted before cleanup runs.
-- Supports Clean Selected, Clean All, opening a file's folder, and deleting individual files from the preview.
-- Displays human-readable file sizes.
-
-## Features
+## Core Features
 
 ### Updates and Software
 
-- Scan for package updates from providers such as Winget, Microsoft Store, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
-- Update packages one at a time with visible progress windows.
-- Search packages before updating.
+- Scan for updates from Winget, Microsoft Store, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
+- Update packages one at a time with a visible update window.
+- Search package results before updating.
 - Ignore selected Winget packages.
 - Browse and install curated software.
+- Handles slow providers with timeout protection.
 
 ### System Health
 
 - Run `sfc /scannow`.
 - Run DISM CheckHealth and RestoreHealth.
 - Run Quick Fix for common Windows repair steps.
-- Check Windows Recovery Environment (WinRE) status with a simplified summary.
+- Check Windows Recovery Environment (WinRE) status with a simple summary and optional technical details.
 - Run CHKDSK tools.
 - Repair Windows Update components.
+- Reset update services.
 
 ### My Device
 
-- View system and device information.
-- Check driver versions and vendor pages.
+- View Windows, CPU, RAM, GPU, motherboard, storage, network, battery, and power details.
+- Check driver versions and open vendor driver pages.
 - Clean RAM.
 - Run SSD TRIM and disk optimization tools.
 - Open Windows Update quickly.
 
 ### Tweaks
 
-- Performance service optimization and revert.
+- Performance service optimization and revert actions.
 - Hibernation, SysMain, memory compression, and power plan controls.
 - Windows Update policy presets.
 - Optional Windows feature toggles.
-- Taskbar, clock, search, widgets, Task View, Chat, and HAGS tweaks.
+- Taskbar alignment, search, widgets, Task View, Chat, and button combine behavior.
+- Clock options for 12-hour/24-hour format and seconds display.
+- Hardware-Accelerated GPU Scheduling (HAGS) toggle.
 - Bloatware and AppX cleanup tools.
 
-### Network and DNS
+### Cleanup
 
-- Flush DNS and reset network settings.
-- Set DNS to Cloudflare, Google, Quad9, DHCP, or custom servers.
-- Enable or disable DNS over HTTPS rules.
-- View routing tables.
-- Edit hosts file and apply ad-block hosts lists.
-
-### Firewall Manager
-
-- View and search firewall rules.
-- Add, edit, enable, disable, and delete rules.
-- Export and import firewall rules.
-- Reset firewall defaults or purge rules with confirmation.
+- Delete temporary files and recycle bin data.
+- Analyze cleanup targets before deleting files.
+- Clean selected files from the preview window.
+- Run advanced cleanup selections.
+- Clear Windows Event Logs.
+- Clean browser and Explorer traces.
+- Find and fix broken shortcuts.
+- Clean selected registry issues with backups and safelists.
+- Clear Xbox credentials for login-loop fixes.
+- Free local OneDrive disk space while keeping cloud copies.
 
 ### Drivers
 
-- Export installed drivers.
-- Export selected drivers from the Driver Export Tool GUI.
+- Export installed drivers with the Driver Export Tool GUI.
+- Export selected drivers by category.
 - Restore drivers from backup.
 - Generate driver reports.
 - Remove ghost devices.
@@ -110,16 +106,21 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 - Toggle device metadata downloads.
 - Clean old duplicate drivers.
 
-### Cleanup
+### Network and DNS
 
-- Delete temp files and recycle bin data.
-- Analyze temp/cleanup files before deletion and delete selected results from the preview.
-- Run advanced cleanup selection.
-- Clean browser and Explorer traces.
-- Find and fix broken shortcuts.
-- Clean selected registry issues with backups and safelists.
-- Clear Xbox credentials for login-loop fixes.
-- Free local OneDrive disk space.
+- Flush DNS and reset network settings.
+- Set DNS to Cloudflare, Google, Quad9, DHCP, or custom DNS servers.
+- Enable or disable DNS over HTTPS rules.
+- View routing tables.
+- Edit the hosts file.
+- Apply ad-block hosts lists.
+
+### Firewall Manager
+
+- View and search firewall rules.
+- Add, edit, enable, disable, and delete firewall rules.
+- Export and import firewall policies.
+- Restore firewall defaults or purge rules with confirmation.
 
 ### Utilities
 
@@ -142,15 +143,13 @@ Double-click:
 Start_WMT_GUI.bat
 ```
 
-The launcher validates `WMT-GUI.ps1`, handles update checks, and starts the GUI with the required permissions.
+Keep `Start_WMT_GUI.bat` and `WMT-GUI.ps1` in the same folder. The launcher validates the script and starts the GUI with the required permissions.
 
 ### Manual Launch
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File "WMT-GUI.ps1"
 ```
-
-Keep `Start_WMT_GUI.bat` and `WMT-GUI.ps1` in the same folder.
 
 ## Requirements
 
@@ -161,7 +160,7 @@ Keep `Start_WMT_GUI.bat` and `WMT-GUI.ps1` in the same folder.
 
 ## Output and Data Folder
 
-WMT stores generated files in the local `data` folder next to the script.
+WMT stores generated files in a local `data` folder next to the script.
 
 | Output | Purpose |
 | --- | --- |
@@ -178,8 +177,8 @@ WMT stores generated files in the local `data` folder next to the script.
 - Destructive actions use confirmation prompts.
 - Registry and hosts changes create backups where applicable.
 - Many tweak groups include revert actions.
-- Startup and service changes are visible in the Startup Manager.
-- No telemetry is sent by WMT itself.
+- Startup and service changes are visible in Startup Manager.
+- WMT itself does not send telemetry.
 - Some features use online sources, package managers, or Microsoft/Windows components.
 
 ## Troubleshooting
@@ -218,4 +217,4 @@ Issues and pull requests are welcome. Please include:
 - Steps to reproduce
 - Screenshot or error output when possible
 
-If this tool helps you, consider starring the repository.
+If this tool helps you, consider starring the repository or Donating.
