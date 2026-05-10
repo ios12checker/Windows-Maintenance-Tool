@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.5"
+$AppVersion = "5.6"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -37,6 +37,14 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
+
+# KILL HANGING PACKAGE MANAGERS
+# This silently clears any stuck winget or installer processes before the tool starts.
+# (Removed Write-GuiLog here since the GUI hasn't been built yet)
+try {
+    Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+}
+catch {}
 
 # ENABLE HIGH-DPI AWARENESS (Safe Check)
 if ([Environment]::OSVersion.Version.Major -ge 6) {
@@ -146,40 +154,194 @@ function Update-TweakButtonStates {
 
 # Centralized data path for exports (in repo folder)
 function Update-MyDeviceStats {
-    try {
-        $os = Get-CimInstance Win32_OperatingSystem; (Get-Ctrl "txtDeviceOS").Text = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
-        $cpu = Get-CimInstance Win32_Processor; (Get-Ctrl "txtDeviceCPU").Text = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
-        $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); (Get-Ctrl "txtDeviceRAM").Text = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
-        # 4. GPU
-        $gpu = Get-CimInstance Win32_VideoController
-        $gpuText = ""
-        foreach ($g in $gpu) {
-            $vram = 0
-            # Bypass WMI 4GB limit by checking the 64-bit registry key
-            $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
+    # 1. Set placeholder text instantly
+    (Get-Ctrl "txtDeviceOS").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceCPU").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceRAM").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceGPU").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceMotherboard").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceStorage").Text = "Gathering stats..."
+
+    # 2. Start Background Runspace for heavy CIM queries
+    $script:StatsRunspace = [PowerShell]::Create().AddScript({
+            $res = @{}
+            try {
+                $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
+                $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
+                $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); $res.RAM = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
             
-            if ($regMatches) {
-                $reg = $regMatches[0]
-                if ($null -ne $reg.'HardwareInformation.qwMemorySize') {
-                    $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2)
+                # GPU (Includes your registry 4GB limit bypass)
+                $gpu = Get-CimInstance Win32_VideoController
+                $gpuText = ""
+                foreach ($g in $gpu) {
+                    $vram = 0
+                    $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
+                    if ($regMatches) {
+                        $reg = $regMatches[0]
+                        if ($null -ne $reg.'HardwareInformation.qwMemorySize') { $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2) }
+                        elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) { $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2) }
+                    }
+                    if ($vram -eq 0 -or $null -eq $vram) { $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) }
+                    $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
                 }
-                elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) {
-                    $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2)
+                $res.GPU = $gpuText.Trim()
+            
+                $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
+                $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; $res.Storage = $dt.Trim()
+                # Physical active adapters only
+                
+                $physicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+                Where-Object {
+                    $_.Status -eq "Up" -and
+                    $_.HardwareInterface -eq $true
                 }
+                
+                $netInfo = @()
+                
+                foreach ($nic in $physicalAdapters) {
+                
+                    $ip = Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                
+                    if (-not $ip) { continue }
+                
+                    $route = Get-NetRoute -InterfaceIndex $nic.ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+                
+                    $dnsServers = (
+                        Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+                    ).ServerAddresses -join ", "
+                
+                    $netInfo += "$($nic.Name) | IP: $($ip.IPAddress)/$($ip.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $($nic.LinkSpeed)"
+                }
+                
+                $res.Network = if ($netInfo) {
+                    $netInfo -join "`r`n"
+                }
+                else {
+                    "No active physical network adapters found."
+                }
+
+                # ==========================================
+                # Battery / Power Information
+                # ==========================================
+                try {
+                    $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+
+                    if ($battery) {
+                        # Current Charge
+                        $charge = $battery.EstimatedChargeRemaining
+                        $res.BatteryCharge = "$charge%"
+
+                        # Charging Status
+                        switch ($battery.BatteryStatus) {
+                            1 { $status = "Discharging" }
+                            2 { $status = "Plugged In / Charging" }
+                            3 { $status = "Fully Charged" }
+                            4 { $status = "Low" }
+                            5 { $status = "Critical" }
+                            6 { $status = "Charging" }
+                            default { $status = "Unknown" }
+                        }
+
+                        $res.BatteryStatus = $status
+
+                        # Estimated Time Remaining
+                        if ($battery.EstimatedRunTime -gt 0 -and $battery.EstimatedRunTime -ne 71582788) {
+                            $hours = [math]::Floor($battery.EstimatedRunTime / 60)
+                            $minutes = $battery.EstimatedRunTime % 60
+                            $res.BatteryTime = "${hours}h ${minutes}m remaining"
+                        }
+                        else {
+                            $res.BatteryTime = "Calculating..."
+                        }
+
+                        # Battery Health
+                        $design = (Get-CimInstance -Namespace root\wmi -Class BatteryStaticData -ErrorAction SilentlyContinue).DesignedCapacity
+                        $full = (Get-CimInstance -Namespace root\wmi -Class BatteryFullChargedCapacity -ErrorAction SilentlyContinue).FullChargedCapacity
+
+                        if ($design -and $full) {
+                            $health = [math]::Round(($full / $design) * 100, 1)
+                            $res.BatteryHealth = "$health% of original capacity"
+                        }
+                        else {
+                            $res.BatteryHealth = "Unavailable"
+                        }
+                    }
+                    else {
+                        $res.BatteryCharge = "Desktop System"
+                        $res.BatteryStatus = "No Battery Detected"
+                        $res.BatteryTime = "N/A"
+                        $res.BatteryHealth = "N/A"
+                    }
+
+                    # Current Power Plan
+                    $powerPlan = powercfg /getactivescheme
+
+                    if ($powerPlan -match '\((.*?)\)') {
+                        $res.PowerPlan = $matches[1]
+                    }
+                    else {
+                        $res.PowerPlan = "Unknown"
+                    }
+                }
+                catch {
+                    $res.BatteryCharge = "Unavailable"
+                    $res.BatteryStatus = "Unavailable"
+                    $res.BatteryTime = "Unavailable"
+                    $res.BatteryHealth = "Unavailable"
+                    $res.PowerPlan = "Unavailable"
+                }
+
+                # # Network information
+                # $net = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback|vEthernet" }
+                # $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+                # $dns = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback" }
+
+                # $netInfo = @()
+                # foreach ($adapter in $net) {
+                #     $route = $routes | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -First 1
+                #     $dnsServers = ($dns | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -ExpandProperty ServerAddresses) -join ", "
+                #     $speed = (Get-NetAdapter -Name $adapter.InterfaceAlias -ErrorAction SilentlyContinue).LinkSpeed
+                #     $netInfo += "$($adapter.InterfaceAlias) | IP: $($adapter.IPAddress)/$($adapter.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $speed"
+                # }
+                # $res.Network = if ($netInfo) { $netInfo -join "`r`n" } else { "No active network adapters found." }
             }
-            
-            # Fallback to standard WMI if registry check fails
-            if ($vram -eq 0 -or $null -eq $vram) { 
-                $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) 
+            catch {}
+            return $res
+        })
+
+    $script:StatsAsyncResult = $script:StatsRunspace.BeginInvoke()
+
+    # 3. Monitor Job using DispatcherTimer (UI Thread safe)
+    $script:StatsTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:StatsTimer.Add_Tick({
+            if ($script:StatsAsyncResult.IsCompleted) {
+                $script:StatsTimer.Stop()
+                try {
+                    $data = $script:StatsRunspace.EndInvoke($script:StatsAsyncResult)
+                    if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
+                
+                    # Apply data to the UI
+                    (Get-Ctrl "txtDeviceOS").Text = $data.OS
+                    (Get-Ctrl "txtDeviceCPU").Text = $data.CPU
+                    (Get-Ctrl "txtDeviceRAM").Text = $data.RAM
+                    (Get-Ctrl "txtDeviceGPU").Text = $data.GPU
+                    (Get-Ctrl "txtDeviceMotherboard").Text = $data.MB
+                    (Get-Ctrl "txtDeviceStorage").Text = $data.Storage
+                    (Get-Ctrl "txtDeviceNetwork").Text = $data.Network
+                    (Get-Ctrl "txtBatteryHealth").Text = "Health: $($data.BatteryHealth)"
+                    (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($data.BatteryCharge)"
+                    (Get-Ctrl "txtBatteryStatus").Text = "Status: $($data.BatteryStatus)"
+                    (Get-Ctrl "txtPowerPlan").Text = "Power Plan: $($data.PowerPlan)"
+                    (Get-Ctrl "txtBatteryTime").Text = "Time Remaining: $($data.BatteryTime)"
+                }
+                catch {}
+                $script:StatsRunspace.Dispose()
             }
-            
-            $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
-        }
-        (Get-Ctrl "txtDeviceGPU").Text = $gpuText.Trim()
-        $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; (Get-Ctrl "txtDeviceMotherboard").Text = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
-        $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; (Get-Ctrl "txtDeviceStorage").Text = $dt.Trim()
-    }
-    catch {}
+        })
+    $script:StatsTimer.Start()
 }
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
@@ -1361,7 +1523,6 @@ function Get-Winapp2Rules {
 }
     
 function Show-AdvancedCleanupSelection {
-
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.TempCleanup
     $isWinapp2Enabled = $currentSettings.LoadWinapp2
@@ -1380,7 +1541,7 @@ function Show-AdvancedCleanupSelection {
     $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $form.ForeColor = "White"
 
-    # --- 1. TOP PANEL (Search) ---
+    # TOP PANEL
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
@@ -1402,11 +1563,10 @@ function Show-AdvancedCleanupSelection {
     $txtSearch.BorderStyle = "FixedSingle"
     $txtSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($txtSearch)
-    
+
     $lblSearch = New-Object System.Windows.Forms.Label
-    $lblSearch.Text = "Search:"
-    $lblSearch.AutoSize = $true; $lblSearch.Location = "370, 15"
-    $lblSearch.Anchor = "Top, Right"
+    $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
+    $lblSearch.Location = "370, 15"; $lblSearch.Anchor = "Top, Right"
     $topPanel.Controls.Add($lblSearch)
 
     $layoutTopPanel = {
@@ -1416,52 +1576,56 @@ function Show-AdvancedCleanupSelection {
     $topPanel.Add_SizeChanged({ & $layoutTopPanel })
     & $layoutTopPanel
 
-    # --- 2. BOTTOM PANEL (Buttons) ---
+    # BOTTOM PANEL
     $btnPanel = New-Object System.Windows.Forms.Panel
     $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
     $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
 
     $btnClean = New-Object System.Windows.Forms.Button
-    $btnClean.Text = "Clean Selected"
-    $btnClean.Size = "120, 35"; $btnClean.Location = "490, 12"
-    $btnClean.BackColor = "SeaGreen"; $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
-    $btnClean.Anchor = "Top, Right"
-    $btnClean.DialogResult = "OK" # Native close
+    $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
+    $btnClean.Location = "490, 12"; $btnClean.BackColor = "SeaGreen"
+    $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
+    $btnClean.Anchor = "Top, Right"; $btnClean.DialogResult = "OK"
     $btnPanel.Controls.Add($btnClean)
 
     $btnAnalyze = New-Object System.Windows.Forms.Button
-    $btnAnalyze.Text = "Analyze"
-    $btnAnalyze.Size = "100, 35"; $btnAnalyze.Location = "380, 12"
-    $btnAnalyze.BackColor = "SteelBlue"; $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
-    $btnAnalyze.Anchor = "Top, Right"
-    $btnAnalyze.DialogResult = "Yes" # Hijacking 'Yes' to act as our Analyze trigger
+    $btnAnalyze.Text = "Analyze"; $btnAnalyze.Size = "100, 35"
+    $btnAnalyze.Location = "380, 12"; $btnAnalyze.BackColor = "SteelBlue"
+    $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
+    $btnAnalyze.Anchor = "Top, Right"; $btnAnalyze.DialogResult = "Yes"
     $tt.SetToolTip($btnAnalyze, "Preview files that will be deleted without removing them.")
     $btnPanel.Controls.Add($btnAnalyze)
 
     $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Cancel"
-    $btnCancel.Size = "90, 35"; $btnCancel.Location = "280, 12"
-    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = "Cancel"
-    $btnCancel.Anchor = "Top, Right"
+    $btnCancel.Text = "Cancel"; $btnCancel.Size = "90, 35"
+    $btnCancel.Location = "280, 12"; $btnCancel.BackColor = "DimGray"
+    $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = "Cancel"; $btnCancel.Anchor = "Top, Right"
     $btnPanel.Controls.Add($btnCancel)
+
+    $btnEventLogs = New-Object System.Windows.Forms.Button
+    $btnEventLogs.Text = "Clear Event Logs"; $btnEventLogs.Size = "120, 35"
+    $btnEventLogs.Top = 12; $btnEventLogs.BackColor = "Goldenrod"
+    $btnEventLogs.ForeColor = "White"; $btnEventLogs.FlatStyle = "Flat"
+    $btnEventLogs.Anchor = "Top, Right"
+    $btnPanel.Controls.Add($btnEventLogs)
 
     $layoutButtonPanel = {
         $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
         $btnAnalyze.Left = [Math]::Max(0, $btnClean.Left - $btnAnalyze.Width - 10)
         $btnCancel.Left = [Math]::Max(0, $btnAnalyze.Left - $btnCancel.Width - 10)
+        $btnEventLogs.Left = [Math]::Max(0, $btnCancel.Left - $btnEventLogs.Width - 10)
     }
     $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
     & $layoutButtonPanel
 
-    # --- 3. MAIN CONTENT PANEL ---
+    # MAIN CONTENT PANEL
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
     $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
-    
-    # FIX 1: Robust Reflection for Double Buffered. Using the 2-argument overload so PowerShell doesn't panic on $null.
+
     $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance, NonPublic')
     if ($prop) { $prop.SetValue($mainPanel, $true) }
 
@@ -1470,77 +1634,73 @@ function Show-AdvancedCleanupSelection {
     $form.Controls.Add($mainPanel)
     $mainPanel.BringToFront()
 
-    # --- INTERNAL RULES ---
+    # --- INTERNAL RULES (static) ---
     $internalRules = @(
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail Cache"; Key = "Thumbnails"; Desc = "Explorer thumbnails"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject][ordered]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail Cache"; Key = "Thumbnails"; Desc = "Explorer thumbnails"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
     )
 
-    $RenderList = {
-        param($IncludeWinapp2, $InteractiveMode)
-        
+    $global:checkboxes = @{}
+    $global:sections = @()
+
+    # ------------------------------------------------
+    # Render helper – rebuilds the entire panel from a rule list,
+    # preserving previous checkbox states
+    # ------------------------------------------------
+    $RenderAllRules = {
+        param($allRules)
+
         $mainPanel.SuspendLayout()
         $mainPanel.Controls.Clear()
-        
-        $allRules = @($internalRules)
 
-        if ($IncludeWinapp2) {
-            $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "Loading Rules..."; $lbl.ForeColor = "Yellow"; $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
-            $mainPanel.Controls.Add($lbl); $form.Update()
-
-            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-            $shouldDownload = $false
-            if (Test-Path $iniPath) {
-                if ((Get-Item $iniPath).LastWriteTime -lt (Get-Date).AddDays(-7) -and $InteractiveMode) {
-                    if ([System.Windows.Forms.MessageBox]::Show("Update Rules?", "Update", "YesNo") -eq "Yes") { $shouldDownload = $true }
-                }
-            }
-            elseif ($InteractiveMode) { $shouldDownload = $true }
-
-            try { $winRules = Get-Winapp2Rules -Download:$shouldDownload; $allRules += $winRules } catch {}
-            if ($mainPanel.Controls.Count -gt 0) { $mainPanel.Controls.RemoveAt(0) }
+        # Preserve current checkbox states
+        $prevStates = @{}
+        foreach ($k in $global:checkboxes.Keys) {
+            $prevStates[$k] = $global:checkboxes[$k].Checked
         }
-
-        $global:checkboxes = @{}
+        $global:checkboxes.Clear()
         $global:sections = @()
 
-        $sections = $allRules | Select-Object -ExpandProperty Section -Unique | Sort-Object
+        $grouped = $allRules | Group-Object Section | Sort-Object Name
+        $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-        foreach ($sec in $sections) {
+        foreach ($group in $grouped) {
+            $sec = $group.Name
+
             $secPanel = New-Object System.Windows.Forms.Panel
             $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
             $secPanel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
             $secPanel.Tag = "HEADER"
-            
+
             $secChk = New-Object System.Windows.Forms.CheckBox
             $secChk.Text = $sec
             $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
             $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
             $secChk.AutoSize = $true; $secChk.Location = "5, 5"
             $secPanel.Controls.Add($secChk)
-            $mainPanel.Controls.Add($secPanel)
-            
+
+            $controlsToAdd.Add($secPanel)
             $global:sections += $secPanel
 
             $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
             $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
-            $itemFlow.Margin = "25, 0, 0, 0"
-            $itemFlow.Tag = "FLOW"
+            $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
 
-            $secItems = $allRules | Where-Object { $_.Section -eq $sec } | Sort-Object AppGroup, Name
+            $secItems = $group.Group | Sort-Object AppGroup, Name
             $childChecks = @()
             $currentGroup = $null
             $isSecChecked = $true
+            $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
             foreach ($item in $secItems) {
                 if ($item.AppGroup -ne $currentGroup) {
@@ -1551,12 +1711,12 @@ function Show-AdvancedCleanupSelection {
                     $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
                     $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
                     $grpLbl.Tag = "GROUPHEADER"
-                    $itemFlow.Controls.Add($grpLbl)
+                    $flowControlsToAdd.Add($grpLbl)
                 }
 
                 $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
                 $chk = New-Object System.Windows.Forms.CheckBox
-                
+
                 if ($item.IsInternal) {
                     $chk.Text = $item.Name
                 }
@@ -1565,40 +1725,110 @@ function Show-AdvancedCleanupSelection {
                     $chk.Text = "$cleanName (*)"
                     $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
                 }
-                
+
                 $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
                 $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
-                
-                if ($savedStates.ContainsKey($itemKey)) { $chk.Checked = $savedStates[$itemKey] }
-                else { $chk.Checked = ($item.IsInternal -eq $true) }
-                
+
+                # Restore previous state or use default
+                if ($prevStates.ContainsKey($itemKey)) {
+                    $chk.Checked = $prevStates[$itemKey]
+                }
+                elseif ($savedStates.ContainsKey($itemKey)) {
+                    $chk.Checked = $savedStates[$itemKey]
+                }
+                else {
+                    $chk.Checked = ($item.IsInternal -eq $true)
+                }
+
                 if (-not $chk.Checked) { $isSecChecked = $false }
                 if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
 
-                $itemFlow.Controls.Add($chk)
+                $flowControlsToAdd.Add($chk)
                 $global:checkboxes[$itemKey] = $chk
                 $childChecks += $chk
             }
 
+            $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
             $secChk.Checked = $isSecChecked
-            $mainPanel.Controls.Add($itemFlow)
-            $secChk.Add_Click({ param($s, $e) foreach ($c in $childChecks) { $c.Checked = $s.Checked } }.GetNewClosure())
+
+            $secChk.Add_CheckedChanged({
+                    param($s, $e)
+                    foreach ($c in $childChecks) { $c.Checked = $s.Checked }
+                }.GetNewClosure())
+
+            $controlsToAdd.Add($itemFlow)
         }
-        $mainPanel.ResumeLayout()
+
+        $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
+        $mainPanel.ResumeLayout($true)
     }
 
-    # FIX 2: Execute rendering directly. Relying on an event like Add_Shown causes variables 
-    # to fall out of scope unless enclosed, leading to a silent pipeline crash.
-    & $RenderList -IncludeWinapp2 $isWinapp2Enabled -InteractiveMode $false
+    # Instant render of internal rules only
+    & $RenderAllRules -allRules $internalRules
 
-    # --- SEARCH LOGIC ---
+    # Function to load community rules (maybe with forced download)
+    $loadCommunityRules = {
+        param([switch]$ForceDownload)
+
+        if (-not $chkToggleWinapp2.Checked) { return }
+
+        $lbl = New-Object System.Windows.Forms.Label
+        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = "Yellow"
+        $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
+        $mainPanel.Controls.Add($lbl)
+        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+
+        try {
+            if ($ForceDownload) {
+                $winRules = Get-Winapp2Rules -Download:$true
+            }
+            else {
+                $winRules = Get-Winapp2Rules -Download:$false
+            }
+            if ($winRules) {
+                # Merge internal + community and re-render once
+                $combined = @($internalRules) + $winRules
+                & $RenderAllRules -allRules $combined
+            }
+        }
+        catch {}
+        finally {
+            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+            $mainPanel.Controls.Remove($lbl)
+        }
+    }
+
+    # Deferred loading after form is visible
+    $form.Add_Shown({
+            $form.BeginInvoke([Action] {
+                    if ($isWinapp2Enabled) {
+                        & $loadCommunityRules
+                    }
+                })
+        })
+
+    # Toggle handler
+    $chkToggleWinapp2.Add_Click({
+            $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
+            Save-WmtSettings -Settings $currentSettings
+
+            if ($chkToggleWinapp2.Checked) {
+                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+                $forceDownload = -not (Test-Path $iniPath)
+                & $loadCommunityRules -ForceDownload:$forceDownload
+            }
+            else {
+                # Revert to internal rules only
+                & $RenderAllRules -allRules $internalRules
+            }
+        })
+
+    # Search logic
     $txtSearch.Add_TextChanged({
             $q = $txtSearch.Text.ToLower()
             $mainPanel.SuspendLayout()
-        
             for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
                 $ctrl = $mainPanel.Controls[$i]
-            
                 if ($ctrl.Tag -eq "FLOW") {
                     $hasVisibleChildren = $false
                     foreach ($child in $ctrl.Controls) {
@@ -1607,12 +1837,10 @@ function Show-AdvancedCleanupSelection {
                                 $child.Visible = $true
                                 $hasVisibleChildren = $true
                             }
-                            else {
-                                $child.Visible = $false
-                            }
-                        } 
+                            else { $child.Visible = $false }
+                        }
                         elseif ($child.Tag -eq "GROUPHEADER") {
-                            $child.Visible = ($q.Length -eq 0) 
+                            $child.Visible = ($q.Length -eq 0)
                         }
                     }
                     $ctrl.Visible = $hasVisibleChildren
@@ -1622,31 +1850,78 @@ function Show-AdvancedCleanupSelection {
             $mainPanel.ResumeLayout()
         })
 
-    $chkToggleWinapp2.Add_Click({
-            $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-            Save-WmtSettings -Settings $currentSettings
-            & $RenderList -IncludeWinapp2 $chkToggleWinapp2.Checked -InteractiveMode $true
-        })
-
     $form.AcceptButton = $btnClean
     $form.CancelButton = $btnCancel
 
+    # Event Logs handler
+    $btnEventLogs.Add_Click({
+            $confirm = [System.Windows.Forms.MessageBox]::Show(
+                "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete.",
+                "Confirm Clear Logs",
+                [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                [System.Windows.Forms.MessageBoxIcon]::Warning
+            )
+            if ($confirm -eq "Yes") {
+                $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
+                $btnEventLogs.Enabled = $false
+                $btnEventLogs.Text = "Clearing..."
+
+                $script:EventLogRunspace = [PowerShell]::Create().AddScript({
+                        $logs = wevtutil el
+                        $cleared = 0
+                        foreach ($log in $logs) {
+                            wevtutil cl "$log" 2>$null
+                            $cleared++
+                        }
+                        return $cleared
+                    })
+                $script:EventLogAsyncResult = $script:EventLogRunspace.BeginInvoke()
+
+                $script:EventLogTimer = New-Object System.Windows.Threading.DispatcherTimer
+                $script:EventLogTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+                $script:EventLogTimer.Add_Tick({
+                        if ($script:EventLogAsyncResult.IsCompleted) {
+                            $script:EventLogTimer.Stop()
+                            $form.Cursor = [System.Windows.Forms.Cursors]::Default
+                            $btnEventLogs.Enabled = $true
+                            $btnEventLogs.Text = "Clear Event Logs"
+                            try {
+                                $clearedCount = $script:EventLogRunspace.EndInvoke($script:EventLogAsyncResult)
+                                if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) {
+                                    $clearedCount = $clearedCount[0]
+                                }
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    "Successfully processed $clearedCount Event Logs.",
+                                    "Success", "OK", "Information"
+                                )
+                            }
+                            catch {
+                                [System.Windows.Forms.MessageBox]::Show(
+                                    "Error: $($_.Exception.Message)", "Error", "OK", "Error"
+                                )
+                            }
+                            $script:EventLogRunspace.Dispose()
+                        }
+                    })
+                $script:EventLogTimer.Start()
+            }
+        })
+
     $guiResult = $form.ShowDialog()
 
-    # FIX 3: Catching the native Form result instead of relying on custom scoped action variables
     if ($guiResult -in @('OK', 'Yes')) {
-        $selectedItems = @()
+        $selectedItems = [System.Collections.Generic.List[object]]::new()
         foreach ($key in $global:checkboxes.Keys) {
             $cb = $global:checkboxes[$key]
-            if ($cb.Checked) { $selectedItems += $cb.Tag }
+            if ($cb.Checked) { $selectedItems.Add($cb.Tag) }
             $currentSettings.TempCleanup[$key] = $cb.Checked
         }
         $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
         Save-WmtSettings -Settings $currentSettings
-        
+
         return [PSCustomObject]@{
             Action = if ($guiResult -eq 'OK') { 'Clean' } else { 'Analyze' }
-            Items  = $selectedItems
+            Items  = $selectedItems.ToArray()
         }
     }
     return $null
@@ -6787,7 +7062,55 @@ function Set-Hags {
                                                 </Border>
 
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
-                                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+                                                        <!-- Network icon (stylised globe + network lines) -->
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+    <Viewbox Width="28" Height="28">
+        <Canvas Width="400" Height="400">
+            <!-- Gradients converted to XAML Resources -->
+            <Canvas.Resources>
+                <LinearGradientBrush x:Key="Path1Brush" StartPoint="0.17,0.83" EndPoint="0.31,0.83">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path2Brush" StartPoint="0.03,0.67" EndPoint="0.45,0.67">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path3Brush" StartPoint="-0.1,0.51" EndPoint="0.6,0.51">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+                <LinearGradientBrush x:Key="Path4Brush" StartPoint="-0.23,0.34" EndPoint="0.74,0.34">
+                    <GradientStop Color="#5080B1" Offset="0"/>
+                    <GradientStop Color="#004E8C" Offset="1"/>
+                </LinearGradientBrush>
+            </Canvas.Resources>
+
+            <Path Fill="{StaticResource Path1Brush}" Data="M170.4 331c0 7.7 3.4 15.3 9.2 20.3 11.1 9.5 28.4 8.7 38.7-1.7 5-5.1 7.5-12.1 7.4-18.5 0-6.4-2.4-12.4-7.4-17.5-10.3-10.4-27.6-11.1-38.7-1.7-5.5 4.7-8.9 11-8.8 19.1z"/>
+            <Path Fill="{StaticResource Path2Brush}" Data="M281.3 272.7c-10.3 11-20.4 21.8-30.5 32.6-4.4-3.8-8.6-7.7-13.1-11.2-7.8-6.2-16.2-11.3-25.6-14.4-15.1-5-29.1-2.2-42.5 6-8 4.9-15 11.1-21.5 17.9-.3.3-.6.7-1.1 1.3-10.8-10.6-21.4-21-32.3-31.7 4.3-4.1 8.4-8.3 12.8-12.1 12.2-10.9 25.6-19.6 41.1-24.7 24.8-8.2 48.7-5.4 71.9 6.1 14.9 7.4 27.7 17.4 39.7 29 .2.3.6.8 1 1.2z"/>
+            <Path Fill="{StaticResource Path3Brush}" Data="M310.4 253.7c-9.3-7.9-18.1-15.9-27.4-23.3-14.5-11.5-30.3-21-47.7-27.3-14.3-5.2-29.1-7.8-44.3-6.8-18.8 1.2-36.1 7.6-52.3 17.2-17.5 10.4-32.6 23.8-46.7 38.6-.3.3-.6.8-1 1.3-10.8-10.6-21.4-21-32.3-31.7 3.5-3.5 6.9-7 10.3-10.4 14.9-14.7 31-27.7 49-38.2 18.1-10.5 37.2-17.9 57.8-21 24.2-3.6 47.9-1.1 71 6.9 23.7 8.1 45 20.7 64.6 36.5 9.6 7.7 18.6 16.2 27.9 24.4.4.4.9.6 1.5 1.1-10 10.8-20.1 21.7-30.1 32.3z"/>
+            <Path Fill="{StaticResource Path4Brush}" Data="M205.8 69.2c2.8.3 5.6.6 8.4.8 22.6 1.7 44.3 7.4 65.2 16 29.5 12 56.1 29 80.7 49.4 11.8 9.7 22.9 20.3 34.3 30.5.5.5 1.1.9 1.8 1.4-10.4 11.1-20.5 21.9-30.8 32.9-1-.9-2-1.7-2.9-2.6-14.1-13.8-29-26.6-44.9-38.1-20.3-14.7-41.8-27-65.4-35.2-20.4-7.1-41.4-10.4-62.9-9.2-20.8 1.2-40.7 6.6-59.7 15.4-23.8 10.9-44.9 26-64.3 43.6-9 8.1-17.5 16.7-26.3 25.3-.5-.5-1.3-1.2-2.1-2-9.6-9.4-19.1-18.8-28.7-28.2-.3-.3-.7-.6-1.1-.8 0-.1 0-.3 0-.4.6-.5 1.2-1 1.8-1.6 25-26.4 52.2-50 83.8-67.8 28-15.8 57.7-26 89.7-28.5 2.6-.2 5.2-.5 7.8-.7h10z"/>
+        </Canvas>
+    </Viewbox>
+</Border>
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
                                                         <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
@@ -6818,6 +7141,54 @@ function Set-Hags {
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
+
+                                                <!-- Battery / Power Card -->
+                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                    <Grid>
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="Auto"/>
+                                                            <ColumnDefinition Width="*"/>
+                                                        </Grid.ColumnDefinitions>
+
+                                                        <!-- Battery Icon -->
+                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Viewbox Width="26" Height="26">
+                                                                <Canvas Width="94" Height="236">
+                                                                    <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="7" 
+                                                                          Data="M8 43v151c0 19 17 35 39 35s39-16 39-35V43c0-19-17-35-39-35S8 24 8 43z"/>
+                                                                    
+                                                                    <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="4" 
+                                                                          Data="M36 12h22V5c0-3-5-5-11-5s-11 2-11 5z"/>
+                                                                    
+                                                                    <Ellipse Canvas.Left="8" Canvas.Top="25" Width="78" Height="36" 
+                                                                             Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="5"/>
+
+                                                                    <Path Fill="#0080CC" 
+                                                                          Data="M8 152v42c0 19 17 35 39 35s39-16 39-35v-42c-8 7-22 12-39 12s-31-5-39-12z"/>
+
+                                                                    <Ellipse Canvas.Left="31" Canvas.Top="65" Width="32" Height="32" Fill="#66B3FF"/>
+                                                                    <Path Fill="#99CCFF" Data="M44 72h6v6h6v6h-6v6h-4v-6h-6v-6h6z"/>
+
+                                                                    <Path Fill="#0080CC" Data="M41 120l17 12-14 3 13 14-30-18 15-3-11-13z"/>
+
+                                                                    <Ellipse Canvas.Left="31" Canvas.Top="191" Width="32" Height="32" Fill="#B3D9FF"/>
+                                                                    <Path Fill="#0080CC" Data="M38 204h18v6H38z"/>
+                                                                </Canvas>
+                                                            </Viewbox>
+                                                        </Border>
+
+                                                        <StackPanel Grid.Column="1">
+                                                            <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                            <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Plan: Loading..."/>
+                                                            <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                        </StackPanel>
+                                                    </Grid>
+                                                </Border>
+
+                                                
 
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -7937,8 +8308,12 @@ $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWing
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
-    
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
+    try {
+        Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+    }
+    catch {}
+
     $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id -Unique)
     $totalItems = $uniqueItems.Count
     
@@ -8816,6 +9191,7 @@ $btnWingetScan.Add_Click({
         if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
         if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
         if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
+    
         $lstWinget.Items.Clear()
         $btnWingetScan.IsEnabled = $false
         if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
@@ -8825,6 +9201,12 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
+
+        # --- NEW: Kill stuck package managers before scanning ---
+        try {
+            Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+        }
+        catch {}
     
         # --- Load Settings ---
         $settings = Get-WmtSettings
@@ -10731,7 +11113,7 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
 }
 
 # --- LAUNCH ---
-$window.Add_Loaded({ 
+$window.Add_ContentRendered({
         $settings = Get-WmtSettings
 
         # Restore persisted window geometry/state when valid
