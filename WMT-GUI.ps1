@@ -202,6 +202,37 @@ function Update-MyDeviceStats {
                 }
             }
 
+            function Get-CleanHardwareValue {
+                param($Value, [string]$Fallback = "Unavailable")
+                if ($null -eq $Value) { return $Fallback }
+                $text = ([string]$Value).Trim()
+                if ([string]::IsNullOrWhiteSpace($text)) { return $Fallback }
+                if ($text -match "(?i)^(to be filled by o\.e\.m\.|default string|system product name|system manufacturer|none|not applicable|not specified)$") { return $Fallback }
+                return $text
+            }
+
+            function Convert-CimDateText {
+                param($Value)
+                if ($null -eq $Value) { return "Unavailable" }
+                try {
+                    if ($Value -is [datetime]) { return $Value.ToString("yyyy-MM-dd") }
+                    return ([System.Management.ManagementDateTimeConverter]::ToDateTime([string]$Value)).ToString("yyyy-MM-dd")
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-FirmwareModeText {
+                try {
+                    $fwType = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control" -Name "PEFirmwareType" -ErrorAction Stop).PEFirmwareType
+                    switch ([int]$fwType) {
+                        1 { return "Legacy BIOS" }
+                        2 { return "UEFI" }
+                        default { return "Unknown" }
+                    }
+                }
+                catch { return "Unknown" }
+            }
+
             try {
                 $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
                 $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
@@ -223,7 +254,79 @@ function Update-MyDeviceStats {
                 }
                 $res.GPU = $gpuText.Trim()
             
-                $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
+                $mb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1
+                $bios = Get-CimInstance Win32_BIOS | Select-Object -First 1
+                $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1
+                $csp = Get-CimInstance Win32_ComputerSystemProduct | Select-Object -First 1
+                $memArray = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue | Select-Object -First 1
+                $tpm = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction SilentlyContinue | Select-Object -First 1
+
+                $mbLines = @()
+                $systemName = ("{0} {1}" -f (Get-CleanHardwareValue $cs.Manufacturer ""), (Get-CleanHardwareValue $cs.Model "")).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($systemName)) { $mbLines += "System: $systemName" }
+
+                $boardName = ("{0} {1}" -f (Get-CleanHardwareValue $mb.Manufacturer ""), (Get-CleanHardwareValue $mb.Product "")).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($boardName)) { $mbLines += "Board: $boardName" }
+
+                $boardVersion = Get-CleanHardwareValue $mb.Version
+                if ($boardVersion -ne "Unavailable") { $mbLines += "Board Version: $boardVersion" }
+
+                $boardSerial = Get-CleanHardwareValue $mb.SerialNumber
+                if ($boardSerial -ne "Unavailable") { $mbLines += "Board Serial: $boardSerial" }
+
+                $sku = Get-CleanHardwareValue $cs.SystemSKUNumber
+                if ($sku -eq "Unavailable") { $sku = Get-CleanHardwareValue $csp.SKUNumber }
+                if ($sku -ne "Unavailable") { $mbLines += "System SKU: $sku" }
+
+                $uuid = Get-CleanHardwareValue $csp.UUID
+                if ($uuid -ne "Unavailable") { $mbLines += "UUID: $uuid" }
+
+                $biosVendor = Get-CleanHardwareValue $bios.Manufacturer
+                $biosVersion = Get-CleanHardwareValue $bios.SMBIOSBIOSVersion
+                if ($biosVersion -eq "Unavailable") { $biosVersion = Get-CleanHardwareValue $bios.Version }
+                $biosParts = @($biosVendor, $biosVersion) | Where-Object { $_ -ne "Unavailable" }
+                if ($biosParts.Count -gt 0) { $mbLines += "BIOS: $($biosParts -join ' ')" }
+
+                $biosDate = Convert-CimDateText $bios.ReleaseDate
+                if ($biosDate -ne "Unavailable") { $mbLines += "BIOS Date: $biosDate" }
+
+                $smbios = if ($bios.SMBIOSMajorVersion -and $null -ne $bios.SMBIOSMinorVersion) { "$($bios.SMBIOSMajorVersion).$($bios.SMBIOSMinorVersion)" } else { "Unavailable" }
+                if ($smbios -ne "Unavailable") { $mbLines += "SMBIOS: $smbios" }
+
+                $mbLines += "Firmware Mode: $(Get-FirmwareModeText)"
+
+                $slotCount = if ($memArray -and $memArray.MemoryDevices) { [int]$memArray.MemoryDevices } else { 0 }
+                if ($slotCount -gt 0) { $mbLines += "Memory Slots: $($mem.Count)/$slotCount used" }
+
+                if ($tpm) {
+                    $tpmSpec = Get-CleanHardwareValue $tpm.SpecVersion
+                    $tpmState = if ($tpm.IsEnabled_InitialValue) { "Enabled" } else { "Present" }
+                    $tpmLine = "TPM: $tpmState"
+                    if ($tpmSpec -ne "Unavailable") { $tpmLine += " ($tpmSpec)" }
+                    $mbLines += $tpmLine
+                }
+
+                $chipsetPattern = "(?i)chipset|SMBus|LPC|PCI Express Root|PCIe Root|Root Port|Host Bridge|Root Complex|Platform Controller Hub|\bPCH\b|I/O Controller|IO Controller|Memory Controller|AMD PSP|AMD GPIO|Intel.*Management Engine"
+                $chipsetDevices = @()
+                try {
+                    $chipsetDevices = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                        Where-Object { $_.Name -and $_.Name -match $chipsetPattern -and $_.Name -notmatch "(?i)virtual|Hyper-V" } |
+                        Sort-Object Name -Unique |
+                        Select-Object -ExpandProperty Name -First 6 |
+                        ForEach-Object { Get-CleanHardwareValue $_ } |
+                        Where-Object { $_ -ne "Unavailable" })
+                }
+                catch {}
+
+                if ($chipsetDevices.Count -gt 0) {
+                    $mbLines += "Chipset / Platform:"
+                    foreach ($deviceName in $chipsetDevices) { $mbLines += " - $deviceName" }
+                }
+                else {
+                    $mbLines += "Chipset / Platform: Not exposed by Windows"
+                }
+
+                $res.MB = ($mbLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
                 $storageDevices = @()
                 $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {
                         $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed"
@@ -495,6 +598,26 @@ function New-WmtStorageTextBlock {
     return $tb
 }
 
+function Open-MyDeviceDriveRoot {
+    param([string]$Drive)
+
+    if ([string]::IsNullOrWhiteSpace($Drive)) { return }
+    $driveRoot = if ($Drive.EndsWith("\")) { $Drive } elseif ($Drive.EndsWith(":")) { "$Drive\" } else { "$Drive\" }
+
+    if (-not (Test-Path -LiteralPath $driveRoot)) {
+        Write-GuiLog "[Storage] Drive root not found: $driveRoot"
+        return
+    }
+
+    try {
+        Start-Process -FilePath "explorer.exe" -ArgumentList "`"$driveRoot`""
+        Write-GuiLog "[Storage] Opened $driveRoot"
+    }
+    catch {
+        Write-GuiLog "[Storage] Failed to open $driveRoot`: $($_.Exception.Message)"
+    }
+}
+
 function Set-MyDeviceStorageDetails {
     param($Devices)
 
@@ -524,7 +647,12 @@ function Set-MyDeviceStorageDetails {
         [void]$header.ColumnDefinitions.Add($colMain)
         [void]$header.ColumnDefinitions.Add($colHealth)
 
-        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#EBEBF5" -FontSize 13 -FontWeight "SemiBold"
+        $driveRoot = if ([string]$d.Drive -match "\\$") { [string]$d.Drive } else { "$($d.Drive)\" }
+        $header.Cursor = [System.Windows.Input.Cursors]::Hand
+        $header.ToolTip = "Open $driveRoot"
+        $header.Add_MouseLeftButtonUp({ Open-MyDeviceDriveRoot -Drive $driveRoot }.GetNewClosure())
+
+        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
         [void]$header.Children.Add($driveTitle)
 
         $healthText = New-WmtStorageTextBlock -Text $d.Health -Color $d.HealthBrush -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
@@ -1509,7 +1637,7 @@ foreach ($drive in $drives) {
         }
 
         $exitCode = $LASTEXITCODE
-        if ($out) { $out | ForEach-Object { if ($_ -ne $null) { Write-Host $_ } } }
+        if ($out) { $out | ForEach-Object { if ($null -ne $_) { Write-Host $_ } } }
 
         if ($exitCode -eq 0) {
             Write-Host "[$target] Completed (exit 0)."
