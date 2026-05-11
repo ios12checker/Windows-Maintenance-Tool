@@ -1,4 +1,4 @@
-<#
+﻿<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -153,6 +153,8 @@ function Update-TweakButtonStates {
 
 # Centralized data path for exports (in repo folder)
 function Update-MyDeviceStats {
+    $script:StatsStartedAt = Get-Date
+
     # 1. Set placeholder text instantly
     (Get-Ctrl "txtDeviceOS").Text = "Gathering stats..."
     (Get-Ctrl "txtDeviceCPU").Text = "Gathering stats..."
@@ -233,8 +235,530 @@ function Update-MyDeviceStats {
                 catch { return "Unknown" }
             }
 
+            function ConvertTo-DateTimeValue {
+                param($Value)
+                if ($null -eq $Value) { return $null }
+                try {
+                    if ($Value -is [datetime]) { return $Value }
+                    return [datetime]::Parse([string]$Value)
+                }
+                catch {
+                    try { return [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$Value) }
+                    catch { return $null }
+                }
+            }
+
+            function Format-DateTimeText {
+                param($Value, [string]$Format = "yyyy-MM-dd HH:mm")
+                $dateValue = ConvertTo-DateTimeValue $Value
+                if ($null -eq $dateValue) { return "Unavailable" }
+                return $dateValue.ToString($Format)
+            }
+
+            function Format-TimeSpanText {
+                param([TimeSpan]$Span)
+                if ($null -eq $Span) { return "Unavailable" }
+                $days = [int][math]::Floor($Span.TotalDays)
+                if ($days -gt 0) { return "$days d $($Span.Hours) h" }
+                if ($Span.Hours -gt 0) { return "$($Span.Hours) h $($Span.Minutes) m" }
+                return "$($Span.Minutes) m"
+            }
+
+            function Get-PendingRebootStatusText {
+                try {
+                    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { return "Yes" }
+                    if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { return "Yes" }
+                    $sessionManager = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+                    if ($sessionManager -and $sessionManager.PendingFileRenameOperations) { return "Yes" }
+                }
+                catch {}
+                return "No"
+            }
+
+            function Get-SecureBootStatusText {
+                try {
+                    if (Confirm-SecureBootUEFI -ErrorAction Stop) { return "Enabled" }
+                    return "Disabled"
+                }
+                catch {
+                    if ((Get-FirmwareModeText) -eq "Legacy BIOS") { return "N/A (Legacy BIOS)" }
+                    return "Unavailable"
+                }
+            }
+
+            function Get-ActivationStatusText {
+                try {
+                    $license = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match "Windows" } |
+                    Sort-Object @{ Expression = { $_.LicenseStatus -eq 1 }; Descending = $true } |
+                    Select-Object -First 1
+
+                    if ($null -eq $license) { return "Unavailable" }
+                    switch ([int]$license.LicenseStatus) {
+                        0 { return "Unlicensed" }
+                        1 { return "Activated" }
+                        2 { return "Grace Period" }
+                        3 { return "Out-of-Tolerance" }
+                        4 { return "Non-Genuine" }
+                        5 { return "Notification" }
+                        6 { return "Extended Grace" }
+                        default { return "Unknown" }
+                    }
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-LocalUserSummaryText {
+                try {
+                    $users = @(Get-CimInstance Win32_UserAccount -Filter "LocalAccount=True" -ErrorAction SilentlyContinue)
+                    if ($users.Count -eq 0) { return "Unavailable" }
+                    $enabled = @($users | Where-Object { -not $_.Disabled }).Count
+                    $disabled = [math]::Max(0, $users.Count - $enabled)
+                    $locked = @($users | Where-Object { $_.Lockout }).Count
+                    $text = "$($users.Count) total, $enabled enabled, $disabled disabled"
+                    if ($locked -gt 0) { $text += ", $locked locked" }
+                    return $text
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-LocalAdminSummaryText {
+                try {
+                    $adminGroup = Get-CimInstance Win32_Group -Filter "SID='S-1-5-32-544'" -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($null -eq $adminGroup) { return "Unavailable" }
+                    $members = @(Get-CimAssociatedInstance -InputObject $adminGroup -Association Win32_GroupUser -ErrorAction SilentlyContinue)
+                    return "$($members.Count) members"
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-LatestHotfixText {
+                try {
+                    $hotfix = Get-CimInstance Win32_QuickFixEngineering -ErrorAction SilentlyContinue |
+                    Sort-Object @{ Expression = { ConvertTo-DateTimeValue $_.InstalledOn }; Descending = $true } |
+                    Select-Object -First 1
+
+                    if ($null -eq $hotfix) { return "Unavailable" }
+                    $installed = Format-DateTimeText $hotfix.InstalledOn "yyyy-MM-dd"
+                    if ($installed -eq "Unavailable") { return $hotfix.HotFixID }
+                    return "$($hotfix.HotFixID) ($installed)"
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-BitLockerStatusText {
+                try {
+                    if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) { return "Unavailable" }
+                    $volume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction SilentlyContinue | Select-Object -First 1
+                    if ($null -eq $volume) { return "Unavailable" }
+                    return "$($volume.ProtectionStatus) ($($volume.VolumeStatus))"
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-DefenderStatusText {
+                try {
+                    if (-not (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue)) { return "Unavailable" }
+                    $status = Get-MpComputerStatus -ErrorAction Stop
+                    $realTime = if ($status.RealTimeProtectionEnabled) { "Real-time on" } else { "Real-time off" }
+                    if ($null -ne $status.AntivirusSignatureAge) { return "$realTime, sig $($status.AntivirusSignatureAge)d old" }
+                    return $realTime
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-ValidPowerNumber {
+                param($Value, [switch]$AllowZero)
+                if ($null -eq $Value) { return $null }
+                try { $number = [double]$Value }
+                catch { return $null }
+
+                if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+                if ($number -lt 0) { return $null }
+                if ($number -in @(2147483647, 4294967295)) { return $null }
+                if (-not $AllowZero -and $number -eq 0) { return $null }
+                return $number
+            }
+
+            function Convert-MilliwattText {
+                param($Milliwatts)
+                $value = Get-ValidPowerNumber $Milliwatts
+                if ($null -eq $value) { return "Unavailable" }
+                return ("{0:N1} W" -f ($value / 1000))
+            }
+
+            function Convert-MillivoltText {
+                param($Millivolts)
+                $value = Get-ValidPowerNumber $Millivolts
+                if ($null -eq $value) { return "Unavailable" }
+                return ("{0:N2} V" -f ($value / 1000))
+            }
+
+            function Convert-MilliwattHourText {
+                param($MilliwattHours)
+                $value = Get-ValidPowerNumber $MilliwattHours
+                if ($null -eq $value) { return "Unavailable" }
+                return ("{0:N1} Wh" -f ($value / 1000))
+            }
+
+            function Convert-SubnetMaskToPrefixLength {
+                param([string]$SubnetMask)
+                if ([string]::IsNullOrWhiteSpace($SubnetMask)) { return "" }
+                try {
+                    $bits = 0
+                    foreach ($octet in ($SubnetMask -split "\.")) {
+                        $value = [byte]$octet
+                        while ($value -gt 0) {
+                            $bits += ($value -band 1)
+                            $value = $value -shr 1
+                        }
+                    }
+                    return [string]$bits
+                }
+                catch { return "" }
+            }
+
+            function Convert-NetworkSpeedText {
+                param($BitsPerSecond)
+                $speed = Get-ValidPowerNumber $BitsPerSecond
+                if ($null -eq $speed) { return "Unknown" }
+                if ($speed -ge 1000000000) { return ("{0:N1} Gbps" -f ($speed / 1000000000)) }
+                if ($speed -ge 1000000) { return ("{0:N0} Mbps" -f ($speed / 1000000)) }
+                if ($speed -ge 1000) { return ("{0:N0} Kbps" -f ($speed / 1000)) }
+                return ("{0:N0} bps" -f $speed)
+            }
+
+            function Get-SystemPowerMeterText {
+                try {
+                    $meters = @(Get-CimInstance -Namespace "root\CIMV2\power" -ClassName Win32_PowerMeter -ErrorAction SilentlyContinue)
+                    if ($meters.Count -eq 0) { return "Unavailable" }
+
+                    $totalWatts = 0.0
+                    $readingCount = 0
+                    foreach ($meter in $meters) {
+                        $readingProperty = $meter.PSObject.Properties["CurrentReading"]
+                        if ($null -eq $readingProperty) { continue }
+
+                        $reading = Get-ValidPowerNumber $readingProperty.Value
+                        if ($null -eq $reading) { continue }
+
+                        $modifier = 0
+                        try {
+                            if ($null -ne $meter.UnitModifier) { $modifier = [int]$meter.UnitModifier }
+                        }
+                        catch { $modifier = 0 }
+
+                        $watts = $reading * [math]::Pow(10, $modifier)
+                        if ($watts -lt 0) { continue }
+
+                        $totalWatts += $watts
+                        $readingCount++
+                    }
+
+                    if ($readingCount -eq 0) { return "Unavailable" }
+                    $suffix = if ($readingCount -gt 1) { " across $readingCount meters" } else { "" }
+                    return ("{0:N1} W{1}" -f $totalWatts, $suffix)
+                }
+                catch { return "Unavailable" }
+            }
+
+            function Get-BatteryPowerTelemetry {
+                param([object[]]$Win32Batteries = @())
+
+                $summary = [ordered]@{
+                    BatteryRate    = "Unavailable"
+                    TotalPower     = "Unavailable"
+                    Electrical     = "Unavailable"
+                    DesignCapacity = $null
+                    FullCapacity   = $null
+                }
+
+                try {
+                    $batteryStatuses = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStatus -ErrorAction SilentlyContinue)
+                    $chargeRateMw = 0.0
+                    $dischargeRateMw = 0.0
+                    $remainingMwh = 0.0
+                    $voltageTotalMv = 0.0
+                    $hasChargeRate = $false
+                    $hasDischargeRate = $false
+                    $hasRemaining = $false
+                    $voltageCount = 0
+                    $isCharging = $false
+                    $isDischarging = $false
+                    $powerOnline = $false
+
+                    foreach ($status in $batteryStatuses) {
+                        if ($status.PowerOnline) { $powerOnline = $true }
+                        if ($status.Charging) { $isCharging = $true }
+                        if ($status.Discharging) { $isDischarging = $true }
+
+                        $chargeRate = Get-ValidPowerNumber $status.ChargeRate
+                        if ($null -ne $chargeRate) {
+                            $chargeRateMw += $chargeRate
+                            $hasChargeRate = $true
+                        }
+
+                        $dischargeRate = Get-ValidPowerNumber $status.DischargeRate
+                        if ($null -ne $dischargeRate) {
+                            $dischargeRateMw += $dischargeRate
+                            $hasDischargeRate = $true
+                        }
+
+                        $remaining = Get-ValidPowerNumber $status.RemainingCapacity
+                        if ($null -ne $remaining) {
+                            $remainingMwh += $remaining
+                            $hasRemaining = $true
+                        }
+
+                        $voltage = Get-ValidPowerNumber $status.Voltage
+                        if ($null -ne $voltage) {
+                            $voltageTotalMv += $voltage
+                            $voltageCount++
+                        }
+                    }
+
+                    $electricalParts = @()
+                    if ($voltageCount -gt 0) {
+                        $electricalParts += "Voltage: $(Convert-MillivoltText ($voltageTotalMv / $voltageCount))"
+                    }
+                    if ($hasRemaining) {
+                        $electricalParts += "Remaining: $(Convert-MilliwattHourText $remainingMwh)"
+                    }
+
+                    $cycleCounts = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryCycleCount -ErrorAction SilentlyContinue |
+                        ForEach-Object { Get-ValidPowerNumber $_.CycleCount -AllowZero } |
+                        Where-Object { $null -ne $_ })
+                    if ($cycleCounts.Count -eq 1) {
+                        $electricalParts += "Cycles: $([int]$cycleCounts[0])"
+                    }
+                    elseif ($cycleCounts.Count -gt 1) {
+                        $electricalParts += "Cycles: $(($cycleCounts | ForEach-Object { [int]$_ }) -join ', ')"
+                    }
+
+                    $designCapacity = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction SilentlyContinue |
+                        ForEach-Object { Get-ValidPowerNumber $_.DesignedCapacity } |
+                        Where-Object { $null -ne $_ } |
+                        Measure-Object -Sum).Sum
+                    $fullCapacity = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue |
+                        ForEach-Object { Get-ValidPowerNumber $_.FullChargedCapacity } |
+                        Where-Object { $null -ne $_ } |
+                        Measure-Object -Sum).Sum
+
+                    if ($null -eq $designCapacity -or $designCapacity -le 0 -or $null -eq $fullCapacity -or $fullCapacity -le 0) {
+                        $win32Batteries = @($Win32Batteries)
+                        if ($win32Batteries.Count -eq 0) { $win32Batteries = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) }
+                        if ($null -eq $designCapacity -or $designCapacity -le 0) {
+                            $designCapacity = @($win32Batteries |
+                                ForEach-Object { Get-ValidPowerNumber $_.DesignCapacity } |
+                                Where-Object { $null -ne $_ } |
+                                Measure-Object -Sum).Sum
+                        }
+                        if ($null -eq $fullCapacity -or $fullCapacity -le 0) {
+                            $fullCapacity = @($win32Batteries |
+                                ForEach-Object { Get-ValidPowerNumber $_.FullChargeCapacity } |
+                                Where-Object { $null -ne $_ } |
+                                Measure-Object -Sum).Sum
+                        }
+                    }
+
+                    if ($null -ne $designCapacity -and $designCapacity -gt 0) { $summary.DesignCapacity = [double]$designCapacity }
+                    if ($null -ne $fullCapacity -and $fullCapacity -gt 0) { $summary.FullCapacity = [double]$fullCapacity }
+
+                    if ($isDischarging -and $hasDischargeRate) {
+                        $rateText = Convert-MilliwattText $dischargeRateMw
+                        $summary.BatteryRate = "Discharging $rateText"
+                        $summary.TotalPower = "$rateText estimate from battery"
+                    }
+                    elseif ($isCharging -and $hasChargeRate) {
+                        $summary.BatteryRate = "Charging +$(Convert-MilliwattText $chargeRateMw)"
+                    }
+                    elseif ($powerOnline) {
+                        $summary.BatteryRate = "AC power, battery idle"
+                    }
+                    elseif ($batteryStatuses.Count -gt 0) {
+                        $summary.BatteryRate = "Battery telemetry unavailable"
+                    }
+
+                    if ($electricalParts.Count -gt 0) { $summary.Electrical = $electricalParts -join " | " }
+                }
+                catch {}
+
+                $powerMeter = Get-SystemPowerMeterText
+                if ($powerMeter -ne "Unavailable") {
+                    $summary.TotalPower = "$powerMeter power meter"
+                }
+                elseif ($summary.TotalPower -eq "Unavailable") {
+                    $summary.TotalPower = "Not exposed by Windows"
+                }
+
+                return [PSCustomObject]$summary
+            }
+
+            function Get-PowerSchemeFriendlyName {
+                param([string]$Guid)
+                if ([string]::IsNullOrWhiteSpace($Guid)) { return "Unavailable" }
+
+                $normalizedGuid = $Guid.Trim("{}").ToLowerInvariant()
+                switch ($normalizedGuid) {
+                    "00000000-0000-0000-0000-000000000000" { return "Balanced" }
+                    "381b4222-f694-41f0-9685-ff5bb260df2e" { return "Balanced" }
+                    "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" { return "High performance" }
+                    "a1841308-3541-4fab-bc81-f71556f20b4a" { return "Power saver" }
+                    "e9a42b02-d5df-448d-aa00-03f14749eb61" { return "Ultimate Performance" }
+                    "961cc777-2547-4f9d-8174-7d86181b8a7a" { return "Best power efficiency" }
+                    "3af9b8d9-7c97-431d-ad78-34a8bfea439f" { return "High performance" }
+                    "ded574b5-45a0-4f42-8737-46345c09c238" { return "Best performance" }
+                }
+
+                try {
+                    $scheme = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\$normalizedGuid" -ErrorAction SilentlyContinue
+                    $friendlyName = Get-CleanHardwareValue $scheme.FriendlyName ""
+                    if (-not [string]::IsNullOrWhiteSpace($friendlyName)) {
+                        if ($friendlyName -match ",([^,]+)$") { $friendlyName = $matches[1] }
+                        $friendlyName = ($friendlyName -replace "\s+Overlay$", "").Trim()
+                        if (-not [string]::IsNullOrWhiteSpace($friendlyName)) { return $friendlyName }
+                    }
+                }
+                catch {}
+
+                return $normalizedGuid
+            }
+
+            function Get-ActivePowerPlanText {
+                $basePlan = "Unavailable"
+                $settingsMode = "Unavailable"
+
+                try {
+                    $powerSchemes = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction Stop
+                    $baseGuid = Get-CleanHardwareValue $powerSchemes.ActivePowerScheme ""
+                    $acOverlayGuid = Get-CleanHardwareValue $powerSchemes.ActiveOverlayAcPowerScheme ""
+                    $dcOverlayGuid = Get-CleanHardwareValue $powerSchemes.ActiveOverlayDcPowerScheme ""
+
+                    if (-not [string]::IsNullOrWhiteSpace($baseGuid)) {
+                        $basePlan = Get-PowerSchemeFriendlyName $baseGuid
+                    }
+
+                    $acMode = if (-not [string]::IsNullOrWhiteSpace($acOverlayGuid)) { Get-PowerSchemeFriendlyName $acOverlayGuid } else { "Balanced" }
+                    $dcMode = if (-not [string]::IsNullOrWhiteSpace($dcOverlayGuid)) { Get-PowerSchemeFriendlyName $dcOverlayGuid } else { "Balanced" }
+
+                    if ($acMode -eq $dcMode) {
+                        $settingsMode = $acMode
+                    }
+                    else {
+                        $settingsMode = "AC $acMode / Battery $dcMode"
+                    }
+                }
+                catch {}
+
+                if ($basePlan -eq "Unavailable") {
+                    try {
+                        $powerPlan = powercfg /getactivescheme
+                        if ($powerPlan -match '\((.*?)\)') { $basePlan = $matches[1] }
+                    }
+                    catch {}
+                }
+
+                if ($settingsMode -eq "Unavailable" -or [string]::IsNullOrWhiteSpace($settingsMode)) {
+                    return "Base plan: $basePlan"
+                }
+
+                return "CFG: $basePlan | Settings: $settingsMode"
+            }
+
+            function Get-WindowsDetailsText {
+                param($OperatingSystem, $ComputerSystem)
+
+                $lines = @()
+                $currentVersion = $null
+                try { $currentVersion = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue } catch {}
+
+                $caption = Get-CleanHardwareValue $OperatingSystem.Caption
+                $displayVersion = Get-CleanHardwareValue $currentVersion.DisplayVersion ""
+                if ([string]::IsNullOrWhiteSpace($displayVersion)) { $displayVersion = Get-CleanHardwareValue $currentVersion.ReleaseId "" }
+                $nameParts = @($caption, $displayVersion) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne "Unavailable" }
+                if ($nameParts.Count -gt 0) { $lines += ($nameParts -join " ") }
+
+                $ubr = Get-CleanHardwareValue $currentVersion.UBR ""
+                $buildText = Get-CleanHardwareValue $OperatingSystem.BuildNumber
+                if (-not [string]::IsNullOrWhiteSpace($ubr)) { $buildText = "$buildText.$ubr" }
+
+                $versionText = Get-CleanHardwareValue $OperatingSystem.Version
+                if ($versionText -ne "Unavailable") { $lines += "Version: $versionText" }
+                if ($buildText -ne "Unavailable") { $lines += "Build: $buildText" }
+
+                $edition = Get-CleanHardwareValue $currentVersion.EditionID
+                if ($edition -ne "Unavailable") { $lines += "Edition: $edition" }
+
+                $installType = Get-CleanHardwareValue $currentVersion.InstallationType
+                if ($installType -ne "Unavailable") { $lines += "Install Type: $installType" }
+
+                $arch = Get-CleanHardwareValue $OperatingSystem.OSArchitecture
+                if ($arch -ne "Unavailable") { $lines += "Architecture: $arch" }
+
+                $role = switch ([int]$OperatingSystem.ProductType) {
+                    1 { "Workstation" }
+                    2 { "Domain Controller" }
+                    3 { "Server" }
+                    default { "Unknown" }
+                }
+                $lines += "OS Role: $role"
+
+                $lines += "Computer Name: $env:COMPUTERNAME"
+                if ($ComputerSystem.PartOfDomain) {
+                    $domainName = Get-CleanHardwareValue $ComputerSystem.Domain
+                    if ($domainName -ne "Unavailable") { $lines += "Domain: $domainName" }
+                }
+                else {
+                    $workgroup = Get-CleanHardwareValue $ComputerSystem.Workgroup
+                    if ($workgroup -ne "Unavailable") { $lines += "Workgroup: $workgroup" }
+                }
+
+                $localUsers = Get-LocalUserSummaryText
+                if ($localUsers -ne "Unavailable") { $lines += "Local Users: $localUsers" }
+
+                $localAdmins = Get-LocalAdminSummaryText
+                if ($localAdmins -ne "Unavailable") { $lines += "Local Admins: $localAdmins" }
+
+                $installDate = Format-DateTimeText $OperatingSystem.InstallDate "yyyy-MM-dd"
+                if ($installDate -ne "Unavailable") { $lines += "Installed: $installDate" }
+
+                $lastBoot = Format-DateTimeText $OperatingSystem.LastBootUpTime "yyyy-MM-dd HH:mm"
+                if ($lastBoot -ne "Unavailable") {
+                    $bootDate = ConvertTo-DateTimeValue $OperatingSystem.LastBootUpTime
+                    $uptime = Format-TimeSpanText (New-TimeSpan -Start $bootDate -End (Get-Date))
+                    $lines += "Last Boot: $lastBoot"
+                    $lines += "Uptime: $uptime"
+                }
+
+                $latestHotfix = Get-LatestHotfixText
+                if ($latestHotfix -ne "Unavailable") { $lines += "Latest Hotfix: $latestHotfix" }
+
+                $activation = Get-ActivationStatusText
+                if ($activation -ne "Unavailable") { $lines += "Activation: $activation" }
+
+                $lines += "Secure Boot: $(Get-SecureBootStatusText)"
+
+                $lines += "BitLocker: Checking..."
+
+                $defender = Get-DefenderStatusText
+                if ($defender -ne "Unavailable") { $lines += "Defender: $defender" }
+
+                $lines += "Pending Reboot: $(Get-PendingRebootStatusText)"
+
+                try {
+                    $culture = [System.Globalization.CultureInfo]::CurrentCulture.Name
+                    $timeZone = [System.TimeZoneInfo]::Local.DisplayName
+                    $lines += "Locale / Time Zone: $culture | $timeZone"
+                }
+                catch {}
+
+                return ($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+            }
+
             try {
-                $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
+                $os = Get-CimInstance Win32_OperatingSystem | Select-Object -First 1
+                $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1
+                $res.OS = Get-WindowsDetailsText -OperatingSystem $os -ComputerSystem $cs
                 $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
                 $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); $res.RAM = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
             
@@ -256,7 +780,7 @@ function Update-MyDeviceStats {
             
                 $mb = Get-CimInstance Win32_BaseBoard | Select-Object -First 1
                 $bios = Get-CimInstance Win32_BIOS | Select-Object -First 1
-                $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1
+                if ($null -eq $cs) { $cs = Get-CimInstance Win32_ComputerSystem | Select-Object -First 1 }
                 $csp = Get-CimInstance Win32_ComputerSystemProduct | Select-Object -First 1
                 $memArray = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue | Select-Object -First 1
                 $tpm = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -309,7 +833,13 @@ function Update-MyDeviceStats {
                 $chipsetPattern = "(?i)chipset|SMBus|LPC|PCI Express Root|PCIe Root|Root Port|Host Bridge|Root Complex|Platform Controller Hub|\bPCH\b|I/O Controller|IO Controller|Memory Controller|AMD PSP|AMD GPIO|Intel.*Management Engine"
                 $chipsetDevices = @()
                 try {
-                    $chipsetDevices = @(Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue |
+                    $pnpCandidates = @()
+                    try { $pnpCandidates = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='System'" -Property Name, PNPClass -ErrorAction Stop) } catch {}
+                    if ($pnpCandidates.Count -eq 0) {
+                        $pnpCandidates = @(Get-CimInstance Win32_PnPEntity -Property Name, PNPClass -ErrorAction SilentlyContinue)
+                    }
+
+                    $chipsetDevices = @($pnpCandidates |
                         Where-Object { $_.Name -and $_.Name -match $chipsetPattern -and $_.Name -notmatch "(?i)virtual|Hyper-V" } |
                         Sort-Object Name -Unique |
                         Select-Object -ExpandProperty Name -First 6 |
@@ -332,6 +862,21 @@ function Update-MyDeviceStats {
                         $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed"
                     } | Sort-Object DriveLetter)
 
+                $partitionByDriveLetter = @{}
+                foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue)) {
+                    if ($null -ne $p.DriveLetter) { $partitionByDriveLetter[[string]$p.DriveLetter] = $p }
+                }
+
+                $diskByNumber = @{}
+                foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue)) {
+                    if ($null -ne $d.Number) { $diskByNumber[[int]$d.Number] = $d }
+                }
+
+                $cimDiskByIndex = @{}
+                foreach ($d in @(Get-CimInstance Win32_DiskDrive -Property Index, Model, InterfaceType, SerialNumber -ErrorAction SilentlyContinue)) {
+                    if ($null -ne $d.Index) { $cimDiskByIndex[[int]$d.Index] = $d }
+                }
+
                 foreach ($v in $volumes) {
                     $driveId = "{0}:" -f $v.DriveLetter
                     $label = if ([string]::IsNullOrWhiteSpace($v.FileSystemLabel)) { "(No label)" } else { [string]$v.FileSystemLabel }
@@ -344,11 +889,11 @@ function Update-MyDeviceStats {
                     $partition = $null
                     $disk = $null
                     $cimDisk = $null
-                    try { $partition = Get-Partition -DriveLetter $v.DriveLetter -ErrorAction Stop | Select-Object -First 1 } catch {}
                     try {
-                        if ($partition) {
-                            $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
-                            $cimDisk = Get-CimInstance Win32_DiskDrive -Filter ("Index={0}" -f $disk.Number) -ErrorAction SilentlyContinue | Select-Object -First 1
+                        $partition = $partitionByDriveLetter[[string]$v.DriveLetter]
+                        if ($partition -and $null -ne $partition.DiskNumber) {
+                            $disk = $diskByNumber[[int]$partition.DiskNumber]
+                            $cimDisk = $cimDiskByIndex[[int]$partition.DiskNumber]
                         }
                     }
                     catch {}
@@ -410,31 +955,35 @@ function Update-MyDeviceStats {
 
                 $res.StorageDevices = $storageDevices
                 $res.Storage = if ($storageDevices.Count -gt 0) { "Fixed volumes detected: $($storageDevices.Count)" } else { "No fixed storage volumes found." }
-                # Physical active adapters only
-                
-                $physicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Status -eq "Up" -and
-                    $_.HardwareInterface -eq $true
-                }
-                
+                # Physical active adapters only. Win32_* classes are quicker here than several NetTCPIP cmdlet calls.
                 $netInfo = @()
-                
-                foreach ($nic in $physicalAdapters) {
-                
-                    $ip = Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                
-                    if (-not $ip) { continue }
-                
-                    $route = Get-NetRoute -InterfaceIndex $nic.ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                
-                    $dnsServers = (
-                        Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-                    ).ServerAddresses -join ", "
-                
-                    $netInfo += "$($nic.Name) | IP: $($ip.IPAddress)/$($ip.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $($nic.LinkSpeed)"
+                $adapterByIndex = @{}
+                foreach ($adapter in @(Get-CimInstance Win32_NetworkAdapter -Filter "NetEnabled=True" -Property Index, Name, NetConnectionID, Speed, PhysicalAdapter, NetConnectionStatus -ErrorAction SilentlyContinue)) {
+                    if ($null -ne $adapter.Index) { $adapterByIndex[[int]$adapter.Index] = $adapter }
+                }
+
+                $networkConfigs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -Property Index, Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder -ErrorAction SilentlyContinue)
+                foreach ($cfg in $networkConfigs) {
+                    if ($null -eq $cfg.Index) { continue }
+                    $adapter = $adapterByIndex[[int]$cfg.Index]
+                    $adapterName = if ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.NetConnectionID)) { [string]$adapter.NetConnectionID } else { [string]$cfg.Description }
+                    if ($adapterName -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth") { continue }
+                    if ($adapter -and $null -ne $adapter.PhysicalAdapter -and -not $adapter.PhysicalAdapter) { continue }
+
+                    $ipv4List = @($cfg.IPAddress | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" })
+                    if ($ipv4List.Count -eq 0) { continue }
+
+                    $ipAddress = [string]($ipv4List | Select-Object -First 1)
+                    $subnetMask = [string](@($cfg.IPSubnet | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
+                    $prefixLength = Convert-SubnetMaskToPrefixLength $subnetMask
+                    $ipText = if ([string]::IsNullOrWhiteSpace($prefixLength)) { $ipAddress } else { "$ipAddress/$prefixLength" }
+                    $gateway = [string](@($cfg.DefaultIPGateway | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
+                    if ([string]::IsNullOrWhiteSpace($gateway)) { $gateway = "None" }
+                    $dnsServers = @($cfg.DNSServerSearchOrder | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) -join ", "
+                    if ([string]::IsNullOrWhiteSpace($dnsServers)) { $dnsServers = "None" }
+                    $speed = if ($adapter) { Convert-NetworkSpeedText $adapter.Speed } else { "Unknown" }
+
+                    $netInfo += "$adapterName | IP: $ipText | GW: $gateway | DNS: $dnsServers | Speed: $speed"
                 }
                 
                 $res.Network = if ($netInfo) {
@@ -448,75 +997,84 @@ function Update-MyDeviceStats {
                 # Battery / Power Information
                 # ==========================================
                 try {
-                    $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+                    $batteries = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+                    $powerTelemetry = Get-BatteryPowerTelemetry -Win32Batteries $batteries
+                    $res.PowerDraw = $powerTelemetry.BatteryRate
+                    $res.PowerTotal = $powerTelemetry.TotalPower
+                    $res.PowerElectrical = $powerTelemetry.Electrical
 
-                    if ($battery) {
-                        # Current Charge
-                        $charge = $battery.EstimatedChargeRemaining
-                        $res.BatteryCharge = "$charge%"
-
-                        # Charging Status
-                        switch ($battery.BatteryStatus) {
-                            1 { $status = "Discharging" }
-                            2 { $status = "Plugged In / Charging" }
-                            3 { $status = "Fully Charged" }
-                            4 { $status = "Low" }
-                            5 { $status = "Critical" }
-                            6 { $status = "Charging" }
-                            7 { $status = "Charging (High)" }
-                            8 { $status = "Charging (Low)" }
-                            9 { $status = "Charging (Critical)" }
-                            11 { $status = "Partially Charged" }
-                            default { $status = "Unknown (Code: $($battery.BatteryStatus))" }
+                    if ($batteries.Count -gt 0) {
+                        $chargeValues = @($batteries |
+                            ForEach-Object { Get-ValidPowerNumber $_.EstimatedChargeRemaining -AllowZero } |
+                            Where-Object { $null -ne $_ })
+                        if ($chargeValues.Count -gt 0) {
+                            $averageCharge = [math]::Round(($chargeValues | Measure-Object -Average).Average, 0)
+                            $packText = if ($batteries.Count -gt 1) { " avg across $($batteries.Count) packs" } else { "" }
+                            $res.BatteryCharge = "$averageCharge%$packText"
+                        }
+                        else {
+                            $res.BatteryCharge = "Unavailable"
                         }
 
-                        $res.BatteryStatus = $status
+                        $statusText = @($batteries | ForEach-Object {
+                                switch ([int]$_.BatteryStatus) {
+                                    1 { "Discharging" }
+                                    2 { "Plugged In / Charging" }
+                                    3 { "Fully Charged" }
+                                    4 { "Low" }
+                                    5 { "Critical" }
+                                    6 { "Charging" }
+                                    7 { "Charging (High)" }
+                                    8 { "Charging (Low)" }
+                                    9 { "Charging (Critical)" }
+                                    11 { "Partially Charged" }
+                                    default { "Unknown (Code: $($_.BatteryStatus))" }
+                                }
+                            } | Select-Object -Unique)
+                        $res.BatteryStatus = if ($statusText.Count -gt 0) { $statusText -join ", " } else { "Unknown" }
 
-                        # Estimated Time Remaining
-                        if ($battery.EstimatedRunTime -gt 0 -and $battery.EstimatedRunTime -ne 71582788) {
-                            $hours = [math]::Floor($battery.EstimatedRunTime / 60)
-                            $minutes = $battery.EstimatedRunTime % 60
+                        $runtimeValues = @($batteries |
+                            ForEach-Object { Get-ValidPowerNumber $_.EstimatedRunTime } |
+                            Where-Object { $null -ne $_ -and $_ -ne 71582788 })
+                        if ($runtimeValues.Count -gt 0) {
+                            $runtime = [int]($runtimeValues | Select-Object -First 1)
+                            $hours = [math]::Floor($runtime / 60)
+                            $minutes = $runtime % 60
                             $res.BatteryTime = "${hours}h ${minutes}m remaining"
                         }
                         else {
-                            $res.BatteryTime = "Calculating..."
+                            $res.BatteryTime = ""
                         }
 
-                        # Battery Health
-                        $design = (Get-CimInstance -Namespace root\wmi -Class BatteryStaticData -ErrorAction SilentlyContinue).DesignedCapacity
-                        $full = (Get-CimInstance -Namespace root\wmi -Class BatteryFullChargedCapacity -ErrorAction SilentlyContinue).FullChargedCapacity
-
-                        if ($design -and $full) {
-                            $health = [math]::Round(($full / $design) * 100, 1)
-                            $res.BatteryHealth = "$health% of original capacity"
+                        if ($powerTelemetry.DesignCapacity -and $powerTelemetry.FullCapacity) {
+                            $health = [math]::Round(($powerTelemetry.FullCapacity / $powerTelemetry.DesignCapacity) * 100, 1)
+                            $res.BatteryHealth = "$health% ($(Convert-MilliwattHourText $powerTelemetry.FullCapacity) / $(Convert-MilliwattHourText $powerTelemetry.DesignCapacity))"
                         }
                         else {
-                            $res.BatteryHealth = "Unavailable"
+                            $res.BatteryHealth = "Not exposed by battery firmware"
                         }
                     }
                     else {
                         $res.BatteryCharge = "Desktop System"
                         $res.BatteryStatus = "No Battery Detected"
-                        $res.BatteryTime = "N/A"
+                        $res.BatteryTime = ""
                         $res.BatteryHealth = "N/A"
+                        $res.PowerDraw = "N/A"
+                        $res.PowerElectrical = "N/A"
                     }
 
-                    # Current Power Plan
-                    $powerPlan = powercfg /getactivescheme
-
-                    if ($powerPlan -match '\((.*?)\)') {
-                        $res.PowerPlan = $matches[1]
-                    }
-                    else {
-                        $res.PowerPlan = "Unknown"
-                    }
+                    # Current base plan plus Windows Settings power-mode overlay.
+                    $res.PowerPlan = Get-ActivePowerPlanText
                 }
                 catch {
                     $res.BatteryCharge = "Unavailable"
                     $res.BatteryStatus = "Unavailable"
-                    $res.BatteryTime = "Unavailable"
+                    $res.BatteryTime = ""
                     $res.BatteryHealth = "Unavailable"
                     $res.PowerPlan = "Unavailable"
+                    $res.PowerDraw = "Unavailable"
+                    $res.PowerTotal = "Unavailable"
+                    $res.PowerElectrical = "Unavailable"
                 }
 
                 # # Network information
@@ -561,14 +1119,130 @@ function Update-MyDeviceStats {
                     (Get-Ctrl "txtBatteryHealth").Text = "Health: $($data.BatteryHealth)"
                     (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($data.BatteryCharge)"
                     (Get-Ctrl "txtBatteryStatus").Text = "Status: $($data.BatteryStatus)"
-                    (Get-Ctrl "txtPowerPlan").Text = "Power Plan: $($data.PowerPlan)"
-                    (Get-Ctrl "txtBatteryTime").Text = "Time Remaining: $($data.BatteryTime)"
+                    (Get-Ctrl "txtPowerPlan").Text = "Power: $($data.PowerPlan)"
+                    $batteryTimeText = [string]$data.BatteryTime
+                    $batteryTimeCtrl = Get-Ctrl "txtBatteryTime"
+                    if ($batteryTimeCtrl) {
+                        if ([string]::IsNullOrWhiteSpace($batteryTimeText)) {
+                            $batteryTimeCtrl.Text = ""
+                            $batteryTimeCtrl.Visibility = "Collapsed"
+                        }
+                        else {
+                            $batteryTimeCtrl.Text = "Time Remaining: $batteryTimeText"
+                            $batteryTimeCtrl.Visibility = "Visible"
+                        }
+                    }
+                    (Get-Ctrl "txtPowerDraw").Text = "Power Draw: $($data.PowerDraw)"
+                    (Get-Ctrl "txtPowerTotal").Text = "Total Power: $($data.PowerTotal)"
+                    (Get-Ctrl "txtPowerElectrical").Text = "Electrical: $($data.PowerElectrical)"
+                    Start-MyDeviceBitLockerStatusUpdate
+                    if ($script:StatsStartedAt) {
+                        $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
+                        Write-GuiLog "[My Device] Core device stats loaded in ${elapsed}s. BitLocker continues in the background."
+                    }
                 }
                 catch {}
                 $script:StatsRunspace.Dispose()
             }
         })
     $script:StatsTimer.Start()
+}
+
+function Start-MyDeviceBitLockerStatusUpdate {
+    $osText = Get-Ctrl "txtDeviceOS"
+    if (-not $osText) { return }
+
+    if ($script:BitLockerStatusTimer) {
+        try { $script:BitLockerStatusTimer.Stop() } catch {}
+    }
+    if ($script:BitLockerStatusRunspace) {
+        try { $script:BitLockerStatusRunspace.Stop() } catch {}
+        try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+    }
+
+    $script:BitLockerStatusRunspace = [PowerShell]::Create().AddScript({
+            function Get-BitLockerStatusTextFast {
+                $systemDrive = $env:SystemDrive
+                if ([string]::IsNullOrWhiteSpace($systemDrive)) { return "Unavailable" }
+
+                try {
+                    if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+                        $volume = Get-BitLockerVolume -MountPoint $systemDrive -ErrorAction Stop | Select-Object -First 1
+                        if ($volume) { return "$($volume.ProtectionStatus) ($($volume.VolumeStatus))" }
+                    }
+                }
+                catch {}
+
+                try {
+                    $volume = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftVolumeEncryption" -ClassName Win32_EncryptableVolume -ErrorAction Stop |
+                    Where-Object { $_.DriveLetter -eq $systemDrive } |
+                    Select-Object -First 1
+
+                    if ($volume) {
+                        $protection = switch ([int]$volume.ProtectionStatus) {
+                            0 { "Off" }
+                            1 { "On" }
+                            2 { "Unknown" }
+                            default { "Unknown" }
+                        }
+                        $conversion = switch ([int]$volume.ConversionStatus) {
+                            0 { "Fully Decrypted" }
+                            1 { "Fully Encrypted" }
+                            2 { "Encryption in Progress" }
+                            3 { "Decryption in Progress" }
+                            4 { "Encryption Paused" }
+                            5 { "Decryption Paused" }
+                            default { "Unknown" }
+                        }
+                        return "$protection ($conversion)"
+                    }
+                }
+                catch {}
+
+                return "Unavailable"
+            }
+
+            Get-BitLockerStatusTextFast
+        })
+
+    $script:BitLockerStatusAsyncResult = $script:BitLockerStatusRunspace.BeginInvoke()
+    $script:BitLockerStatusStartedAt = Get-Date
+    $script:BitLockerStatusTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:BitLockerStatusTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:BitLockerStatusTimer.Add_Tick({
+            $timedOut = $script:BitLockerStatusStartedAt -and (((Get-Date) - $script:BitLockerStatusStartedAt).TotalSeconds -gt 20)
+            if (($script:BitLockerStatusAsyncResult -and $script:BitLockerStatusAsyncResult.IsCompleted) -or $timedOut) {
+                $script:BitLockerStatusTimer.Stop()
+                try {
+                    if ($timedOut) {
+                        try { $script:BitLockerStatusRunspace.Stop() } catch {}
+                        $status = "Timed out"
+                    }
+                    else {
+                        $status = $script:BitLockerStatusRunspace.EndInvoke($script:BitLockerStatusAsyncResult)
+                        if ($status -is [System.Collections.ObjectModel.Collection[PSObject]]) { $status = [string]$status[0] }
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$status)) { $status = "Unavailable" }
+
+                    $ctrl = Get-Ctrl "txtDeviceOS"
+                    if ($ctrl) {
+                        $replacement = "BitLocker: $status"
+                        if ($ctrl.Text -match "(?m)^BitLocker:") {
+                            $ctrl.Text = [regex]::Replace($ctrl.Text, "(?m)^BitLocker:.*$", $replacement)
+                        }
+                        else {
+                            $ctrl.Text = "$($ctrl.Text)`n$replacement"
+                        }
+                    }
+                }
+                catch {}
+                try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+                $script:BitLockerStatusRunspace = $null
+                $script:BitLockerStatusAsyncResult = $null
+                $script:BitLockerStatusStartedAt = $null
+            }
+        })
+    $script:BitLockerStatusTimer.Start()
 }
 
 function New-WmtBrush {
@@ -3891,6 +4565,22 @@ function Start-DiskManagementGui {
     }
     catch {
         Write-GuiLog "[Storage] Failed to open Disk Management: $($_.Exception.Message)"
+    }
+}
+
+function Open-PowerSettings {
+    try {
+        Start-Process "ms-settings:powersleep"
+        Write-GuiLog "[Power] Opened Windows Power settings."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "control.exe" -ArgumentList "powercfg.cpl"
+            Write-GuiLog "[Power] Opened Control Panel Power Options."
+        }
+        catch {
+            Write-GuiLog "[Power] Failed to open power settings: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -7908,8 +8598,11 @@ function Set-Hags {
                                                             <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Plan: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#58A6FF" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -8838,6 +9531,11 @@ if ($btnMyDeviceDiskpart) {
 $btnMyDeviceDriveBenchmark = Get-Ctrl "btnMyDeviceDriveBenchmark"
 if ($btnMyDeviceDriveBenchmark) {
     $btnMyDeviceDriveBenchmark.Add_Click({ Start-DriveBenchmark })
+}
+
+$txtPowerPlan = Get-Ctrl "txtPowerPlan"
+if ($txtPowerPlan) {
+    $txtPowerPlan.Add_MouseLeftButtonUp({ Open-PowerSettings })
 }
 
 $btnMyDeviceGPUDriver = Get-Ctrl "btnMyDeviceGPUDriver"
@@ -12039,6 +12737,16 @@ $window.Add_Closing({
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+        if ($script:StatsTimer) { $script:StatsTimer.Stop() }
+        if ($script:StatsRunspace) {
+            try { $script:StatsRunspace.Stop() } catch {}
+            try { $script:StatsRunspace.Dispose() } catch {}
+        }
+        if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
+        if ($script:BitLockerStatusRunspace) {
+            try { $script:BitLockerStatusRunspace.Stop() } catch {}
+            try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+        }
         try {
             $settings = Get-WmtSettings
             $settings.Theme = $script:CurrentTheme
