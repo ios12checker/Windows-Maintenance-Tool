@@ -1301,7 +1301,7 @@ function Set-MyDeviceGpuCards {
         $card.Child = $stack
 
         $card.Add_MouseLeftButtonUp({
-                param($sender, $e)
+                param($s, $e)
                 $selectedVendor = [string]$sender.Tag
                 if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
                     Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
@@ -1317,7 +1317,7 @@ function Set-MyDeviceGpuCards {
     }
 }
 
-function Apply-MyDeviceSectionData {
+function Set-MyDeviceSectionData {
     param($Data)
     if ($Data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $Data = $Data[0] }
     if (-not $Data) { return }
@@ -1404,7 +1404,7 @@ function Update-MyDeviceStats {
     foreach ($section in $sections) {
         $cached = if (-not $ForceRefresh) { Get-MyDeviceCacheEntry -Section $section.Name } else { $null }
         if ($cached) {
-            Apply-MyDeviceSectionData -Data $cached
+            Set-MyDeviceSectionData -Data $cached
             Write-GuiLog "[My Device] Loaded $($section.Name) from RAM cache."
         }
         else {
@@ -1437,7 +1437,7 @@ function Update-MyDeviceStats {
                         $data = $job.PowerShell.EndInvoke($job.Async)
                         if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
                         if ($data) {
-                            Apply-MyDeviceSectionData -Data $data
+                            Set-MyDeviceSectionData -Data $data
                             Set-MyDeviceCacheEntry -Section $key -Data $data
                             $elapsed = [math]::Round(((Get-Date) - $job.StartedAt).TotalSeconds, 1)
                             Write-GuiLog "[My Device] $key loaded in ${elapsed}s."
