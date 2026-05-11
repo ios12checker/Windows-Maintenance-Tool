@@ -10046,6 +10046,7 @@ function Set-Hags {
 
                                 <!-- MY DEVICE PANEL -->
                                 <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                    <StackPanel>
                                         <WrapPanel Name="pnlMyDeviceCards" Margin="20" ItemWidth="350">
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -10342,6 +10343,10 @@ function Set-Hags {
                                                     </Grid>
                                                 </Border>
                                         </WrapPanel>
+                                        <Border Margin="20,0,20,24" BorderBrush="#2C2C2E" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
+                                            <Button Name="btnMyDeviceExport" Content="Export" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                        </Border>
+                                    </StackPanel>
                                 </ScrollViewer>
 
                                 <!-- FIREWALL PANEL -->
@@ -10694,6 +10699,108 @@ function Update-MyDeviceResponsiveLayout {
     $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
 }
 
+function Get-MyDeviceExportTextLines {
+    param($Control)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    if (-not $Control) { return @() }
+
+    if ($Control -is [System.Windows.Controls.TextBlock]) {
+        $text = ([string]$Control.Text).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+    }
+    elseif ($Control -is [System.Windows.Controls.TextBox]) {
+        $text = ([string]$Control.Text).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+    }
+    elseif ($Control -is [System.Windows.Controls.ContentControl]) {
+        if ($Control.Content -is [string]) {
+            $text = ([string]$Control.Content).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+        }
+        elseif ($Control.Content -is [System.Windows.DependencyObject]) {
+            foreach ($line in (Get-MyDeviceExportTextLines -Control $Control.Content)) { [void]$lines.Add($line) }
+        }
+    }
+
+    if ($Control -is [System.Windows.Controls.Panel]) {
+        foreach ($child in $Control.Children) {
+            foreach ($line in (Get-MyDeviceExportTextLines -Control $child)) { [void]$lines.Add($line) }
+        }
+    }
+    elseif ($Control -is [System.Windows.Controls.Decorator] -and $Control.Child) {
+        foreach ($line in (Get-MyDeviceExportTextLines -Control $Control.Child)) { [void]$lines.Add($line) }
+    }
+
+    return $lines.ToArray()
+}
+
+function Add-MyDeviceExportSection {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [string]$Title,
+        [string[]]$TextControlNames = @(),
+        [string[]]$PanelControlNames = @()
+    )
+
+    $sectionLines = New-Object System.Collections.Generic.List[string]
+
+    foreach ($name in $TextControlNames) {
+        $ctrl = Get-Ctrl $name
+        if ($ctrl -and $ctrl.Text) {
+            $text = ([string]$ctrl.Text).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$sectionLines.Add($text) }
+        }
+    }
+
+    foreach ($name in $PanelControlNames) {
+        foreach ($line in (Get-MyDeviceExportTextLines -Control (Get-Ctrl $name))) {
+            $text = ([string]$line).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$sectionLines.Add($text) }
+        }
+    }
+
+    if ($sectionLines.Count -eq 0) { return }
+
+    if ($Lines.Count -gt 0) { [void]$Lines.Add("") }
+    [void]$Lines.Add($Title)
+    [void]$Lines.Add(("-" * $Title.Length))
+
+    $previous = $null
+    foreach ($line in $sectionLines) {
+        if ($line -ne $previous) { [void]$Lines.Add($line) }
+        $previous = $line
+    }
+}
+
+function Invoke-MyDeviceExport {
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add("Windows Maintenance Tool - My Device Export")
+        [void]$lines.Add("Generated: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+        [void]$lines.Add("Computer: $env:COMPUTERNAME")
+
+        Add-MyDeviceExportSection -Lines $lines -Title "Operating System" -TextControlNames @("txtDeviceOS")
+        Add-MyDeviceExportSection -Lines $lines -Title "Network Info" -TextControlNames @("txtDeviceNetwork") -PanelControlNames @("pnlDeviceNetworkList")
+        Add-MyDeviceExportSection -Lines $lines -Title "Processor (CPU)" -TextControlNames @("txtDeviceCPU")
+        Add-MyDeviceExportSection -Lines $lines -Title "Battery / Power" -TextControlNames @("txtBatteryHealth", "txtBatteryCharge", "txtBatteryStatus", "txtPowerPlan", "txtBatteryTime", "txtPowerDraw", "txtPowerTotal", "txtPowerElectrical")
+        Add-MyDeviceExportSection -Lines $lines -Title "Memory (RAM)" -TextControlNames @("txtDeviceRAM")
+        Add-MyDeviceExportSection -Lines $lines -Title "Graphics (GPU)" -PanelControlNames @("pnlDeviceGPUList")
+        Add-MyDeviceExportSection -Lines $lines -Title "Motherboard" -TextControlNames @("txtDeviceMotherboard")
+        Add-MyDeviceExportSection -Lines $lines -Title "Storage Drives" -TextControlNames @("txtDeviceStorage") -PanelControlNames @("pnlDeviceStorageList")
+
+        $outFile = Join-Path (Get-DataPath) ("MyDevice_{0}.txt" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))
+        Set-Content -Path $outFile -Value $lines.ToArray() -Encoding UTF8
+
+        Write-GuiLog "[My Device] Exported device summary to $outFile"
+        [System.Windows.MessageBox]::Show("My Device export saved to:`n$outFile", "Export Complete", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    }
+    catch {
+        Write-GuiLog "[My Device] Export failed: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show("Failed to export My Device details:`n$($_.Exception.Message)", "Export Failed", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+    }
+}
+
 function Set-ButtonIcon {
     param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
     $btn = Get-Ctrl $BtnName
@@ -10827,6 +10934,7 @@ Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 
 Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
 Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
 Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
+Set-ButtonIcon "btnMyDeviceExport" "M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M13,9V3.5L18.5,9H13M12,17L8,13H10.5V10H13.5V13H16L12,17Z" "Export" "Saves the current My Device details to the data folder"
 Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
 Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
 Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
@@ -11026,6 +11134,11 @@ if ($btnMyDeviceDiskpart) {
 $btnMyDeviceDriveBenchmark = Get-Ctrl "btnMyDeviceDriveBenchmark"
 if ($btnMyDeviceDriveBenchmark) {
     $btnMyDeviceDriveBenchmark.Add_Click({ Start-DriveBenchmark })
+}
+
+$btnMyDeviceExport = Get-Ctrl "btnMyDeviceExport"
+if ($btnMyDeviceExport) {
+    $btnMyDeviceExport.Add_Click({ Invoke-MyDeviceExport })
 }
 
 $txtPowerPlan = Get-Ctrl "txtPowerPlan"
@@ -11363,6 +11476,7 @@ Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyD
 Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceExport" "Export My Device Details" "btnTabMyDevice"
 
 # 10. Catalog & Providers
 Add-SearchIndexEntry "btnShowCatalog" "Software Catalog" "btnTabUpdates"
