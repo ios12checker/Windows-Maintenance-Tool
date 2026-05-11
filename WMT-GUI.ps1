@@ -4585,60 +4585,307 @@ function Open-PowerSettings {
 }
 
 function Start-DriveBenchmark {
-    $btn = Get-Ctrl "btnMyDeviceDriveBenchmark"
+    $launcherButton = Get-Ctrl "btnMyDeviceDriveBenchmark"
 
-    if ($script:DriveBenchmarkAsyncResult -and -not $script:DriveBenchmarkAsyncResult.IsCompleted) {
-        if ($script:DriveBenchmarkWindow) { $script:DriveBenchmarkWindow.Activate() | Out-Null }
-        return
+    if ($script:DriveBenchmarkWindow) {
+        try {
+            if ($script:DriveBenchmarkWindow.IsVisible) {
+                $script:DriveBenchmarkWindow.Activate() | Out-Null
+                return
+            }
+        }
+        catch {}
+
+        $script:DriveBenchmarkWindow = $null
     }
 
-    if ($btn) { $btn.IsEnabled = $false }
-    Write-GuiLog "[Storage Benchmark] Started quick CDM-style benchmark."
+    Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName WindowsBase -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 
-    $sync = [hashtable]::Synchronized(@{
+    if ($launcherButton) {
+        $launcherButton.IsEnabled = $false
+    }
+
+    Write-GuiLog "[Storage Benchmark] Opening drive benchmark window."
+
+    $BrushWindow = New-WmtBrush "#0D1117"
+    $BrushPanel = New-WmtBrush "#161B22"
+    $BrushControl = New-WmtBrush "#21262D"
+    $BrushBorder = New-WmtBrush "#30363D"
+    $BrushText = New-WmtBrush "#E6EDF3"
+    $BrushTitle = New-WmtBrush "#EBEBF5"
+    $BrushWarn = New-WmtBrush "#D29922"
+    $BrushSuccess = New-WmtBrush "#3FB950"
+    $BrushError = New-WmtBrush "#F85149"
+    $BrushAccent = New-WmtBrush "#58A6FF"
+    $BrushHighlight = New-WmtBrush "#1F6FEB"
+    $BrushHighlightTx = New-WmtBrush "#FFFFFF"
+
+    $BrushHeaderBg = New-WmtBrush "#FFFFFF"
+    $BrushHeaderText = New-WmtBrush "#000000"
+    $BrushHeaderBorder = New-WmtBrush "#BDBDBD"
+    $BrushHeaderSelectBg = New-WmtBrush "#DCEBFF"
+
+    function Set-DbSystemColors {
+        param([System.Windows.FrameworkElement]$Element)
+
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushPanel
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushText
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushControl
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushText
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHighlight
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHighlightTx
+    }
+
+    function Set-DbHeaderSystemColors {
+        param([System.Windows.FrameworkElement]$Element)
+
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushHeaderBg
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushHeaderBg
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHeaderSelectBg
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::GrayTextBrushKey] = $BrushHeaderText
+    }
+
+    function New-DbTextBlock {
+        param(
+            [string]$Text,
+            [double]$FontSize = 12,
+            [System.Windows.Media.Brush]$Foreground = $BrushText,
+            [System.Windows.Thickness]$Margin = (New-Object System.Windows.Thickness(0))
+        )
+
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $Text
+        $tb.FontSize = $FontSize
+        $tb.Foreground = $Foreground
+        $tb.Margin = $Margin
+        $tb.VerticalAlignment = "Center"
+        $tb.TextWrapping = "Wrap"
+
+        return $tb
+    }
+
+    function Set-DbButtonStyle {
+        param([System.Windows.Controls.Button]$Button)
+
+        $Button.Background = $BrushControl
+        $Button.Foreground = $BrushText
+        $Button.BorderBrush = $BrushBorder
+        $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
+
+        Set-DbSystemColors $Button
+    }
+
+    function Set-DbHeaderButtonStyle {
+        param([System.Windows.Controls.Button]$Button)
+
+        $Button.Background = $BrushHeaderBg
+        $Button.Foreground = $BrushHeaderText
+        $Button.BorderBrush = $BrushHeaderBorder
+        $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
+
+        Set-DbHeaderSystemColors $Button
+    }
+
+    function Set-DbHeaderComboStyle {
+        param([System.Windows.Controls.ComboBox]$ComboBox)
+
+        $ComboBox.Background = $BrushHeaderBg
+        $ComboBox.Foreground = $BrushHeaderText
+        $ComboBox.BorderBrush = $BrushHeaderBorder
+        $ComboBox.IsEditable = $false
+
+        Set-DbHeaderSystemColors $ComboBox
+
+        $itemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::BackgroundProperty,
+                $BrushHeaderBg
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::ForegroundProperty,
+                $BrushHeaderText
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::BorderBrushProperty,
+                $BrushHeaderBorder
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::PaddingProperty,
+                (New-Object System.Windows.Thickness(8, 3, 8, 3))
+            ))
+        )
+
+        $ComboBox.ItemContainerStyle = $itemStyle
+    }
+
+    $state = [hashtable]::Synchronized(@{
             Lines       = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-            Status      = "Preparing benchmark..."
+            Status      = "Ready."
             Progress    = 0
+            IsRunning   = $false
             IsCompleted = $false
             Error       = ""
+            Cancel      = $false
+            TargetDrive = "ALL"
+            TargetSize  = 64
         })
-    [void]$sync.Lines.Add("Quick drive benchmark results (synthetic, CDM-style):")
-    [void]$sync.Lines.Add("Using a small temporary test file so the UI stays responsive.")
+
+    $worker = @{
+        PowerShell = $null
+        Runspace   = $null
+        Async      = $null
+        StartedAt  = $null
+    }
+
+    $driveValueMap = @{}
+    $sizeValueMap = @{}
+    $isWindowCleanupDone = $false
 
     $benchWindow = New-Object System.Windows.Window
     $benchWindow.Title = "Drive Benchmark"
-    $benchWindow.Width = 680
-    $benchWindow.Height = 460
-    $benchWindow.MinWidth = 560
-    $benchWindow.MinHeight = 360
+    $benchWindow.Width = 720
+    $benchWindow.Height = 540
+    $benchWindow.MinWidth = 620
+    $benchWindow.MinHeight = 420
     $benchWindow.WindowStartupLocation = "CenterOwner"
-    if ($window) { $benchWindow.Owner = $window }
-    $benchWindow.Background = New-WmtBrush "#0D1117"
-    $benchWindow.Foreground = New-WmtBrush "#E6EDF3"
+    $benchWindow.Background = $BrushWindow
+    $benchWindow.Foreground = $BrushText
+
+    if ($window) {
+        $benchWindow.Owner = $window
+    }
+
+    Set-DbSystemColors $benchWindow
 
     $root = New-Object System.Windows.Controls.Grid
-    $root.Margin = "18"
-    foreach ($height in @("Auto", "Auto", "*", "Auto")) {
+    $root.Margin = New-Object System.Windows.Thickness(18)
+    $root.Background = $BrushWindow
+
+    Set-DbSystemColors $root
+
+    foreach ($rowHeight in @("Auto", "Auto", "Auto", "*", "Auto")) {
         $row = New-Object System.Windows.Controls.RowDefinition
-        if ($height -eq "*") { $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) }
-        else { $row.Height = [System.Windows.GridLength]::Auto }
+
+        if ($rowHeight -eq "*") {
+            $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        }
+        else {
+            $row.Height = [System.Windows.GridLength]::Auto
+        }
+
         [void]$root.RowDefinitions.Add($row)
     }
 
-    $title = New-Object System.Windows.Controls.TextBlock
-    $title.Text = "Drive Benchmark"
-    $title.FontSize = 18
+    $title = New-DbTextBlock `
+        -Text "Drive Benchmark" `
+        -FontSize 18 `
+        -Foreground $BrushTitle `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+
     $title.FontWeight = [System.Windows.FontWeights]::SemiBold
-    $title.Foreground = New-WmtBrush "#EBEBF5"
-    $title.Margin = "0,0,0,6"
+
+    [System.Windows.Controls.Grid]::SetRow($title, 0)
     [void]$root.Children.Add($title)
 
-    $statusText = New-Object System.Windows.Controls.TextBlock
-    $statusText.Text = "Preparing benchmark..."
-    $statusText.Foreground = New-WmtBrush "#D29922"
-    $statusText.Margin = "0,0,0,8"
-    $statusText.TextWrapping = "Wrap"
-    [System.Windows.Controls.Grid]::SetRow($statusText, 1)
+    $controlsPanel = New-Object System.Windows.Controls.StackPanel
+    $controlsPanel.Orientation = "Horizontal"
+    $controlsPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
+
+    [System.Windows.Controls.Grid]::SetRow($controlsPanel, 1)
+
+    $lblDrive = New-DbTextBlock `
+        -Text "Target:" `
+        -Foreground $BrushText `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+
+    [void]$controlsPanel.Children.Add($lblDrive)
+
+    $cmbDrive = New-Object System.Windows.Controls.ComboBox
+    $cmbDrive.Width = 180
+    $cmbDrive.Height = 30
+    $cmbDrive.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
+
+    Set-DbHeaderComboStyle $cmbDrive
+
+    [void]$cmbDrive.Items.Add("All Fixed Drives")
+    $driveValueMap["All Fixed Drives"] = "ALL"
+
+    foreach ($driveInfo in [System.IO.DriveInfo]::GetDrives()) {
+        if ($driveInfo.DriveType -eq [System.IO.DriveType]::Fixed -and $driveInfo.IsReady) {
+            $driveLetter = $driveInfo.Name.Substring(0, 1)
+
+            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
+                "Local Disk"
+            }
+            else {
+                $driveInfo.VolumeLabel
+            }
+
+            $displayText = "$driveLetter`: ($driveLabel)"
+            [void]$cmbDrive.Items.Add($displayText)
+            $driveValueMap[$displayText] = $driveLetter
+        }
+    }
+
+    $cmbDrive.SelectedIndex = 0
+    [void]$controlsPanel.Children.Add($cmbDrive)
+
+    $lblSize = New-DbTextBlock `
+        -Text "Test Size:" `
+        -Foreground $BrushText `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+
+    [void]$controlsPanel.Children.Add($lblSize)
+
+    $cmbSize = New-Object System.Windows.Controls.ComboBox
+    $cmbSize.Width = 110
+    $cmbSize.Height = 30
+    $cmbSize.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
+
+    Set-DbHeaderComboStyle $cmbSize
+
+    foreach ($sizeMb in @(16, 32, 64, 128, 256, 512, 1024, 2048, 4096)) {
+        $sizeText = "$sizeMb MB"
+        [void]$cmbSize.Items.Add($sizeText)
+        $sizeValueMap[$sizeText] = $sizeMb
+    }
+
+    $cmbSize.SelectedItem = "64 MB"
+    [void]$controlsPanel.Children.Add($cmbSize)
+
+    $btnRun = New-Object System.Windows.Controls.Button
+    $btnRun.Content = "Run Benchmark"
+    $btnRun.Width = 125
+    $btnRun.Height = 30
+
+    Set-DbHeaderButtonStyle $btnRun
+
+    [void]$controlsPanel.Children.Add($btnRun)
+    [void]$root.Children.Add($controlsPanel)
+
+    $statusText = New-DbTextBlock `
+        -Text "Ready." `
+        -Foreground $BrushWarn `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+
+    [System.Windows.Controls.Grid]::SetRow($statusText, 2)
     [void]$root.Children.Add($statusText)
 
     $logBox = New-Object System.Windows.Controls.TextBox
@@ -4649,309 +4896,803 @@ function Start-DriveBenchmark {
     $logBox.HorizontalScrollBarVisibility = "Auto"
     $logBox.FontFamily = "Cascadia Mono, Consolas"
     $logBox.FontSize = 12
-    $logBox.Background = New-WmtBrush "#161B22"
-    $logBox.Foreground = New-WmtBrush "#E6EDF3"
-    $logBox.BorderBrush = New-WmtBrush "#30363D"
-    $logBox.BorderThickness = "1"
-    $logBox.Padding = "10"
-    [System.Windows.Controls.Grid]::SetRow($logBox, 2)
+    $logBox.Background = $BrushPanel
+    $logBox.Foreground = $BrushText
+    $logBox.BorderBrush = $BrushBorder
+    $logBox.BorderThickness = New-Object System.Windows.Thickness(1)
+    $logBox.Padding = New-Object System.Windows.Thickness(10)
+
+    Set-DbSystemColors $logBox
+
+    [System.Windows.Controls.Grid]::SetRow($logBox, 3)
     [void]$root.Children.Add($logBox)
 
     $bottom = New-Object System.Windows.Controls.Grid
-    $bottom.Margin = "0,12,0,0"
-    $bottomCol1 = New-Object System.Windows.Controls.ColumnDefinition
-    $bottomCol1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-    $bottomCol2 = New-Object System.Windows.Controls.ColumnDefinition
-    $bottomCol2.Width = [System.Windows.GridLength]::Auto
-    [void]$bottom.ColumnDefinitions.Add($bottomCol1)
-    [void]$bottom.ColumnDefinitions.Add($bottomCol2)
+    $bottom.Margin = New-Object System.Windows.Thickness(0, 12, 0, 0)
+
+    $colProgress = New-Object System.Windows.Controls.ColumnDefinition
+    $colProgress.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+
+    $colExport = New-Object System.Windows.Controls.ColumnDefinition
+    $colExport.Width = [System.Windows.GridLength]::Auto
+
+    $colClose = New-Object System.Windows.Controls.ColumnDefinition
+    $colClose.Width = [System.Windows.GridLength]::Auto
+
+    [void]$bottom.ColumnDefinitions.Add($colProgress)
+    [void]$bottom.ColumnDefinitions.Add($colExport)
+    [void]$bottom.ColumnDefinitions.Add($colClose)
 
     $progress = New-Object System.Windows.Controls.ProgressBar
     $progress.Minimum = 0
     $progress.Maximum = 100
     $progress.Height = 12
-    $progress.Margin = "0,8,12,0"
-    $progress.Foreground = New-WmtBrush "#58A6FF"
-    $progress.Background = New-WmtBrush "#30363D"
+    $progress.Margin = New-Object System.Windows.Thickness(0, 8, 12, 0)
+    $progress.Foreground = $BrushAccent
+    $progress.Background = $BrushBorder
+
+    [System.Windows.Controls.Grid]::SetColumn($progress, 0)
     [void]$bottom.Children.Add($progress)
+
+    $exportBtn = New-Object System.Windows.Controls.Button
+    $exportBtn.Content = "Export"
+    $exportBtn.Width = 80
+    $exportBtn.Height = 32
+    $exportBtn.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+
+    Set-DbButtonStyle $exportBtn
+
+    $exportBtn.Add_Click({
+            $dialog = New-Object System.Windows.Forms.SaveFileDialog
+            $dialog.Filter = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
+            $dialog.FileName = "WMT_DriveBenchmark_Results.txt"
+
+            if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                try {
+                    [System.IO.File]::WriteAllText($dialog.FileName, $logBox.Text, [System.Text.Encoding]::UTF8)
+                    Write-GuiLog "[Storage Benchmark] Exported results to $($dialog.FileName)"
+                }
+                catch {
+                    Write-GuiLog "[Storage Benchmark] Export failed: $($_.Exception.Message)"
+                }
+            }
+        }.GetNewClosure())
+
+    [System.Windows.Controls.Grid]::SetColumn($exportBtn, 1)
+    [void]$bottom.Children.Add($exportBtn)
 
     $closeBtn = New-Object System.Windows.Controls.Button
     $closeBtn.Content = "Close"
-    $closeBtn.Width = 96
+    $closeBtn.Width = 80
     $closeBtn.Height = 32
-    $closeBtn.Margin = "0"
-    $closeBtn.IsEnabled = $false
-    $closeBtn.Background = New-WmtBrush "#21262D"
-    $closeBtn.Foreground = New-WmtBrush "#E6EDF3"
-    $closeBtn.BorderBrush = New-WmtBrush "#30363D"
-    $closeBtn.Add_Click({ $benchWindow.Close() }.GetNewClosure())
-    [System.Windows.Controls.Grid]::SetColumn($closeBtn, 1)
+
+    Set-DbButtonStyle $closeBtn
+
+    $closeBtn.Add_Click({
+            try {
+                $benchWindow.Close()
+            }
+            catch {
+                Write-GuiLog "[Storage Benchmark] Close failed: $($_.Exception.Message)"
+            }
+        }.GetNewClosure())
+
+    [System.Windows.Controls.Grid]::SetColumn($closeBtn, 2)
     [void]$bottom.Children.Add($closeBtn)
 
-    [System.Windows.Controls.Grid]::SetRow($bottom, 3)
+    [System.Windows.Controls.Grid]::SetRow($bottom, 4)
     [void]$root.Children.Add($bottom)
 
     $benchWindow.Content = $root
     $script:DriveBenchmarkWindow = $benchWindow
-    $benchWindow.Add_Closing({
-            param($s, $e)
-            if (-not $closeBtn.IsEnabled) {
-                $e.Cancel = $true
-                $statusText.Text = "Benchmark is still running. The window will be closable when it finishes."
-                $statusText.Foreground = New-WmtBrush "#D29922"
-            }
-        }.GetNewClosure())
 
-    $script:DriveBenchmarkRunspace = [PowerShell]::Create().AddScript({
-            param($Sync)
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(200)
 
-            function Add-BenchmarkLine {
-                param([string]$Text)
-                [void]$Sync.Lines.Add($Text)
+    $releaseWindowState = {
+        try {
+            if ($isWindowCleanupDone) {
+                return
             }
 
-            function Set-BenchmarkStatus {
-                param([string]$Text, [int]$Progress)
-                $Sync.Status = $Text
-                $Sync.Progress = [math]::Max(0, [math]::Min(100, $Progress))
+            $isWindowCleanupDone = $true
+
+            $script:DriveBenchmarkWindow = $null
+
+            if ($launcherButton) {
+                $launcherButton.IsEnabled = $true
             }
 
-            function Get-MBps {
-                param([int64]$Bytes, [double]$Seconds)
-                if ($Seconds -le 0) { return 0 }
-                return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+            Write-GuiLog "[Storage Benchmark] Window closed."
+        }
+        catch {
+            try {
+                $script:DriveBenchmarkWindow = $null
             }
+            catch {}
 
-            function Get-Iops {
-                param([int]$Operations, [double]$Seconds)
-                if ($Seconds -le 0) { return 0 }
-                return [math]::Round($Operations / $Seconds, 0)
-            }
-
-            function Measure-WmtDriveBenchmark {
-                param(
-                    [string]$DriveLetter,
-                    [int]$FileSizeMb = 64,
-                    [int]$RandomOps = 1024,
-                    [int]$BaseProgress = 0,
-                    [int]$StepWeight = 20
-                )
-
-                $root = "{0}:\" -f $DriveLetter
-                $folder = Join-Path $root "WMT_Benchmark_Temp"
-                $file = Join-Path $folder ("wmt_benchmark_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
-                $targetBytes = [int64]$FileSizeMb * 1MB
-                $seqBufferSize = 1MB
-                $randomBlockSize = 4096
-                $seqBuffer = New-Object byte[] $seqBufferSize
-                $randomBuffer = New-Object byte[] $randomBlockSize
-                $random = [System.Random]::new()
-                $random.NextBytes($seqBuffer)
-                $random.NextBytes($randomBuffer)
-
-                $fs = $null
-                try {
-                    New-Item -ItemType Directory -Path $folder -Force | Out-Null
-                    Get-ChildItem -LiteralPath $folder -Filter "wmt_benchmark_*.tmp" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
-
-                    Set-BenchmarkStatus "Testing $DriveLetter`: sequential write..." $BaseProgress
-                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, $seqBufferSize, [System.IO.FileOptions]::SequentialScan)
-                    $written = [int64]0
-                    while ($written -lt $targetBytes) {
-                        $remaining = $targetBytes - $written
-                        $toWrite = if ($remaining -lt $seqBuffer.Length) { [int]$remaining } else { $seqBuffer.Length }
-                        $fs.Write($seqBuffer, 0, $toWrite)
-                        $written += $toWrite
-                    }
-                    $fs.Flush()
-                    $sw.Stop()
-                    $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
-                    $fs.Dispose()
-                    $fs = $null
-                    Add-BenchmarkLine ("  SEQ1M Write {0} MB/s" -f $seqWrite)
-                    Set-BenchmarkStatus "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
-
-                    $readBuffer = New-Object byte[] $seqBufferSize
-                    $sw.Restart()
-                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, $seqBufferSize, [System.IO.FileOptions]::SequentialScan)
-                    $readBytes = [int64]0
-                    do {
-                        $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
-                        $readBytes += $readNow
-                    } while ($readNow -gt 0)
-                    $sw.Stop()
-                    $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
-                    $fs.Dispose()
-                    $fs = $null
-                    Add-BenchmarkLine ("  SEQ1M Read  {0} MB/s" -f $seqRead)
-                    Set-BenchmarkStatus "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
-
-                    $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
-                    $sw.Restart()
-                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, $randomBlockSize, [System.IO.FileOptions]::RandomAccess)
-                    for ($i = 0; $i -lt $RandomOps; $i++) {
-                        $offset = [int64]$random.Next(0, $blockCount) * $randomBlockSize
-                        [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                        [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
-                    }
-                    $sw.Stop()
-                    $rndReadSeconds = $sw.Elapsed.TotalSeconds
-                    $rndReadBytes = [int64]$RandomOps * $randomBlockSize
-                    $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
-                    $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
-                    $fs.Dispose()
-                    $fs = $null
-                    Add-BenchmarkLine ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
-                    Set-BenchmarkStatus "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
-
-                    $sw.Restart()
-                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, $randomBlockSize, [System.IO.FileOptions]::RandomAccess)
-                    for ($i = 0; $i -lt $RandomOps; $i++) {
-                        $offset = [int64]$random.Next(0, $blockCount) * $randomBlockSize
-                        [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                        $fs.Write($randomBuffer, 0, $randomBlockSize)
-                    }
-                    $fs.Flush()
-                    $sw.Stop()
-                    $rndWriteSeconds = $sw.Elapsed.TotalSeconds
-                    $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
-                    $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
-                    $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
-                    Add-BenchmarkLine ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
-                    Set-BenchmarkStatus "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
-
-                    return [pscustomobject]@{
-                        FileSizeMb   = $FileSizeMb
-                        SeqRead      = $seqRead
-                        SeqWrite     = $seqWrite
-                        RndRead      = $rndRead
-                        RndReadIops  = $rndReadIops
-                        RndWrite     = $rndWrite
-                        RndWriteIops = $rndWriteIops
-                    }
+            try {
+                if ($launcherButton) {
+                    $launcherButton.IsEnabled = $true
                 }
-                finally {
-                    if ($fs) { $fs.Dispose() }
-                    try { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } } catch {}
+            }
+            catch {}
+        }
+    }.GetNewClosure()
+
+    $setRunningUi = {
+        param([bool]$Running)
+
+        $cmbDrive.IsEnabled = $true
+        $cmbSize.IsEnabled = $true
+        $btnRun.IsEnabled = $true
+
+        if ($Running) {
+            $btnRun.Content = "Running..."
+        }
+        else {
+            $btnRun.Content = "Run Benchmark"
+        }
+
+        $cmbDrive.Background = $BrushHeaderBg
+        $cmbDrive.Foreground = $BrushHeaderText
+        $cmbDrive.BorderBrush = $BrushHeaderBorder
+
+        $cmbSize.Background = $BrushHeaderBg
+        $cmbSize.Foreground = $BrushHeaderText
+        $cmbSize.BorderBrush = $BrushHeaderBorder
+
+        $btnRun.Background = $BrushHeaderBg
+        $btnRun.Foreground = $BrushHeaderText
+        $btnRun.BorderBrush = $BrushHeaderBorder
+
+        $exportBtn.IsEnabled = $true
+        $closeBtn.IsEnabled = $true
+    }.GetNewClosure()
+
+    $disposeWorker = {
+        try {
+            if ($worker["PowerShell"]) {
+                $worker["PowerShell"].Dispose()
+            }
+        }
+        catch {}
+
+        try {
+            if ($worker["Runspace"]) {
+                $worker["Runspace"].Close()
+                $worker["Runspace"].Dispose()
+            }
+        }
+        catch {}
+
+        $worker["PowerShell"] = $null
+        $worker["Runspace"] = $null
+        $worker["Async"] = $null
+        $worker["StartedAt"] = $null
+    }.GetNewClosure()
+
+    $refreshUi = {
+        try {
+            $statusText.Text = [string]$state["Status"]
+            $progress.Value = [double]$state["Progress"]
+
+            if ($state["Lines"]) {
+                $logBox.Text = (@($state["Lines"]) -join "`r`n")
+                $logBox.ScrollToEnd()
+            }
+        }
+        catch {
+            Write-GuiLog "[Storage Benchmark] UI refresh failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $timerTick = {
+        try {
+            & $refreshUi
+
+            if (-not $worker["Async"]) {
+                return
+            }
+
+            if ($state["IsRunning"] -and $worker["StartedAt"]) {
+                $elapsedMinutes = ((Get-Date) - $worker["StartedAt"]).TotalMinutes
+
+                if ($elapsedMinutes -ge 60) {
+                    $state["Cancel"] = $true
+                    $state["Error"] = "Benchmark timed out after 60 minutes."
+                    $state["Status"] = "Benchmark timed out."
+                    $state["Progress"] = 100
+                    $state["IsRunning"] = $false
+                    $state["IsCompleted"] = $true
+
+                    [void]$state["Lines"].Add("")
+                    [void]$state["Lines"].Add("ERROR: Benchmark timed out after 60 minutes.")
+
                     try {
-                        if ((Test-Path -LiteralPath $folder) -and -not (Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue)) {
-                            Remove-Item -LiteralPath $folder -Force
+                        if ($worker["PowerShell"]) {
+                            $worker["PowerShell"].Stop()
                         }
                     }
                     catch {}
                 }
             }
 
-            try {
-                $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {
-                        $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed"
-                    } | Sort-Object DriveLetter)
+            if ($worker["Async"].IsCompleted -or $state["IsCompleted"]) {
+                $timer.Stop()
 
-                if (-not $volumes -or $volumes.Count -eq 0) {
-                    throw "No fixed volumes with drive letters were found."
-                }
-
-                $testableVolumes = @($volumes | Where-Object { [double]$_.SizeRemaining -ge 160MB })
-                if (-not $testableVolumes -or $testableVolumes.Count -eq 0) {
-                    throw "No fixed volume has enough free space for the benchmark."
-                }
-
-                $totalSteps = [math]::Max(1, $testableVolumes.Count * 4)
-                $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
-                $stepIndex = 0
-
-                foreach ($v in $volumes) {
-                    $drive = [string]$v.DriveLetter
-                    $label = if ([string]::IsNullOrWhiteSpace($v.FileSystemLabel)) { "(No label)" } else { [string]$v.FileSystemLabel }
-                    $freeBytes = [double]$v.SizeRemaining
-                    $fileSizeMb = if ($freeBytes -lt 1GB) { 32 } else { 64 }
-                    $requiredBytes = ([int64]$fileSizeMb * 1MB) + 96MB
-
-                    if ($freeBytes -lt $requiredBytes) {
-                        Add-BenchmarkLine ("{0}: {1} - skipped, not enough free space for a safe test." -f $drive, $label)
-                        continue
-                    }
-
-                    try {
-                        Add-BenchmarkLine ""
-                        Add-BenchmarkLine ("{0}: {1} ({2} MiB test file)" -f $drive, $label, $fileSizeMb)
-                        $baseProgress = $stepIndex * $stepWeight
-                        [void](Measure-WmtDriveBenchmark -DriveLetter $drive -FileSizeMb $fileSizeMb -RandomOps 1024 -BaseProgress $baseProgress -StepWeight $stepWeight)
-                        $stepIndex += 4
-                    }
-                    catch {
-                        Add-BenchmarkLine ("{0}: {1} - benchmark failed: {2}" -f $drive, $label, $_.Exception.Message)
-                    }
-                }
-
-                Add-BenchmarkLine ""
-                Add-BenchmarkLine ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
-                Set-BenchmarkStatus "Benchmark complete." 100
-            }
-            catch {
-                $Sync.Error = $_.Exception.Message
-                Add-BenchmarkLine ""
-                Add-BenchmarkLine ("ERROR: {0}" -f $_.Exception.Message)
-                Set-BenchmarkStatus "Benchmark failed." 100
-            }
-            finally {
-                $Sync.IsCompleted = $true
-            }
-        }).AddArgument($sync)
-
-    $script:DriveBenchmarkAsyncResult = $script:DriveBenchmarkRunspace.BeginInvoke()
-    $script:DriveBenchmarkTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:DriveBenchmarkStartedAt = Get-Date
-    $script:DriveBenchmarkTimedOut = $false
-    $script:DriveBenchmarkTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-    $script:DriveBenchmarkTimer.Add_Tick({
-            $statusText.Text = $sync.Status
-            $progress.Value = [double]$sync.Progress
-            $logBox.Text = (@($sync.Lines) -join "`r`n")
-            $logBox.ScrollToEnd()
-
-            if (-not $sync.IsCompleted -and ((Get-Date) - $script:DriveBenchmarkStartedAt).TotalMinutes -ge 5) {
-                $sync.Error = "Benchmark timed out after 5 minutes."
-                [void]$sync.Lines.Add("")
-                [void]$sync.Lines.Add("ERROR: Benchmark timed out after 5 minutes.")
-                $sync.Status = "Benchmark timed out."
-                $sync.Progress = 100
-                $sync.IsCompleted = $true
-                $script:DriveBenchmarkTimedOut = $true
-                try { $script:DriveBenchmarkRunspace.Stop() } catch {}
-            }
-
-            if ($script:DriveBenchmarkAsyncResult.IsCompleted -or $script:DriveBenchmarkTimedOut) {
-                $script:DriveBenchmarkTimer.Stop()
                 try {
-                    if ($script:DriveBenchmarkAsyncResult.IsCompleted) {
-                        [void]$script:DriveBenchmarkRunspace.EndInvoke($script:DriveBenchmarkAsyncResult)
+                    if ($worker["Async"] -and $worker["Async"].IsCompleted -and $worker["PowerShell"]) {
+                        [void]$worker["PowerShell"].EndInvoke($worker["Async"])
                     }
                 }
                 catch {
-                    if ([string]::IsNullOrWhiteSpace($sync.Error)) { $sync.Error = $_.Exception.Message }
-                    Write-GuiLog "[Storage Benchmark] Failed: $($_.Exception.Message)"
+                    if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                        $state["Error"] = $_.Exception.Message
+                        [void]$state["Lines"].Add("")
+                        [void]$state["Lines"].Add("ERROR: $($_.Exception.Message)")
+                    }
+
+                    Write-GuiLog "[Storage Benchmark] Runspace failed: $($_.Exception.Message)"
                 }
-                finally {
-                    $statusText.Text = if ([string]::IsNullOrWhiteSpace($sync.Error)) { "Benchmark complete." } else { "Benchmark failed: $($sync.Error)" }
-                    $statusText.Foreground = if ([string]::IsNullOrWhiteSpace($sync.Error)) { New-WmtBrush "#3FB950" } else { New-WmtBrush "#F85149" }
-                    $progress.Value = 100
-                    $logBox.Text = (@($sync.Lines) -join "`r`n")
-                    $logBox.ScrollToEnd()
-                    foreach ($line in @($sync.Lines)) { Write-GuiLog "[Storage Benchmark] $line" }
-                    $closeBtn.IsEnabled = $true
-                    if ($btn) { $btn.IsEnabled = $true }
-                    if ($script:DriveBenchmarkRunspace) { $script:DriveBenchmarkRunspace.Dispose() }
-                    $script:DriveBenchmarkRunspace = $null
-                    $script:DriveBenchmarkAsyncResult = $null
+
+                $state["IsRunning"] = $false
+                $state["IsCompleted"] = $true
+                $state["Progress"] = 100
+
+                if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                    $state["Status"] = "Benchmark complete."
+                    $statusText.Foreground = $BrushSuccess
                 }
+                else {
+                    $state["Status"] = "Benchmark failed: $($state["Error"])"
+                    $statusText.Foreground = $BrushError
+                }
+
+                & $refreshUi
+
+                foreach ($line in @($state["Lines"])) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+                        Write-GuiLog "[Storage Benchmark] $line"
+                    }
+                }
+
+                & $setRunningUi $false
+                & $disposeWorker
             }
+        }
+        catch {
+            $timer.Stop()
+
+            $state["IsRunning"] = $false
+            $state["IsCompleted"] = $true
+            $state["Error"] = $_.Exception.Message
+            $state["Status"] = "Benchmark UI failed."
+            $state["Progress"] = 100
+
+            try {
+                [void]$state["Lines"].Add("")
+                [void]$state["Lines"].Add("TIMER ERROR: $($_.Exception.Message)")
+            }
+            catch {}
+
+            $statusText.Text = "Benchmark UI failed: $($_.Exception.Message)"
+            $statusText.Foreground = $BrushError
+
+            & $refreshUi
+            & $setRunningUi $false
+            & $disposeWorker
+
+            Write-GuiLog "[Storage Benchmark] Timer failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $timer.Add_Tick($timerTick)
+
+    $startBenchmark = {
+        if ($state["IsRunning"]) {
+            return
+        }
+
+        & $disposeWorker
+
+        $selectedDrive = "ALL"
+
+        if ($cmbDrive.SelectedItem) {
+            $driveKey = [string]$cmbDrive.SelectedItem
+
+            if ($driveValueMap.ContainsKey($driveKey)) {
+                $selectedDrive = [string]$driveValueMap[$driveKey]
+            }
+        }
+
+        $selectedSize = 64
+
+        if ($cmbSize.SelectedItem) {
+            $sizeKey = [string]$cmbSize.SelectedItem
+
+            if ($sizeValueMap.ContainsKey($sizeKey)) {
+                $selectedSize = [int]$sizeValueMap[$sizeKey]
+            }
+        }
+
+        $state["Lines"].Clear()
+        $state["Status"] = "Preparing benchmark..."
+        $state["Progress"] = 0
+        $state["IsRunning"] = $true
+        $state["IsCompleted"] = $false
+        $state["Error"] = ""
+        $state["Cancel"] = $false
+        $state["TargetDrive"] = $selectedDrive
+        $state["TargetSize"] = $selectedSize
+
+        $targetLabel = if ($selectedDrive -eq "ALL") {
+            "All Fixed Drives"
+        }
+        else {
+            "{0}:\" -f $selectedDrive
+        }
+
+        [void]$state["Lines"].Add("Quick drive benchmark results (.NET runspace, CDM-style):")
+        [void]$state["Lines"].Add("Target: $targetLabel | Size: $selectedSize MB")
+        [void]$state["Lines"].Add("")
+
+        $statusText.Foreground = $BrushWarn
+
+        & $setRunningUi $true
+        & $refreshUi
+
+        try {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = "MTA"
+            $runspace.ThreadOptions = "ReuseThread"
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+
+            [void]$ps.AddScript({
+                    param($State)
+
+                    $ErrorActionPreference = "Stop"
+
+                    function Add-Line {
+                        param([string]$Text)
+                        [void]$State["Lines"].Add($Text)
+                    }
+
+                    function Set-Status {
+                        param(
+                            [string]$Text,
+                            [int]$Progress
+                        )
+
+                        $State["Status"] = $Text
+                        $State["Progress"] = [math]::Max(0, [math]::Min(100, $Progress))
+                    }
+
+                    function Test-Cancelled {
+                        if ($State["Cancel"]) {
+                            throw "Benchmark cancelled."
+                        }
+                    }
+
+                    function Get-MBps {
+                        param(
+                            [int64]$Bytes,
+                            [double]$Seconds
+                        )
+
+                        if ($Seconds -le 0) {
+                            return 0
+                        }
+
+                        return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+                    }
+
+                    function Get-Iops {
+                        param(
+                            [int]$Operations,
+                            [double]$Seconds
+                        )
+
+                        if ($Seconds -le 0) {
+                            return 0
+                        }
+
+                        return [math]::Round($Operations / $Seconds, 0)
+                    }
+
+                    function Measure-Drive {
+                        param(
+                            [string]$DriveLetter,
+                            [int]$FileSizeMb,
+                            [int]$RandomOps,
+                            [int]$BaseProgress,
+                            [int]$StepWeight
+                        )
+
+                        $root = "{0}:\" -f $DriveLetter
+                        $folder = [System.IO.Path]::Combine($root, "WMT_Benchmark_Temp")
+                        $file = [System.IO.Path]::Combine($folder, "wmt_benchmark_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
+
+                        $seqBufferSize = 1MB
+                        $randomBlockSize = 4096
+                        $targetBytes = [int64]$FileSizeMb * 1MB
+
+                        $seqBuffer = New-Object byte[] $seqBufferSize
+                        $readBuffer = New-Object byte[] $seqBufferSize
+                        $randomBuffer = New-Object byte[] $randomBlockSize
+                        $rng = [System.Random]::new()
+
+                        $rng.NextBytes($seqBuffer)
+                        $rng.NextBytes($randomBuffer)
+
+                        $fs = $null
+
+                        try {
+                            Test-Cancelled
+
+                            if (-not [System.IO.Directory]::Exists($folder)) {
+                                [void][System.IO.Directory]::CreateDirectory($folder)
+                            }
+
+                            try {
+                                foreach ($oldFile in [System.IO.Directory]::GetFiles($folder, "wmt_benchmark_*.tmp")) {
+                                    try {
+                                        [System.IO.File]::Delete($oldFile)
+                                    }
+                                    catch {}
+                                }
+                            }
+                            catch {}
+
+                            Set-Status "Testing $DriveLetter`: sequential write..." $BaseProgress
+
+                            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Create,
+                                [System.IO.FileAccess]::ReadWrite,
+                                [System.IO.FileShare]::None,
+                                $seqBufferSize,
+                                [System.IO.FileOptions]::SequentialScan
+                            )
+
+                            $written = [int64]0
+
+                            while ($written -lt $targetBytes) {
+                                Test-Cancelled
+
+                                $remaining = $targetBytes - $written
+
+                                $toWrite = if ($remaining -lt $seqBuffer.Length) {
+                                    [int]$remaining
+                                }
+                                else {
+                                    $seqBuffer.Length
+                                }
+
+                                $fs.Write($seqBuffer, 0, $toWrite)
+                                $written += $toWrite
+                            }
+
+                            $fs.Flush()
+                            $sw.Stop()
+
+                            $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  SEQ1M Write {0} MB/s" -f $seqWrite)
+                            Set-Status "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
+
+                            Test-Cancelled
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::Read,
+                                [System.IO.FileShare]::ReadWrite,
+                                $seqBufferSize,
+                                [System.IO.FileOptions]::SequentialScan
+                            )
+
+                            $readBytes = [int64]0
+
+                            do {
+                                Test-Cancelled
+
+                                $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
+                                $readBytes += $readNow
+                            } while ($readNow -gt 0)
+
+                            $sw.Stop()
+
+                            $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  SEQ1M Read  {0} MB/s" -f $seqRead)
+                            Set-Status "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
+
+                            Test-Cancelled
+
+                            $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::Read,
+                                [System.IO.FileShare]::ReadWrite,
+                                $randomBlockSize,
+                                [System.IO.FileOptions]::RandomAccess
+                            )
+
+                            for ($i = 0; $i -lt $RandomOps; $i++) {
+                                Test-Cancelled
+
+                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
+                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                                [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
+                            }
+
+                            $sw.Stop()
+
+                            $rndReadSeconds = $sw.Elapsed.TotalSeconds
+                            $rndReadBytes = [int64]$RandomOps * $randomBlockSize
+                            $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
+                            $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
+                            Set-Status "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
+
+                            Test-Cancelled
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::ReadWrite,
+                                [System.IO.FileShare]::None,
+                                $randomBlockSize,
+                                [System.IO.FileOptions]::RandomAccess
+                            )
+
+                            for ($i = 0; $i -lt $RandomOps; $i++) {
+                                Test-Cancelled
+
+                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
+                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                                $fs.Write($randomBuffer, 0, $randomBlockSize)
+                            }
+
+                            $fs.Flush()
+                            $sw.Stop()
+
+                            $rndWriteSeconds = $sw.Elapsed.TotalSeconds
+                            $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
+                            $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
+                            $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
+
+                            Add-Line ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
+                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
+                        }
+                        finally {
+                            if ($fs) {
+                                try {
+                                    $fs.Dispose()
+                                }
+                                catch {}
+                            }
+
+                            try {
+                                if ([System.IO.File]::Exists($file)) {
+                                    [System.IO.File]::Delete($file)
+                                }
+                            }
+                            catch {}
+
+                            try {
+                                if ([System.IO.Directory]::Exists($folder)) {
+                                    $entries = [System.IO.Directory]::GetFileSystemEntries($folder)
+
+                                    if (-not $entries -or $entries.Count -eq 0) {
+                                        [System.IO.Directory]::Delete($folder, $false)
+                                    }
+                                }
+                            }
+                            catch {}
+                        }
+                    }
+
+                    try {
+                        $targetDrive = [string]$State["TargetDrive"]
+                        $targetSize = [int]$State["TargetSize"]
+
+                        Set-Status "Finding fixed drives..." 0
+
+                        $drives = @(
+                            [System.IO.DriveInfo]::GetDrives() |
+                            Where-Object {
+                                $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady
+                            }
+                        )
+
+                        if ($targetDrive -ne "ALL") {
+                            $drives = @(
+                                $drives |
+                                Where-Object {
+                                    $_.Name.Substring(0, 1).ToUpperInvariant() -eq $targetDrive.ToUpperInvariant()
+                                }
+                            )
+                        }
+
+                        if (-not $drives -or $drives.Count -eq 0) {
+                            throw "No suitable fixed drives were found."
+                        }
+
+                        $requiredBytes = ([int64]$targetSize * 1MB) + 96MB
+
+                        $testableDrives = @(
+                            $drives |
+                            Where-Object {
+                                [int64]$_.AvailableFreeSpace -ge $requiredBytes
+                            }
+                        )
+
+                        if (-not $testableDrives -or $testableDrives.Count -eq 0) {
+                            throw "Selected drive(s) do not have enough free space for a $targetSize MB benchmark."
+                        }
+
+                        $totalSteps = [math]::Max(1, $testableDrives.Count * 4)
+                        $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
+                        $stepIndex = 0
+
+                        foreach ($driveInfo in $drives) {
+                            Test-Cancelled
+
+                            $driveLetter = $driveInfo.Name.Substring(0, 1)
+
+                            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
+                                "(No label)"
+                            }
+                            else {
+                                $driveInfo.VolumeLabel
+                            }
+
+                            if ([int64]$driveInfo.AvailableFreeSpace -lt $requiredBytes) {
+                                Add-Line ("{0}: {1} - skipped, not enough free space for a {2} MB test." -f $driveLetter, $driveLabel, $targetSize)
+                                continue
+                            }
+
+                            Add-Line ""
+                            Add-Line ("{0}: {1} ({2} MiB test file)" -f $driveLetter, $driveLabel, $targetSize)
+
+                            $baseProgress = $stepIndex * $stepWeight
+
+                            try {
+                                Measure-Drive `
+                                    -DriveLetter $driveLetter `
+                                    -FileSizeMb $targetSize `
+                                    -RandomOps 1024 `
+                                    -BaseProgress $baseProgress `
+                                    -StepWeight $stepWeight
+                            }
+                            catch {
+                                Add-Line ("{0}: {1} - benchmark failed: {2}" -f $driveLetter, $driveLabel, $_.Exception.Message)
+                            }
+
+                            $stepIndex += 4
+                        }
+
+                        Add-Line ""
+                        Add-Line ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
+
+                        Set-Status "Benchmark complete." 100
+                    }
+                    catch {
+                        $State["Error"] = $_.Exception.Message
+
+                        Add-Line ""
+                        Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+
+                        Set-Status "Benchmark failed." 100
+                    }
+                    finally {
+                        $State["IsRunning"] = $false
+                        $State["IsCompleted"] = $true
+                    }
+                }).AddArgument($state)
+
+            $worker["Runspace"] = $runspace
+            $worker["PowerShell"] = $ps
+            $worker["StartedAt"] = Get-Date
+            $worker["Async"] = $ps.BeginInvoke()
+
+            $timer.Start()
+        }
+        catch {
+            $state["IsRunning"] = $false
+            $state["IsCompleted"] = $true
+            $state["Error"] = $_.Exception.Message
+            $state["Status"] = "Failed to start benchmark."
+            $state["Progress"] = 100
+
+            [void]$state["Lines"].Add("")
+            [void]$state["Lines"].Add("START ERROR: $($_.Exception.Message)")
+
+            $statusText.Foreground = $BrushError
+
+            & $refreshUi
+            & $setRunningUi $false
+            & $disposeWorker
+
+            Write-GuiLog "[Storage Benchmark] Start failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $btnRun.Add_Click({
+            & $startBenchmark
         }.GetNewClosure())
-    $script:DriveBenchmarkTimer.Start()
+
+    $didAutoStart = $false
+
+    $benchWindow.Add_Loaded({
+            if ($didAutoStart) {
+                return
+            }
+
+            $didAutoStart = $true
+
+            $benchWindow.Dispatcher.BeginInvoke(
+                [Action] {
+                    & $startBenchmark
+                },
+                [System.Windows.Threading.DispatcherPriority]::ApplicationIdle
+            ) | Out-Null
+        }.GetNewClosure())
+
+    $windowCleanup = {
+        $state["Cancel"] = $true
+
+        try {
+            $timer.Stop()
+        }
+        catch {}
+
+        try {
+            if ($worker["PowerShell"] -and $state["IsRunning"]) {
+                $worker["PowerShell"].Stop()
+            }
+        }
+        catch {}
+
+        & $disposeWorker
+        & $releaseWindowState
+    }.GetNewClosure()
+
+    $benchWindow.Add_Closing({
+            & $windowCleanup
+        }.GetNewClosure())
+
+    $benchWindow.Add_Closed({
+            & $releaseWindowState
+        }.GetNewClosure())
+
     $benchWindow.Show() | Out-Null
 }
-
 function Show-BrokenShortcuts {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
