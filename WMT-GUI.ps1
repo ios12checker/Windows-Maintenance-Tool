@@ -240,7 +240,11 @@ function Update-MyDeviceStats {
                             4 { $status = "Low" }
                             5 { $status = "Critical" }
                             6 { $status = "Charging" }
-                            default { $status = "Unknown" }
+                            7 { $status = "Charging (High)" }
+                            8 { $status = "Charging (Low)" }
+                            9 { $status = "Charging (Critical)" }
+                            11 { $status = "Partially Charged" }
+                            default { $status = "Unknown (Code: $($battery.BatteryStatus))" }
                         }
 
                         $res.BatteryStatus = $status
