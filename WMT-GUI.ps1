@@ -1,4 +1,4 @@
-<#
+﻿<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -8288,6 +8288,72 @@ function Update-MyDeviceResponsiveLayout {
     $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
 }
 
+function Get-WingetExitInfo {
+    param([int]$ExitCode)
+
+    $unsigned = if ($ExitCode -lt 0) { [uint32]([int64]$ExitCode + 4294967296) } else { [uint32]$ExitCode }
+    $hex = "0x{0:x8}" -f $unsigned
+    $descriptions = @{
+        "0x00000000" = "Success"
+        "0x8a150001" = "Invalid argument"
+        "0x8a150002" = "Internal failure"
+        "0x8a150003" = "Source cache corrupted"
+        "0x8a150014" = "Network error"
+        "0x80070005" = "Access denied"
+        "0x80070490" = "Element not found"
+        "0x80072ee7" = "DNS lookup failed"
+        "0x80072f8f" = "SSL certificate error"
+    }
+    $description = if ($descriptions.ContainsKey($hex)) { $descriptions[$hex] } else { "Unknown error" }
+
+    return [pscustomobject]@{
+        Code        = $ExitCode
+        Hex         = $hex
+        Description = $description
+    }
+}
+
+function Invoke-WingetSourceRefresh {
+    try {
+        Write-GuiLog "Pre-refreshing winget sources (this may take a moment)..."
+
+        $wingetArgs = "source update --name winget --disable-interactivity"
+        $refreshProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
+
+        if ($refreshProc.ExitCode -eq 0) {
+            Write-GuiLog "Winget community source refreshed successfully."
+            return
+        }
+
+        $info = Get-WingetExitInfo -ExitCode $refreshProc.ExitCode
+        Write-GuiLog "Winget source refresh returned exit code $($info.Code) ($($info.Hex): $($info.Description))."
+
+        if ($info.Hex -in @("0x8a150002", "0x8a150003", "0x80070490")) {
+            Write-GuiLog "Attempting winget source reset, then retrying source refresh..."
+            $resetProc = Start-Process -FilePath "winget" -ArgumentList "source reset --force --disable-interactivity" -NoNewWindow -Wait -PassThru
+            if ($resetProc.ExitCode -ne 0) {
+                $resetInfo = Get-WingetExitInfo -ExitCode $resetProc.ExitCode
+                Write-GuiLog "Winget source reset returned exit code $($resetInfo.Code) ($($resetInfo.Hex): $($resetInfo.Description))."
+            }
+
+            $retryProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
+            if ($retryProc.ExitCode -eq 0) {
+                Write-GuiLog "Winget community source refreshed successfully after reset."
+                return
+            }
+
+            $retryInfo = Get-WingetExitInfo -ExitCode $retryProc.ExitCode
+            Write-GuiLog "Winget source refresh retry returned exit code $($retryInfo.Code) ($($retryInfo.Hex): $($retryInfo.Description)). Continuing scan anyway."
+            return
+        }
+
+        Write-GuiLog "Continuing scan anyway."
+    }
+    catch {
+        Write-GuiLog "Winget source refresh failed: $($_.Exception.Message)"
+    }
+}
+
 # --- ICON INJECTION SYSTEM (SILENT + TOOLTIPS) ---
 function Set-ButtonIcon {
     param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
@@ -9856,24 +9922,7 @@ $btnWingetScan.Add_Click({
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
         # Pre-scan: sync winget sources (prevents parallel SQLite database locks)
-        try {
-            Write-GuiLog "Pre-refreshing winget sources (this may take a moment)..."
-            
-            # ADDED "--name winget": Bypasses the buggy msstore repository update entirely
-            $wingetArgs = "source update --name winget --accept-source-agreements --disable-interactivity"
-            
-            $refreshProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
-            
-            if ($refreshProc.ExitCode -eq 0) {
-                Write-GuiLog "Winget community source refreshed successfully."
-            }
-            else {
-                Write-GuiLog "Winget source refresh returned exit code $($refreshProc.ExitCode) - continuing anyway."
-            }
-        }
-        catch {
-            Write-GuiLog "Winget source refresh failed: $($_.Exception.Message)"
-        }
+        Invoke-WingetSourceRefresh
         try {
             Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
         }
