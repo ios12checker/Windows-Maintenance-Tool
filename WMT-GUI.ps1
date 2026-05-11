@@ -1,4 +1,4 @@
-﻿<#
+<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -8313,9 +8313,31 @@ function Get-WingetExitInfo {
     }
 }
 
+function Invoke-WingetSourceAgreementBootstrap {
+    try {
+        Write-GuiLog "Checking winget source agreements..."
+        $agreementArgs = "search --id Microsoft.PowerShell --exact --source winget --accept-source-agreements --disable-interactivity"
+        $agreementProc = Start-Process -FilePath "winget" -ArgumentList $agreementArgs -NoNewWindow -Wait -PassThru
+
+        if ($agreementProc.ExitCode -eq 0) {
+            Write-GuiLog "Winget source agreements accepted/confirmed."
+            return $true
+        }
+
+        $info = Get-WingetExitInfo -ExitCode $agreementProc.ExitCode
+        Write-GuiLog "Could not confirm winget source agreements: $($info.Code) ($($info.Hex): $($info.Description))."
+    }
+    catch {
+        Write-GuiLog "Could not check winget source agreements: $($_.Exception.Message)"
+    }
+
+    return $false
+}
+
 function Invoke-WingetSourceRefresh {
     try {
         Write-GuiLog "Pre-refreshing winget sources (this may take a moment)..."
+        Invoke-WingetSourceAgreementBootstrap | Out-Null
 
         $wingetArgs = "source update --name winget --disable-interactivity"
         $refreshProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
@@ -8336,6 +8358,7 @@ function Invoke-WingetSourceRefresh {
                 Write-GuiLog "Winget source reset returned exit code $($resetInfo.Code) ($($resetInfo.Hex): $($resetInfo.Description))."
             }
 
+            Invoke-WingetSourceAgreementBootstrap | Out-Null
             $retryProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
             if ($retryProc.ExitCode -eq 0) {
                 Write-GuiLog "Winget community source refreshed successfully after reset."
