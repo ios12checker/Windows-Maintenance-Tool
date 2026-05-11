@@ -105,10 +105,9 @@ function Get-Ctrl { param($Name) return $window.FindName($Name) }
 
 function Write-GuiLog {
     param($Msg)
-    $lb = Get-Ctrl "LogBox"
-    if ($lb) {
-        $lb.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
-        $lb.ScrollToEnd()
+    if ($script:LogBox) {
+        $script:LogBox.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
+        $script:LogBox.ScrollToEnd()
     }
 }
 
@@ -743,7 +742,7 @@ function Start-XboxClean {
         $allCreds = (cmdkey /list) -split "`r?`n"
         $targets = @()
         foreach ($line in $allCreds) {
-            if ($line -match "(?i)^\\s*Target:.*(Xbl.*)$") { $targets += $matches[1] }
+            if ($line -match '^\s*Target:.*(Xbl.*)$') { $targets += $matches[1] }
         }
 
         if ($targets.Count -eq 0) {
@@ -7575,6 +7574,7 @@ function Set-Hags {
 # ==========================================
 $reader = (New-Object System.Xml.XmlNodeReader $xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
+$script:LogBox = $window.FindName("LogBox")
 
 function Get-Ctrl { param($Name) return $window.FindName($Name) }
 
@@ -11146,8 +11146,16 @@ $window.Add_ContentRendered({
                 $window.Height = [double]$wb.Height
             }
             if (($wb.Left -ne 0 -or $wb.Top -ne 0) -and $settings.WindowState -ne "Maximized") {
-                $window.Left = [double]$wb.Left
-                $window.Top = [double]$wb.Top
+                $screenW = [System.Windows.SystemParameters]::VirtualScreenWidth
+                $screenH = [System.Windows.SystemParameters]::VirtualScreenHeight
+                $screenX = [System.Windows.SystemParameters]::VirtualScreenLeft
+                $screenY = [System.Windows.SystemParameters]::VirtualScreenTop
+            
+                $clampedLeft = [math]::Max($screenX, [math]::Min([double]$wb.Left, $screenX + $screenW - 100))
+                $clampedTop = [math]::Max($screenY, [math]::Min([double]$wb.Top, $screenY + $screenH - 40))
+            
+                $window.Left = $clampedLeft
+                $window.Top = $clampedTop
             }
         }
 
