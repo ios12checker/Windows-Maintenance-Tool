@@ -9850,96 +9850,6 @@ function Update-MyDeviceResponsiveLayout {
     $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
 }
 
-function Get-WingetExitInfo {
-    param([int]$ExitCode)
-
-    $unsigned = if ($ExitCode -lt 0) { [uint32]([int64]$ExitCode + 4294967296) } else { [uint32]$ExitCode }
-    $hex = "0x{0:x8}" -f $unsigned
-    $descriptions = @{
-        "0x00000000" = "Success"
-        "0x8a150001" = "Invalid argument"
-        "0x8a150002" = "Internal failure"
-        "0x8a150003" = "Source cache corrupted"
-        "0x8a150014" = "Network error"
-        "0x80070005" = "Access denied"
-        "0x80070490" = "Element not found"
-        "0x80072ee7" = "DNS lookup failed"
-        "0x80072f8f" = "SSL certificate error"
-    }
-    $description = if ($descriptions.ContainsKey($hex)) { $descriptions[$hex] } else { "Unknown error" }
-
-    return [pscustomobject]@{
-        Code        = $ExitCode
-        Hex         = $hex
-        Description = $description
-    }
-}
-
-function Invoke-WingetSourceAgreementBootstrap {
-    try {
-        Write-GuiLog "Checking winget source agreements..."
-        $agreementArgs = "search --id Microsoft.PowerShell --exact --source winget --accept-source-agreements --disable-interactivity"
-        $agreementProc = Start-Process -FilePath "winget" -ArgumentList $agreementArgs -NoNewWindow -Wait -PassThru
-
-        if ($agreementProc.ExitCode -eq 0) {
-            Write-GuiLog "Winget source agreements accepted/confirmed."
-            return $true
-        }
-
-        $info = Get-WingetExitInfo -ExitCode $agreementProc.ExitCode
-        Write-GuiLog "Could not confirm winget source agreements: $($info.Code) ($($info.Hex): $($info.Description))."
-    }
-    catch {
-        Write-GuiLog "Could not check winget source agreements: $($_.Exception.Message)"
-    }
-
-    return $false
-}
-
-function Invoke-WingetSourceRefresh {
-    try {
-        Write-GuiLog "Pre-refreshing winget sources (this may take a moment)..."
-        Invoke-WingetSourceAgreementBootstrap | Out-Null
-
-        $wingetArgs = "source update --name winget --disable-interactivity"
-        $refreshProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
-
-        if ($refreshProc.ExitCode -eq 0) {
-            Write-GuiLog "Winget community source refreshed successfully."
-            return
-        }
-
-        $info = Get-WingetExitInfo -ExitCode $refreshProc.ExitCode
-        Write-GuiLog "Winget source refresh returned exit code $($info.Code) ($($info.Hex): $($info.Description))."
-
-        if ($info.Hex -in @("0x8a150002", "0x8a150003", "0x80070490")) {
-            Write-GuiLog "Attempting winget source reset, then retrying source refresh..."
-            $resetProc = Start-Process -FilePath "winget" -ArgumentList "source reset --force --disable-interactivity" -NoNewWindow -Wait -PassThru
-            if ($resetProc.ExitCode -ne 0) {
-                $resetInfo = Get-WingetExitInfo -ExitCode $resetProc.ExitCode
-                Write-GuiLog "Winget source reset returned exit code $($resetInfo.Code) ($($resetInfo.Hex): $($resetInfo.Description))."
-            }
-
-            Invoke-WingetSourceAgreementBootstrap | Out-Null
-            $retryProc = Start-Process -FilePath "winget" -ArgumentList $wingetArgs -NoNewWindow -Wait -PassThru
-            if ($retryProc.ExitCode -eq 0) {
-                Write-GuiLog "Winget community source refreshed successfully after reset."
-                return
-            }
-
-            $retryInfo = Get-WingetExitInfo -ExitCode $retryProc.ExitCode
-            Write-GuiLog "Winget source refresh retry returned exit code $($retryInfo.Code) ($($retryInfo.Hex): $($retryInfo.Description)). Continuing scan anyway."
-            return
-        }
-
-        Write-GuiLog "Continuing scan anyway."
-    }
-    catch {
-        Write-GuiLog "Winget source refresh failed: $($_.Exception.Message)"
-    }
-}
-
-# --- ICON INJECTION SYSTEM (SILENT + TOOLTIPS) ---
 function Set-ButtonIcon {
     param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
     $btn = Get-Ctrl $BtnName
@@ -10405,7 +10315,13 @@ foreach ($btnName in $TabButtons) {
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
                 }
             }
-            if ($s.Name -eq "btnTabMyDevice") { Update-MyDeviceResponsiveLayout }
+            if ($s.Name -eq "btnTabMyDevice") {
+                Update-MyDeviceResponsiveLayout
+                if (-not $script:MyDeviceStatsStarted) {
+                    $script:MyDeviceStatsStarted = $true
+                    Update-MyDeviceStats
+                }
+            }
         })
 }
 
@@ -11417,6 +11333,127 @@ function Show-ProviderManager {
     $win.ShowDialog() | Out-Null
 }
 
+
+function Start-WingetScanSourcePreflight {
+    param([string[]]$Sources)
+
+    if (-not $Sources -or $Sources.Count -eq 0) {
+        $script:WingetSourcePreflightReadyForScan = $true
+        if ($btnWingetScan) {
+            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+        return
+    }
+
+    if ($script:WingetScanSourcePreflightInProgress) {
+        Write-GuiLog "Winget source preflight is already running."
+        return
+    }
+
+    $script:WingetScanSourcePreflightInProgress = $true
+    $script:WingetSourcePreflightReadyForScan = $false
+    $script:WingetSourcePreflightSources = @($Sources | Select-Object -Unique)
+
+    Write-GuiLog "Preparing winget sources before package scan: $($script:WingetSourcePreflightSources -join ', ')"
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Preparing winget sources before scan..."
+        $lblWingetStatus.Visibility = "Visible"
+    }
+
+    if ($script:WingetSourcePreflightTimer) {
+        try { $script:WingetSourcePreflightTimer.Stop() } catch {}
+        $script:WingetSourcePreflightTimer = $null
+    }
+    if ($script:WingetSourcePreflightRunspace) {
+        try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
+        try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+        $script:WingetSourcePreflightRunspace = $null
+    }
+
+    $script:WingetSourcePreflightRunspace = [PowerShell]::Create().AddScript({
+        param([string[]]$Sources)
+        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $log = New-Object System.Collections.Generic.List[string]
+
+        function Add-Log { param([string]$Text) if (-not [string]::IsNullOrWhiteSpace($Text)) { [void]$log.Add($Text) } }
+        function Invoke-WingetProcess {
+            param([string]$Arguments, [int]$TimeoutMs = 90000)
+            $psi = [System.Diagnostics.ProcessStartInfo]::new()
+            $psi.FileName = "winget"
+            $psi.Arguments = $Arguments
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError = $true
+            try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+            try { $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            if (-not $proc.WaitForExit($TimeoutMs)) {
+                try { $proc.Kill() } catch {}
+                return [PSCustomObject]@{ ExitCode = -1; TimedOut = $true }
+            }
+            return [PSCustomObject]@{ ExitCode = [int]$proc.ExitCode; TimedOut = $false }
+        }
+
+        foreach ($source in @($Sources | Select-Object -Unique)) {
+            try {
+                Add-Log "LOG:Preparing $source source before scan..."
+                [void](Invoke-WingetProcess -Arguments "search --id Microsoft.PowerShell --exact --source $source --accept-source-agreements --disable-interactivity" -TimeoutMs 45000)
+                $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs 120000
+
+                if ($refresh.TimedOut) {
+                    Add-Log "LOG:$source source refresh timed out; continuing to scan anyway."
+                }
+                elseif ($refresh.ExitCode -eq 0) {
+                    Add-Log "LOG:$source source refresh completed before scan."
+                }
+                else {
+                    Add-Log "LOG:$source source refresh exited with code $($refresh.ExitCode); continuing to scan anyway."
+                }
+            }
+            catch {
+                Add-Log "LOG:$source source preflight failed: $($_.Exception.Message); continuing to scan anyway."
+            }
+        }
+
+        Add-Log "LOG:Winget source preflight finished; starting package scan."
+        return $log.ToArray()
+    }).AddArgument([string[]]$script:WingetSourcePreflightSources)
+
+    $script:WingetSourcePreflightAsyncResult = $script:WingetSourcePreflightRunspace.BeginInvoke()
+    $script:WingetSourcePreflightTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WingetSourcePreflightTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:WingetSourcePreflightTimer.Add_Tick({
+        if (-not $script:WingetSourcePreflightAsyncResult) { return }
+        if (-not $script:WingetSourcePreflightAsyncResult.IsCompleted) { return }
+
+        $script:WingetSourcePreflightTimer.Stop()
+        try {
+            $lines = $script:WingetSourcePreflightRunspace.EndInvoke($script:WingetSourcePreflightAsyncResult)
+            foreach ($line in $lines) {
+                if ($line -is [string] -and $line.StartsWith("LOG:")) { Write-GuiLog ($line.Substring(4)) }
+                elseif ($line) { Write-GuiLog ([string]$line) }
+            }
+        }
+        catch {
+            Write-GuiLog "Winget source preflight background error: $($_.Exception.Message)"
+        }
+        finally {
+            try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+            $script:WingetSourcePreflightRunspace = $null
+            $script:WingetSourcePreflightAsyncResult = $null
+            $script:WingetScanSourcePreflightInProgress = $false
+            $script:WingetSourcePreflightReadyForScan = $true
+        }
+
+        if ($btnWingetScan) {
+            $btnWingetScan.IsEnabled = $true
+            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+    })
+    $script:WingetSourcePreflightTimer.Start()
+}
+
 # ---------------------------------------------------------
 # PARALLEL SCAN ENGINE
 # ---------------------------------------------------------
@@ -11511,12 +11548,11 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
-        # Pre-scan: sync winget sources (prevents parallel SQLite database locks)
-        Invoke-WingetSourceRefresh
-        try {
-            Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
-        }
-        catch {}
+        # Winget/MS Store source refresh is handled inside each provider worker now.
+        # That guarantees the provider scan starts only after its source refresh attempt finishes,
+        # while still keeping all winget work off the UI thread.
+        # Do not kill winget here; source preflight may already be running.
+        # Stuck winget processes are cleaned at app start and install/update actions handle their own cleanup.
     
         # --- Load Settings ---
         $settings = Get-WmtSettings
@@ -11529,6 +11565,25 @@ $btnWingetScan.Add_Click({
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+
+        # Gate the actual winget/msstore scan behind a completed source refresh.
+        # This keeps startup clickable but ensures the first visible package results are collected after source prep.
+        $wingetSourcesToPrep = @()
+        if ("winget" -in $enabled) { $wingetSourcesToPrep += "winget" }
+        if ("msstore" -in $enabled) { $wingetSourcesToPrep += "msstore" }
+
+        if ($wingetSourcesToPrep.Count -gt 0 -and -not $script:WingetSourcePreflightReadyForScan) {
+            if (-not $script:WingetScanSourcePreflightInProgress) {
+                Start-WingetScanSourcePreflight -Sources $wingetSourcesToPrep
+            }
+            else {
+                Write-GuiLog "Waiting for winget source preflight to finish before scanning..."
+            }
+            return
+        }
+
+        # Consume the ready flag so every manual refresh also gets a fresh source preflight first.
+        $script:WingetSourcePreflightReadyForScan = $false
     
         # --- Reset scan tracking ---
         $script:ActiveScans.Clear()
@@ -11581,7 +11636,7 @@ $btnWingetScan.Add_Click({
                         return $false
                     }
     
-                    Write-Output "LOG:Scanning $SourceName..."
+                    Write-Output "LOG:$SourceName source preflight already completed; starting scan..."
     
                     # Timeout: 45 sec for msstore, 120 sec for winget
                     $timeoutMs = if ($SourceName -eq "msstore") { 45000 } else { 120000 }
@@ -13459,8 +13514,8 @@ $window.Add_ContentRendered({
         Start-UpdateCheckBackground
         # 3. Update tweak button states based on system
         Update-TweakButtonStates
-        # 4. Load device hardware statistics into My Device panel
-        Update-MyDeviceStats
+        # 4. Defer My Device hardware statistics until the My Device tab is opened.
+        # CIM/storage/BitLocker queries already run in background runspaces, but delaying them avoids competing with startup and winget preflight.
         Update-MyDeviceResponsiveLayout
     })
 
@@ -13478,6 +13533,11 @@ $window.Add_Closing({
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+        if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
+        if ($script:WingetSourcePreflightRunspace) {
+            try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
+            try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+        }
         if ($script:StatsTimer) { $script:StatsTimer.Stop() }
         if ($script:StatsRunspace) {
             try { $script:StatsRunspace.Stop() } catch {}
