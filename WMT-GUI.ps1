@@ -159,11 +159,49 @@ function Update-MyDeviceStats {
     (Get-Ctrl "txtDeviceRAM").Text = "Gathering stats..."
     (Get-Ctrl "txtDeviceGPU").Text = "Gathering stats..."
     (Get-Ctrl "txtDeviceMotherboard").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceStorage").Text = "Gathering stats..."
+    (Get-Ctrl "txtDeviceStorage").Text = "Gathering storage details..."
+    $storageList = Get-Ctrl "pnlDeviceStorageList"
+    if ($storageList) { $storageList.Children.Clear() }
 
     # 2. Start Background Runspace for heavy CIM queries
     $script:StatsRunspace = [PowerShell]::Create().AddScript({
             $res = @{}
+            function ConvertTo-StorageSizeText {
+                param([double]$Bytes)
+                if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
+                if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+                if ($Bytes -ge 1MB) { return ("{0:N0} MB" -f ($Bytes / 1MB)) }
+                if ($Bytes -gt 0) { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
+                return "0 B"
+            }
+
+            function Get-FreeSpaceBrush {
+                param([double]$FreePercent)
+                if ($FreePercent -lt 10) { return "#F85149" }
+                if ($FreePercent -lt 20) { return "#D29922" }
+                if ($FreePercent -lt 35) { return "#E3B341" }
+                return "#3FB950"
+            }
+
+            function Get-HealthRank {
+                param([string]$Status)
+                if ([string]::IsNullOrWhiteSpace($Status)) { return 0 }
+                if ($Status -match "(?i)unhealthy|critical|failed|failure|error") { return 3 }
+                if ($Status -match "(?i)warning|degraded|predict|attention|stressed") { return 2 }
+                if ($Status -match "(?i)healthy|ok|online") { return 1 }
+                return 0
+            }
+
+            function Get-HealthBrush {
+                param([int]$Rank)
+                switch ($Rank) {
+                    3 { return "#F85149" }
+                    2 { return "#D29922" }
+                    1 { return "#3FB950" }
+                    default { return "#8B949E" }
+                }
+            }
+
             try {
                 $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
                 $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
@@ -186,7 +224,89 @@ function Update-MyDeviceStats {
                 $res.GPU = $gpuText.Trim()
             
                 $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
-                $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; $res.Storage = $dt.Trim()
+                $storageDevices = @()
+                $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {
+                        $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed"
+                    } | Sort-Object DriveLetter)
+
+                foreach ($v in $volumes) {
+                    $driveId = "{0}:" -f $v.DriveLetter
+                    $label = if ([string]::IsNullOrWhiteSpace($v.FileSystemLabel)) { "(No label)" } else { [string]$v.FileSystemLabel }
+                    $fileSystem = if ([string]::IsNullOrWhiteSpace($v.FileSystem)) { "Unknown FS" } else { [string]$v.FileSystem }
+                    $sizeBytes = [double]$v.Size
+                    $freeBytes = [double]$v.SizeRemaining
+                    $freePercent = if ($sizeBytes -gt 0) { [math]::Round(($freeBytes / $sizeBytes) * 100, 1) } else { 0 }
+                    $usedPercent = [math]::Max(0, [math]::Round(100 - $freePercent, 1))
+
+                    $partition = $null
+                    $disk = $null
+                    $cimDisk = $null
+                    try { $partition = Get-Partition -DriveLetter $v.DriveLetter -ErrorAction Stop | Select-Object -First 1 } catch {}
+                    try {
+                        if ($partition) {
+                            $disk = Get-Disk -Number $partition.DiskNumber -ErrorAction Stop
+                            $cimDisk = Get-CimInstance Win32_DiskDrive -Filter ("Index={0}" -f $disk.Number) -ErrorAction SilentlyContinue | Select-Object -First 1
+                        }
+                    }
+                    catch {}
+
+                    $hardwareName = "Unknown physical drive"
+                    if ($disk -and -not [string]::IsNullOrWhiteSpace($disk.FriendlyName)) { $hardwareName = [string]$disk.FriendlyName }
+                    elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace($cimDisk.Model)) { $hardwareName = [string]$cimDisk.Model }
+
+                    $diskNumberText = if ($partition) { "Disk $($partition.DiskNumber), Partition $($partition.PartitionNumber)" } else { "Disk unknown" }
+                    $busType = if ($disk -and $disk.BusType) { [string]$disk.BusType } elseif ($cimDisk -and $cimDisk.InterfaceType) { [string]$cimDisk.InterfaceType } else { "Bus unknown" }
+                    $partitionStyle = if ($disk -and $disk.PartitionStyle) { [string]$disk.PartitionStyle } else { "Style unknown" }
+                    $serial = if ($disk -and -not [string]::IsNullOrWhiteSpace($disk.SerialNumber)) { ([string]$disk.SerialNumber).Trim() } elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace($cimDisk.SerialNumber)) { ([string]$cimDisk.SerialNumber).Trim() } else { "" }
+
+                    $diskHealth = if ($disk -and $disk.HealthStatus) { [string]$disk.HealthStatus } else { "Unknown" }
+                    $volumeHealth = if ($v.HealthStatus) { [string]$v.HealthStatus } else { "Unknown" }
+                    $healthText = if ($diskHealth -eq $volumeHealth) { $diskHealth } else { "Disk: $diskHealth | Volume: $volumeHealth" }
+                    $healthRank = [math]::Max((Get-HealthRank $diskHealth), (Get-HealthRank $volumeHealth))
+                    $operational = if ($disk -and $disk.OperationalStatus) { ([string[]]$disk.OperationalStatus) -join ", " } else { "Unknown" }
+
+                    $metaParts = @($diskNumberText, $busType, $fileSystem, $partitionStyle)
+                    if (-not [string]::IsNullOrWhiteSpace($serial)) { $metaParts += "Serial: $serial" }
+
+                    $storageDevices += [pscustomobject]@{
+                        Drive       = $driveId
+                        Label       = $label
+                        Hardware    = $hardwareName
+                        Meta        = ($metaParts -join " | ")
+                        Health      = $healthText
+                        HealthBrush = Get-HealthBrush $healthRank
+                        Operational = "Operational: $operational"
+                        FreeText    = "{0} free of {1} ({2:N1}%)" -f (ConvertTo-StorageSizeText $freeBytes), (ConvertTo-StorageSizeText $sizeBytes), $freePercent
+                        FreePercent = $freePercent
+                        UsedPercent = $usedPercent
+                        FreeBrush   = Get-FreeSpaceBrush $freePercent
+                    }
+                }
+
+                if ($storageDevices.Count -eq 0) {
+                    $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | Sort-Object DeviceID)
+                    foreach ($d in $logicalDisks) {
+                        $sizeBytes = [double]$d.Size
+                        $freeBytes = [double]$d.FreeSpace
+                        $freePercent = if ($sizeBytes -gt 0) { [math]::Round(($freeBytes / $sizeBytes) * 100, 1) } else { 0 }
+                        $storageDevices += [pscustomobject]@{
+                            Drive       = [string]$d.DeviceID
+                            Label       = if ([string]::IsNullOrWhiteSpace($d.VolumeName)) { "(No label)" } else { [string]$d.VolumeName }
+                            Hardware    = "Physical drive details unavailable"
+                            Meta        = "Logical disk fallback | $($d.FileSystem)"
+                            Health      = "Unknown"
+                            HealthBrush = "#8B949E"
+                            Operational = "Operational: Unknown"
+                            FreeText    = "{0} free of {1} ({2:N1}%)" -f (ConvertTo-StorageSizeText $freeBytes), (ConvertTo-StorageSizeText $sizeBytes), $freePercent
+                            FreePercent = $freePercent
+                            UsedPercent = [math]::Max(0, [math]::Round(100 - $freePercent, 1))
+                            FreeBrush   = Get-FreeSpaceBrush $freePercent
+                        }
+                    }
+                }
+
+                $res.StorageDevices = $storageDevices
+                $res.Storage = if ($storageDevices.Count -gt 0) { "Fixed volumes detected: $($storageDevices.Count)" } else { "No fixed storage volumes found." }
                 # Physical active adapters only
                 
                 $physicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
@@ -333,6 +453,7 @@ function Update-MyDeviceStats {
                     (Get-Ctrl "txtDeviceGPU").Text = $data.GPU
                     (Get-Ctrl "txtDeviceMotherboard").Text = $data.MB
                     (Get-Ctrl "txtDeviceStorage").Text = $data.Storage
+                    Set-MyDeviceStorageDetails -Devices $data.StorageDevices
                     (Get-Ctrl "txtDeviceNetwork").Text = $data.Network
                     (Get-Ctrl "txtBatteryHealth").Text = "Health: $($data.BatteryHealth)"
                     (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($data.BatteryCharge)"
@@ -346,6 +467,97 @@ function Update-MyDeviceStats {
         })
     $script:StatsTimer.Start()
 }
+
+function New-WmtBrush {
+    param([string]$Color)
+    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color) }
+    catch { return [System.Windows.Media.BrushConverter]::new().ConvertFromString("#8B949E") }
+}
+
+function New-WmtStorageTextBlock {
+    param(
+        [string]$Text,
+        [string]$Color = "#98989D",
+        [double]$FontSize = 12,
+        [string]$FontWeight = "Normal",
+        [string]$Margin = "0"
+    )
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Text
+    $tb.Foreground = New-WmtBrush $Color
+    $tb.FontSize = $FontSize
+    $tb.Margin = $Margin
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    if ($FontWeight -eq "SemiBold") { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+    elseif ($FontWeight -eq "Bold") { $tb.FontWeight = [System.Windows.FontWeights]::Bold }
+    return $tb
+}
+
+function Set-MyDeviceStorageDetails {
+    param($Devices)
+
+    $panel = Get-Ctrl "pnlDeviceStorageList"
+    $summary = Get-Ctrl "txtDeviceStorage"
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+    $deviceList = @($Devices)
+
+    if (-not $deviceList -or $deviceList.Count -eq 0) {
+        if ($summary) { $summary.Text = "No fixed storage volumes found." }
+        return
+    }
+
+    if ($summary) { $summary.Text = "Fixed volumes detected: $($deviceList.Count)" }
+
+    for ($i = 0; $i -lt $deviceList.Count; $i++) {
+        $d = $deviceList[$i]
+
+        $header = New-Object System.Windows.Controls.Grid
+        $header.Margin = if ($i -eq 0) { "0,8,0,0" } else { "0,12,0,0" }
+        $colMain = New-Object System.Windows.Controls.ColumnDefinition
+        $colMain.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $colHealth = New-Object System.Windows.Controls.ColumnDefinition
+        $colHealth.Width = [System.Windows.GridLength]::Auto
+        [void]$header.ColumnDefinitions.Add($colMain)
+        [void]$header.ColumnDefinitions.Add($colHealth)
+
+        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#EBEBF5" -FontSize 13 -FontWeight "SemiBold"
+        [void]$header.Children.Add($driveTitle)
+
+        $healthText = New-WmtStorageTextBlock -Text $d.Health -Color $d.HealthBrush -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
+        [System.Windows.Controls.Grid]::SetColumn($healthText, 1)
+        [void]$header.Children.Add($healthText)
+        [void]$panel.Children.Add($header)
+
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "#E6EDF3" -FontSize 12 -Margin "0,4,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "#8B949E" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "#6E7681" -FontSize 11 -Margin "0,2,0,0"))
+
+        $bar = New-Object System.Windows.Controls.ProgressBar
+        $bar.Minimum = 0
+        $bar.Maximum = 100
+        $bar.Value = [double]$d.FreePercent
+        $bar.Height = 7
+        $bar.Margin = "0,7,0,2"
+        $bar.Foreground = New-WmtBrush $d.FreeBrush
+        $bar.Background = New-WmtBrush "#30363D"
+        [void]$panel.Children.Add($bar)
+
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.FreeText -Color $d.FreeBrush -FontSize 12 -FontWeight "SemiBold" -Margin "0,2,0,0"))
+
+        if ($i -lt ($deviceList.Count - 1)) {
+            $separator = New-Object System.Windows.Controls.Border
+            $separator.Height = 1
+            $separator.Background = New-WmtBrush "#30363D"
+            $separator.Margin = "0,10,0,0"
+            [void]$panel.Children.Add($separator)
+        }
+    }
+}
+
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
     $dataPath = Join-Path $root "data"
@@ -3542,6 +3754,384 @@ Write-Host ""
     $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($consoleScript))
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded" -WindowStyle Normal
     Write-GuiLog "[Trim] Opened live SSD trim console window."
+}
+
+function Start-DiskManagementGui {
+    try {
+        Start-Process -FilePath "diskmgmt.msc" -WindowStyle Normal
+        Write-GuiLog "[Storage] Opened Disk Management."
+    }
+    catch {
+        Write-GuiLog "[Storage] Failed to open Disk Management: $($_.Exception.Message)"
+    }
+}
+
+function Start-DriveBenchmark {
+    $btn = Get-Ctrl "btnMyDeviceDriveBenchmark"
+
+    if ($script:DriveBenchmarkAsyncResult -and -not $script:DriveBenchmarkAsyncResult.IsCompleted) {
+        if ($script:DriveBenchmarkWindow) { $script:DriveBenchmarkWindow.Activate() | Out-Null }
+        return
+    }
+
+    if ($btn) { $btn.IsEnabled = $false }
+    Write-GuiLog "[Storage Benchmark] Started quick CDM-style benchmark."
+
+    $sync = [hashtable]::Synchronized(@{
+            Lines       = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+            Status      = "Preparing benchmark..."
+            Progress    = 0
+            IsCompleted = $false
+            Error       = ""
+        })
+    [void]$sync.Lines.Add("Quick drive benchmark results (synthetic, CDM-style):")
+    [void]$sync.Lines.Add("Using a small temporary test file so the UI stays responsive.")
+
+    $benchWindow = New-Object System.Windows.Window
+    $benchWindow.Title = "Drive Benchmark"
+    $benchWindow.Width = 680
+    $benchWindow.Height = 460
+    $benchWindow.MinWidth = 560
+    $benchWindow.MinHeight = 360
+    $benchWindow.WindowStartupLocation = "CenterOwner"
+    if ($window) { $benchWindow.Owner = $window }
+    $benchWindow.Background = New-WmtBrush "#0D1117"
+    $benchWindow.Foreground = New-WmtBrush "#E6EDF3"
+
+    $root = New-Object System.Windows.Controls.Grid
+    $root.Margin = "18"
+    foreach ($height in @("Auto", "Auto", "*", "Auto")) {
+        $row = New-Object System.Windows.Controls.RowDefinition
+        if ($height -eq "*") { $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) }
+        else { $row.Height = [System.Windows.GridLength]::Auto }
+        [void]$root.RowDefinitions.Add($row)
+    }
+
+    $title = New-Object System.Windows.Controls.TextBlock
+    $title.Text = "Drive Benchmark"
+    $title.FontSize = 18
+    $title.FontWeight = [System.Windows.FontWeights]::SemiBold
+    $title.Foreground = New-WmtBrush "#EBEBF5"
+    $title.Margin = "0,0,0,6"
+    [void]$root.Children.Add($title)
+
+    $statusText = New-Object System.Windows.Controls.TextBlock
+    $statusText.Text = "Preparing benchmark..."
+    $statusText.Foreground = New-WmtBrush "#D29922"
+    $statusText.Margin = "0,0,0,8"
+    $statusText.TextWrapping = "Wrap"
+    [System.Windows.Controls.Grid]::SetRow($statusText, 1)
+    [void]$root.Children.Add($statusText)
+
+    $logBox = New-Object System.Windows.Controls.TextBox
+    $logBox.IsReadOnly = $true
+    $logBox.AcceptsReturn = $true
+    $logBox.TextWrapping = "NoWrap"
+    $logBox.VerticalScrollBarVisibility = "Auto"
+    $logBox.HorizontalScrollBarVisibility = "Auto"
+    $logBox.FontFamily = "Cascadia Mono, Consolas"
+    $logBox.FontSize = 12
+    $logBox.Background = New-WmtBrush "#161B22"
+    $logBox.Foreground = New-WmtBrush "#E6EDF3"
+    $logBox.BorderBrush = New-WmtBrush "#30363D"
+    $logBox.BorderThickness = "1"
+    $logBox.Padding = "10"
+    [System.Windows.Controls.Grid]::SetRow($logBox, 2)
+    [void]$root.Children.Add($logBox)
+
+    $bottom = New-Object System.Windows.Controls.Grid
+    $bottom.Margin = "0,12,0,0"
+    $bottomCol1 = New-Object System.Windows.Controls.ColumnDefinition
+    $bottomCol1.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+    $bottomCol2 = New-Object System.Windows.Controls.ColumnDefinition
+    $bottomCol2.Width = [System.Windows.GridLength]::Auto
+    [void]$bottom.ColumnDefinitions.Add($bottomCol1)
+    [void]$bottom.ColumnDefinitions.Add($bottomCol2)
+
+    $progress = New-Object System.Windows.Controls.ProgressBar
+    $progress.Minimum = 0
+    $progress.Maximum = 100
+    $progress.Height = 12
+    $progress.Margin = "0,8,12,0"
+    $progress.Foreground = New-WmtBrush "#58A6FF"
+    $progress.Background = New-WmtBrush "#30363D"
+    [void]$bottom.Children.Add($progress)
+
+    $closeBtn = New-Object System.Windows.Controls.Button
+    $closeBtn.Content = "Close"
+    $closeBtn.Width = 96
+    $closeBtn.Height = 32
+    $closeBtn.Margin = "0"
+    $closeBtn.IsEnabled = $false
+    $closeBtn.Background = New-WmtBrush "#21262D"
+    $closeBtn.Foreground = New-WmtBrush "#E6EDF3"
+    $closeBtn.BorderBrush = New-WmtBrush "#30363D"
+    $closeBtn.Add_Click({ $benchWindow.Close() }.GetNewClosure())
+    [System.Windows.Controls.Grid]::SetColumn($closeBtn, 1)
+    [void]$bottom.Children.Add($closeBtn)
+
+    [System.Windows.Controls.Grid]::SetRow($bottom, 3)
+    [void]$root.Children.Add($bottom)
+
+    $benchWindow.Content = $root
+    $script:DriveBenchmarkWindow = $benchWindow
+    $benchWindow.Add_Closing({
+            param($s, $e)
+            if (-not $closeBtn.IsEnabled) {
+                $e.Cancel = $true
+                $statusText.Text = "Benchmark is still running. The window will be closable when it finishes."
+                $statusText.Foreground = New-WmtBrush "#D29922"
+            }
+        }.GetNewClosure())
+
+    $script:DriveBenchmarkRunspace = [PowerShell]::Create().AddScript({
+            param($Sync)
+
+            function Add-BenchmarkLine {
+                param([string]$Text)
+                [void]$Sync.Lines.Add($Text)
+            }
+
+            function Set-BenchmarkStatus {
+                param([string]$Text, [int]$Progress)
+                $Sync.Status = $Text
+                $Sync.Progress = [math]::Max(0, [math]::Min(100, $Progress))
+            }
+
+            function Get-MBps {
+                param([int64]$Bytes, [double]$Seconds)
+                if ($Seconds -le 0) { return 0 }
+                return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+            }
+
+            function Get-Iops {
+                param([int]$Operations, [double]$Seconds)
+                if ($Seconds -le 0) { return 0 }
+                return [math]::Round($Operations / $Seconds, 0)
+            }
+
+            function Measure-WmtDriveBenchmark {
+                param(
+                    [string]$DriveLetter,
+                    [int]$FileSizeMb = 64,
+                    [int]$RandomOps = 1024,
+                    [int]$BaseProgress = 0,
+                    [int]$StepWeight = 20
+                )
+
+                $root = "{0}:\" -f $DriveLetter
+                $folder = Join-Path $root "WMT_Benchmark_Temp"
+                $file = Join-Path $folder ("wmt_benchmark_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
+                $targetBytes = [int64]$FileSizeMb * 1MB
+                $seqBufferSize = 1MB
+                $randomBlockSize = 4096
+                $seqBuffer = New-Object byte[] $seqBufferSize
+                $randomBuffer = New-Object byte[] $randomBlockSize
+                $random = [System.Random]::new()
+                $random.NextBytes($seqBuffer)
+                $random.NextBytes($randomBuffer)
+
+                $fs = $null
+                try {
+                    New-Item -ItemType Directory -Path $folder -Force | Out-Null
+                    Get-ChildItem -LiteralPath $folder -Filter "wmt_benchmark_*.tmp" -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+
+                    Set-BenchmarkStatus "Testing $DriveLetter`: sequential write..." $BaseProgress
+                    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Create, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, $seqBufferSize, [System.IO.FileOptions]::SequentialScan)
+                    $written = [int64]0
+                    while ($written -lt $targetBytes) {
+                        $remaining = $targetBytes - $written
+                        $toWrite = if ($remaining -lt $seqBuffer.Length) { [int]$remaining } else { $seqBuffer.Length }
+                        $fs.Write($seqBuffer, 0, $toWrite)
+                        $written += $toWrite
+                    }
+                    $fs.Flush()
+                    $sw.Stop()
+                    $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
+                    $fs.Dispose()
+                    $fs = $null
+                    Add-BenchmarkLine ("  SEQ1M Write {0} MB/s" -f $seqWrite)
+                    Set-BenchmarkStatus "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
+
+                    $readBuffer = New-Object byte[] $seqBufferSize
+                    $sw.Restart()
+                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, $seqBufferSize, [System.IO.FileOptions]::SequentialScan)
+                    $readBytes = [int64]0
+                    do {
+                        $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
+                        $readBytes += $readNow
+                    } while ($readNow -gt 0)
+                    $sw.Stop()
+                    $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
+                    $fs.Dispose()
+                    $fs = $null
+                    Add-BenchmarkLine ("  SEQ1M Read  {0} MB/s" -f $seqRead)
+                    Set-BenchmarkStatus "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
+
+                    $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
+                    $sw.Restart()
+                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite, $randomBlockSize, [System.IO.FileOptions]::RandomAccess)
+                    for ($i = 0; $i -lt $RandomOps; $i++) {
+                        $offset = [int64]$random.Next(0, $blockCount) * $randomBlockSize
+                        [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                        [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
+                    }
+                    $sw.Stop()
+                    $rndReadSeconds = $sw.Elapsed.TotalSeconds
+                    $rndReadBytes = [int64]$RandomOps * $randomBlockSize
+                    $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
+                    $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
+                    $fs.Dispose()
+                    $fs = $null
+                    Add-BenchmarkLine ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
+                    Set-BenchmarkStatus "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
+
+                    $sw.Restart()
+                    $fs = [System.IO.FileStream]::new($file, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None, $randomBlockSize, [System.IO.FileOptions]::RandomAccess)
+                    for ($i = 0; $i -lt $RandomOps; $i++) {
+                        $offset = [int64]$random.Next(0, $blockCount) * $randomBlockSize
+                        [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                        $fs.Write($randomBuffer, 0, $randomBlockSize)
+                    }
+                    $fs.Flush()
+                    $sw.Stop()
+                    $rndWriteSeconds = $sw.Elapsed.TotalSeconds
+                    $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
+                    $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
+                    $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
+                    Add-BenchmarkLine ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
+                    Set-BenchmarkStatus "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
+
+                    return [pscustomobject]@{
+                        FileSizeMb   = $FileSizeMb
+                        SeqRead      = $seqRead
+                        SeqWrite     = $seqWrite
+                        RndRead      = $rndRead
+                        RndReadIops  = $rndReadIops
+                        RndWrite     = $rndWrite
+                        RndWriteIops = $rndWriteIops
+                    }
+                }
+                finally {
+                    if ($fs) { $fs.Dispose() }
+                    try { if (Test-Path -LiteralPath $file) { Remove-Item -LiteralPath $file -Force } } catch {}
+                    try {
+                        if ((Test-Path -LiteralPath $folder) -and -not (Get-ChildItem -LiteralPath $folder -Force -ErrorAction SilentlyContinue)) {
+                            Remove-Item -LiteralPath $folder -Force
+                        }
+                    }
+                    catch {}
+                }
+            }
+
+            try {
+                $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object {
+                        $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed"
+                    } | Sort-Object DriveLetter)
+
+                if (-not $volumes -or $volumes.Count -eq 0) {
+                    throw "No fixed volumes with drive letters were found."
+                }
+
+                $testableVolumes = @($volumes | Where-Object { [double]$_.SizeRemaining -ge 160MB })
+                if (-not $testableVolumes -or $testableVolumes.Count -eq 0) {
+                    throw "No fixed volume has enough free space for the benchmark."
+                }
+
+                $totalSteps = [math]::Max(1, $testableVolumes.Count * 4)
+                $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
+                $stepIndex = 0
+
+                foreach ($v in $volumes) {
+                    $drive = [string]$v.DriveLetter
+                    $label = if ([string]::IsNullOrWhiteSpace($v.FileSystemLabel)) { "(No label)" } else { [string]$v.FileSystemLabel }
+                    $freeBytes = [double]$v.SizeRemaining
+                    $fileSizeMb = if ($freeBytes -lt 1GB) { 32 } else { 64 }
+                    $requiredBytes = ([int64]$fileSizeMb * 1MB) + 96MB
+
+                    if ($freeBytes -lt $requiredBytes) {
+                        Add-BenchmarkLine ("{0}: {1} - skipped, not enough free space for a safe test." -f $drive, $label)
+                        continue
+                    }
+
+                    try {
+                        Add-BenchmarkLine ""
+                        Add-BenchmarkLine ("{0}: {1} ({2} MiB test file)" -f $drive, $label, $fileSizeMb)
+                        $baseProgress = $stepIndex * $stepWeight
+                        [void](Measure-WmtDriveBenchmark -DriveLetter $drive -FileSizeMb $fileSizeMb -RandomOps 1024 -BaseProgress $baseProgress -StepWeight $stepWeight)
+                        $stepIndex += 4
+                    }
+                    catch {
+                        Add-BenchmarkLine ("{0}: {1} - benchmark failed: {2}" -f $drive, $label, $_.Exception.Message)
+                    }
+                }
+
+                Add-BenchmarkLine ""
+                Add-BenchmarkLine ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
+                Set-BenchmarkStatus "Benchmark complete." 100
+            }
+            catch {
+                $Sync.Error = $_.Exception.Message
+                Add-BenchmarkLine ""
+                Add-BenchmarkLine ("ERROR: {0}" -f $_.Exception.Message)
+                Set-BenchmarkStatus "Benchmark failed." 100
+            }
+            finally {
+                $Sync.IsCompleted = $true
+            }
+        }).AddArgument($sync)
+
+    $script:DriveBenchmarkAsyncResult = $script:DriveBenchmarkRunspace.BeginInvoke()
+    $script:DriveBenchmarkTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DriveBenchmarkStartedAt = Get-Date
+    $script:DriveBenchmarkTimedOut = $false
+    $script:DriveBenchmarkTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:DriveBenchmarkTimer.Add_Tick({
+            $statusText.Text = $sync.Status
+            $progress.Value = [double]$sync.Progress
+            $logBox.Text = (@($sync.Lines) -join "`r`n")
+            $logBox.ScrollToEnd()
+
+            if (-not $sync.IsCompleted -and ((Get-Date) - $script:DriveBenchmarkStartedAt).TotalMinutes -ge 5) {
+                $sync.Error = "Benchmark timed out after 5 minutes."
+                [void]$sync.Lines.Add("")
+                [void]$sync.Lines.Add("ERROR: Benchmark timed out after 5 minutes.")
+                $sync.Status = "Benchmark timed out."
+                $sync.Progress = 100
+                $sync.IsCompleted = $true
+                $script:DriveBenchmarkTimedOut = $true
+                try { $script:DriveBenchmarkRunspace.Stop() } catch {}
+            }
+
+            if ($script:DriveBenchmarkAsyncResult.IsCompleted -or $script:DriveBenchmarkTimedOut) {
+                $script:DriveBenchmarkTimer.Stop()
+                try {
+                    if ($script:DriveBenchmarkAsyncResult.IsCompleted) {
+                        [void]$script:DriveBenchmarkRunspace.EndInvoke($script:DriveBenchmarkAsyncResult)
+                    }
+                }
+                catch {
+                    if ([string]::IsNullOrWhiteSpace($sync.Error)) { $sync.Error = $_.Exception.Message }
+                    Write-GuiLog "[Storage Benchmark] Failed: $($_.Exception.Message)"
+                }
+                finally {
+                    $statusText.Text = if ([string]::IsNullOrWhiteSpace($sync.Error)) { "Benchmark complete." } else { "Benchmark failed: $($sync.Error)" }
+                    $statusText.Foreground = if ([string]::IsNullOrWhiteSpace($sync.Error)) { New-WmtBrush "#3FB950" } else { New-WmtBrush "#F85149" }
+                    $progress.Value = 100
+                    $logBox.Text = (@($sync.Lines) -join "`r`n")
+                    $logBox.ScrollToEnd()
+                    foreach ($line in @($sync.Lines)) { Write-GuiLog "[Storage Benchmark] $line" }
+                    $closeBtn.IsEnabled = $true
+                    if ($btn) { $btn.IsEnabled = $true }
+                    if ($script:DriveBenchmarkRunspace) { $script:DriveBenchmarkRunspace.Dispose() }
+                    $script:DriveBenchmarkRunspace = $null
+                    $script:DriveBenchmarkAsyncResult = $null
+                }
+            }
+        }.GetNewClosure())
+    $script:DriveBenchmarkTimer.Start()
+    $benchWindow.Show() | Out-Null
 }
 
 function Show-BrokenShortcuts {
@@ -7055,7 +7645,7 @@ function Set-Hags {
 
                                 <!-- MY DEVICE PANEL -->
                                 <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                        <WrapPanel Margin="20" ItemWidth="350">
+                                        <WrapPanel Name="pnlMyDeviceCards" Margin="20" ItemWidth="350">
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                         <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
@@ -7328,7 +7918,20 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceTrim" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
+                                                            <StackPanel x:Name="pnlDeviceStorageList" Margin="0,0,0,0"/>
+                                                            <Grid Margin="0,10,0,0">
+                                                                <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                </Grid.RowDefinitions>
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceDiskpart" Grid.Row="0" Grid.Column="0" Content="Disk Mgmt" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceDriveBenchmark" Grid.Row="0" Grid.Column="1" Content="Benchmark" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -7659,6 +8262,32 @@ function Set-WmtTheme {
     $script:CurrentTheme = $Theme
 }
 
+function Update-MyDeviceResponsiveLayout {
+    $cards = Get-Ctrl "pnlMyDeviceCards"
+    $scroll = Get-Ctrl "pnlMyDevice"
+    if (-not $cards -or -not $scroll) { return }
+
+    $available = [double]$scroll.ViewportWidth
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$scroll.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$window.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { return }
+
+    $marginWidth = 40.0
+    $contentWidth = [math]::Max(320.0, $available - $marginWidth)
+    $minCardWidth = 330.0
+    $targetCardWidth = 410.0
+    $columns = [math]::Floor($contentWidth / $targetCardWidth)
+    if ($columns -lt 1) { $columns = 1 }
+    if ($columns -gt 4) { $columns = 4 }
+
+    while ($columns -gt 1 -and ($contentWidth / $columns) -lt $minCardWidth) {
+        $columns--
+    }
+
+    $itemWidth = [math]::Floor($contentWidth / $columns)
+    $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
+}
+
 # --- ICON INJECTION SYSTEM (SILENT + TOOLTIPS) ---
 function Set-ButtonIcon {
     param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
@@ -7790,6 +8419,9 @@ Set-ButtonIcon "btnDrvDisableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,
 Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M11,14V9H9L12,6L15,9H13V14H11Z" "Enable Device Metadata" "Allow device metadata downloads"
 Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
 Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
+Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
+Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
+Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
 Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
 Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
 Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
@@ -7981,6 +8613,16 @@ if ($btnMyDeviceTrim) {
     $btnMyDeviceTrim.Add_Click({ Start-SSDTrimConsole })
 }
 
+$btnMyDeviceDiskpart = Get-Ctrl "btnMyDeviceDiskpart"
+if ($btnMyDeviceDiskpart) {
+    $btnMyDeviceDiskpart.Add_Click({ Start-DiskManagementGui })
+}
+
+$btnMyDeviceDriveBenchmark = Get-Ctrl "btnMyDeviceDriveBenchmark"
+if ($btnMyDeviceDriveBenchmark) {
+    $btnMyDeviceDriveBenchmark.Add_Click({ Start-DriveBenchmark })
+}
+
 $btnMyDeviceGPUDriver = Get-Ctrl "btnMyDeviceGPUDriver"
 if ($btnMyDeviceGPUDriver) {
     $btnMyDeviceGPUDriver.Add_Click({
@@ -8107,6 +8749,7 @@ foreach ($btnName in $TabButtons) {
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
                 }
             }
+            if ($s.Name -eq "btnTabMyDevice") { Update-MyDeviceResponsiveLayout }
         })
 }
 
@@ -8203,6 +8846,8 @@ Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "b
 Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
 
 # 10. Catalog & Providers
@@ -11177,7 +11822,10 @@ $window.Add_ContentRendered({
         Update-TweakButtonStates
         # 4. Load device hardware statistics into My Device panel
         Update-MyDeviceStats
+        Update-MyDeviceResponsiveLayout
     })
+
+$window.Add_SizeChanged({ Update-MyDeviceResponsiveLayout })
 
 $window.Add_Closing({
         # Cancel any ongoing scan
