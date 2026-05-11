@@ -415,6 +415,30 @@ function Convert-NetworkSpeedText {
     return ("{0:N0} bps" -f $speed)
 }
 
+function Convert-NetConnectionStatusText {
+    param($Status)
+    if ($null -eq $Status) { return "Unknown" }
+    try {
+        switch ([int]$Status) {
+            0 { return "Disconnected" }
+            1 { return "Connecting" }
+            2 { return "Connected" }
+            3 { return "Disconnecting" }
+            4 { return "Hardware not present" }
+            5 { return "Hardware disabled" }
+            6 { return "Hardware malfunction" }
+            7 { return "Media disconnected" }
+            8 { return "Authenticating" }
+            9 { return "Authentication succeeded" }
+            10 { return "Authentication failed" }
+            11 { return "Invalid address" }
+            12 { return "Credentials required" }
+            default { return "Unknown ($Status)" }
+        }
+    }
+    catch { return "Unknown" }
+}
+
 function Get-SystemPowerMeterText {
     try {
         $meters = @(Get-CimInstance -Namespace "root\CIMV2\power" -ClassName Win32_PowerMeter -ErrorAction SilentlyContinue)
@@ -1127,31 +1151,244 @@ $script:MyDeviceNetworkBody = @'
 
 $res = [ordered]@{ Section = "Network" }
 try {
-    $netInfo = @(); $adapterByIndex = @{}
-    foreach ($adapter in @(Get-CimInstance Win32_NetworkAdapter -Filter "NetEnabled=True" -Property Index, Name, NetConnectionID, Speed, PhysicalAdapter, NetConnectionStatus -ErrorAction SilentlyContinue)) { if ($null -ne $adapter.Index) { $adapterByIndex[[int]$adapter.Index] = $adapter } }
-    $networkConfigs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -Property Index, Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder -ErrorAction SilentlyContinue)
+    $networkAdapters = @()
+    $adapterByIndex = @{}
+    foreach ($adapter in @(Get-CimInstance Win32_NetworkAdapter -Filter "NetEnabled=True" -Property Index, Name, NetConnectionID, Speed, PhysicalAdapter, NetConnectionStatus, MACAddress, Manufacturer, AdapterType, ServiceName -ErrorAction SilentlyContinue)) {
+        if ($null -ne $adapter.Index) { $adapterByIndex[[int]$adapter.Index] = $adapter }
+    }
+
+    $netAdapterByIndex = @{}
+    try {
+        foreach ($netAdapter in @(Get-NetAdapter -ErrorAction Stop)) {
+            if ($null -ne $netAdapter.ifIndex) { $netAdapterByIndex[[int]$netAdapter.ifIndex] = $netAdapter }
+        }
+    } catch {}
+
+    $profileByIndex = @{}
+    try {
+        foreach ($profile in @(Get-NetConnectionProfile -ErrorAction Stop)) {
+            if ($null -ne $profile.InterfaceIndex) { $profileByIndex[[int]$profile.InterfaceIndex] = $profile }
+        }
+    } catch {}
+
+    $ipInterfaceByIndex = @{}
+    try {
+        foreach ($ipInterface in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) {
+            if ($null -ne $ipInterface.InterfaceIndex) { $ipInterfaceByIndex[[int]$ipInterface.InterfaceIndex] = $ipInterface }
+        }
+    } catch {}
+
+    $dnsClientByIndex = @{}
+    try {
+        foreach ($dnsClient in @(Get-DnsClient -ErrorAction Stop)) {
+            if ($null -ne $dnsClient.InterfaceIndex) { $dnsClientByIndex[[int]$dnsClient.InterfaceIndex] = $dnsClient }
+        }
+    } catch {}
+
+    $routeByIndex = @{}
+    try {
+        foreach ($route in @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop | Sort-Object RouteMetric, InterfaceMetric)) {
+            if ($null -ne $route.InterfaceIndex) {
+                $idx = [int]$route.InterfaceIndex
+                if (-not $routeByIndex.ContainsKey($idx)) { $routeByIndex[$idx] = $route }
+            }
+        }
+    } catch {}
+
+    $statsByName = @{}
+    try {
+        foreach ($stats in @(Get-NetAdapterStatistics -ErrorAction Stop)) {
+            if (-not [string]::IsNullOrWhiteSpace($stats.Name)) { $statsByName[[string]$stats.Name] = $stats }
+        }
+    } catch {}
+
+    $wifiInfoByName = @{}
+    try {
+        $currentWifiName = $null
+        foreach ($line in @(netsh wlan show interfaces 2>$null)) {
+            if ($line -match '^\s*Name\s*:\s*(.+?)\s*$') {
+                $currentWifiName = $matches[1].Trim()
+                if (-not $wifiInfoByName.ContainsKey($currentWifiName)) { $wifiInfoByName[$currentWifiName] = [ordered]@{} }
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($currentWifiName)) { continue }
+            if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["SSID"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*BSSID\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["BSSID"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Signal\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Signal"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Radio type\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Radio"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Channel\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Channel"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Authentication\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Authentication"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Cipher\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Cipher"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Receive rate \(Mbps\)\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["RxRate"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Transmit rate \(Mbps\)\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["TxRate"] = $matches[1].Trim(); continue }
+        }
+    } catch {}
+
+    $networkConfigs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -Property Index, Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder, DHCPEnabled, DHCPServer, DHCPLeaseObtained, DHCPLeaseExpires, DNSDomain, DNSHostName, MACAddress -ErrorAction SilentlyContinue)
     foreach ($cfg in $networkConfigs) {
         if ($null -eq $cfg.Index) { continue }
-        $adapter = $adapterByIndex[[int]$cfg.Index]
-        $adapterName = if ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.NetConnectionID)) { [string]$adapter.NetConnectionID } else { [string]$cfg.Description }
-        if ($adapterName -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth") { continue }
+        $idx = [int]$cfg.Index
+        $adapter = $adapterByIndex[$idx]
+        $netAdapter = $netAdapterByIndex[$idx]
+        $adapterName = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.Name)) { [string]$netAdapter.Name } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.NetConnectionID)) { [string]$adapter.NetConnectionID } else { [string]$cfg.Description }
+        $description = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.InterfaceDescription)) { [string]$netAdapter.InterfaceDescription } elseif (-not [string]::IsNullOrWhiteSpace($cfg.Description)) { [string]$cfg.Description } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.Name)) { [string]$adapter.Name } else { "Unknown adapter" }
+        if ($adapterName -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth" -or $description -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth") { continue }
         if ($adapter -and $null -ne $adapter.PhysicalAdapter -and -not $adapter.PhysicalAdapter) { continue }
-        $ipv4List = @($cfg.IPAddress | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" })
-        if ($ipv4List.Count -eq 0) { continue }
-        $ipAddress = [string]($ipv4List | Select-Object -First 1)
-        $subnetMask = [string](@($cfg.IPSubnet | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
-        $prefixLength = Convert-SubnetMaskToPrefixLength $subnetMask
-        $ipText = if ([string]::IsNullOrWhiteSpace($prefixLength)) { $ipAddress } else { "$ipAddress/$prefixLength" }
-        $gateway = [string](@($cfg.DefaultIPGateway | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
-        if ([string]::IsNullOrWhiteSpace($gateway)) { $gateway = "None" }
-        $dnsServers = @($cfg.DNSServerSearchOrder | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) -join ", "
-        if ([string]::IsNullOrWhiteSpace($dnsServers)) { $dnsServers = "None" }
-        $speed = if ($adapter) { Convert-NetworkSpeedText $adapter.Speed } else { "Unknown" }
-        $netInfo += "$adapterName | IP: $ipText | GW: $gateway | DNS: $dnsServers | Speed: $speed"
+
+        $ipAddresses = @($cfg.IPAddress)
+        $subnets = @($cfg.IPSubnet)
+        $ipv4Entries = @()
+        $ipv4Copy = @()
+        $ipv6Entries = @()
+        $ipv6Copy = @()
+        for ($i = 0; $i -lt $ipAddresses.Count; $i++) {
+            $address = [string]$ipAddresses[$i]
+            if ([string]::IsNullOrWhiteSpace($address)) { continue }
+            $subnet = if ($i -lt $subnets.Count) { [string]$subnets[$i] } else { "" }
+            if ($address -match "^\d{1,3}(\.\d{1,3}){3}$") {
+                $prefixLength = Convert-SubnetMaskToPrefixLength $subnet
+                $cidr = if ([string]::IsNullOrWhiteSpace($prefixLength)) { $address } else { "$address/$prefixLength" }
+                $ipv4Copy += $cidr
+                if ([string]::IsNullOrWhiteSpace($subnet)) { $ipv4Entries += $cidr } else { $ipv4Entries += "$cidr ($subnet)" }
+            }
+            elseif ($address -match ":") {
+                $prefix = if ($subnet -match "^\d{1,3}$") { "/$subnet" } else { "" }
+                $cidr6 = "$address$prefix"
+                $ipv6Copy += $cidr6
+                if ($address -notmatch "^(?i)fe80:") { $ipv6Entries += $cidr6 }
+            }
+        }
+        if ($ipv6Entries.Count -eq 0) { $ipv6Entries = @($ipv6Copy | Select-Object -First 2) }
+        if ($ipv4Entries.Count -eq 0) { continue }
+
+        $gatewayList = @($cfg.DefaultIPGateway | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $gatewayText = if ($gatewayList.Count -gt 0) { $gatewayList -join ", " } else { "None" }
+        $gatewayLink = [string](@($gatewayList | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($gatewayLink)) { $gatewayLink = [string]($gatewayList | Select-Object -First 1) }
+
+        $dnsList = @($cfg.DNSServerSearchOrder | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $dnsText = if ($dnsList.Count -gt 0) { $dnsList -join ", " } else { "None" }
+
+        $speed = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.LinkSpeed)) { [string]$netAdapter.LinkSpeed } elseif ($adapter) { Convert-NetworkSpeedText $adapter.Speed } else { "Unknown" }
+        $status = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.Status)) { [string]$netAdapter.Status } elseif ($adapter) { Convert-NetConnectionStatusText $adapter.NetConnectionStatus } else { "Unknown" }
+        $mediaState = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.MediaConnectionState)) { [string]$netAdapter.MediaConnectionState } else { "" }
+        $linkParts = @($status)
+        if (-not [string]::IsNullOrWhiteSpace($mediaState) -and $mediaState -ne $status) { $linkParts += $mediaState }
+        if (-not [string]::IsNullOrWhiteSpace($speed)) { $linkParts += "Speed: $speed" }
+
+        $profile = $profileByIndex[$idx]
+        $profileText = "Unavailable"
+        $connectivityText = ""
+        if ($profile) {
+            $profileName = if ([string]::IsNullOrWhiteSpace($profile.Name)) { "Unidentified network" } else { [string]$profile.Name }
+            $category = if ([string]::IsNullOrWhiteSpace($profile.NetworkCategory)) { "Unknown" } else { [string]$profile.NetworkCategory }
+            $profileText = "$profileName ($category)"
+            $connectivityParts = @()
+            if (-not [string]::IsNullOrWhiteSpace($profile.IPv4Connectivity)) { $connectivityParts += "IPv4 $($profile.IPv4Connectivity)" }
+            if (-not [string]::IsNullOrWhiteSpace($profile.IPv6Connectivity)) { $connectivityParts += "IPv6 $($profile.IPv6Connectivity)" }
+            $connectivityText = $connectivityParts -join " | "
+        }
+
+        $ipInterface = $ipInterfaceByIndex[$idx]
+        $route = $routeByIndex[$idx]
+        $metricParts = @()
+        if ($ipInterface -and $null -ne $ipInterface.NlMtu) { $metricParts += "MTU: $($ipInterface.NlMtu)" }
+        if ($ipInterface -and $null -ne $ipInterface.InterfaceMetric) { $metricParts += "Interface metric: $($ipInterface.InterfaceMetric)" }
+        if ($route -and $null -ne $route.RouteMetric) { $metricParts += "Route metric: $($route.RouteMetric)" }
+        $routeText = $metricParts -join " | "
+
+        $dhcpMode = if ($cfg.DHCPEnabled) { "On" } else { "Off / static" }
+        if ($ipInterface -and -not [string]::IsNullOrWhiteSpace($ipInterface.Dhcp)) { $dhcpMode = [string]$ipInterface.Dhcp }
+        $dhcpText = $dhcpMode
+        if ($cfg.DHCPEnabled -and -not [string]::IsNullOrWhiteSpace($cfg.DHCPServer)) { $dhcpText += " via $($cfg.DHCPServer)" }
+        $leaseText = ""
+        if ($cfg.DHCPEnabled) {
+            $leaseStart = Format-DateTimeText $cfg.DHCPLeaseObtained "yyyy-MM-dd HH:mm"
+            $leaseEnd = Format-DateTimeText $cfg.DHCPLeaseExpires "yyyy-MM-dd HH:mm"
+            if ($leaseStart -ne "Unavailable" -or $leaseEnd -ne "Unavailable") { $leaseText = "$leaseStart to $leaseEnd" }
+        }
+
+        $dnsClient = $dnsClientByIndex[$idx]
+        $suffixParts = @()
+        if (-not [string]::IsNullOrWhiteSpace($cfg.DNSDomain)) { $suffixParts += [string]$cfg.DNSDomain }
+        if ($dnsClient -and -not [string]::IsNullOrWhiteSpace($dnsClient.ConnectionSpecificSuffix)) { $suffixParts += [string]$dnsClient.ConnectionSpecificSuffix }
+        $dnsSuffixText = @($suffixParts | Select-Object -Unique) -join ", "
+
+        $mac = if (-not [string]::IsNullOrWhiteSpace($cfg.MACAddress)) { [string]$cfg.MACAddress } elseif ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.MacAddress)) { [string]$netAdapter.MacAddress } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.MACAddress)) { [string]$adapter.MACAddress } else { "" }
+
+        $stats = $null
+        if ($statsByName.ContainsKey($adapterName)) { $stats = $statsByName[$adapterName] }
+        elseif ($netAdapter -and $statsByName.ContainsKey([string]$netAdapter.Name)) { $stats = $statsByName[[string]$netAdapter.Name] }
+        $trafficText = ""
+        if ($stats) {
+            $rx = ConvertTo-StorageSizeText ([double]$stats.ReceivedBytes)
+            $tx = ConvertTo-StorageSizeText ([double]$stats.SentBytes)
+            $trafficText = "RX $rx / TX $tx"
+        }
+
+        $wifi = $null
+        foreach ($wifiKey in @($adapterName, $description, $(if ($netAdapter) { [string]$netAdapter.Name } else { "" }))) {
+            if (-not [string]::IsNullOrWhiteSpace($wifiKey) -and $wifiInfoByName.ContainsKey($wifiKey)) { $wifi = $wifiInfoByName[$wifiKey]; break }
+        }
+        $wifiText = ""
+        if ($wifi) {
+            $wifiParts = @()
+            if (-not [string]::IsNullOrWhiteSpace($wifi["SSID"])) { $wifiParts += "SSID: $($wifi["SSID"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["BSSID"])) { $wifiParts += "BSSID: $($wifi["BSSID"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Signal"])) { $wifiParts += "Signal: $($wifi["Signal"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Radio"])) { $wifiParts += "Radio: $($wifi["Radio"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Channel"])) { $wifiParts += "Channel: $($wifi["Channel"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Authentication"])) { $wifiParts += "Auth: $($wifi["Authentication"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Cipher"])) { $wifiParts += "Cipher: $($wifi["Cipher"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["RxRate"]) -or -not [string]::IsNullOrWhiteSpace($wifi["TxRate"])) { $wifiParts += "Rate: $($wifi["RxRate"])/$($wifi["TxRate"]) Mbps" }
+            $wifiText = $wifiParts -join " | "
+        }
+
+        $driverParts = @()
+        if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.DriverVersion)) { $driverParts += "Version: $($netAdapter.DriverVersion)" }
+        if ($netAdapter -and $null -ne $netAdapter.DriverDate) {
+            $driverDate = Format-DateTimeText $netAdapter.DriverDate "yyyy-MM-dd"
+            if ($driverDate -ne "Unavailable") { $driverParts += "Date: $driverDate" }
+        }
+        if ($driverParts.Count -eq 0 -and $netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.DriverInformation)) { $driverParts += [string]$netAdapter.DriverInformation }
+        $driverText = $driverParts -join " | "
+
+        $networkAdapters += [pscustomobject]@{
+            Name         = $adapterName
+            Description  = $description
+            Profile      = $profileText
+            Connectivity = $connectivityText
+            LinkText     = (($linkParts + $metricParts) -join " | ")
+            Status       = $status
+            IPv4Text     = ($ipv4Entries -join ", ")
+            IPv4Copy     = ($ipv4Copy -join ", ")
+            IPv6Text     = ($ipv6Entries -join ", ")
+            IPv6Copy     = ($ipv6Copy -join ", ")
+            GatewayText  = $gatewayText
+            GatewayLink  = $gatewayLink
+            DnsText      = $dnsText
+            DnsCopy      = ($dnsList -join ", ")
+            DhcpText     = $dhcpText
+            LeaseText    = $leaseText
+            DnsSuffix    = $dnsSuffixText
+            MacAddress   = $mac
+            TrafficText  = $trafficText
+            WifiText     = $wifiText
+            DriverText   = $driverText
+            RouteText    = $routeText
+        }
     }
-    $res.Network = if ($netInfo) { $netInfo -join "`r`n" } else { "No active physical network adapters found." }
+    $res.NetworkAdapters = $networkAdapters
+    if ($networkAdapters.Count -gt 0) {
+        $primary = @($networkAdapters | Where-Object { $_.GatewayText -and $_.GatewayText -ne "None" } | Select-Object -First 1)
+        $primaryText = if ($primary.Count -gt 0) { " | Primary: $($primary[0].Name)" } else { "" }
+        $res.Network = "Active physical adapters: $($networkAdapters.Count)$primaryText"
+    }
+    else {
+        $res.Network = "No active physical network adapters found."
+    }
 }
-catch { $res.Network = "Unavailable" }
+catch { $res.Network = "Unavailable"; $res.NetworkAdapters = @() }
 [pscustomobject]$res
 
 '@
@@ -1202,6 +1439,8 @@ function Set-MyDeviceUiPlaceholders {
     (Get-Ctrl "txtPowerElectrical").Text = "Electrical: Gathering..."
     $storageList = Get-Ctrl "pnlDeviceStorageList"
     if ($storageList) { $storageList.Children.Clear() }
+    $networkList = Get-Ctrl "pnlDeviceNetworkList"
+    if ($networkList) { $networkList.Children.Clear() }
 }
 
 function Get-MyDeviceCacheEntry {
@@ -1334,7 +1573,10 @@ function Set-MyDeviceSectionData {
             if ($Data.Storage) { (Get-Ctrl "txtDeviceStorage").Text = $Data.Storage }
             Set-MyDeviceStorageDetails -Devices $Data.StorageDevices
         }
-        "Network" { if ($Data.Network) { (Get-Ctrl "txtDeviceNetwork").Text = $Data.Network } }
+        "Network" {
+            if ($Data.Network) { (Get-Ctrl "txtDeviceNetwork").Text = $Data.Network }
+            Set-MyDeviceNetworkDetails -Adapters $Data.NetworkAdapters
+        }
         "Power" {
             (Get-Ctrl "txtBatteryHealth").Text = "Health: $($Data.BatteryHealth)"
             (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($Data.BatteryCharge)"
@@ -1659,6 +1901,297 @@ function Set-MyDeviceStorageDetails {
         [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.FreeText -Color $d.FreeBrush -FontSize 12 -FontWeight "SemiBold" -Margin "0,2,0,0"))
 
         if ($i -lt ($deviceList.Count - 1)) {
+            $separator = New-Object System.Windows.Controls.Border
+            $separator.Height = 1
+            $separator.Background = New-WmtBrush "#30363D"
+            $separator.Margin = "0,10,0,0"
+            [void]$panel.Children.Add($separator)
+        }
+    }
+}
+
+function New-WmtNetworkTextBlock {
+    param(
+        [string]$Text,
+        [string]$Color = "#98989D",
+        [double]$FontSize = 12,
+        [string]$FontWeight = "Normal",
+        [string]$Margin = "0"
+    )
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Text
+    $tb.Foreground = New-WmtBrush $Color
+    $tb.FontSize = $FontSize
+    $tb.Margin = $Margin
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    if ($FontWeight -eq "SemiBold") { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+    elseif ($FontWeight -eq "Bold") { $tb.FontWeight = [System.Windows.FontWeights]::Bold }
+    return $tb
+}
+
+function Copy-MyDeviceNetworkValue {
+    param(
+        [string]$Label,
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return }
+    try {
+        [System.Windows.Clipboard]::SetText($Value)
+        Write-GuiLog "[Network] Copied $Label to clipboard."
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to copy $Label`: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceGateway {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) { return }
+    $target = $Address.Trim()
+    if ($target -match "^\d{1,3}(\.\d{1,3}){3}$") {
+        $url = "http://$target/"
+    }
+    elseif ($target -match ":") {
+        $url = "http://[$($target -replace '%', '%25')]/"
+    }
+    else {
+        Write-GuiLog "[Network] Unsupported gateway address: $target"
+        return
+    }
+
+    try {
+        Start-Process -FilePath $url
+        Write-GuiLog "[Network] Opened gateway $target"
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to open gateway $target`: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceNetworkConnections {
+    try {
+        Start-Process -FilePath "ncpa.cpl"
+        Write-GuiLog "[Network] Opened Network Connections."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "control.exe" -ArgumentList "netconnections"
+            Write-GuiLog "[Network] Opened Network Connections."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open Network Connections: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Open-MyDeviceWifiSettings {
+    try {
+        Start-Process -FilePath "ms-settings:network-wifi"
+        Write-GuiLog "[Network] Opened Wi-Fi settings."
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to open Wi-Fi settings: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceDnsSettings {
+    param([string]$AdapterName)
+
+    if (-not [string]::IsNullOrWhiteSpace($AdapterName)) {
+        try {
+            $shell = New-Object -ComObject Shell.Application
+            $connections = $shell.Namespace(0x31)
+            if (-not $connections) { $connections = $shell.Namespace("shell:ConnectionsFolder") }
+            if ($connections) {
+                $adapterItem = @($connections.Items()) | Where-Object { $_.Name -eq $AdapterName } | Select-Object -First 1
+                if (-not $adapterItem) {
+                    $adapterItem = @($connections.Items()) | Where-Object { $_.Name -like "*$AdapterName*" -or $AdapterName -like "*$($_.Name)*" } | Select-Object -First 1
+                }
+                if ($adapterItem) {
+                    try { $adapterItem.InvokeVerb("properties") }
+                    catch {
+                        $propertiesVerb = @($adapterItem.Verbs()) | Where-Object { (($_.Name -replace "&", "").Trim()) -match "(?i)^properties$" } | Select-Object -First 1
+                        if ($propertiesVerb) { $propertiesVerb.DoIt() }
+                        else { throw }
+                    }
+                    Write-GuiLog "[Network] Opened adapter properties for $AdapterName. Select IPv4 or IPv6 to edit DNS."
+                    return
+                }
+            }
+            Write-GuiLog "[Network] Could not find adapter '$AdapterName' in Network Connections."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open adapter DNS properties for $AdapterName`: $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        Start-Process -FilePath "ms-settings:network-advancedsettings"
+        Write-GuiLog "[Network] Opened advanced network settings for DNS assignment."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "ncpa.cpl"
+            Write-GuiLog "[Network] Opened Network Connections for DNS settings."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open DNS settings: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Add-WmtNetworkLine {
+    param(
+        [System.Windows.Controls.Panel]$Panel,
+        [string]$Label,
+        [string]$Value,
+        [scriptblock]$ClickAction = $null,
+        [string]$ToolTip = "",
+        [string]$Margin = "0,2,0,0"
+    )
+
+    if (-not $Panel -or [string]::IsNullOrWhiteSpace($Value)) { return }
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Foreground = New-WmtBrush "#98989D"
+    $tb.FontSize = 12
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    $tb.Margin = $Margin
+
+    $labelRun = New-Object System.Windows.Documents.Run
+    $labelRun.Text = ("{0}: " -f $Label)
+    $labelRun.Foreground = New-WmtBrush "#8B949E"
+    $labelRun.FontWeight = [System.Windows.FontWeights]::SemiBold
+    [void]$tb.Inlines.Add($labelRun)
+
+    if ($ClickAction) {
+        $action = $ClickAction
+        $link = New-Object System.Windows.Documents.Hyperlink
+        $link.Foreground = New-WmtBrush "#58A6FF"
+        $link.Cursor = [System.Windows.Input.Cursors]::Hand
+        if (-not [string]::IsNullOrWhiteSpace($ToolTip)) { $link.ToolTip = $ToolTip }
+        $valueRun = New-Object System.Windows.Documents.Run
+        $valueRun.Text = $Value
+        [void]$link.Inlines.Add($valueRun)
+        $link.Add_Click({
+                param($s, $e)
+                & $action
+                $e.Handled = $true
+            }.GetNewClosure())
+        [void]$tb.Inlines.Add($link)
+    }
+    else {
+        $valueRun = New-Object System.Windows.Documents.Run
+        $valueRun.Text = $Value
+        [void]$tb.Inlines.Add($valueRun)
+    }
+
+    [void]$Panel.Children.Add($tb)
+}
+
+function Get-WmtNetworkStatusBrush {
+    param([string]$StatusText)
+
+    if ([string]::IsNullOrWhiteSpace($StatusText)) { return "#8B949E" }
+    if ($StatusText -match "(?i)disconnect|down|failed|disabled|malfunction|not present") { return "#F85149" }
+    if ($StatusText -match "(?i)local|limited|notraffic|authenticating|connecting") { return "#D29922" }
+    if ($StatusText -match "(?i)internet|connected|up") { return "#3FB950" }
+    return "#8B949E"
+}
+
+function Set-MyDeviceNetworkDetails {
+    param($Adapters)
+
+    $panel = Get-Ctrl "pnlDeviceNetworkList"
+    $summary = Get-Ctrl "txtDeviceNetwork"
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+    $adapterList = @($Adapters | Where-Object { $null -ne $_ })
+
+    if (-not $adapterList -or $adapterList.Count -eq 0) {
+        if ($summary -and [string]::IsNullOrWhiteSpace($summary.Text)) { $summary.Text = "No active physical network adapters found." }
+        return
+    }
+
+    if ($summary) {
+        $primary = @($adapterList | Where-Object { $_.GatewayText -and $_.GatewayText -ne "None" } | Select-Object -First 1)
+        $summary.Text = if ($primary.Count -gt 0) { "Active physical adapters: $($adapterList.Count) | Primary: $($primary[0].Name)" } else { "Active physical adapters: $($adapterList.Count)" }
+    }
+
+    for ($i = 0; $i -lt $adapterList.Count; $i++) {
+        $d = $adapterList[$i]
+
+        $header = New-Object System.Windows.Controls.Grid
+        $header.Margin = if ($i -eq 0) { "0,8,0,0" } else { "0,12,0,0" }
+        $colMain = New-Object System.Windows.Controls.ColumnDefinition
+        $colMain.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $colStatus = New-Object System.Windows.Controls.ColumnDefinition
+        $colStatus.Width = [System.Windows.GridLength]::Auto
+        [void]$header.ColumnDefinitions.Add($colMain)
+        [void]$header.ColumnDefinitions.Add($colStatus)
+
+        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $adapterTitle.Cursor = [System.Windows.Input.Cursors]::Hand
+        $adapterTitle.TextDecorations = [System.Windows.TextDecorations]::Underline
+        $adapterTitle.ToolTip = "Open Network Connections"
+        $adapterTitle.Add_MouseLeftButtonUp({
+                param($s, $e)
+                Open-MyDeviceNetworkConnections
+                $e.Handled = $true
+            })
+        [void]$header.Children.Add($adapterTitle)
+
+        $statusText = New-WmtNetworkTextBlock -Text $d.Status -Color (Get-WmtNetworkStatusBrush "$($d.Status) $($d.Connectivity)") -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
+        [System.Windows.Controls.Grid]::SetColumn($statusText, 1)
+        [void]$header.Children.Add($statusText)
+        [void]$panel.Children.Add($header)
+
+        Add-WmtNetworkLine -Panel $panel -Label "Adapter" -Value $d.Description -Margin "0,4,0,0"
+        Add-WmtNetworkLine -Panel $panel -Label "Profile" -Value $d.Profile -ClickAction { Open-MyDeviceNetworkConnections } -ToolTip "Open Network Connections"
+        Add-WmtNetworkLine -Panel $panel -Label "Connectivity" -Value $d.Connectivity
+        Add-WmtNetworkLine -Panel $panel -Label "Link" -Value $d.LinkText
+
+        $ipv4Copy = [string]$d.IPv4Copy
+        Add-WmtNetworkLine -Panel $panel -Label "IPv4" -Value $d.IPv4Text -ClickAction ({ Copy-MyDeviceNetworkValue -Label "IPv4 address" -Value $ipv4Copy }.GetNewClosure()) -ToolTip "Copy IPv4 address"
+
+        if (-not [string]::IsNullOrWhiteSpace($d.IPv6Text)) {
+            $ipv6Copy = [string]$d.IPv6Copy
+            Add-WmtNetworkLine -Panel $panel -Label "IPv6" -Value $d.IPv6Text -ClickAction ({ Copy-MyDeviceNetworkValue -Label "IPv6 address" -Value $ipv6Copy }.GetNewClosure()) -ToolTip "Copy IPv6 address"
+        }
+
+        $gatewayAddress = [string]$d.GatewayLink
+        if (-not [string]::IsNullOrWhiteSpace($gatewayAddress)) {
+            Add-WmtNetworkLine -Panel $panel -Label "Gateway" -Value $d.GatewayText -ClickAction ({ Open-MyDeviceGateway -Address $gatewayAddress }.GetNewClosure()) -ToolTip "Open gateway in browser"
+        }
+        else {
+            Add-WmtNetworkLine -Panel $panel -Label "Gateway" -Value $d.GatewayText
+        }
+
+        $dnsAdapterName = [string]$d.Name
+        Add-WmtNetworkLine -Panel $panel -Label "DNS" -Value $d.DnsText -ClickAction ({ Open-MyDeviceDnsSettings -AdapterName $dnsAdapterName }.GetNewClosure()) -ToolTip "Open this adapter's properties for DNS"
+
+        Add-WmtNetworkLine -Panel $panel -Label "DHCP" -Value $d.DhcpText
+        Add-WmtNetworkLine -Panel $panel -Label "Lease" -Value $d.LeaseText
+        Add-WmtNetworkLine -Panel $panel -Label "DNS suffix" -Value $d.DnsSuffix
+
+        $macCopy = [string]$d.MacAddress
+        if (-not [string]::IsNullOrWhiteSpace($macCopy)) {
+            Add-WmtNetworkLine -Panel $panel -Label "MAC" -Value $d.MacAddress -ClickAction ({ Copy-MyDeviceNetworkValue -Label "MAC address" -Value $macCopy }.GetNewClosure()) -ToolTip "Copy MAC address"
+        }
+
+        Add-WmtNetworkLine -Panel $panel -Label "Traffic" -Value $d.TrafficText
+        if (-not [string]::IsNullOrWhiteSpace($d.WifiText)) {
+            Add-WmtNetworkLine -Panel $panel -Label "Wi-Fi" -Value $d.WifiText -ClickAction { Open-MyDeviceWifiSettings } -ToolTip "Open Wi-Fi settings"
+        }
+        Add-WmtNetworkLine -Panel $panel -Label "Driver" -Value $d.DriverText
+
+        if ($i -lt ($adapterList.Count - 1)) {
             $separator = New-Object System.Windows.Controls.Border
             $separator.Height = 1
             $separator.Background = New-WmtBrush "#30363D"
@@ -9567,6 +10100,7 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <StackPanel Name="pnlDeviceNetworkList" Margin="0,6,0,0"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
