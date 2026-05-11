@@ -101,8 +101,6 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Typ
 # 2. HELPER FUNCTIONS
 # ==========================================
 
-function Get-Ctrl { param($Name) return $window.FindName($Name) }
-
 function Write-GuiLog {
     param($Msg)
     if ($script:LogBox) {
@@ -1292,7 +1290,7 @@ function Set-MyDeviceGpuCards {
         $card.BorderThickness = [System.Windows.Thickness]::new(1)
         $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
         $card.Padding = [System.Windows.Thickness]::new(10)
-        $card.Margin = if ($index -eq 1) { [System.Windows.Thickness]::new(0,0,0,8) } else { [System.Windows.Thickness]::new(0,4,0,8) }
+        $card.Margin = if ($index -eq 1) { [System.Windows.Thickness]::new(0, 0, 0, 8) } else { [System.Windows.Thickness]::new(0, 4, 0, 8) }
         $card.Cursor = [System.Windows.Input.Cursors]::Hand
         $card.Tag = $vendor
         $card.ToolTip = if ($vendor -eq "Unknown") { "No known GPU vendor detected for this adapter." } else { "Open $vendor control panel for this GPU." }
@@ -1303,16 +1301,16 @@ function Set-MyDeviceGpuCards {
         $card.Child = $stack
 
         $card.Add_MouseLeftButtonUp({
-            param($sender, $e)
-            $selectedVendor = [string]$sender.Tag
-            if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
-                Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
-            }
-            else {
-                Open-GpuVendorControlPanel -Vendors @($selectedVendor)
-            }
-            $e.Handled = $true
-        })
+                param($sender, $e)
+                $selectedVendor = [string]$sender.Tag
+                if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
+                    Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
+                }
+                else {
+                    Open-GpuVendorControlPanel -Vendors @($selectedVendor)
+                }
+                $e.Handled = $true
+            })
 
         [void]$panel.Children.Add($card)
         $index++
@@ -1373,8 +1371,8 @@ function Stop-MyDeviceSectionJobs {
 
 function Start-MyDeviceSectionJob {
     param(
-        [Parameter(Mandatory=$true)][string]$Name,
-        [Parameter(Mandatory=$true)][string]$Body
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Body
     )
     $fullScript = $script:MyDeviceCommonHelpers + "`n" + $Body
     $ps = [PowerShell]::Create()
@@ -1395,12 +1393,12 @@ function Update-MyDeviceStats {
     Set-MyDeviceUiPlaceholders
 
     $sections = @(
-        [pscustomobject]@{ Name = "Core";        Body = $script:MyDeviceCoreBody },
-        [pscustomobject]@{ Name = "GPU";         Body = $script:MyDeviceGpuBody },
+        [pscustomobject]@{ Name = "Core"; Body = $script:MyDeviceCoreBody },
+        [pscustomobject]@{ Name = "GPU"; Body = $script:MyDeviceGpuBody },
         [pscustomobject]@{ Name = "Motherboard"; Body = $script:MyDeviceMotherboardBody },
-        [pscustomobject]@{ Name = "Storage";     Body = $script:MyDeviceStorageBody },
-        [pscustomobject]@{ Name = "Network";     Body = $script:MyDeviceNetworkBody },
-        [pscustomobject]@{ Name = "Power";       Body = $script:MyDevicePowerBody }
+        [pscustomobject]@{ Name = "Storage"; Body = $script:MyDeviceStorageBody },
+        [pscustomobject]@{ Name = "Network"; Body = $script:MyDeviceNetworkBody },
+        [pscustomobject]@{ Name = "Power"; Body = $script:MyDevicePowerBody }
     )
 
     foreach ($section in $sections) {
@@ -1422,39 +1420,39 @@ function Update-MyDeviceStats {
     $script:StatsTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(200)
     $script:StatsTimer.Add_Tick({
-        if (-not $script:MyDeviceSectionJobs -or $script:MyDeviceSectionJobs.Count -eq 0) {
-            try { $script:StatsTimer.Stop() } catch {}
-            if ($script:StatsStartedAt) {
-                $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
-                Write-GuiLog "[My Device] Progressive stats load finished in ${elapsed}s."
+            if (-not $script:MyDeviceSectionJobs -or $script:MyDeviceSectionJobs.Count -eq 0) {
+                try { $script:StatsTimer.Stop() } catch {}
+                if ($script:StatsStartedAt) {
+                    $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
+                    Write-GuiLog "[My Device] Progressive stats load finished in ${elapsed}s."
+                }
+                return
             }
-            return
-        }
 
-        foreach ($key in @($script:MyDeviceSectionJobs.Keys)) {
-            $job = $script:MyDeviceSectionJobs[$key]
-            if (-not $job -or -not $job.Async) { continue }
-            if ($job.Async.IsCompleted) {
-                try {
-                    $data = $job.PowerShell.EndInvoke($job.Async)
-                    if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
-                    if ($data) {
-                        Apply-MyDeviceSectionData -Data $data
-                        Set-MyDeviceCacheEntry -Section $key -Data $data
-                        $elapsed = [math]::Round(((Get-Date) - $job.StartedAt).TotalSeconds, 1)
-                        Write-GuiLog "[My Device] $key loaded in ${elapsed}s."
+            foreach ($key in @($script:MyDeviceSectionJobs.Keys)) {
+                $job = $script:MyDeviceSectionJobs[$key]
+                if (-not $job -or -not $job.Async) { continue }
+                if ($job.Async.IsCompleted) {
+                    try {
+                        $data = $job.PowerShell.EndInvoke($job.Async)
+                        if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
+                        if ($data) {
+                            Apply-MyDeviceSectionData -Data $data
+                            Set-MyDeviceCacheEntry -Section $key -Data $data
+                            $elapsed = [math]::Round(((Get-Date) - $job.StartedAt).TotalSeconds, 1)
+                            Write-GuiLog "[My Device] $key loaded in ${elapsed}s."
+                        }
+                    }
+                    catch {
+                        Write-GuiLog "[My Device] $key load failed: $($_.Exception.Message)"
+                    }
+                    finally {
+                        try { $job.PowerShell.Dispose() } catch {}
+                        $script:MyDeviceSectionJobs.Remove($key)
                     }
                 }
-                catch {
-                    Write-GuiLog "[My Device] $key load failed: $($_.Exception.Message)"
-                }
-                finally {
-                    try { $job.PowerShell.Dispose() } catch {}
-                    $script:MyDeviceSectionJobs.Remove($key)
-                }
             }
-        }
-    })
+        })
     $script:StatsTimer.Start()
 }
 
@@ -11781,86 +11779,86 @@ function Start-WingetScanSourcePreflight {
     }
 
     $script:WingetSourcePreflightRunspace = [PowerShell]::Create().AddScript({
-        param([string[]]$Sources)
-        [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-        $log = New-Object System.Collections.Generic.List[string]
+            param([string[]]$Sources)
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $log = New-Object System.Collections.Generic.List[string]
 
-        function Add-Log { param([string]$Text) if (-not [string]::IsNullOrWhiteSpace($Text)) { [void]$log.Add($Text) } }
-        function Invoke-WingetProcess {
-            param([string]$Arguments, [int]$TimeoutMs = 90000)
-            $psi = [System.Diagnostics.ProcessStartInfo]::new()
-            $psi.FileName = "winget"
-            $psi.Arguments = $Arguments
-            $psi.UseShellExecute = $false
-            $psi.CreateNoWindow = $true
-            $psi.RedirectStandardOutput = $true
-            $psi.RedirectStandardError = $true
-            try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
-            try { $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
-            $proc = [System.Diagnostics.Process]::Start($psi)
-            if (-not $proc.WaitForExit($TimeoutMs)) {
-                try { $proc.Kill() } catch {}
-                return [PSCustomObject]@{ ExitCode = -1; TimedOut = $true }
-            }
-            return [PSCustomObject]@{ ExitCode = [int]$proc.ExitCode; TimedOut = $false }
-        }
-
-        foreach ($source in @($Sources | Select-Object -Unique)) {
-            try {
-                Add-Log "LOG:Preparing $source source before scan..."
-                [void](Invoke-WingetProcess -Arguments "search --id Microsoft.PowerShell --exact --source $source --accept-source-agreements --disable-interactivity" -TimeoutMs 45000)
-                $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs 120000
-
-                if ($refresh.TimedOut) {
-                    Add-Log "LOG:$source source refresh timed out; continuing to scan anyway."
+            function Add-Log { param([string]$Text) if (-not [string]::IsNullOrWhiteSpace($Text)) { [void]$log.Add($Text) } }
+            function Invoke-WingetProcess {
+                param([string]$Arguments, [int]$TimeoutMs = 90000)
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = "winget"
+                $psi.Arguments = $Arguments
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+                try { $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                if (-not $proc.WaitForExit($TimeoutMs)) {
+                    try { $proc.Kill() } catch {}
+                    return [PSCustomObject]@{ ExitCode = -1; TimedOut = $true }
                 }
-                elseif ($refresh.ExitCode -eq 0) {
-                    Add-Log "LOG:$source source refresh completed before scan."
-                }
-                else {
-                    Add-Log "LOG:$source source refresh exited with code $($refresh.ExitCode); continuing to scan anyway."
-                }
+                return [PSCustomObject]@{ ExitCode = [int]$proc.ExitCode; TimedOut = $false }
             }
-            catch {
-                Add-Log "LOG:$source source preflight failed: $($_.Exception.Message); continuing to scan anyway."
-            }
-        }
 
-        Add-Log "LOG:Winget source preflight finished; starting package scan."
-        return $log.ToArray()
-    }).AddArgument([string[]]$script:WingetSourcePreflightSources)
+            foreach ($source in @($Sources | Select-Object -Unique)) {
+                try {
+                    Add-Log "LOG:Preparing $source source before scan..."
+                    [void](Invoke-WingetProcess -Arguments "search --id Microsoft.PowerShell --exact --source $source --accept-source-agreements --disable-interactivity" -TimeoutMs 45000)
+                    $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs 120000
+
+                    if ($refresh.TimedOut) {
+                        Add-Log "LOG:$source source refresh timed out; continuing to scan anyway."
+                    }
+                    elseif ($refresh.ExitCode -eq 0) {
+                        Add-Log "LOG:$source source refresh completed before scan."
+                    }
+                    else {
+                        Add-Log "LOG:$source source refresh exited with code $($refresh.ExitCode); continuing to scan anyway."
+                    }
+                }
+                catch {
+                    Add-Log "LOG:$source source preflight failed: $($_.Exception.Message); continuing to scan anyway."
+                }
+            }
+
+            Add-Log "LOG:Winget source preflight finished; starting package scan."
+            return $log.ToArray()
+        }).AddArgument([string[]]$script:WingetSourcePreflightSources)
 
     $script:WingetSourcePreflightAsyncResult = $script:WingetSourcePreflightRunspace.BeginInvoke()
     $script:WingetSourcePreflightTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:WingetSourcePreflightTimer.Interval = [TimeSpan]::FromMilliseconds(250)
     $script:WingetSourcePreflightTimer.Add_Tick({
-        if (-not $script:WingetSourcePreflightAsyncResult) { return }
-        if (-not $script:WingetSourcePreflightAsyncResult.IsCompleted) { return }
+            if (-not $script:WingetSourcePreflightAsyncResult) { return }
+            if (-not $script:WingetSourcePreflightAsyncResult.IsCompleted) { return }
 
-        $script:WingetSourcePreflightTimer.Stop()
-        try {
-            $lines = $script:WingetSourcePreflightRunspace.EndInvoke($script:WingetSourcePreflightAsyncResult)
-            foreach ($line in $lines) {
-                if ($line -is [string] -and $line.StartsWith("LOG:")) { Write-GuiLog ($line.Substring(4)) }
-                elseif ($line) { Write-GuiLog ([string]$line) }
+            $script:WingetSourcePreflightTimer.Stop()
+            try {
+                $lines = $script:WingetSourcePreflightRunspace.EndInvoke($script:WingetSourcePreflightAsyncResult)
+                foreach ($line in $lines) {
+                    if ($line -is [string] -and $line.StartsWith("LOG:")) { Write-GuiLog ($line.Substring(4)) }
+                    elseif ($line) { Write-GuiLog ([string]$line) }
+                }
             }
-        }
-        catch {
-            Write-GuiLog "Winget source preflight background error: $($_.Exception.Message)"
-        }
-        finally {
-            try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
-            $script:WingetSourcePreflightRunspace = $null
-            $script:WingetSourcePreflightAsyncResult = $null
-            $script:WingetScanSourcePreflightInProgress = $false
-            $script:WingetSourcePreflightReadyForScan = $true
-        }
+            catch {
+                Write-GuiLog "Winget source preflight background error: $($_.Exception.Message)"
+            }
+            finally {
+                try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+                $script:WingetSourcePreflightRunspace = $null
+                $script:WingetSourcePreflightAsyncResult = $null
+                $script:WingetScanSourcePreflightInProgress = $false
+                $script:WingetSourcePreflightReadyForScan = $true
+            }
 
-        if ($btnWingetScan) {
-            $btnWingetScan.IsEnabled = $true
-            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-        }
-    })
+            if ($btnWingetScan) {
+                $btnWingetScan.IsEnabled = $true
+                $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+            }
+        })
     $script:WingetSourcePreflightTimer.Start()
 }
 
