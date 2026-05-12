@@ -12637,9 +12637,8 @@ $btnWingetScan.Add_Click({
             }
             return
         }
-
-        # Consume the ready flag so every manual refresh also gets a fresh source preflight first.
-        $script:WingetSourcePreflightReadyForScan = $false
+        #$script:WingetSourcePreflightReadyForScan = $false
+        # Keep the ready flag set after the first preflight so later page/manual refreshes scan immediately.
     
         # --- Reset scan tracking ---
         $script:ActiveScans.Clear()
