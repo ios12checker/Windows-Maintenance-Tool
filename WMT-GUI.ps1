@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.6"
+$AppVersion = "5.7"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -101,14 +101,11 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Typ
 # 2. HELPER FUNCTIONS
 # ==========================================
 
-function Get-Ctrl { param($Name) return $window.FindName($Name) }
-
 function Write-GuiLog {
     param($Msg)
-    $lb = Get-Ctrl "LogBox"
-    if ($lb) {
-        $lb.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
-        $lb.ScrollToEnd()
+    if ($script:LogBox) {
+        $script:LogBox.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
+        $script:LogBox.ScrollToEnd()
     }
 }
 
@@ -153,196 +150,2057 @@ function Update-TweakButtonStates {
 }
 
 # Centralized data path for exports (in repo folder)
-function Update-MyDeviceStats {
-    # 1. Set placeholder text instantly
-    (Get-Ctrl "txtDeviceOS").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceCPU").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceRAM").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceGPU").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceMotherboard").Text = "Gathering stats..."
-    (Get-Ctrl "txtDeviceStorage").Text = "Gathering stats..."
 
-    # 2. Start Background Runspace for heavy CIM queries
-    $script:StatsRunspace = [PowerShell]::Create().AddScript({
-            $res = @{}
+$script:MyDeviceCacheTtlSeconds = 600
+if (-not $script:MyDeviceCache) { $script:MyDeviceCache = @{} }
+if (-not $script:MyDeviceSectionJobs) { $script:MyDeviceSectionJobs = @{} }
+$script:MyDeviceCommonHelpers = @'
+function ConvertTo-StorageSizeText {
+    param([double]$Bytes)
+    if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ("{0:N0} MB" -f ($Bytes / 1MB)) }
+    if ($Bytes -gt 0) { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
+    return "0 B"
+}
+
+function Get-FreeSpaceBrush {
+    param([double]$FreePercent)
+    if ($FreePercent -lt 10) { return "#F85149" }
+    if ($FreePercent -lt 20) { return "#D29922" }
+    if ($FreePercent -lt 35) { return "#E3B341" }
+    return "#3FB950"
+}
+
+function Get-HealthRank {
+    param([string]$Status)
+    if ([string]::IsNullOrWhiteSpace($Status)) { return 0 }
+    if ($Status -match "(?i)unhealthy|critical|failed|failure|error") { return 3 }
+    if ($Status -match "(?i)warning|degraded|predict|attention|stressed") { return 2 }
+    if ($Status -match "(?i)healthy|ok|online") { return 1 }
+    return 0
+}
+
+function Get-HealthBrush {
+    param([int]$Rank)
+    switch ($Rank) {
+        3 { return "#F85149" }
+        2 { return "#D29922" }
+        1 { return "#3FB950" }
+        default { return "#8B949E" }
+    }
+}
+
+function Get-CleanHardwareValue {
+    param($Value, [string]$Fallback = "Unavailable")
+    if ($null -eq $Value) { return $Fallback }
+    $text = ([string]$Value).Trim()
+    if ([string]::IsNullOrWhiteSpace($text)) { return $Fallback }
+    if ($text -match "(?i)^(to be filled by o\.e\.m\.|default string|system product name|system manufacturer|none|not applicable|not specified)$") { return $Fallback }
+    return $text
+}
+
+function Convert-CimDateText {
+    param($Value)
+    if ($null -eq $Value) { return "Unavailable" }
+    try {
+        if ($Value -is [datetime]) { return $Value.ToString("yyyy-MM-dd") }
+        return ([System.Management.ManagementDateTimeConverter]::ToDateTime([string]$Value)).ToString("yyyy-MM-dd")
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-FirmwareModeText {
+    try {
+        $fwType = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control" -Name "PEFirmwareType" -ErrorAction Stop).PEFirmwareType
+        switch ([int]$fwType) {
+            1 { return "Legacy BIOS" }
+            2 { return "UEFI" }
+            default { return "Unknown" }
+        }
+    }
+    catch { return "Unknown" }
+}
+
+function ConvertTo-DateTimeValue {
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    try {
+        if ($Value -is [datetime]) { return $Value }
+        return [datetime]::Parse([string]$Value)
+    }
+    catch {
+        try { return [System.Management.ManagementDateTimeConverter]::ToDateTime([string]$Value) }
+        catch { return $null }
+    }
+}
+
+function Format-DateTimeText {
+    param($Value, [string]$Format = "yyyy-MM-dd HH:mm")
+    $dateValue = ConvertTo-DateTimeValue $Value
+    if ($null -eq $dateValue) { return "Unavailable" }
+    return $dateValue.ToString($Format)
+}
+
+function Format-TimeSpanText {
+    param([TimeSpan]$Span)
+    if ($null -eq $Span) { return "Unavailable" }
+    $days = [int][math]::Floor($Span.TotalDays)
+    if ($days -gt 0) { return "$days d $($Span.Hours) h" }
+    if ($Span.Hours -gt 0) { return "$($Span.Hours) h $($Span.Minutes) m" }
+    return "$($Span.Minutes) m"
+}
+
+function Get-PendingRebootStatusText {
+    try {
+        if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Component Based Servicing\RebootPending") { return "Yes" }
+        if (Test-Path "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\WindowsUpdate\Auto Update\RebootRequired") { return "Yes" }
+        $sessionManager = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager" -Name "PendingFileRenameOperations" -ErrorAction SilentlyContinue
+        if ($sessionManager -and $sessionManager.PendingFileRenameOperations) { return "Yes" }
+    }
+    catch {}
+    return "No"
+}
+
+function Get-SecureBootStatusText {
+    try {
+        if (Confirm-SecureBootUEFI -ErrorAction Stop) { return "Enabled" }
+        return "Disabled"
+    }
+    catch {
+        if ((Get-FirmwareModeText) -eq "Legacy BIOS") { return "N/A (Legacy BIOS)" }
+        return "Unavailable"
+    }
+}
+
+function Get-ActivationStatusText {
+    try {
+        $license = Get-CimInstance SoftwareLicensingProduct -Filter "PartialProductKey IS NOT NULL" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match "Windows" } |
+        Sort-Object @{ Expression = { $_.LicenseStatus -eq 1 }; Descending = $true } |
+        Select-Object -First 1
+
+        if ($null -eq $license) { return "Unavailable" }
+        switch ([int]$license.LicenseStatus) {
+            0 { return "Unlicensed" }
+            1 { return "Activated" }
+            2 { return "Grace Period" }
+            3 { return "Out-of-Tolerance" }
+            4 { return "Non-Genuine" }
+            5 { return "Notification" }
+            6 { return "Extended Grace" }
+            default { return "Unknown" }
+        }
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-LocalUserSummaryText {
+    try {
+        $users = @(Get-CimInstance Win32_UserAccount -Filter "LocalAccount=True" -ErrorAction SilentlyContinue)
+        if ($users.Count -eq 0) { return "Unavailable" }
+        $enabled = @($users | Where-Object { -not $_.Disabled }).Count
+        $disabled = [math]::Max(0, $users.Count - $enabled)
+        $locked = @($users | Where-Object { $_.Lockout }).Count
+        $text = "$($users.Count) total, $enabled enabled, $disabled disabled"
+        if ($locked -gt 0) { $text += ", $locked locked" }
+        return $text
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-LocalAdminSummaryText {
+    try {
+        $adminGroup = Get-CimInstance Win32_Group -Filter "SID='S-1-5-32-544'" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $adminGroup) { return "Unavailable" }
+        $members = @(Get-CimAssociatedInstance -InputObject $adminGroup -Association Win32_GroupUser -ErrorAction SilentlyContinue)
+        return "$($members.Count) members"
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-LatestHotfixText {
+    try {
+        $hotfix = Get-CimInstance Win32_QuickFixEngineering -ErrorAction SilentlyContinue |
+        Sort-Object @{ Expression = { ConvertTo-DateTimeValue $_.InstalledOn }; Descending = $true } |
+        Select-Object -First 1
+
+        if ($null -eq $hotfix) { return "Unavailable" }
+        $installed = Format-DateTimeText $hotfix.InstalledOn "yyyy-MM-dd"
+        if ($installed -eq "Unavailable") { return $hotfix.HotFixID }
+        return "$($hotfix.HotFixID) ($installed)"
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-BitLockerStatusText {
+    try {
+        if (-not (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue)) { return "Unavailable" }
+        $volume = Get-BitLockerVolume -MountPoint $env:SystemDrive -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($null -eq $volume) { return "Unavailable" }
+        return "$($volume.ProtectionStatus) ($($volume.VolumeStatus))"
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-DefenderStatusText {
+    try {
+        if (-not (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue)) { return "Unavailable" }
+        $status = Get-MpComputerStatus -ErrorAction Stop
+        $realTime = if ($status.RealTimeProtectionEnabled) { "Real-time on" } else { "Real-time off" }
+        if ($null -ne $status.AntivirusSignatureAge) { return "$realTime, sig $($status.AntivirusSignatureAge)d old" }
+        return $realTime
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-ValidPowerNumber {
+    param($Value, [switch]$AllowZero)
+    if ($null -eq $Value) { return $null }
+    try { $number = [double]$Value }
+    catch { return $null }
+
+    if ([double]::IsNaN($number) -or [double]::IsInfinity($number)) { return $null }
+    if ($number -lt 0) { return $null }
+    if ($number -in @(2147483647, 4294967295)) { return $null }
+    if (-not $AllowZero -and $number -eq 0) { return $null }
+    return $number
+}
+
+function Convert-MilliwattText {
+    param($Milliwatts)
+    $value = Get-ValidPowerNumber $Milliwatts
+    if ($null -eq $value) { return "Unavailable" }
+    return ("{0:N1} W" -f ($value / 1000))
+}
+
+function Convert-MillivoltText {
+    param($Millivolts)
+    $value = Get-ValidPowerNumber $Millivolts
+    if ($null -eq $value) { return "Unavailable" }
+    return ("{0:N2} V" -f ($value / 1000))
+}
+
+function Convert-MilliwattHourText {
+    param($MilliwattHours)
+    $value = Get-ValidPowerNumber $MilliwattHours
+    if ($null -eq $value) { return "Unavailable" }
+    return ("{0:N1} Wh" -f ($value / 1000))
+}
+
+function Convert-SubnetMaskToPrefixLength {
+    param([string]$SubnetMask)
+    if ([string]::IsNullOrWhiteSpace($SubnetMask)) { return "" }
+    try {
+        $bits = 0
+        foreach ($octet in ($SubnetMask -split "\.")) {
+            $value = [byte]$octet
+            while ($value -gt 0) {
+                $bits += ($value -band 1)
+                $value = $value -shr 1
+            }
+        }
+        return [string]$bits
+    }
+    catch { return "" }
+}
+
+function Convert-NetworkSpeedText {
+    param($BitsPerSecond)
+    $speed = Get-ValidPowerNumber $BitsPerSecond
+    if ($null -eq $speed) { return "Unknown" }
+    if ($speed -ge 1000000000) { return ("{0:N1} Gbps" -f ($speed / 1000000000)) }
+    if ($speed -ge 1000000) { return ("{0:N0} Mbps" -f ($speed / 1000000)) }
+    if ($speed -ge 1000) { return ("{0:N0} Kbps" -f ($speed / 1000)) }
+    return ("{0:N0} bps" -f $speed)
+}
+
+function Convert-NetConnectionStatusText {
+    param($Status)
+    if ($null -eq $Status) { return "Unknown" }
+    try {
+        switch ([int]$Status) {
+            0 { return "Disconnected" }
+            1 { return "Connecting" }
+            2 { return "Connected" }
+            3 { return "Disconnecting" }
+            4 { return "Hardware not present" }
+            5 { return "Hardware disabled" }
+            6 { return "Hardware malfunction" }
+            7 { return "Media disconnected" }
+            8 { return "Authenticating" }
+            9 { return "Authentication succeeded" }
+            10 { return "Authentication failed" }
+            11 { return "Invalid address" }
+            12 { return "Credentials required" }
+            default { return "Unknown ($Status)" }
+        }
+    }
+    catch { return "Unknown" }
+}
+
+function Get-SystemPowerMeterText {
+    try {
+        $meters = @(Get-CimInstance -Namespace "root\CIMV2\power" -ClassName Win32_PowerMeter -ErrorAction SilentlyContinue)
+        if ($meters.Count -eq 0) { return "Unavailable" }
+
+        $totalWatts = 0.0
+        $readingCount = 0
+        foreach ($meter in $meters) {
+            $readingProperty = $meter.PSObject.Properties["CurrentReading"]
+            if ($null -eq $readingProperty) { continue }
+
+            $reading = Get-ValidPowerNumber $readingProperty.Value
+            if ($null -eq $reading) { continue }
+
+            $modifier = 0
             try {
-                $os = Get-CimInstance Win32_OperatingSystem; $res.OS = "$($os.Caption) $($os.Version)`nBuild: $($os.BuildNumber)`nArch: $($os.OSArchitecture)"
-                $cpu = Get-CimInstance Win32_Processor; $res.CPU = "$($cpu.Name)`nCores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)`nBase: $($cpu.MaxClockSpeed)MHz"
-                $mem = Get-CimInstance Win32_PhysicalMemory; $tr = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2); $res.RAM = "Total: ${tr}GB`nSpeed: $(($mem | Select-Object -First 1).Speed)MHz`nModules: $($mem.Count)"
-            
-                # GPU (Includes your registry 4GB limit bypass)
-                $gpu = Get-CimInstance Win32_VideoController
-                $gpuText = ""
-                foreach ($g in $gpu) {
-                    $vram = 0
-                    $regMatches = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object { $_.DriverDesc -eq $g.Name }
-                    if ($regMatches) {
-                        $reg = $regMatches[0]
-                        if ($null -ne $reg.'HardwareInformation.qwMemorySize') { $vram = [math]::Round($reg.'HardwareInformation.qwMemorySize' / 1GB, 2) }
-                        elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) { $vram = [math]::Round($reg.'HardwareInformation.MemorySize' / 1GB, 2) }
-                    }
-                    if ($vram -eq 0 -or $null -eq $vram) { $vram = [math]::Round([uint32]$g.AdapterRAM / 1GB, 2) }
-                    $gpuText += "$($g.Name)`nVRAM: $vram GB`nDriver: $($g.DriverVersion)`n"
-                }
-                $res.GPU = $gpuText.Trim()
-            
-                $mb = Get-CimInstance Win32_BaseBoard; $bios = Get-CimInstance Win32_BIOS; $res.MB = "$($mb.Manufacturer) $($mb.Product)`nBIOS: $($bios.SMBIOSBIOSVersion)"
-                $dsk = Get-CimInstance Win32_LogicalDisk -F "DriveType=3"; $dt = ""; foreach ($d in $dsk) { $t = [math]::Round($d.Size / 1GB, 1); $f = [math]::Round($d.FreeSpace / 1GB, 1); $dt += "$($d.DeviceID) ${t}GB (Free: ${f}GB)`n" }; $res.Storage = $dt.Trim()
-                # Physical active adapters only
-                
-                $physicalAdapters = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
-                Where-Object {
-                    $_.Status -eq "Up" -and
-                    $_.HardwareInterface -eq $true
-                }
-                
-                $netInfo = @()
-                
-                foreach ($nic in $physicalAdapters) {
-                
-                    $ip = Get-NetIPAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                
-                    if (-not $ip) { continue }
-                
-                    $route = Get-NetRoute -InterfaceIndex $nic.ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-                
-                    $dnsServers = (
-                        Get-DnsClientServerAddress -InterfaceIndex $nic.ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
-                    ).ServerAddresses -join ", "
-                
-                    $netInfo += "$($nic.Name) | IP: $($ip.IPAddress)/$($ip.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $($nic.LinkSpeed)"
-                }
-                
-                $res.Network = if ($netInfo) {
-                    $netInfo -join "`r`n"
+                if ($null -ne $meter.UnitModifier) { $modifier = [int]$meter.UnitModifier }
+            }
+            catch { $modifier = 0 }
+
+            $watts = $reading * [math]::Pow(10, $modifier)
+            if ($watts -lt 0) { continue }
+
+            $totalWatts += $watts
+            $readingCount++
+        }
+
+        if ($readingCount -eq 0) { return "Unavailable" }
+        $suffix = if ($readingCount -gt 1) { " across $readingCount meters" } else { "" }
+        return ("{0:N1} W{1}" -f $totalWatts, $suffix)
+    }
+    catch { return "Unavailable" }
+}
+
+function Get-BatteryPowerTelemetry {
+    param([object[]]$Win32Batteries = @())
+
+    $summary = [ordered]@{
+        BatteryRate    = "Unavailable"
+        TotalPower     = "Unavailable"
+        Electrical     = "Unavailable"
+        DesignCapacity = $null
+        FullCapacity   = $null
+    }
+
+    try {
+        $batteryStatuses = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStatus -ErrorAction SilentlyContinue)
+        $chargeRateMw = 0.0
+        $dischargeRateMw = 0.0
+        $remainingMwh = 0.0
+        $voltageTotalMv = 0.0
+        $hasChargeRate = $false
+        $hasDischargeRate = $false
+        $hasRemaining = $false
+        $voltageCount = 0
+        $isCharging = $false
+        $isDischarging = $false
+        $powerOnline = $false
+
+        foreach ($status in $batteryStatuses) {
+            if ($status.PowerOnline) { $powerOnline = $true }
+            if ($status.Charging) { $isCharging = $true }
+            if ($status.Discharging) { $isDischarging = $true }
+
+            $chargeRate = Get-ValidPowerNumber $status.ChargeRate
+            if ($null -ne $chargeRate) {
+                $chargeRateMw += $chargeRate
+                $hasChargeRate = $true
+            }
+
+            $dischargeRate = Get-ValidPowerNumber $status.DischargeRate
+            if ($null -ne $dischargeRate) {
+                $dischargeRateMw += $dischargeRate
+                $hasDischargeRate = $true
+            }
+
+            $remaining = Get-ValidPowerNumber $status.RemainingCapacity
+            if ($null -ne $remaining) {
+                $remainingMwh += $remaining
+                $hasRemaining = $true
+            }
+
+            $voltage = Get-ValidPowerNumber $status.Voltage
+            if ($null -ne $voltage) {
+                $voltageTotalMv += $voltage
+                $voltageCount++
+            }
+        }
+
+        $electricalParts = @()
+        if ($voltageCount -gt 0) {
+            $electricalParts += "Voltage: $(Convert-MillivoltText ($voltageTotalMv / $voltageCount))"
+        }
+        if ($hasRemaining) {
+            $electricalParts += "Remaining: $(Convert-MilliwattHourText $remainingMwh)"
+        }
+
+        $cycleCounts = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryCycleCount -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ValidPowerNumber $_.CycleCount -AllowZero } |
+            Where-Object { $null -ne $_ })
+        if ($cycleCounts.Count -eq 1) {
+            $electricalParts += "Cycles: $([int]$cycleCounts[0])"
+        }
+        elseif ($cycleCounts.Count -gt 1) {
+            $electricalParts += "Cycles: $(($cycleCounts | ForEach-Object { [int]$_ }) -join ', ')"
+        }
+
+        $designCapacity = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryStaticData -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ValidPowerNumber $_.DesignedCapacity } |
+            Where-Object { $null -ne $_ } |
+            Measure-Object -Sum).Sum
+        $fullCapacity = @(Get-CimInstance -Namespace "root\wmi" -ClassName BatteryFullChargedCapacity -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ValidPowerNumber $_.FullChargedCapacity } |
+            Where-Object { $null -ne $_ } |
+            Measure-Object -Sum).Sum
+
+        if ($null -eq $designCapacity -or $designCapacity -le 0 -or $null -eq $fullCapacity -or $fullCapacity -le 0) {
+            $win32Batteries = @($Win32Batteries)
+            if ($win32Batteries.Count -eq 0) { $win32Batteries = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue) }
+            if ($null -eq $designCapacity -or $designCapacity -le 0) {
+                $designCapacity = @($win32Batteries |
+                    ForEach-Object { Get-ValidPowerNumber $_.DesignCapacity } |
+                    Where-Object { $null -ne $_ } |
+                    Measure-Object -Sum).Sum
+            }
+            if ($null -eq $fullCapacity -or $fullCapacity -le 0) {
+                $fullCapacity = @($win32Batteries |
+                    ForEach-Object { Get-ValidPowerNumber $_.FullChargeCapacity } |
+                    Where-Object { $null -ne $_ } |
+                    Measure-Object -Sum).Sum
+            }
+        }
+
+        if ($null -ne $designCapacity -and $designCapacity -gt 0) { $summary.DesignCapacity = [double]$designCapacity }
+        if ($null -ne $fullCapacity -and $fullCapacity -gt 0) { $summary.FullCapacity = [double]$fullCapacity }
+
+        if ($isDischarging -and $hasDischargeRate) {
+            $rateText = Convert-MilliwattText $dischargeRateMw
+            $summary.BatteryRate = "Discharging $rateText"
+            $summary.TotalPower = "$rateText estimate from battery"
+        }
+        elseif ($isCharging -and $hasChargeRate) {
+            $summary.BatteryRate = "Charging +$(Convert-MilliwattText $chargeRateMw)"
+        }
+        elseif ($powerOnline) {
+            $summary.BatteryRate = "AC power, battery idle"
+        }
+        elseif ($batteryStatuses.Count -gt 0) {
+            $summary.BatteryRate = "Battery telemetry unavailable"
+        }
+
+        if ($electricalParts.Count -gt 0) { $summary.Electrical = $electricalParts -join " | " }
+    }
+    catch {}
+
+    $powerMeter = Get-SystemPowerMeterText
+    if ($powerMeter -ne "Unavailable") {
+        $summary.TotalPower = "$powerMeter power meter"
+    }
+    elseif ($summary.TotalPower -eq "Unavailable") {
+        $summary.TotalPower = "Not exposed by Windows"
+    }
+
+    return [PSCustomObject]$summary
+}
+
+function Get-PowerSchemeFriendlyName {
+    param([string]$Guid)
+    if ([string]::IsNullOrWhiteSpace($Guid)) { return "Unavailable" }
+
+    $normalizedGuid = $Guid.Trim("{}").ToLowerInvariant()
+    switch ($normalizedGuid) {
+        "00000000-0000-0000-0000-000000000000" { return "Balanced" }
+        "381b4222-f694-41f0-9685-ff5bb260df2e" { return "Balanced" }
+        "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c" { return "High performance" }
+        "a1841308-3541-4fab-bc81-f71556f20b4a" { return "Power saver" }
+        "e9a42b02-d5df-448d-aa00-03f14749eb61" { return "Ultimate Performance" }
+        "961cc777-2547-4f9d-8174-7d86181b8a7a" { return "Best power efficiency" }
+        "3af9b8d9-7c97-431d-ad78-34a8bfea439f" { return "High performance" }
+        "ded574b5-45a0-4f42-8737-46345c09c238" { return "Best performance" }
+    }
+
+    try {
+        $scheme = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\$normalizedGuid" -ErrorAction SilentlyContinue
+        $friendlyName = Get-CleanHardwareValue $scheme.FriendlyName ""
+        if (-not [string]::IsNullOrWhiteSpace($friendlyName)) {
+            if ($friendlyName -match ",([^,]+)$") { $friendlyName = $matches[1] }
+            $friendlyName = ($friendlyName -replace "\s+Overlay$", "").Trim()
+            if (-not [string]::IsNullOrWhiteSpace($friendlyName)) { return $friendlyName }
+        }
+    }
+    catch {}
+
+    return $normalizedGuid
+}
+
+function Get-ActivePowerPlanText {
+    $basePlan = "Unavailable"
+    $settingsMode = "Unavailable"
+
+    try {
+        $powerSchemes = Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes" -ErrorAction Stop
+        $baseGuid = Get-CleanHardwareValue $powerSchemes.ActivePowerScheme ""
+        $acOverlayGuid = Get-CleanHardwareValue $powerSchemes.ActiveOverlayAcPowerScheme ""
+        $dcOverlayGuid = Get-CleanHardwareValue $powerSchemes.ActiveOverlayDcPowerScheme ""
+
+        if (-not [string]::IsNullOrWhiteSpace($baseGuid)) {
+            $basePlan = Get-PowerSchemeFriendlyName $baseGuid
+        }
+
+        $acMode = if (-not [string]::IsNullOrWhiteSpace($acOverlayGuid)) { Get-PowerSchemeFriendlyName $acOverlayGuid } else { "Balanced" }
+        $dcMode = if (-not [string]::IsNullOrWhiteSpace($dcOverlayGuid)) { Get-PowerSchemeFriendlyName $dcOverlayGuid } else { "Balanced" }
+
+        if ($acMode -eq $dcMode) {
+            $settingsMode = $acMode
+        }
+        else {
+            $settingsMode = "AC $acMode / Battery $dcMode"
+        }
+    }
+    catch {}
+
+    if ($basePlan -eq "Unavailable") {
+        try {
+            $powerPlan = powercfg /getactivescheme
+            if ($powerPlan -match '\((.*?)\)') { $basePlan = $matches[1] }
+        }
+        catch {}
+    }
+
+    if ($settingsMode -eq "Unavailable" -or [string]::IsNullOrWhiteSpace($settingsMode)) {
+        return "Base plan: $basePlan"
+    }
+
+    return "CFG: $basePlan | Settings: $settingsMode"
+}
+
+function Get-WindowsDetailsText {
+    param($OperatingSystem, $ComputerSystem)
+
+    $lines = @()
+    $currentVersion = $null
+    try { $currentVersion = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion" -ErrorAction SilentlyContinue } catch {}
+
+    $caption = Get-CleanHardwareValue $OperatingSystem.Caption
+    $displayVersion = Get-CleanHardwareValue $currentVersion.DisplayVersion ""
+    if ([string]::IsNullOrWhiteSpace($displayVersion)) { $displayVersion = Get-CleanHardwareValue $currentVersion.ReleaseId "" }
+    $nameParts = @($caption, $displayVersion) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_ -ne "Unavailable" }
+    if ($nameParts.Count -gt 0) { $lines += ($nameParts -join " ") }
+
+    $ubr = Get-CleanHardwareValue $currentVersion.UBR ""
+    $buildText = Get-CleanHardwareValue $OperatingSystem.BuildNumber
+    if (-not [string]::IsNullOrWhiteSpace($ubr)) { $buildText = "$buildText.$ubr" }
+
+    $versionText = Get-CleanHardwareValue $OperatingSystem.Version
+    if ($versionText -ne "Unavailable") { $lines += "Version: $versionText" }
+    if ($buildText -ne "Unavailable") { $lines += "Build: $buildText" }
+
+    $edition = Get-CleanHardwareValue $currentVersion.EditionID
+    if ($edition -ne "Unavailable") { $lines += "Edition: $edition" }
+
+    $installType = Get-CleanHardwareValue $currentVersion.InstallationType
+    if ($installType -ne "Unavailable") { $lines += "Install Type: $installType" }
+
+    $arch = Get-CleanHardwareValue $OperatingSystem.OSArchitecture
+    if ($arch -ne "Unavailable") { $lines += "Architecture: $arch" }
+
+    $role = switch ([int]$OperatingSystem.ProductType) {
+        1 { "Workstation" }
+        2 { "Domain Controller" }
+        3 { "Server" }
+        default { "Unknown" }
+    }
+    $lines += "OS Role: $role"
+
+    $lines += "Computer Name: $env:COMPUTERNAME"
+    if ($ComputerSystem.PartOfDomain) {
+        $domainName = Get-CleanHardwareValue $ComputerSystem.Domain
+        if ($domainName -ne "Unavailable") { $lines += "Domain: $domainName" }
+    }
+    else {
+        $workgroup = Get-CleanHardwareValue $ComputerSystem.Workgroup
+        if ($workgroup -ne "Unavailable") { $lines += "Workgroup: $workgroup" }
+    }
+
+    $localUsers = Get-LocalUserSummaryText
+    if ($localUsers -ne "Unavailable") { $lines += "Local Users: $localUsers" }
+
+    $localAdmins = Get-LocalAdminSummaryText
+    if ($localAdmins -ne "Unavailable") { $lines += "Local Admins: $localAdmins" }
+
+    $installDate = Format-DateTimeText $OperatingSystem.InstallDate "yyyy-MM-dd"
+    if ($installDate -ne "Unavailable") { $lines += "Installed: $installDate" }
+
+    $lastBoot = Format-DateTimeText $OperatingSystem.LastBootUpTime "yyyy-MM-dd HH:mm"
+    if ($lastBoot -ne "Unavailable") {
+        $bootDate = ConvertTo-DateTimeValue $OperatingSystem.LastBootUpTime
+        $uptime = Format-TimeSpanText (New-TimeSpan -Start $bootDate -End (Get-Date))
+        $lines += "Last Boot: $lastBoot"
+        $lines += "Uptime: $uptime"
+    }
+
+    $latestHotfix = Get-LatestHotfixText
+    if ($latestHotfix -ne "Unavailable") { $lines += "Latest Hotfix: $latestHotfix" }
+
+    $activation = Get-ActivationStatusText
+    if ($activation -ne "Unavailable") { $lines += "Activation: $activation" }
+
+    $lines += "Secure Boot: $(Get-SecureBootStatusText)"
+
+    $lines += "BitLocker: Checking..."
+
+    $defender = Get-DefenderStatusText
+    if ($defender -ne "Unavailable") { $lines += "Defender: $defender" }
+
+    $lines += "Pending Reboot: $(Get-PendingRebootStatusText)"
+
+    try {
+        $culture = [System.Globalization.CultureInfo]::CurrentCulture.Name
+        $timeZone = [System.TimeZoneInfo]::Local.DisplayName
+        $lines += "Locale / Time Zone: $culture | $timeZone"
+    }
+    catch {}
+
+    return ($lines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+}
+
+'@
+$script:MyDeviceCoreBody = @'
+
+$res = [ordered]@{ Section = "Core" }
+try {
+    $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue | Select-Object -First 1
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue | Select-Object -First 1
+    $res.OS = Get-WindowsDetailsText -OperatingSystem $os -ComputerSystem $cs
+}
+catch { $res.OS = "Unavailable" }
+try {
+    $cpu = Get-CimInstance Win32_Processor -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cpu) {
+        $cpuLines = @()
+        $cpuName = Get-CleanHardwareValue $cpu.Name
+        $cpuLines += $cpuName
+        if ($cpu.Manufacturer) { $cpuLines += "Vendor: $($cpu.Manufacturer)" }
+        if ($cpu.SocketDesignation) { $cpuLines += "Socket: $($cpu.SocketDesignation)" }
+        if ($null -ne $cpu.NumberOfCores -or $null -ne $cpu.NumberOfLogicalProcessors) { $cpuLines += "Cores/Threads: $($cpu.NumberOfCores)/$($cpu.NumberOfLogicalProcessors)" }
+        if ($null -ne $cpu.NumberOfEnabledCore -and $cpu.NumberOfEnabledCore -ne $cpu.NumberOfCores) { $cpuLines += "Enabled cores: $($cpu.NumberOfEnabledCore)" }
+        if ($cpu.MaxClockSpeed) { $cpuLines += "Base/Max clock: $($cpu.MaxClockSpeed) MHz" }
+        if ($cpu.CurrentClockSpeed) { $cpuLines += "Current clock: $($cpu.CurrentClockSpeed) MHz" }
+        if ($cpu.L2CacheSize -or $cpu.L3CacheSize) {
+            $cacheParts = @()
+            if ($cpu.L2CacheSize) { $cacheParts += ("L2 {0:N0} KB" -f [double]$cpu.L2CacheSize) }
+            if ($cpu.L3CacheSize) { $cacheParts += ("L3 {0:N0} KB" -f [double]$cpu.L3CacheSize) }
+            $cpuLines += "Cache: $($cacheParts -join ', ')"
+        }
+        if ($cpu.VirtualizationFirmwareEnabled -ne $null) { $cpuLines += "Virtualization firmware: $($cpu.VirtualizationFirmwareEnabled)" }
+        if ($cpu.SecondLevelAddressTranslationExtensions -ne $null) { $cpuLines += "SLAT: $($cpu.SecondLevelAddressTranslationExtensions)" }
+        if ($cpu.AddressWidth) { $cpuLines += "Address width: $($cpu.AddressWidth)-bit" }
+        $res.CPU = ($cpuLines | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join "`n"
+    }
+    else { $res.CPU = "Unavailable" }
+}
+catch { $res.CPU = "Unavailable" }
+try {
+    $mem = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue | Sort-Object BankLabel, DeviceLocator)
+    if ($mem.Count -gt 0) {
+        function Get-MemoryTypeTextLocal {
+            param($Module)
+            $smbios = 0
+            try { $smbios = [int]$Module.SMBIOSMemoryType } catch {}
+            $legacy = 0
+            try { $legacy = [int]$Module.MemoryType } catch {}
+            switch ($smbios) {
+                20 { return "DDR" }
+                21 { return "DDR2" }
+                24 { return "DDR3" }
+                26 { return "DDR4" }
+                34 { return "DDR5" }
+                35 { return "LPDDR5" }
+                30 { return "LPDDR4" }
+                31 { return "LPDDR4X" }
+            }
+            switch ($legacy) {
+                20 { return "DDR" }
+                21 { return "DDR2" }
+                24 { return "DDR3" }
+                26 { return "DDR4" }
+                34 { return "DDR5" }
+                default { return "Unknown" }
+            }
+        }
+        function Get-FormFactorTextLocal {
+            param($Value)
+            try { $v = [int]$Value } catch { return "Unknown" }
+            switch ($v) {
+                8 { return "DIMM" }
+                12 { return "SODIMM" }
+                13 { return "SRIMM" }
+                14 { return "SMD" }
+                15 { return "SSMP" }
+                16 { return "QFP" }
+                17 { return "TQFP" }
+                18 { return "SOIC" }
+                19 { return "LCC" }
+                20 { return "PLCC" }
+                21 { return "BGA" }
+                22 { return "FPBGA" }
+                default { return "Unknown" }
+            }
+        }
+
+        $totalGb = [math]::Round(($mem | Measure-Object Capacity -Sum).Sum / 1GB, 2)
+        $stickCapsGb = @($mem | ForEach-Object {
+            if ($_.Capacity) { [math]::Round([double]$_.Capacity / 1GB, 2) }
+        })
+        $stickCapSummary = $null
+        if ($stickCapsGb.Count -gt 0) {
+            $capGroups = @($stickCapsGb | Group-Object | Sort-Object { [double]$_.Name })
+            if ($capGroups.Count -eq 1) {
+                $stickCapSummary = "$($capGroups[0].Count) x $($capGroups[0].Name) GB"
+            }
+            else {
+                $stickCapSummary = (($capGroups | ForEach-Object { "$($_.Count) x $($_.Name) GB" }) -join " + ")
+            }
+        }
+        $types = @($mem | ForEach-Object { Get-MemoryTypeTextLocal $_ } | Where-Object { $_ -and $_ -ne "Unknown" } | Select-Object -Unique)
+        $forms = @($mem | ForEach-Object { Get-FormFactorTextLocal $_.FormFactor } | Where-Object { $_ -and $_ -ne "Unknown" } | Select-Object -Unique)
+        $configuredSpeeds = @($mem | ForEach-Object { $_.ConfiguredClockSpeed } | Where-Object { $_ } | Select-Object -Unique)
+        $ratedSpeeds = @($mem | ForEach-Object { $_.Speed } | Where-Object { $_ } | Select-Object -Unique)
+        $volts = @($mem | ForEach-Object { $_.ConfiguredVoltage } | Where-Object { $_ } | Select-Object -Unique)
+        $ramLines = @()
+        if ($stickCapSummary) {
+            $ramLines += "Total: ${totalGb} GB ($stickCapSummary)"
+        }
+        else {
+            $ramLines += "Total: ${totalGb} GB"
+        }
+        $ramLines += "Modules: $($mem.Count)"
+        if ($types.Count -gt 0) { $ramLines += "Type: $($types -join '/')" }
+        if ($forms.Count -gt 0) { $ramLines += "Form factor: $($forms -join '/')" }
+        if ($configuredSpeeds.Count -gt 0) { $ramLines += "Configured speed: $(($configuredSpeeds | Sort-Object) -join '/') MHz" }
+        if ($ratedSpeeds.Count -gt 0) { $ramLines += "Rated speed: $(($ratedSpeeds | Sort-Object) -join '/') MHz" }
+        if ($volts.Count -gt 0) { $ramLines += "Voltage: $(($volts | Sort-Object) -join '/') mV" }
+        $ramLines += ""
+        $ramLines += "Per-stick:"
+
+        $idx = 1
+        foreach ($m in $mem) {
+            $capGb = if ($m.Capacity) { [math]::Round([double]$m.Capacity / 1GB, 2) } else { $null }
+            $slot = Get-CleanHardwareValue $m.DeviceLocator "Slot $idx"
+            $bank = Get-CleanHardwareValue $m.BankLabel "Unknown bank"
+            $manufacturer = Get-CleanHardwareValue $m.Manufacturer "Unknown maker"
+            $part = Get-CleanHardwareValue $m.PartNumber "Unknown model"
+            $type = Get-MemoryTypeTextLocal $m
+            $form = Get-FormFactorTextLocal $m.FormFactor
+            $speed = if ($m.ConfiguredClockSpeed) { "$($m.ConfiguredClockSpeed) MHz configured" } elseif ($m.Speed) { "$($m.Speed) MHz rated" } else { "Unknown speed" }
+            $stickLine = " - ${slot} / ${bank}: "
+            if ($capGb -ne $null) { $stickLine += "${capGb} GB, " }
+            $stickLine += "$type $form, $speed, $manufacturer $part"
+            if ($m.ConfiguredVoltage) { $stickLine += ", $($m.ConfiguredVoltage)mV" }
+            $ramLines += $stickLine.Trim()
+            $idx++
+        }
+
+        $res.RAM = ($ramLines | Where-Object { $null -ne $_ }) -join "`n"
+    }
+    else { $res.RAM = "Unavailable" }
+}
+catch { $res.RAM = "Unavailable" }
+[pscustomobject]$res
+
+'@
+$script:MyDeviceGpuBody = @'
+
+$res = [ordered]@{ Section = "GPU" }
+try {
+    function Get-GpuVendorTextLocal {
+        param($Name, $PnpId)
+        $text = "${Name} ${PnpId}"
+        if ($text -match "(?i)nvidia|ven_10de") { return "NVIDIA" }
+        if ($text -match "(?i)amd|radeon|advanced micro devices|ven_1002") { return "AMD" }
+        if ($text -match "(?i)intel|iris|arc|uhd graphics|ven_8086") { return "Intel" }
+        return "Unknown"
+    }
+
+    function Get-GpuVideoArchTextLocal {
+        param($Code)
+        switch ([int]($Code -as [int])) {
+            1 { return "Other" }
+            2 { return "Unknown" }
+            3 { return "CGA" }
+            4 { return "EGA" }
+            5 { return "VGA" }
+            6 { return "SVGA" }
+            7 { return "MDA" }
+            8 { return "HGC" }
+            9 { return "MCGA" }
+            10 { return "8514A" }
+            11 { return "XGA" }
+            12 { return "Linear Frame Buffer" }
+            160 { return "PC-98" }
+            default { return "Unknown" }
+        }
+    }
+
+    function Get-GpuAvailabilityTextLocal {
+        param($Code)
+        switch ([int]($Code -as [int])) {
+            3 { return "Running/full power" }
+            4 { return "Warning" }
+            5 { return "In test" }
+            6 { return "Not applicable" }
+            7 { return "Power off" }
+            8 { return "Offline" }
+            9 { return "Off duty" }
+            10 { return "Degraded" }
+            11 { return "Not installed" }
+            12 { return "Install error" }
+            13 { return "Power save: unknown" }
+            14 { return "Power save: low power" }
+            15 { return "Power save: standby" }
+            16 { return "Power cycle" }
+            17 { return "Power save: warning" }
+            default { return "Unknown" }
+        }
+    }
+
+    function ConvertTo-GpuMemoryTextLocal {
+        param($Bytes)
+        try {
+            if ($null -eq $Bytes -or [double]$Bytes -le 0) { return "Unavailable" }
+            if ([double]$Bytes -ge 1GB) { return ("{0:N2} GB" -f ([double]$Bytes / 1GB)) }
+            if ([double]$Bytes -ge 1MB) { return ("{0:N0} MB" -f ([double]$Bytes / 1MB)) }
+            return ("{0:N0} bytes" -f [double]$Bytes)
+        }
+        catch { return "Unavailable" }
+    }
+
+    $gpu = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+    $gpuText = New-Object System.Collections.Generic.List[string]
+    foreach ($g in $gpu) {
+        $reg = $null
+        $regMatches = @(Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\*" -EA Ignore | Where-Object {
+            $_.DriverDesc -eq $g.Name -or $_.MatchingDeviceId -eq $g.PNPDeviceID -or $_.ProviderName -eq $g.AdapterCompatibility
+        })
+        if ($regMatches.Count -gt 0) { $reg = $regMatches[0] }
+
+        $vramBytes = $null
+        if ($reg) {
+            if ($null -ne $reg.'HardwareInformation.qwMemorySize') { $vramBytes = [double]$reg.'HardwareInformation.qwMemorySize' }
+            elseif ($null -ne $reg.'HardwareInformation.MemorySize' -and $reg.'HardwareInformation.MemorySize' -isnot [byte[]]) { $vramBytes = [double]$reg.'HardwareInformation.MemorySize' }
+        }
+        if (($null -eq $vramBytes -or $vramBytes -le 0) -and $g.AdapterRAM) { $vramBytes = [double]([uint32]$g.AdapterRAM) }
+
+        $name = Get-CleanHardwareValue $g.Name "Unknown GPU"
+        $vendor = Get-GpuVendorTextLocal $g.Name $g.PNPDeviceID
+        $driverDate = Convert-CimDateText $g.DriverDate
+        $refresh = if ($g.CurrentRefreshRate) { "$($g.CurrentRefreshRate) Hz" } else { "Unavailable" }
+        $resolution = if ($g.CurrentHorizontalResolution -and $g.CurrentVerticalResolution) { "$($g.CurrentHorizontalResolution) x $($g.CurrentVerticalResolution) @ $refresh" } else { "Unavailable" }
+        $bits = if ($g.CurrentBitsPerPixel) { "$($g.CurrentBitsPerPixel)-bit" } else { "Unavailable" }
+        $status = Get-CleanHardwareValue $g.Status "Unknown"
+        $availability = Get-GpuAvailabilityTextLocal $g.Availability
+        $arch = Get-GpuVideoArchTextLocal $g.VideoArchitecture
+        $mode = Get-CleanHardwareValue $g.VideoModeDescription "Unavailable"
+        $processor = Get-CleanHardwareValue $g.VideoProcessor "Unavailable"
+        $dac = Get-CleanHardwareValue $g.AdapterDACType "Unavailable"
+        $pnp = Get-CleanHardwareValue $g.PNPDeviceID "Unavailable"
+        $infSection = if ($reg -and $reg.InfSection) { Get-CleanHardwareValue $reg.InfSection "Unavailable" } else { "Unavailable" }
+        $provider = if ($reg -and $reg.ProviderName) { Get-CleanHardwareValue $reg.ProviderName "Unavailable" } elseif ($g.AdapterCompatibility) { Get-CleanHardwareValue $g.AdapterCompatibility "Unavailable" } else { "Unavailable" }
+        $luid = if ($reg -and $reg.AdapterLuid) { Get-CleanHardwareValue $reg.AdapterLuid "Unavailable" } else { "Unavailable" }
+
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add($name)
+        $lines.Add("Vendor: $vendor")
+        $lines.Add("VRAM: $(ConvertTo-GpuMemoryTextLocal $vramBytes)")
+        $lines.Add("Driver: $($g.DriverVersion)")
+        if ($driverDate -ne "Unavailable") { $lines.Add("Driver date: $driverDate") }
+        if ($provider -ne "Unavailable") { $lines.Add("Provider: $provider") }
+        $lines.Add("Status: $status / $availability")
+        $lines.Add("Resolution: $resolution")
+        if ($bits -ne "Unavailable") { $lines.Add("Color depth: $bits") }
+        if ($mode -ne "Unavailable") { $lines.Add("Mode: $mode") }
+        if ($processor -ne "Unavailable") { $lines.Add("Processor: $processor") }
+        if ($dac -ne "Unavailable") { $lines.Add("DAC: $dac") }
+        if ($arch -ne "Unknown") { $lines.Add("Architecture: $arch") }
+        if ($infSection -ne "Unavailable") { $lines.Add("INF section: $infSection") }
+        if ($luid -ne "Unavailable") { $lines.Add("Adapter LUID: $luid") }
+        if ($pnp -ne "Unavailable") { $lines.Add("PNP ID: $pnp") }
+        $gpuText.Add(($lines -join "`n"))
+    }
+    $res.GPU = if ($gpuText.Count -eq 0) { "Unavailable" } else { ($gpuText -join "`n`n") }
+}
+catch { $res.GPU = "Unavailable" }
+[pscustomobject]$res
+
+'@
+$script:MyDeviceMotherboardBody = @'
+
+$res = [ordered]@{ Section = "Motherboard" }
+try {
+    $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue | Select-Object -First 1
+    $bios = Get-CimInstance Win32_BIOS -ErrorAction SilentlyContinue | Select-Object -First 1
+    $csp = Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mem = @(Get-CimInstance Win32_PhysicalMemory -ErrorAction SilentlyContinue)
+    $memArray = Get-CimInstance Win32_PhysicalMemoryArray -ErrorAction SilentlyContinue | Select-Object -First 1
+    $tpm = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftTpm" -ClassName Win32_Tpm -ErrorAction SilentlyContinue | Select-Object -First 1
+    $mbLines = @()
+    $systemName = ("{0} {1}" -f (Get-CleanHardwareValue $cs.Manufacturer ""), (Get-CleanHardwareValue $cs.Model "")).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($systemName)) { $mbLines += "System: $systemName" }
+    $boardName = ("{0} {1}" -f (Get-CleanHardwareValue $mb.Manufacturer ""), (Get-CleanHardwareValue $mb.Product "")).Trim()
+    if (-not [string]::IsNullOrWhiteSpace($boardName)) { $mbLines += "Board: $boardName" }
+    $boardVersion = Get-CleanHardwareValue $mb.Version
+    if ($boardVersion -ne "Unavailable") { $mbLines += "Board Version: $boardVersion" }
+    $boardSerial = Get-CleanHardwareValue $mb.SerialNumber
+    if ($boardSerial -ne "Unavailable") { $mbLines += "Board Serial: $boardSerial" }
+    $sku = Get-CleanHardwareValue $cs.SystemSKUNumber
+    if ($sku -eq "Unavailable") { $sku = Get-CleanHardwareValue $csp.SKUNumber }
+    if ($sku -ne "Unavailable") { $mbLines += "System SKU: $sku" }
+    $uuid = Get-CleanHardwareValue $csp.UUID
+    if ($uuid -ne "Unavailable") { $mbLines += "UUID: $uuid" }
+    $biosVendor = Get-CleanHardwareValue $bios.Manufacturer
+    $biosVersion = Get-CleanHardwareValue $bios.SMBIOSBIOSVersion
+    if ($biosVersion -eq "Unavailable") { $biosVersion = Get-CleanHardwareValue $bios.Version }
+    $biosParts = @($biosVendor, $biosVersion) | Where-Object { $_ -ne "Unavailable" }
+    if ($biosParts.Count -gt 0) { $mbLines += "BIOS: $($biosParts -join ' ')" }
+    $biosDate = Convert-CimDateText $bios.ReleaseDate
+    if ($biosDate -ne "Unavailable") { $mbLines += "BIOS Date: $biosDate" }
+    $smbios = if ($bios.SMBIOSMajorVersion -and $null -ne $bios.SMBIOSMinorVersion) { "$($bios.SMBIOSMajorVersion).$($bios.SMBIOSMinorVersion)" } else { "Unavailable" }
+    if ($smbios -ne "Unavailable") { $mbLines += "SMBIOS: $smbios" }
+    $mbLines += "Firmware Mode: $(Get-FirmwareModeText)"
+    $slotCount = if ($memArray -and $memArray.MemoryDevices) { [int]$memArray.MemoryDevices } else { 0 }
+    if ($slotCount -gt 0) { $mbLines += "Memory Slots: $($mem.Count)/$slotCount used" }
+    if ($tpm) {
+        $tpmSpec = Get-CleanHardwareValue $tpm.SpecVersion
+        $tpmState = if ($tpm.IsEnabled_InitialValue) { "Enabled" } else { "Present" }
+        $tpmLine = "TPM: $tpmState"
+        if ($tpmSpec -ne "Unavailable") { $tpmLine += " ($tpmSpec)" }
+        $mbLines += $tpmLine
+    }
+    $chipsetPattern = "(?i)chipset|SMBus|LPC|PCI Express Root|PCIe Root|Root Port|Host Bridge|Root Complex|Platform Controller Hub|\bPCH\b|I/O Controller|IO Controller|Memory Controller|AMD PSP|AMD GPIO|Intel.*Management Engine"
+    $chipsetDevices = @()
+    try {
+        $pnpCandidates = @()
+        try { $pnpCandidates = @(Get-CimInstance Win32_PnPEntity -Filter "PNPClass='System'" -Property Name, PNPClass -ErrorAction Stop) } catch {}
+        if ($pnpCandidates.Count -eq 0) { $pnpCandidates = @(Get-CimInstance Win32_PnPEntity -Property Name, PNPClass -ErrorAction SilentlyContinue) }
+        $chipsetDevices = @($pnpCandidates | Where-Object { $_.Name -and $_.Name -match $chipsetPattern -and $_.Name -notmatch "(?i)virtual|Hyper-V" } | Sort-Object Name -Unique | Select-Object -ExpandProperty Name -First 6 | ForEach-Object { Get-CleanHardwareValue $_ } | Where-Object { $_ -ne "Unavailable" })
+    } catch {}
+    if ($chipsetDevices.Count -gt 0) {
+        $mbLines += "Chipset / Platform:"
+        foreach ($deviceName in $chipsetDevices) { $mbLines += " - $deviceName" }
+    } else { $mbLines += "Chipset / Platform: Not exposed by Windows" }
+    $res.MB = ($mbLines | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join "`n"
+}
+catch { $res.MB = "Unavailable" }
+[pscustomobject]$res
+
+'@
+$script:MyDeviceStorageBody = @'
+
+$res = [ordered]@{ Section = "Storage" }
+try {
+    $storageDevices = @()
+    $volumes = @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.DriveLetter -and $_.DriveType -eq "Fixed" } | Sort-Object DriveLetter)
+    $partitionByDriveLetter = @{}
+    foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue)) { if ($null -ne $p.DriveLetter) { $partitionByDriveLetter[[string]$p.DriveLetter] = $p } }
+    $diskByNumber = @{}
+    foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue)) { if ($null -ne $d.Number) { $diskByNumber[[int]$d.Number] = $d } }
+    $cimDiskByIndex = @{}
+    foreach ($d in @(Get-CimInstance Win32_DiskDrive -Property Index, Model, InterfaceType, SerialNumber -ErrorAction SilentlyContinue)) { if ($null -ne $d.Index) { $cimDiskByIndex[[int]$d.Index] = $d } }
+    foreach ($v in $volumes) {
+        $driveId = "{0}:" -f $v.DriveLetter
+        $label = if ([string]::IsNullOrWhiteSpace($v.FileSystemLabel)) { "(No label)" } else { [string]$v.FileSystemLabel }
+        $fileSystem = if ([string]::IsNullOrWhiteSpace($v.FileSystem)) { "Unknown FS" } else { [string]$v.FileSystem }
+        $sizeBytes = [double]$v.Size; $freeBytes = [double]$v.SizeRemaining
+        $freePercent = if ($sizeBytes -gt 0) { [math]::Round(($freeBytes / $sizeBytes) * 100, 1) } else { 0 }
+        $usedPercent = [math]::Max(0, [math]::Round(100 - $freePercent, 1))
+        $partition = $null; $disk = $null; $cimDisk = $null
+        try { $partition = $partitionByDriveLetter[[string]$v.DriveLetter]; if ($partition -and $null -ne $partition.DiskNumber) { $disk = $diskByNumber[[int]$partition.DiskNumber]; $cimDisk = $cimDiskByIndex[[int]$partition.DiskNumber] } } catch {}
+        $hardwareName = "Unknown physical drive"
+        if ($disk -and -not [string]::IsNullOrWhiteSpace($disk.FriendlyName)) { $hardwareName = [string]$disk.FriendlyName } elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace($cimDisk.Model)) { $hardwareName = [string]$cimDisk.Model }
+        $diskNumberText = if ($partition) { "Disk $($partition.DiskNumber), Partition $($partition.PartitionNumber)" } else { "Disk unknown" }
+        $busType = if ($disk -and $disk.BusType) { [string]$disk.BusType } elseif ($cimDisk -and $cimDisk.InterfaceType) { [string]$cimDisk.InterfaceType } else { "Bus unknown" }
+        $partitionStyle = if ($disk -and $disk.PartitionStyle) { [string]$disk.PartitionStyle } else { "Style unknown" }
+        $serial = if ($disk -and -not [string]::IsNullOrWhiteSpace($disk.SerialNumber)) { ([string]$disk.SerialNumber).Trim() } elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace($cimDisk.SerialNumber)) { ([string]$cimDisk.SerialNumber).Trim() } else { "" }
+        $diskHealth = if ($disk -and $disk.HealthStatus) { [string]$disk.HealthStatus } else { "Unknown" }
+        $volumeHealth = if ($v.HealthStatus) { [string]$v.HealthStatus } else { "Unknown" }
+        $healthText = if ($diskHealth -eq $volumeHealth) { $diskHealth } else { "Disk: $diskHealth | Volume: $volumeHealth" }
+        $healthRank = [math]::Max((Get-HealthRank $diskHealth), (Get-HealthRank $volumeHealth))
+        $operational = if ($disk -and $disk.OperationalStatus) { ([string[]]$disk.OperationalStatus) -join ", " } else { "Unknown" }
+        $metaParts = @($diskNumberText, $busType, $fileSystem, $partitionStyle)
+        if (-not [string]::IsNullOrWhiteSpace($serial)) { $metaParts += "Serial: $serial" }
+        $storageDevices += [pscustomobject]@{ Drive=$driveId; Label=$label; Hardware=$hardwareName; Meta=($metaParts -join " | "); Health=$healthText; HealthBrush=(Get-HealthBrush $healthRank); Operational="Operational: $operational"; FreeText=("{0} free of {1} ({2:N1}%)" -f (ConvertTo-StorageSizeText $freeBytes), (ConvertTo-StorageSizeText $sizeBytes), $freePercent); FreePercent=$freePercent; UsedPercent=$usedPercent; FreeBrush=(Get-FreeSpaceBrush $freePercent) }
+    }
+    if ($storageDevices.Count -eq 0) {
+        $logicalDisks = @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction SilentlyContinue | Sort-Object DeviceID)
+        foreach ($d in $logicalDisks) {
+            $sizeBytes = [double]$d.Size; $freeBytes = [double]$d.FreeSpace; $freePercent = if ($sizeBytes -gt 0) { [math]::Round(($freeBytes / $sizeBytes) * 100, 1) } else { 0 }
+            $storageDevices += [pscustomobject]@{ Drive=[string]$d.DeviceID; Label=if ([string]::IsNullOrWhiteSpace($d.VolumeName)) { "(No label)" } else { [string]$d.VolumeName }; Hardware="Physical drive details unavailable"; Meta="Logical disk fallback | $($d.FileSystem)"; Health="Unknown"; HealthBrush="#8B949E"; Operational="Operational: Unknown"; FreeText=("{0} free of {1} ({2:N1}%)" -f (ConvertTo-StorageSizeText $freeBytes), (ConvertTo-StorageSizeText $sizeBytes), $freePercent); FreePercent=$freePercent; UsedPercent=[math]::Max(0, [math]::Round(100 - $freePercent, 1)); FreeBrush=(Get-FreeSpaceBrush $freePercent) }
+        }
+    }
+    $res.StorageDevices = $storageDevices
+    $res.Storage = if ($storageDevices.Count -gt 0) { "Fixed volumes detected: $($storageDevices.Count)" } else { "No fixed storage volumes found." }
+}
+catch { $res.Storage = "Unavailable"; $res.StorageDevices = @() }
+[pscustomobject]$res
+
+'@
+$script:MyDeviceNetworkBody = @'
+
+$res = [ordered]@{ Section = "Network" }
+try {
+    $networkAdapters = @()
+    $adapterByIndex = @{}
+    foreach ($adapter in @(Get-CimInstance Win32_NetworkAdapter -Filter "NetEnabled=True" -Property Index, Name, NetConnectionID, Speed, PhysicalAdapter, NetConnectionStatus, MACAddress, Manufacturer, AdapterType, ServiceName -ErrorAction SilentlyContinue)) {
+        if ($null -ne $adapter.Index) { $adapterByIndex[[int]$adapter.Index] = $adapter }
+    }
+
+    $netAdapterByIndex = @{}
+    try {
+        foreach ($netAdapter in @(Get-NetAdapter -ErrorAction Stop)) {
+            if ($null -ne $netAdapter.ifIndex) { $netAdapterByIndex[[int]$netAdapter.ifIndex] = $netAdapter }
+        }
+    } catch {}
+
+    $profileByIndex = @{}
+    try {
+        foreach ($profile in @(Get-NetConnectionProfile -ErrorAction Stop)) {
+            if ($null -ne $profile.InterfaceIndex) { $profileByIndex[[int]$profile.InterfaceIndex] = $profile }
+        }
+    } catch {}
+
+    $ipInterfaceByIndex = @{}
+    try {
+        foreach ($ipInterface in @(Get-NetIPInterface -AddressFamily IPv4 -ErrorAction Stop)) {
+            if ($null -ne $ipInterface.InterfaceIndex) { $ipInterfaceByIndex[[int]$ipInterface.InterfaceIndex] = $ipInterface }
+        }
+    } catch {}
+
+    $dnsClientByIndex = @{}
+    try {
+        foreach ($dnsClient in @(Get-DnsClient -ErrorAction Stop)) {
+            if ($null -ne $dnsClient.InterfaceIndex) { $dnsClientByIndex[[int]$dnsClient.InterfaceIndex] = $dnsClient }
+        }
+    } catch {}
+
+    $routeByIndex = @{}
+    try {
+        foreach ($route in @(Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction Stop | Sort-Object RouteMetric, InterfaceMetric)) {
+            if ($null -ne $route.InterfaceIndex) {
+                $idx = [int]$route.InterfaceIndex
+                if (-not $routeByIndex.ContainsKey($idx)) { $routeByIndex[$idx] = $route }
+            }
+        }
+    } catch {}
+
+    $statsByName = @{}
+    try {
+        foreach ($stats in @(Get-NetAdapterStatistics -ErrorAction Stop)) {
+            if (-not [string]::IsNullOrWhiteSpace($stats.Name)) { $statsByName[[string]$stats.Name] = $stats }
+        }
+    } catch {}
+
+    $wifiInfoByName = @{}
+    try {
+        $currentWifiName = $null
+        foreach ($line in @(netsh wlan show interfaces 2>$null)) {
+            if ($line -match '^\s*Name\s*:\s*(.+?)\s*$') {
+                $currentWifiName = $matches[1].Trim()
+                if (-not $wifiInfoByName.ContainsKey($currentWifiName)) { $wifiInfoByName[$currentWifiName] = [ordered]@{} }
+                continue
+            }
+            if ([string]::IsNullOrWhiteSpace($currentWifiName)) { continue }
+            if ($line -match '^\s*SSID\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["SSID"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*BSSID\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["BSSID"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Signal\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Signal"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Radio type\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Radio"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Channel\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Channel"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Authentication\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Authentication"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Cipher\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["Cipher"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Receive rate \(Mbps\)\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["RxRate"] = $matches[1].Trim(); continue }
+            if ($line -match '^\s*Transmit rate \(Mbps\)\s*:\s*(.+?)\s*$') { $wifiInfoByName[$currentWifiName]["TxRate"] = $matches[1].Trim(); continue }
+        }
+    } catch {}
+
+    $networkConfigs = @(Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled=True" -Property Index, Description, IPAddress, IPSubnet, DefaultIPGateway, DNSServerSearchOrder, DHCPEnabled, DHCPServer, DHCPLeaseObtained, DHCPLeaseExpires, DNSDomain, DNSHostName, MACAddress -ErrorAction SilentlyContinue)
+    foreach ($cfg in $networkConfigs) {
+        if ($null -eq $cfg.Index) { continue }
+        $idx = [int]$cfg.Index
+        $adapter = $adapterByIndex[$idx]
+        $netAdapter = $netAdapterByIndex[$idx]
+        $adapterName = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.Name)) { [string]$netAdapter.Name } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.NetConnectionID)) { [string]$adapter.NetConnectionID } else { [string]$cfg.Description }
+        $description = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.InterfaceDescription)) { [string]$netAdapter.InterfaceDescription } elseif (-not [string]::IsNullOrWhiteSpace($cfg.Description)) { [string]$cfg.Description } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.Name)) { [string]$adapter.Name } else { "Unknown adapter" }
+        if ($adapterName -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth" -or $description -match "(?i)loopback|virtual|vEthernet|Hyper-V|Bluetooth") { continue }
+        if ($adapter -and $null -ne $adapter.PhysicalAdapter -and -not $adapter.PhysicalAdapter) { continue }
+
+        $ipAddresses = @($cfg.IPAddress)
+        $subnets = @($cfg.IPSubnet)
+        $ipv4Entries = @()
+        $ipv4Copy = @()
+        $ipv6Entries = @()
+        $ipv6Copy = @()
+        for ($i = 0; $i -lt $ipAddresses.Count; $i++) {
+            $address = [string]$ipAddresses[$i]
+            if ([string]::IsNullOrWhiteSpace($address)) { continue }
+            $subnet = if ($i -lt $subnets.Count) { [string]$subnets[$i] } else { "" }
+            if ($address -match "^\d{1,3}(\.\d{1,3}){3}$") {
+                $prefixLength = Convert-SubnetMaskToPrefixLength $subnet
+                $cidr = if ([string]::IsNullOrWhiteSpace($prefixLength)) { $address } else { "$address/$prefixLength" }
+                $ipv4Copy += $cidr
+                if ([string]::IsNullOrWhiteSpace($subnet)) { $ipv4Entries += $cidr } else { $ipv4Entries += "$cidr ($subnet)" }
+            }
+            elseif ($address -match ":") {
+                $prefix = if ($subnet -match "^\d{1,3}$") { "/$subnet" } else { "" }
+                $cidr6 = "$address$prefix"
+                $ipv6Copy += $cidr6
+                if ($address -notmatch "^(?i)fe80:") { $ipv6Entries += $cidr6 }
+            }
+        }
+        if ($ipv6Entries.Count -eq 0) { $ipv6Entries = @($ipv6Copy | Select-Object -First 2) }
+        if ($ipv4Entries.Count -eq 0) { continue }
+
+        $gatewayList = @($cfg.DefaultIPGateway | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $gatewayText = if ($gatewayList.Count -gt 0) { $gatewayList -join ", " } else { "None" }
+        $gatewayLink = [string](@($gatewayList | Where-Object { $_ -match "^\d{1,3}(\.\d{1,3}){3}$" }) | Select-Object -First 1)
+        if ([string]::IsNullOrWhiteSpace($gatewayLink)) { $gatewayLink = [string]($gatewayList | Select-Object -First 1) }
+
+        $dnsList = @($cfg.DNSServerSearchOrder | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+        $dnsText = if ($dnsList.Count -gt 0) { $dnsList -join ", " } else { "None" }
+
+        $speed = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.LinkSpeed)) { [string]$netAdapter.LinkSpeed } elseif ($adapter) { Convert-NetworkSpeedText $adapter.Speed } else { "Unknown" }
+        $status = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.Status)) { [string]$netAdapter.Status } elseif ($adapter) { Convert-NetConnectionStatusText $adapter.NetConnectionStatus } else { "Unknown" }
+        $mediaState = if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.MediaConnectionState)) { [string]$netAdapter.MediaConnectionState } else { "" }
+        $linkParts = @($status)
+        if (-not [string]::IsNullOrWhiteSpace($mediaState) -and $mediaState -ne $status) { $linkParts += $mediaState }
+        if (-not [string]::IsNullOrWhiteSpace($speed)) { $linkParts += "Speed: $speed" }
+
+        $profile = $profileByIndex[$idx]
+        $profileText = "Unavailable"
+        $connectivityText = ""
+        if ($profile) {
+            $profileName = if ([string]::IsNullOrWhiteSpace($profile.Name)) { "Unidentified network" } else { [string]$profile.Name }
+            $category = if ([string]::IsNullOrWhiteSpace($profile.NetworkCategory)) { "Unknown" } else { [string]$profile.NetworkCategory }
+            $profileText = "$profileName ($category)"
+            $connectivityParts = @()
+            if (-not [string]::IsNullOrWhiteSpace($profile.IPv4Connectivity)) { $connectivityParts += "IPv4 $($profile.IPv4Connectivity)" }
+            if (-not [string]::IsNullOrWhiteSpace($profile.IPv6Connectivity)) { $connectivityParts += "IPv6 $($profile.IPv6Connectivity)" }
+            $connectivityText = $connectivityParts -join " | "
+        }
+
+        $ipInterface = $ipInterfaceByIndex[$idx]
+        $route = $routeByIndex[$idx]
+        $metricParts = @()
+        if ($ipInterface -and $null -ne $ipInterface.NlMtu) { $metricParts += "MTU: $($ipInterface.NlMtu)" }
+        if ($ipInterface -and $null -ne $ipInterface.InterfaceMetric) { $metricParts += "Interface metric: $($ipInterface.InterfaceMetric)" }
+        if ($route -and $null -ne $route.RouteMetric) { $metricParts += "Route metric: $($route.RouteMetric)" }
+        $routeText = $metricParts -join " | "
+
+        $dhcpMode = if ($cfg.DHCPEnabled) { "On" } else { "Off / static" }
+        if ($ipInterface -and -not [string]::IsNullOrWhiteSpace($ipInterface.Dhcp)) { $dhcpMode = [string]$ipInterface.Dhcp }
+        $dhcpText = $dhcpMode
+        if ($cfg.DHCPEnabled -and -not [string]::IsNullOrWhiteSpace($cfg.DHCPServer)) { $dhcpText += " via $($cfg.DHCPServer)" }
+        $leaseText = ""
+        if ($cfg.DHCPEnabled) {
+            $leaseStart = Format-DateTimeText $cfg.DHCPLeaseObtained "yyyy-MM-dd HH:mm"
+            $leaseEnd = Format-DateTimeText $cfg.DHCPLeaseExpires "yyyy-MM-dd HH:mm"
+            if ($leaseStart -ne "Unavailable" -or $leaseEnd -ne "Unavailable") { $leaseText = "$leaseStart to $leaseEnd" }
+        }
+
+        $dnsClient = $dnsClientByIndex[$idx]
+        $suffixParts = @()
+        if (-not [string]::IsNullOrWhiteSpace($cfg.DNSDomain)) { $suffixParts += [string]$cfg.DNSDomain }
+        if ($dnsClient -and -not [string]::IsNullOrWhiteSpace($dnsClient.ConnectionSpecificSuffix)) { $suffixParts += [string]$dnsClient.ConnectionSpecificSuffix }
+        $dnsSuffixText = @($suffixParts | Select-Object -Unique) -join ", "
+
+        $mac = if (-not [string]::IsNullOrWhiteSpace($cfg.MACAddress)) { [string]$cfg.MACAddress } elseif ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.MacAddress)) { [string]$netAdapter.MacAddress } elseif ($adapter -and -not [string]::IsNullOrWhiteSpace($adapter.MACAddress)) { [string]$adapter.MACAddress } else { "" }
+
+        $stats = $null
+        if ($statsByName.ContainsKey($adapterName)) { $stats = $statsByName[$adapterName] }
+        elseif ($netAdapter -and $statsByName.ContainsKey([string]$netAdapter.Name)) { $stats = $statsByName[[string]$netAdapter.Name] }
+        $trafficText = ""
+        if ($stats) {
+            $rx = ConvertTo-StorageSizeText ([double]$stats.ReceivedBytes)
+            $tx = ConvertTo-StorageSizeText ([double]$stats.SentBytes)
+            $trafficText = "RX $rx / TX $tx"
+        }
+
+        $wifi = $null
+        foreach ($wifiKey in @($adapterName, $description, $(if ($netAdapter) { [string]$netAdapter.Name } else { "" }))) {
+            if (-not [string]::IsNullOrWhiteSpace($wifiKey) -and $wifiInfoByName.ContainsKey($wifiKey)) { $wifi = $wifiInfoByName[$wifiKey]; break }
+        }
+        $wifiText = ""
+        if ($wifi) {
+            $wifiParts = @()
+            if (-not [string]::IsNullOrWhiteSpace($wifi["SSID"])) { $wifiParts += "SSID: $($wifi["SSID"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["BSSID"])) { $wifiParts += "BSSID: $($wifi["BSSID"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Signal"])) { $wifiParts += "Signal: $($wifi["Signal"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Radio"])) { $wifiParts += "Radio: $($wifi["Radio"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Channel"])) { $wifiParts += "Channel: $($wifi["Channel"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Authentication"])) { $wifiParts += "Auth: $($wifi["Authentication"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["Cipher"])) { $wifiParts += "Cipher: $($wifi["Cipher"])" }
+            if (-not [string]::IsNullOrWhiteSpace($wifi["RxRate"]) -or -not [string]::IsNullOrWhiteSpace($wifi["TxRate"])) { $wifiParts += "Rate: $($wifi["RxRate"])/$($wifi["TxRate"]) Mbps" }
+            $wifiText = $wifiParts -join " | "
+        }
+
+        $driverParts = @()
+        if ($netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.DriverVersion)) { $driverParts += "Version: $($netAdapter.DriverVersion)" }
+        if ($netAdapter -and $null -ne $netAdapter.DriverDate) {
+            $driverDate = Format-DateTimeText $netAdapter.DriverDate "yyyy-MM-dd"
+            if ($driverDate -ne "Unavailable") { $driverParts += "Date: $driverDate" }
+        }
+        if ($driverParts.Count -eq 0 -and $netAdapter -and -not [string]::IsNullOrWhiteSpace($netAdapter.DriverInformation)) { $driverParts += [string]$netAdapter.DriverInformation }
+        $driverText = $driverParts -join " | "
+
+        $networkAdapters += [pscustomobject]@{
+            Name         = $adapterName
+            Description  = $description
+            Profile      = $profileText
+            Connectivity = $connectivityText
+            LinkText     = (($linkParts + $metricParts) -join " | ")
+            Status       = $status
+            IPv4Text     = ($ipv4Entries -join ", ")
+            IPv4Copy     = ($ipv4Copy -join ", ")
+            IPv6Text     = ($ipv6Entries -join ", ")
+            IPv6Copy     = ($ipv6Copy -join ", ")
+            GatewayText  = $gatewayText
+            GatewayLink  = $gatewayLink
+            DnsText      = $dnsText
+            DnsCopy      = ($dnsList -join ", ")
+            DhcpText     = $dhcpText
+            LeaseText    = $leaseText
+            DnsSuffix    = $dnsSuffixText
+            MacAddress   = $mac
+            TrafficText  = $trafficText
+            WifiText     = $wifiText
+            DriverText   = $driverText
+            RouteText    = $routeText
+        }
+    }
+    $res.NetworkAdapters = $networkAdapters
+    if ($networkAdapters.Count -gt 0) {
+        $primary = @($networkAdapters | Where-Object { $_.GatewayText -and $_.GatewayText -ne "None" } | Select-Object -First 1)
+        $primaryText = if ($primary.Count -gt 0) { " | Primary: $($primary[0].Name)" } else { "" }
+        $res.Network = "Active physical adapters: $($networkAdapters.Count)$primaryText"
+    }
+    else {
+        $res.Network = "No active physical network adapters found."
+    }
+}
+catch { $res.Network = "Unavailable"; $res.NetworkAdapters = @() }
+[pscustomobject]$res
+
+'@
+$script:MyDevicePowerBody = @'
+
+$res = [ordered]@{ Section = "Power" }
+try {
+    $batteries = @(Get-CimInstance Win32_Battery -ErrorAction SilentlyContinue)
+    $powerTelemetry = Get-BatteryPowerTelemetry -Win32Batteries $batteries
+    $res.PowerDraw = $powerTelemetry.BatteryRate
+    $res.PowerTotal = $powerTelemetry.TotalPower
+    $res.PowerElectrical = $powerTelemetry.Electrical
+    if ($batteries.Count -gt 0) {
+        $chargeValues = @($batteries | ForEach-Object { Get-ValidPowerNumber $_.EstimatedChargeRemaining -AllowZero } | Where-Object { $null -ne $_ })
+        if ($chargeValues.Count -gt 0) { $averageCharge = [math]::Round(($chargeValues | Measure-Object -Average).Average, 0); $packText = if ($batteries.Count -gt 1) { " avg across $($batteries.Count) packs" } else { "" }; $res.BatteryCharge = "$averageCharge%$packText" } else { $res.BatteryCharge = "Unavailable" }
+        $statusText = @($batteries | ForEach-Object { switch ([int]$_.BatteryStatus) { 1 { "Discharging" } 2 { "Plugged In / Charging" } 3 { "Fully Charged" } 4 { "Low" } 5 { "Critical" } 6 { "Charging" } 7 { "Charging (High)" } 8 { "Charging (Low)" } 9 { "Charging (Critical)" } 11 { "Partially Charged" } default { "Unknown (Code: $($_.BatteryStatus))" } } } | Select-Object -Unique)
+        $res.BatteryStatus = if ($statusText.Count -gt 0) { $statusText -join ", " } else { "Unknown" }
+        $runtimeValues = @($batteries | ForEach-Object { Get-ValidPowerNumber $_.EstimatedRunTime } | Where-Object { $null -ne $_ -and $_ -ne 71582788 })
+        if ($runtimeValues.Count -gt 0) { $runtime = [int]($runtimeValues | Select-Object -First 1); $hours = [math]::Floor($runtime / 60); $minutes = $runtime % 60; $res.BatteryTime = "${hours}h ${minutes}m remaining" } else { $res.BatteryTime = "" }
+        if ($powerTelemetry.DesignCapacity -and $powerTelemetry.FullCapacity) { $health = [math]::Round(($powerTelemetry.FullCapacity / $powerTelemetry.DesignCapacity) * 100, 1); $res.BatteryHealth = "$health% ($(Convert-MilliwattHourText $powerTelemetry.FullCapacity) / $(Convert-MilliwattHourText $powerTelemetry.DesignCapacity))" } else { $res.BatteryHealth = "Not exposed by battery firmware" }
+    }
+    else {
+        $res.BatteryCharge = "Desktop System"; $res.BatteryStatus = "No Battery Detected"; $res.BatteryTime = ""; $res.BatteryHealth = "N/A"; $res.PowerDraw = "N/A"; $res.PowerElectrical = "N/A"
+    }
+    $res.PowerPlan = Get-ActivePowerPlanText
+}
+catch { $res.BatteryCharge = "Unavailable"; $res.BatteryStatus = "Unavailable"; $res.BatteryTime = ""; $res.BatteryHealth = "Unavailable"; $res.PowerPlan = "Unavailable"; $res.PowerDraw = "Unavailable"; $res.PowerTotal = "Unavailable"; $res.PowerElectrical = "Unavailable" }
+[pscustomobject]$res
+
+'@
+
+function Set-MyDeviceUiPlaceholders {
+    (Get-Ctrl "txtDeviceOS").Text = "Gathering OS/security/account stats..."
+    (Get-Ctrl "txtDeviceCPU").Text = "Gathering CPU stats..."
+    (Get-Ctrl "txtDeviceRAM").Text = "Gathering RAM stats..."
+    Set-MyDeviceGpuCardsPlaceholder "Gathering GPU stats..."
+    (Get-Ctrl "txtDeviceMotherboard").Text = "Gathering motherboard/BIOS/TPM/chipset stats..."
+    (Get-Ctrl "txtDeviceStorage").Text = "Gathering storage details..."
+    (Get-Ctrl "txtDeviceNetwork").Text = "Gathering network details..."
+    (Get-Ctrl "txtBatteryHealth").Text = "Health: Gathering..."
+    (Get-Ctrl "txtBatteryCharge").Text = "Charge: Gathering..."
+    (Get-Ctrl "txtBatteryStatus").Text = "Status: Gathering..."
+    (Get-Ctrl "txtPowerPlan").Text = "Power: Gathering..."
+    $batteryTimeCtrl = Get-Ctrl "txtBatteryTime"
+    if ($batteryTimeCtrl) { $batteryTimeCtrl.Text = "Time Remaining: Gathering..."; $batteryTimeCtrl.Visibility = "Visible" }
+    (Get-Ctrl "txtPowerDraw").Text = "Power Draw: Gathering..."
+    (Get-Ctrl "txtPowerTotal").Text = "Total Power: Gathering..."
+    (Get-Ctrl "txtPowerElectrical").Text = "Electrical: Gathering..."
+    $storageList = Get-Ctrl "pnlDeviceStorageList"
+    if ($storageList) { $storageList.Children.Clear() }
+    $networkList = Get-Ctrl "pnlDeviceNetworkList"
+    if ($networkList) { $networkList.Children.Clear() }
+}
+
+function Get-MyDeviceCacheEntry {
+    param([string]$Section)
+    if (-not $script:MyDeviceCache -or -not $script:MyDeviceCache.ContainsKey($Section)) { return $null }
+    $entry = $script:MyDeviceCache[$Section]
+    if (-not $entry -or -not $entry.Timestamp) { return $null }
+    if (((Get-Date) - $entry.Timestamp).TotalSeconds -gt $script:MyDeviceCacheTtlSeconds) { return $null }
+    return $entry.Data
+}
+
+function Set-MyDeviceCacheEntry {
+    param([string]$Section, $Data)
+    if (-not $script:MyDeviceCache) { $script:MyDeviceCache = @{} }
+    $script:MyDeviceCache[$Section] = [pscustomobject]@{ Timestamp = Get-Date; Data = $Data }
+}
+
+
+function New-MyDeviceTextBlock {
+    param(
+        [string]$Text,
+        [int]$FontSize = 13,
+        [string]$Foreground = "#98989D",
+        [string]$FontWeight = "Normal",
+        [double]$MarginTop = 0
+    )
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Text
+    $tb.FontSize = $FontSize
+    $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Foreground)
+    $tb.TextWrapping = [System.Windows.TextWrapping]::Wrap
+    $tb.LineHeight = 18
+    if ($FontWeight -ne "Normal") {
+        switch ($FontWeight) {
+            "SemiBold" { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+            "Bold" { $tb.FontWeight = [System.Windows.FontWeights]::Bold }
+            default { $tb.FontWeight = [System.Windows.FontWeights]::Normal }
+        }
+    }
+    if ($MarginTop -gt 0) { $tb.Margin = [System.Windows.Thickness]::new(0, $MarginTop, 0, 0) }
+    return $tb
+}
+
+function Get-GpuVendorFromTextBlock {
+    param([string]$GpuText)
+    if ($GpuText -match '(?im)^\s*Vendor:\s*(NVIDIA|AMD|Intel)\s*$') { return $matches[1] }
+    if ($GpuText -match '(?i)nvidia|ven_10de') { return "NVIDIA" }
+    if ($GpuText -match '(?i)amd|radeon|advanced micro devices|ven_1002') { return "AMD" }
+    if ($GpuText -match '(?i)intel|iris|arc|uhd graphics|ven_8086') { return "Intel" }
+    return "Unknown"
+}
+
+function Set-MyDeviceGpuCardsPlaceholder {
+    param([string]$Text)
+    $panel = Get-Ctrl "pnlDeviceGPUList"
+    if (-not $panel) { return }
+    $panel.Children.Clear()
+    [void]$panel.Children.Add((New-MyDeviceTextBlock -Text $Text))
+}
+
+function Set-MyDeviceGpuCards {
+    param([string]$GpuText)
+
+    $panel = Get-Ctrl "pnlDeviceGPUList"
+    if (-not $panel) { return }
+    $panel.Children.Clear()
+
+    if ([string]::IsNullOrWhiteSpace($GpuText)) {
+        [void]$panel.Children.Add((New-MyDeviceTextBlock -Text "Unavailable"))
+        return
+    }
+
+    $blocks = @($GpuText -split "(`r?`n){2,}" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    if ($blocks.Count -eq 0) { $blocks = @($GpuText) }
+
+    $index = 1
+    foreach ($block in $blocks) {
+        $vendor = Get-GpuVendorFromTextBlock -GpuText $block
+        $lines = @($block -split "`r?`n" | Where-Object { $_ -ne $null })
+        $title = if ($lines.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($lines[0])) { [string]$lines[0] } else { "GPU $index" }
+        $details = if ($lines.Count -gt 1) { ($lines[1..($lines.Count - 1)] -join "`n") } else { "Vendor: $vendor" }
+
+        $card = New-Object System.Windows.Controls.Border
+        $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#141416")
+        $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2C2C2E")
+        $card.BorderThickness = [System.Windows.Thickness]::new(1)
+        $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
+        $card.Padding = [System.Windows.Thickness]::new(10)
+        $card.Margin = if ($index -eq 1) { [System.Windows.Thickness]::new(0, 0, 0, 8) } else { [System.Windows.Thickness]::new(0, 4, 0, 8) }
+        $card.Cursor = [System.Windows.Input.Cursors]::Hand
+        $card.Tag = $vendor
+        $card.ToolTip = if ($vendor -eq "Unknown") { "No known GPU vendor detected for this adapter." } else { "Open $vendor control panel for this GPU." }
+
+        $stack = New-Object System.Windows.Controls.StackPanel
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $title -FontSize 13 -Foreground "#EBEBF5" -FontWeight "SemiBold"))
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $details -FontSize 12 -Foreground "#98989D" -MarginTop 3))
+        $card.Child = $stack
+
+        $card.Add_MouseLeftButtonUp({
+                param($s, $e)
+                $selectedVendor = [string]$sender.Tag
+                if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
+                    Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
                 }
                 else {
-                    "No active physical network adapters found."
+                    Open-GpuVendorControlPanel -Vendors @($selectedVendor)
                 }
+                $e.Handled = $true
+            })
 
-                # ==========================================
-                # Battery / Power Information
-                # ==========================================
-                try {
-                    $battery = Get-CimInstance Win32_Battery -ErrorAction Stop
+        [void]$panel.Children.Add($card)
+        $index++
+    }
+}
 
-                    if ($battery) {
-                        # Current Charge
-                        $charge = $battery.EstimatedChargeRemaining
-                        $res.BatteryCharge = "$charge%"
-
-                        # Charging Status
-                        switch ($battery.BatteryStatus) {
-                            1 { $status = "Discharging" }
-                            2 { $status = "Plugged In / Charging" }
-                            3 { $status = "Fully Charged" }
-                            4 { $status = "Low" }
-                            5 { $status = "Critical" }
-                            6 { $status = "Charging" }
-                            default { $status = "Unknown" }
-                        }
-
-                        $res.BatteryStatus = $status
-
-                        # Estimated Time Remaining
-                        if ($battery.EstimatedRunTime -gt 0 -and $battery.EstimatedRunTime -ne 71582788) {
-                            $hours = [math]::Floor($battery.EstimatedRunTime / 60)
-                            $minutes = $battery.EstimatedRunTime % 60
-                            $res.BatteryTime = "${hours}h ${minutes}m remaining"
-                        }
-                        else {
-                            $res.BatteryTime = "Calculating..."
-                        }
-
-                        # Battery Health
-                        $design = (Get-CimInstance -Namespace root\wmi -Class BatteryStaticData -ErrorAction SilentlyContinue).DesignedCapacity
-                        $full = (Get-CimInstance -Namespace root\wmi -Class BatteryFullChargedCapacity -ErrorAction SilentlyContinue).FullChargedCapacity
-
-                        if ($design -and $full) {
-                            $health = [math]::Round(($full / $design) * 100, 1)
-                            $res.BatteryHealth = "$health% of original capacity"
-                        }
-                        else {
-                            $res.BatteryHealth = "Unavailable"
-                        }
-                    }
-                    else {
-                        $res.BatteryCharge = "Desktop System"
-                        $res.BatteryStatus = "No Battery Detected"
-                        $res.BatteryTime = "N/A"
-                        $res.BatteryHealth = "N/A"
-                    }
-
-                    # Current Power Plan
-                    $powerPlan = powercfg /getactivescheme
-
-                    if ($powerPlan -match '\((.*?)\)') {
-                        $res.PowerPlan = $matches[1]
-                    }
-                    else {
-                        $res.PowerPlan = "Unknown"
-                    }
-                }
-                catch {
-                    $res.BatteryCharge = "Unavailable"
-                    $res.BatteryStatus = "Unavailable"
-                    $res.BatteryTime = "Unavailable"
-                    $res.BatteryHealth = "Unavailable"
-                    $res.PowerPlan = "Unavailable"
-                }
-
-                # # Network information
-                # $net = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback|vEthernet" }
-                # $routes = Get-NetRoute -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
-                # $dns = Get-DnsClientServerAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.InterfaceAlias -notmatch "Loopback" }
-
-                # $netInfo = @()
-                # foreach ($adapter in $net) {
-                #     $route = $routes | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -First 1
-                #     $dnsServers = ($dns | Where-Object { $_.InterfaceIndex -eq $adapter.InterfaceIndex } | Select-Object -ExpandProperty ServerAddresses) -join ", "
-                #     $speed = (Get-NetAdapter -Name $adapter.InterfaceAlias -ErrorAction SilentlyContinue).LinkSpeed
-                #     $netInfo += "$($adapter.InterfaceAlias) | IP: $($adapter.IPAddress)/$($adapter.PrefixLength) | GW: $($route.NextHop) | DNS: $dnsServers | Speed: $speed"
-                # }
-                # $res.Network = if ($netInfo) { $netInfo -join "`r`n" } else { "No active network adapters found." }
+function Set-MyDeviceSectionData {
+    param($Data)
+    if ($Data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $Data = $Data[0] }
+    if (-not $Data) { return }
+    switch ([string]$Data.Section) {
+        "Core" {
+            if ($Data.OS) { (Get-Ctrl "txtDeviceOS").Text = $Data.OS }
+            if ($Data.CPU) { (Get-Ctrl "txtDeviceCPU").Text = $Data.CPU }
+            if ($Data.RAM) { (Get-Ctrl "txtDeviceRAM").Text = $Data.RAM }
+            Start-MyDeviceBitLockerStatusUpdate
+        }
+        "GPU" { if ($Data.GPU) { Set-MyDeviceGpuCards -GpuText $Data.GPU } }
+        "Motherboard" { if ($Data.MB) { (Get-Ctrl "txtDeviceMotherboard").Text = $Data.MB } }
+        "Storage" {
+            if ($Data.Storage) { (Get-Ctrl "txtDeviceStorage").Text = $Data.Storage }
+            Set-MyDeviceStorageDetails -Devices $Data.StorageDevices
+        }
+        "Network" {
+            if ($Data.Network) { (Get-Ctrl "txtDeviceNetwork").Text = $Data.Network }
+            Set-MyDeviceNetworkDetails -Adapters $Data.NetworkAdapters
+        }
+        "Power" {
+            (Get-Ctrl "txtBatteryHealth").Text = "Health: $($Data.BatteryHealth)"
+            (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($Data.BatteryCharge)"
+            (Get-Ctrl "txtBatteryStatus").Text = "Status: $($Data.BatteryStatus)"
+            (Get-Ctrl "txtPowerPlan").Text = "Power: $($Data.PowerPlan)"
+            $batteryTimeText = [string]$Data.BatteryTime
+            $batteryTimeCtrl = Get-Ctrl "txtBatteryTime"
+            if ($batteryTimeCtrl) {
+                if ([string]::IsNullOrWhiteSpace($batteryTimeText)) { $batteryTimeCtrl.Text = ""; $batteryTimeCtrl.Visibility = "Collapsed" }
+                else { $batteryTimeCtrl.Text = "Time Remaining: $batteryTimeText"; $batteryTimeCtrl.Visibility = "Visible" }
             }
-            catch {}
-            return $res
-        })
+            (Get-Ctrl "txtPowerDraw").Text = "Power Draw: $($Data.PowerDraw)"
+            (Get-Ctrl "txtPowerTotal").Text = "Total Power: $($Data.PowerTotal)"
+            (Get-Ctrl "txtPowerElectrical").Text = "Electrical: $($Data.PowerElectrical)"
+        }
+    }
+}
 
-    $script:StatsAsyncResult = $script:StatsRunspace.BeginInvoke()
+function Stop-MyDeviceSectionJobs {
+    if ($script:StatsTimer) { try { $script:StatsTimer.Stop() } catch {} }
+    if ($script:MyDeviceSectionJobs) {
+        foreach ($job in @($script:MyDeviceSectionJobs.Values)) {
+            try { $job.PowerShell.Stop() } catch {}
+            try { $job.PowerShell.Dispose() } catch {}
+        }
+        $script:MyDeviceSectionJobs.Clear()
+    }
+    if ($script:StatsRunspace) {
+        try { $script:StatsRunspace.Stop() } catch {}
+        try { $script:StatsRunspace.Dispose() } catch {}
+        $script:StatsRunspace = $null
+    }
+}
 
-    # 3. Monitor Job using DispatcherTimer (UI Thread safe)
+function Start-MyDeviceSectionJob {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][string]$Body
+    )
+    $fullScript = $script:MyDeviceCommonHelpers + "`n" + $Body
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript($fullScript)
+    $async = $ps.BeginInvoke()
+    $script:MyDeviceSectionJobs[$Name] = [pscustomobject]@{
+        Name       = $Name
+        PowerShell = $ps
+        Async      = $async
+        StartedAt  = Get-Date
+    }
+}
+
+function Update-MyDeviceStats {
+    param([switch]$ForceRefresh)
+    $script:StatsStartedAt = Get-Date
+    Stop-MyDeviceSectionJobs
+    Set-MyDeviceUiPlaceholders
+
+    $sections = @(
+        [pscustomobject]@{ Name = "Core"; Body = $script:MyDeviceCoreBody },
+        [pscustomobject]@{ Name = "GPU"; Body = $script:MyDeviceGpuBody },
+        [pscustomobject]@{ Name = "Motherboard"; Body = $script:MyDeviceMotherboardBody },
+        [pscustomobject]@{ Name = "Storage"; Body = $script:MyDeviceStorageBody },
+        [pscustomobject]@{ Name = "Network"; Body = $script:MyDeviceNetworkBody },
+        [pscustomobject]@{ Name = "Power"; Body = $script:MyDevicePowerBody }
+    )
+
+    foreach ($section in $sections) {
+        $cached = if (-not $ForceRefresh) { Get-MyDeviceCacheEntry -Section $section.Name } else { $null }
+        if ($cached) {
+            Set-MyDeviceSectionData -Data $cached
+            Write-GuiLog "[My Device] Loaded $($section.Name) from RAM cache."
+        }
+        else {
+            Start-MyDeviceSectionJob -Name $section.Name -Body $section.Body
+        }
+    }
+
+    if ($script:MyDeviceSectionJobs.Count -eq 0) {
+        Write-GuiLog "[My Device] All sections loaded from RAM cache."
+        return
+    }
+
     $script:StatsTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(200)
     $script:StatsTimer.Add_Tick({
-            if ($script:StatsAsyncResult.IsCompleted) {
-                $script:StatsTimer.Stop()
-                try {
-                    $data = $script:StatsRunspace.EndInvoke($script:StatsAsyncResult)
-                    if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
-                
-                    # Apply data to the UI
-                    (Get-Ctrl "txtDeviceOS").Text = $data.OS
-                    (Get-Ctrl "txtDeviceCPU").Text = $data.CPU
-                    (Get-Ctrl "txtDeviceRAM").Text = $data.RAM
-                    (Get-Ctrl "txtDeviceGPU").Text = $data.GPU
-                    (Get-Ctrl "txtDeviceMotherboard").Text = $data.MB
-                    (Get-Ctrl "txtDeviceStorage").Text = $data.Storage
-                    (Get-Ctrl "txtDeviceNetwork").Text = $data.Network
-                    (Get-Ctrl "txtBatteryHealth").Text = "Health: $($data.BatteryHealth)"
-                    (Get-Ctrl "txtBatteryCharge").Text = "Charge: $($data.BatteryCharge)"
-                    (Get-Ctrl "txtBatteryStatus").Text = "Status: $($data.BatteryStatus)"
-                    (Get-Ctrl "txtPowerPlan").Text = "Power Plan: $($data.PowerPlan)"
-                    (Get-Ctrl "txtBatteryTime").Text = "Time Remaining: $($data.BatteryTime)"
+            if (-not $script:MyDeviceSectionJobs -or $script:MyDeviceSectionJobs.Count -eq 0) {
+                try { $script:StatsTimer.Stop() } catch {}
+                if ($script:StatsStartedAt) {
+                    $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
+                    Write-GuiLog "[My Device] Progressive stats load finished in ${elapsed}s."
                 }
-                catch {}
-                $script:StatsRunspace.Dispose()
+                return
+            }
+
+            foreach ($key in @($script:MyDeviceSectionJobs.Keys)) {
+                $job = $script:MyDeviceSectionJobs[$key]
+                if (-not $job -or -not $job.Async) { continue }
+                if ($job.Async.IsCompleted) {
+                    try {
+                        $data = $job.PowerShell.EndInvoke($job.Async)
+                        if ($data -is [System.Collections.ObjectModel.Collection[PSObject]]) { $data = $data[0] }
+                        if ($data) {
+                            Set-MyDeviceSectionData -Data $data
+                            Set-MyDeviceCacheEntry -Section $key -Data $data
+                            $elapsed = [math]::Round(((Get-Date) - $job.StartedAt).TotalSeconds, 1)
+                            Write-GuiLog "[My Device] $key loaded in ${elapsed}s."
+                        }
+                    }
+                    catch {
+                        Write-GuiLog "[My Device] $key load failed: $($_.Exception.Message)"
+                    }
+                    finally {
+                        try { $job.PowerShell.Dispose() } catch {}
+                        $script:MyDeviceSectionJobs.Remove($key)
+                    }
+                }
             }
         })
     $script:StatsTimer.Start()
 }
+
+function Start-MyDeviceBitLockerStatusUpdate {
+    $osText = Get-Ctrl "txtDeviceOS"
+    if (-not $osText) { return }
+
+    if ($script:BitLockerStatusTimer) {
+        try { $script:BitLockerStatusTimer.Stop() } catch {}
+    }
+    if ($script:BitLockerStatusRunspace) {
+        try { $script:BitLockerStatusRunspace.Stop() } catch {}
+        try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+    }
+
+    $script:BitLockerStatusRunspace = [PowerShell]::Create().AddScript({
+            function Get-BitLockerStatusTextFast {
+                $systemDrive = $env:SystemDrive
+                if ([string]::IsNullOrWhiteSpace($systemDrive)) { return "Unavailable" }
+
+                try {
+                    if (Get-Command Get-BitLockerVolume -ErrorAction SilentlyContinue) {
+                        $volume = Get-BitLockerVolume -MountPoint $systemDrive -ErrorAction Stop | Select-Object -First 1
+                        if ($volume) { return "$($volume.ProtectionStatus) ($($volume.VolumeStatus))" }
+                    }
+                }
+                catch {}
+
+                try {
+                    $volume = Get-CimInstance -Namespace "root\cimv2\Security\MicrosoftVolumeEncryption" -ClassName Win32_EncryptableVolume -ErrorAction Stop |
+                    Where-Object { $_.DriveLetter -eq $systemDrive } |
+                    Select-Object -First 1
+
+                    if ($volume) {
+                        $protection = switch ([int]$volume.ProtectionStatus) {
+                            0 { "Off" }
+                            1 { "On" }
+                            2 { "Unknown" }
+                            default { "Unknown" }
+                        }
+                        $conversion = switch ([int]$volume.ConversionStatus) {
+                            0 { "Fully Decrypted" }
+                            1 { "Fully Encrypted" }
+                            2 { "Encryption in Progress" }
+                            3 { "Decryption in Progress" }
+                            4 { "Encryption Paused" }
+                            5 { "Decryption Paused" }
+                            default { "Unknown" }
+                        }
+                        return "$protection ($conversion)"
+                    }
+                }
+                catch {}
+
+                return "Unavailable"
+            }
+
+            Get-BitLockerStatusTextFast
+        })
+
+    $script:BitLockerStatusAsyncResult = $script:BitLockerStatusRunspace.BeginInvoke()
+    $script:BitLockerStatusStartedAt = Get-Date
+    $script:BitLockerStatusTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:BitLockerStatusTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:BitLockerStatusTimer.Add_Tick({
+            $timedOut = $script:BitLockerStatusStartedAt -and (((Get-Date) - $script:BitLockerStatusStartedAt).TotalSeconds -gt 20)
+            if (($script:BitLockerStatusAsyncResult -and $script:BitLockerStatusAsyncResult.IsCompleted) -or $timedOut) {
+                $script:BitLockerStatusTimer.Stop()
+                try {
+                    if ($timedOut) {
+                        try { $script:BitLockerStatusRunspace.Stop() } catch {}
+                        $status = "Timed out"
+                    }
+                    else {
+                        $status = $script:BitLockerStatusRunspace.EndInvoke($script:BitLockerStatusAsyncResult)
+                        if ($status -is [System.Collections.ObjectModel.Collection[PSObject]]) { $status = [string]$status[0] }
+                    }
+                    if ([string]::IsNullOrWhiteSpace([string]$status)) { $status = "Unavailable" }
+
+                    $ctrl = Get-Ctrl "txtDeviceOS"
+                    if ($ctrl) {
+                        $replacement = "BitLocker: $status"
+                        if ($ctrl.Text -match "(?m)^BitLocker:") {
+                            $ctrl.Text = [regex]::Replace($ctrl.Text, "(?m)^BitLocker:.*$", $replacement)
+                        }
+                        else {
+                            $ctrl.Text = "$($ctrl.Text)`n$replacement"
+                        }
+                    }
+                }
+                catch {}
+                try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+                $script:BitLockerStatusRunspace = $null
+                $script:BitLockerStatusAsyncResult = $null
+                $script:BitLockerStatusStartedAt = $null
+            }
+        })
+    $script:BitLockerStatusTimer.Start()
+}
+
+function New-WmtBrush {
+    param([string]$Color)
+    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color) }
+    catch { return [System.Windows.Media.BrushConverter]::new().ConvertFromString("#8B949E") }
+}
+
+function New-WmtStorageTextBlock {
+    param(
+        [string]$Text,
+        [string]$Color = "#98989D",
+        [double]$FontSize = 12,
+        [string]$FontWeight = "Normal",
+        [string]$Margin = "0"
+    )
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Text
+    $tb.Foreground = New-WmtBrush $Color
+    $tb.FontSize = $FontSize
+    $tb.Margin = $Margin
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    if ($FontWeight -eq "SemiBold") { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+    elseif ($FontWeight -eq "Bold") { $tb.FontWeight = [System.Windows.FontWeights]::Bold }
+    return $tb
+}
+
+function Open-MyDeviceDriveRoot {
+    param([string]$Drive)
+
+    if ([string]::IsNullOrWhiteSpace($Drive)) { return }
+    $driveRoot = if ($Drive.EndsWith("\")) { $Drive } elseif ($Drive.EndsWith(":")) { "$Drive\" } else { "$Drive\" }
+
+    if (-not (Test-Path -LiteralPath $driveRoot)) {
+        Write-GuiLog "[Storage] Drive root not found: $driveRoot"
+        return
+    }
+
+    try {
+        Start-Process -FilePath "explorer.exe" -ArgumentList "`"$driveRoot`""
+        Write-GuiLog "[Storage] Opened $driveRoot"
+    }
+    catch {
+        Write-GuiLog "[Storage] Failed to open $driveRoot`: $($_.Exception.Message)"
+    }
+}
+
+function Set-MyDeviceStorageDetails {
+    param($Devices)
+
+    $panel = Get-Ctrl "pnlDeviceStorageList"
+    $summary = Get-Ctrl "txtDeviceStorage"
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+    $deviceList = @($Devices)
+
+    if (-not $deviceList -or $deviceList.Count -eq 0) {
+        if ($summary) { $summary.Text = "No fixed storage volumes found." }
+        return
+    }
+
+    if ($summary) { $summary.Text = "Fixed volumes detected: $($deviceList.Count)" }
+
+    for ($i = 0; $i -lt $deviceList.Count; $i++) {
+        $d = $deviceList[$i]
+
+        $header = New-Object System.Windows.Controls.Grid
+        $header.Margin = if ($i -eq 0) { "0,8,0,0" } else { "0,12,0,0" }
+        $colMain = New-Object System.Windows.Controls.ColumnDefinition
+        $colMain.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $colHealth = New-Object System.Windows.Controls.ColumnDefinition
+        $colHealth.Width = [System.Windows.GridLength]::Auto
+        [void]$header.ColumnDefinitions.Add($colMain)
+        [void]$header.ColumnDefinitions.Add($colHealth)
+
+        $driveRoot = if ([string]$d.Drive -match "\\$") { [string]$d.Drive } else { "$($d.Drive)\" }
+        $header.Cursor = [System.Windows.Input.Cursors]::Hand
+        $header.ToolTip = "Open $driveRoot"
+        $header.Add_MouseLeftButtonUp({ Open-MyDeviceDriveRoot -Drive $driveRoot }.GetNewClosure())
+
+        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        [void]$header.Children.Add($driveTitle)
+
+        $healthText = New-WmtStorageTextBlock -Text $d.Health -Color $d.HealthBrush -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
+        [System.Windows.Controls.Grid]::SetColumn($healthText, 1)
+        [void]$header.Children.Add($healthText)
+        [void]$panel.Children.Add($header)
+
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "#E6EDF3" -FontSize 12 -Margin "0,4,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "#8B949E" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "#6E7681" -FontSize 11 -Margin "0,2,0,0"))
+
+        $bar = New-Object System.Windows.Controls.ProgressBar
+        $bar.Minimum = 0
+        $bar.Maximum = 100
+        $bar.Value = [double]$d.FreePercent
+        $bar.Height = 7
+        $bar.Margin = "0,7,0,2"
+        $bar.Foreground = New-WmtBrush $d.FreeBrush
+        $bar.Background = New-WmtBrush "#30363D"
+        [void]$panel.Children.Add($bar)
+
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.FreeText -Color $d.FreeBrush -FontSize 12 -FontWeight "SemiBold" -Margin "0,2,0,0"))
+
+        if ($i -lt ($deviceList.Count - 1)) {
+            $separator = New-Object System.Windows.Controls.Border
+            $separator.Height = 1
+            $separator.Background = New-WmtBrush "#30363D"
+            $separator.Margin = "0,10,0,0"
+            [void]$panel.Children.Add($separator)
+        }
+    }
+}
+
+function New-WmtNetworkTextBlock {
+    param(
+        [string]$Text,
+        [string]$Color = "#98989D",
+        [double]$FontSize = 12,
+        [string]$FontWeight = "Normal",
+        [string]$Margin = "0"
+    )
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Text = $Text
+    $tb.Foreground = New-WmtBrush $Color
+    $tb.FontSize = $FontSize
+    $tb.Margin = $Margin
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    if ($FontWeight -eq "SemiBold") { $tb.FontWeight = [System.Windows.FontWeights]::SemiBold }
+    elseif ($FontWeight -eq "Bold") { $tb.FontWeight = [System.Windows.FontWeights]::Bold }
+    return $tb
+}
+
+function Copy-MyDeviceNetworkValue {
+    param(
+        [string]$Label,
+        [string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return }
+    try {
+        [System.Windows.Clipboard]::SetText($Value)
+        Write-GuiLog "[Network] Copied $Label to clipboard."
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to copy $Label`: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceGateway {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) { return }
+    $target = $Address.Trim()
+    if ($target -match "^\d{1,3}(\.\d{1,3}){3}$") {
+        $url = "http://$target/"
+    }
+    elseif ($target -match ":") {
+        $url = "http://[$($target -replace '%', '%25')]/"
+    }
+    else {
+        Write-GuiLog "[Network] Unsupported gateway address: $target"
+        return
+    }
+
+    try {
+        Start-Process -FilePath $url
+        Write-GuiLog "[Network] Opened gateway $target"
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to open gateway $target`: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceNetworkConnections {
+    try {
+        Start-Process -FilePath "ncpa.cpl"
+        Write-GuiLog "[Network] Opened Network Connections."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "control.exe" -ArgumentList "netconnections"
+            Write-GuiLog "[Network] Opened Network Connections."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open Network Connections: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Open-MyDeviceWifiSettings {
+    try {
+        Start-Process -FilePath "ms-settings:network-wifi"
+        Write-GuiLog "[Network] Opened Wi-Fi settings."
+    }
+    catch {
+        Write-GuiLog "[Network] Failed to open Wi-Fi settings: $($_.Exception.Message)"
+    }
+}
+
+function Open-MyDeviceDnsSettings {
+    param([string]$AdapterName)
+
+    if (-not [string]::IsNullOrWhiteSpace($AdapterName)) {
+        try {
+            $shell = New-Object -ComObject Shell.Application
+            $connections = $shell.Namespace(0x31)
+            if (-not $connections) { $connections = $shell.Namespace("shell:ConnectionsFolder") }
+            if ($connections) {
+                $adapterItem = @($connections.Items()) | Where-Object { $_.Name -eq $AdapterName } | Select-Object -First 1
+                if (-not $adapterItem) {
+                    $adapterItem = @($connections.Items()) | Where-Object { $_.Name -like "*$AdapterName*" -or $AdapterName -like "*$($_.Name)*" } | Select-Object -First 1
+                }
+                if ($adapterItem) {
+                    try { $adapterItem.InvokeVerb("properties") }
+                    catch {
+                        $propertiesVerb = @($adapterItem.Verbs()) | Where-Object { (($_.Name -replace "&", "").Trim()) -match "(?i)^properties$" } | Select-Object -First 1
+                        if ($propertiesVerb) { $propertiesVerb.DoIt() }
+                        else { throw }
+                    }
+                    Write-GuiLog "[Network] Opened adapter properties for $AdapterName. Select IPv4 or IPv6 to edit DNS."
+                    return
+                }
+            }
+            Write-GuiLog "[Network] Could not find adapter '$AdapterName' in Network Connections."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open adapter DNS properties for $AdapterName`: $($_.Exception.Message)"
+        }
+    }
+
+    try {
+        Start-Process -FilePath "ms-settings:network-advancedsettings"
+        Write-GuiLog "[Network] Opened advanced network settings for DNS assignment."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "ncpa.cpl"
+            Write-GuiLog "[Network] Opened Network Connections for DNS settings."
+        }
+        catch {
+            Write-GuiLog "[Network] Failed to open DNS settings: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Add-WmtNetworkLine {
+    param(
+        [System.Windows.Controls.Panel]$Panel,
+        [string]$Label,
+        [string]$Value,
+        [scriptblock]$ClickAction = $null,
+        [string]$ToolTip = "",
+        [string]$Margin = "0,2,0,0"
+    )
+
+    if (-not $Panel -or [string]::IsNullOrWhiteSpace($Value)) { return }
+
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.Foreground = New-WmtBrush "#98989D"
+    $tb.FontSize = 12
+    $tb.TextWrapping = "Wrap"
+    $tb.LineHeight = 17
+    $tb.Margin = $Margin
+
+    $labelRun = New-Object System.Windows.Documents.Run
+    $labelRun.Text = ("{0}: " -f $Label)
+    $labelRun.Foreground = New-WmtBrush "#8B949E"
+    $labelRun.FontWeight = [System.Windows.FontWeights]::SemiBold
+    [void]$tb.Inlines.Add($labelRun)
+
+    if ($ClickAction) {
+        $action = $ClickAction
+        $link = New-Object System.Windows.Documents.Hyperlink
+        $link.Foreground = New-WmtBrush "#58A6FF"
+        $link.Cursor = [System.Windows.Input.Cursors]::Hand
+        if (-not [string]::IsNullOrWhiteSpace($ToolTip)) { $link.ToolTip = $ToolTip }
+        $valueRun = New-Object System.Windows.Documents.Run
+        $valueRun.Text = $Value
+        [void]$link.Inlines.Add($valueRun)
+        $link.Add_Click({
+                param($s, $e)
+                & $action
+                $e.Handled = $true
+            }.GetNewClosure())
+        [void]$tb.Inlines.Add($link)
+    }
+    else {
+        $valueRun = New-Object System.Windows.Documents.Run
+        $valueRun.Text = $Value
+        [void]$tb.Inlines.Add($valueRun)
+    }
+
+    [void]$Panel.Children.Add($tb)
+}
+
+function Get-WmtNetworkStatusBrush {
+    param([string]$StatusText)
+
+    if ([string]::IsNullOrWhiteSpace($StatusText)) { return "#8B949E" }
+    if ($StatusText -match "(?i)disconnect|down|failed|disabled|malfunction|not present") { return "#F85149" }
+    if ($StatusText -match "(?i)local|limited|notraffic|authenticating|connecting") { return "#D29922" }
+    if ($StatusText -match "(?i)internet|connected|up") { return "#3FB950" }
+    return "#8B949E"
+}
+
+function Set-MyDeviceNetworkDetails {
+    param($Adapters)
+
+    $panel = Get-Ctrl "pnlDeviceNetworkList"
+    $summary = Get-Ctrl "txtDeviceNetwork"
+    if (-not $panel) { return }
+
+    $panel.Children.Clear()
+    $adapterList = @($Adapters | Where-Object { $null -ne $_ })
+
+    if (-not $adapterList -or $adapterList.Count -eq 0) {
+        if ($summary -and [string]::IsNullOrWhiteSpace($summary.Text)) { $summary.Text = "No active physical network adapters found." }
+        return
+    }
+
+    if ($summary) {
+        $primary = @($adapterList | Where-Object { $_.GatewayText -and $_.GatewayText -ne "None" } | Select-Object -First 1)
+        $summary.Text = if ($primary.Count -gt 0) { "Active physical adapters: $($adapterList.Count) | Primary: $($primary[0].Name)" } else { "Active physical adapters: $($adapterList.Count)" }
+    }
+
+    for ($i = 0; $i -lt $adapterList.Count; $i++) {
+        $d = $adapterList[$i]
+
+        $header = New-Object System.Windows.Controls.Grid
+        $header.Margin = if ($i -eq 0) { "0,8,0,0" } else { "0,12,0,0" }
+        $colMain = New-Object System.Windows.Controls.ColumnDefinition
+        $colMain.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $colStatus = New-Object System.Windows.Controls.ColumnDefinition
+        $colStatus.Width = [System.Windows.GridLength]::Auto
+        [void]$header.ColumnDefinitions.Add($colMain)
+        [void]$header.ColumnDefinitions.Add($colStatus)
+
+        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $adapterTitle.Cursor = [System.Windows.Input.Cursors]::Hand
+        $adapterTitle.TextDecorations = [System.Windows.TextDecorations]::Underline
+        $adapterTitle.ToolTip = "Open Network Connections"
+        $adapterTitle.Add_MouseLeftButtonUp({
+                param($s, $e)
+                Open-MyDeviceNetworkConnections
+                $e.Handled = $true
+            })
+        [void]$header.Children.Add($adapterTitle)
+
+        $statusText = New-WmtNetworkTextBlock -Text $d.Status -Color (Get-WmtNetworkStatusBrush "$($d.Status) $($d.Connectivity)") -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
+        [System.Windows.Controls.Grid]::SetColumn($statusText, 1)
+        [void]$header.Children.Add($statusText)
+        [void]$panel.Children.Add($header)
+
+        Add-WmtNetworkLine -Panel $panel -Label "Adapter" -Value $d.Description -Margin "0,4,0,0"
+        Add-WmtNetworkLine -Panel $panel -Label "Profile" -Value $d.Profile -ClickAction { Open-MyDeviceNetworkConnections } -ToolTip "Open Network Connections"
+        Add-WmtNetworkLine -Panel $panel -Label "Connectivity" -Value $d.Connectivity
+        Add-WmtNetworkLine -Panel $panel -Label "Link" -Value $d.LinkText
+
+        $ipv4Copy = [string]$d.IPv4Copy
+        Add-WmtNetworkLine -Panel $panel -Label "IPv4" -Value $d.IPv4Text -ClickAction ({ Copy-MyDeviceNetworkValue -Label "IPv4 address" -Value $ipv4Copy }.GetNewClosure()) -ToolTip "Copy IPv4 address"
+
+        if (-not [string]::IsNullOrWhiteSpace($d.IPv6Text)) {
+            $ipv6Copy = [string]$d.IPv6Copy
+            Add-WmtNetworkLine -Panel $panel -Label "IPv6" -Value $d.IPv6Text -ClickAction ({ Copy-MyDeviceNetworkValue -Label "IPv6 address" -Value $ipv6Copy }.GetNewClosure()) -ToolTip "Copy IPv6 address"
+        }
+
+        $gatewayAddress = [string]$d.GatewayLink
+        if (-not [string]::IsNullOrWhiteSpace($gatewayAddress)) {
+            Add-WmtNetworkLine -Panel $panel -Label "Gateway" -Value $d.GatewayText -ClickAction ({ Open-MyDeviceGateway -Address $gatewayAddress }.GetNewClosure()) -ToolTip "Open gateway in browser"
+        }
+        else {
+            Add-WmtNetworkLine -Panel $panel -Label "Gateway" -Value $d.GatewayText
+        }
+
+        $dnsAdapterName = [string]$d.Name
+        Add-WmtNetworkLine -Panel $panel -Label "DNS" -Value $d.DnsText -ClickAction ({ Open-MyDeviceDnsSettings -AdapterName $dnsAdapterName }.GetNewClosure()) -ToolTip "Open this adapter's properties for DNS"
+
+        Add-WmtNetworkLine -Panel $panel -Label "DHCP" -Value $d.DhcpText
+        Add-WmtNetworkLine -Panel $panel -Label "Lease" -Value $d.LeaseText
+        Add-WmtNetworkLine -Panel $panel -Label "DNS suffix" -Value $d.DnsSuffix
+
+        $macCopy = [string]$d.MacAddress
+        if (-not [string]::IsNullOrWhiteSpace($macCopy)) {
+            Add-WmtNetworkLine -Panel $panel -Label "MAC" -Value $d.MacAddress -ClickAction ({ Copy-MyDeviceNetworkValue -Label "MAC address" -Value $macCopy }.GetNewClosure()) -ToolTip "Copy MAC address"
+        }
+
+        Add-WmtNetworkLine -Panel $panel -Label "Traffic" -Value $d.TrafficText
+        if (-not [string]::IsNullOrWhiteSpace($d.WifiText)) {
+            Add-WmtNetworkLine -Panel $panel -Label "Wi-Fi" -Value $d.WifiText -ClickAction { Open-MyDeviceWifiSettings } -ToolTip "Open Wi-Fi settings"
+        }
+        Add-WmtNetworkLine -Panel $panel -Label "Driver" -Value $d.DriverText
+
+        if ($i -lt ($adapterList.Count - 1)) {
+            $separator = New-Object System.Windows.Controls.Border
+            $separator.Height = 1
+            $separator.Background = New-WmtBrush "#30363D"
+            $separator.Margin = "0,10,0,0"
+            [void]$panel.Children.Add($separator)
+        }
+    }
+}
+
 function Get-DataPath {
     $root = Split-Path -Parent $PSCommandPath
     $dataPath = Join-Path $root "data"
@@ -743,7 +2601,7 @@ function Start-XboxClean {
         $allCreds = (cmdkey /list) -split "`r?`n"
         $targets = @()
         foreach ($line in $allCreds) {
-            if ($line -match "(?i)^\\s*Target:.*(Xbl.*)$") { $targets += $matches[1] }
+            if ($line -match '^\s*Target:.*(Xbl.*)$') { $targets += $matches[1] }
         }
 
         if ($targets.Count -eq 0) {
@@ -970,12 +2828,6 @@ function Invoke-HostsUpdate {
         $backupDir = Join-Path (Get-DataPath) "hosts_backups"
         if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
 
-        # Capture original ACL to preserve permissions (e.g., Users read access)
-        $origAcl = $null
-        if (Test-Path $hostsPath) {
-            try { $origAcl = Get-Acl -Path $hostsPath } catch {}
-        }
-
         # 2. DOWNLOAD HOSTS FILE
         $mirrors = @(
             "https://o0.pages.dev/Lite/hosts.win",
@@ -1038,31 +2890,29 @@ function Invoke-HostsUpdate {
         $finalContent = "$userEntries`r`n`r`n# UPDATED: $(Get-Date)`r`n$adBlockContent"
         
         try {
-            Set-Content -Path $hostsPath -Value $finalContent -Encoding UTF8 -Force
+            # FIX: Write file as UTF-8 without Byte Order Mark (BOM)
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($hostsPath, $finalContent, $utf8NoBom)
 
-            # Re-apply original ACL or ensure Users has read access
+            # FIX: Ensure Users have read access using Universal SID (Localization safe)
             try {
-                if ($origAcl) {
-                    Set-Acl -Path $hostsPath -AclObject $origAcl
-                    Write-Output "Restored original permissions on hosts file."
-                }
-                else {
-                    $fs = Get-Acl -Path $hostsPath
-                    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule("Users", "ReadAndExecute", "Allow")
-                    $fs.SetAccessRule($rule)
-                    Set-Acl -Path $hostsPath -AclObject $fs
-                    Write-Output "Applied Users read permission to hosts file."
-                }
+                $acl = Get-Acl -Path $hostsPath
+                # Get Universal SID for Built-in "Users" group
+                $usersSid = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($usersSid, "ReadAndExecute", "Allow")
+                $acl.SetAccessRule($rule)
+                Set-Acl -Path $hostsPath -AclObject $acl
+                Write-Output "Applied universal read permissions to hosts file."
             }
             catch {
-                Write-Output "Warning: Could not reapply permissions: $($_.Exception.Message)"
+                Write-Output "Warning: Could not strictly apply permissions: $($_.Exception.Message)"
             }
             
             # Validation
             if ((Get-Item $hostsPath).Length -lt 100) { throw "Write verification failed (File empty)." }
             
             ipconfig /flushdns | Out-Null
-            Write-Output "Hosts file updated successfully."
+            Write-Output "Hosts file updated and DNS flushed successfully."
         }
         catch {
             Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
@@ -1075,6 +2925,7 @@ function Invoke-HostsUpdate {
         }
     } "Updating hosts file..."
 }
+
 # --- HOSTS EDITOR ---
 function Show-HostsEditor {
     # 1. SETUP FORM
@@ -1160,7 +3011,7 @@ function Show-HostsEditor {
             }
         })
     
-    # 6. SAVE LOGIC (Modified to use local variables)
+    # 6. SAVE LOGIC
     $SaveAction = {
         param($FormObj, $TextBox, $FilePath, $HighlightScript)
         
@@ -1175,9 +3026,23 @@ function Show-HostsEditor {
                 if ($check -eq "No") { return $false }
             }
             
-            Set-Content -Path $FilePath -Value $TextBox.Text -Encoding UTF8 -Force
-            Start-Process icacls.exe -ArgumentList "`"$FilePath`" /reset" -NoNewWindow -Wait -ErrorAction SilentlyContinue
+            # FIX: Write the GUI editor changes without BOM
+            $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+            [System.IO.File]::WriteAllText($FilePath, $TextBox.Text, $utf8NoBom)
             
+            # FIX: Ensure proper permissions instead of using icacls
+            try {
+                $acl = Get-Acl -Path $FilePath
+                $usersSid = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
+                $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($usersSid, "ReadAndExecute", "Allow")
+                $acl.SetAccessRule($rule)
+                Set-Acl -Path $FilePath -AclObject $acl
+            }
+            catch {}
+            
+            # Flush DNS cache so immediate changes take effect
+            ipconfig /flushdns | Out-Null
+
             if ((Get-Item $FilePath).Length -eq 0 -and $TextBox.Text.Length -gt 0) {
                 throw "Write failed (0 bytes)."
             }
@@ -1188,7 +3053,7 @@ function Show-HostsEditor {
                 $FormObj.Text = "Hosts File Editor"
             }
             
-            [System.Windows.Forms.MessageBox]::Show("Saved successfully!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+            [System.Windows.Forms.MessageBox]::Show("Saved successfully and flushed DNS!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
             
             # Re-apply highlighting
             & $HighlightScript
@@ -1214,10 +3079,10 @@ function Show-HostsEditor {
             }
         })
     
-    # 8. CLOSE PROMPT (FIXED - Pass all required parameters)
+    # 8. CLOSE PROMPT
     $hForm.Add_FormClosing({
             param($src, $e)
-        
+    
             if ($src.Tag -eq $true) {
                 $res = [System.Windows.Forms.MessageBox]::Show(
                     "You have unsaved changes. Save now?", 
@@ -1225,9 +3090,8 @@ function Show-HostsEditor {
                     [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, 
                     [System.Windows.Forms.MessageBoxIcon]::Warning
                 )
-            
+        
                 if ($res -eq "Yes") {
-                    # Pass all required parameters to SaveAction
                     $success = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
                     if (-not $success) {
                         $e.Cancel = $true
@@ -1236,7 +3100,6 @@ function Show-HostsEditor {
                 elseif ($res -eq "Cancel") {
                     $e.Cancel = $true
                 }
-                # If "No", just close without saving
             }
         })
     
@@ -1289,7 +3152,7 @@ foreach ($drive in $drives) {
         }
 
         $exitCode = $LASTEXITCODE
-        if ($out) { $out | ForEach-Object { if ($_ -ne $null) { Write-Host $_ } } }
+        if ($out) { $out | ForEach-Object { if ($null -ne $_) { Write-Host $_ } } }
 
         if ($exitCode -eq 0) {
             Write-Host "[$target] Completed (exit 0)."
@@ -3536,6 +5399,1141 @@ Write-Host ""
     Write-GuiLog "[Trim] Opened live SSD trim console window."
 }
 
+function Start-DiskManagementGui {
+    try {
+        Start-Process -FilePath "diskmgmt.msc" -WindowStyle Normal
+        Write-GuiLog "[Storage] Opened Disk Management."
+    }
+    catch {
+        Write-GuiLog "[Storage] Failed to open Disk Management: $($_.Exception.Message)"
+    }
+}
+
+function Open-PowerSettings {
+    try {
+        Start-Process "ms-settings:powersleep"
+        Write-GuiLog "[Power] Opened Windows Power settings."
+    }
+    catch {
+        try {
+            Start-Process -FilePath "control.exe" -ArgumentList "powercfg.cpl"
+            Write-GuiLog "[Power] Opened Control Panel Power Options."
+        }
+        catch {
+            Write-GuiLog "[Power] Failed to open power settings: $($_.Exception.Message)"
+        }
+    }
+}
+
+function Start-DriveBenchmark {
+    $launcherButton = Get-Ctrl "btnMyDeviceDriveBenchmark"
+
+    if ($script:DriveBenchmarkWindow) {
+        try {
+            if ($script:DriveBenchmarkWindow.IsVisible) {
+                $script:DriveBenchmarkWindow.Activate() | Out-Null
+                return
+            }
+        }
+        catch {}
+
+        $script:DriveBenchmarkWindow = $null
+    }
+
+    Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName WindowsBase -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+
+    if ($launcherButton) {
+        $launcherButton.IsEnabled = $false
+    }
+
+    Write-GuiLog "[Storage Benchmark] Opening drive benchmark window."
+
+    $BrushWindow = New-WmtBrush "#0D1117"
+    $BrushPanel = New-WmtBrush "#161B22"
+    $BrushControl = New-WmtBrush "#21262D"
+    $BrushBorder = New-WmtBrush "#30363D"
+    $BrushText = New-WmtBrush "#E6EDF3"
+    $BrushTitle = New-WmtBrush "#EBEBF5"
+    $BrushWarn = New-WmtBrush "#D29922"
+    $BrushSuccess = New-WmtBrush "#3FB950"
+    $BrushError = New-WmtBrush "#F85149"
+    $BrushAccent = New-WmtBrush "#58A6FF"
+    $BrushHighlight = New-WmtBrush "#1F6FEB"
+    $BrushHighlightTx = New-WmtBrush "#FFFFFF"
+
+    $BrushHeaderBg = New-WmtBrush "#FFFFFF"
+    $BrushHeaderText = New-WmtBrush "#000000"
+    $BrushHeaderBorder = New-WmtBrush "#BDBDBD"
+    $BrushHeaderSelectBg = New-WmtBrush "#DCEBFF"
+
+    function Set-DbSystemColors {
+        param([System.Windows.FrameworkElement]$Element)
+
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushPanel
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushText
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushControl
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushText
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHighlight
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHighlightTx
+    }
+
+    function Set-DbHeaderSystemColors {
+        param([System.Windows.FrameworkElement]$Element)
+
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushHeaderBg
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushHeaderBg
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHeaderSelectBg
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHeaderText
+        $Element.Resources[[System.Windows.SystemColors]::GrayTextBrushKey] = $BrushHeaderText
+    }
+
+    function New-DbTextBlock {
+        param(
+            [string]$Text,
+            [double]$FontSize = 12,
+            [System.Windows.Media.Brush]$Foreground = $BrushText,
+            [System.Windows.Thickness]$Margin = (New-Object System.Windows.Thickness(0))
+        )
+
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = $Text
+        $tb.FontSize = $FontSize
+        $tb.Foreground = $Foreground
+        $tb.Margin = $Margin
+        $tb.VerticalAlignment = "Center"
+        $tb.TextWrapping = "Wrap"
+
+        return $tb
+    }
+
+    function Set-DbButtonStyle {
+        param([System.Windows.Controls.Button]$Button)
+
+        $Button.Background = $BrushControl
+        $Button.Foreground = $BrushText
+        $Button.BorderBrush = $BrushBorder
+        $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
+
+        Set-DbSystemColors $Button
+    }
+
+    function Set-DbHeaderButtonStyle {
+        param([System.Windows.Controls.Button]$Button)
+
+        $Button.Background = $BrushHeaderBg
+        $Button.Foreground = $BrushHeaderText
+        $Button.BorderBrush = $BrushHeaderBorder
+        $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
+
+        Set-DbHeaderSystemColors $Button
+    }
+
+    function Set-DbHeaderComboStyle {
+        param([System.Windows.Controls.ComboBox]$ComboBox)
+
+        $ComboBox.Background = $BrushHeaderBg
+        $ComboBox.Foreground = $BrushHeaderText
+        $ComboBox.BorderBrush = $BrushHeaderBorder
+        $ComboBox.IsEditable = $false
+
+        Set-DbHeaderSystemColors $ComboBox
+
+        $itemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::BackgroundProperty,
+                $BrushHeaderBg
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::ForegroundProperty,
+                $BrushHeaderText
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::BorderBrushProperty,
+                $BrushHeaderBorder
+            ))
+        )
+
+        [void]$itemStyle.Setters.Add(
+            (New-Object System.Windows.Setter(
+                [System.Windows.Controls.Control]::PaddingProperty,
+                (New-Object System.Windows.Thickness(8, 3, 8, 3))
+            ))
+        )
+
+        $ComboBox.ItemContainerStyle = $itemStyle
+    }
+
+    $state = [hashtable]::Synchronized(@{
+            Lines       = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+            Status      = "Ready."
+            Progress    = 0
+            IsRunning   = $false
+            IsCompleted = $false
+            Error       = ""
+            Cancel      = $false
+            TargetDrive = "ALL"
+            TargetSize  = 64
+        })
+
+    $worker = @{
+        PowerShell = $null
+        Runspace   = $null
+        Async      = $null
+        StartedAt  = $null
+    }
+
+    $driveValueMap = @{}
+    $sizeValueMap = @{}
+    $isWindowCleanupDone = $false
+
+    $benchWindow = New-Object System.Windows.Window
+    $benchWindow.Title = "Drive Benchmark"
+    $benchWindow.Width = 720
+    $benchWindow.Height = 540
+    $benchWindow.MinWidth = 620
+    $benchWindow.MinHeight = 420
+    $benchWindow.WindowStartupLocation = "CenterOwner"
+    $benchWindow.Background = $BrushWindow
+    $benchWindow.Foreground = $BrushText
+
+    if ($window) {
+        $benchWindow.Owner = $window
+    }
+
+    Set-DbSystemColors $benchWindow
+
+    $root = New-Object System.Windows.Controls.Grid
+    $root.Margin = New-Object System.Windows.Thickness(18)
+    $root.Background = $BrushWindow
+
+    Set-DbSystemColors $root
+
+    foreach ($rowHeight in @("Auto", "Auto", "Auto", "*", "Auto")) {
+        $row = New-Object System.Windows.Controls.RowDefinition
+
+        if ($rowHeight -eq "*") {
+            $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        }
+        else {
+            $row.Height = [System.Windows.GridLength]::Auto
+        }
+
+        [void]$root.RowDefinitions.Add($row)
+    }
+
+    $title = New-DbTextBlock `
+        -Text "Drive Benchmark" `
+        -FontSize 18 `
+        -Foreground $BrushTitle `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+
+    $title.FontWeight = [System.Windows.FontWeights]::SemiBold
+
+    [System.Windows.Controls.Grid]::SetRow($title, 0)
+    [void]$root.Children.Add($title)
+
+    $controlsPanel = New-Object System.Windows.Controls.StackPanel
+    $controlsPanel.Orientation = "Horizontal"
+    $controlsPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
+
+    [System.Windows.Controls.Grid]::SetRow($controlsPanel, 1)
+
+    $lblDrive = New-DbTextBlock `
+        -Text "Target:" `
+        -Foreground $BrushText `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+
+    [void]$controlsPanel.Children.Add($lblDrive)
+
+    $cmbDrive = New-Object System.Windows.Controls.ComboBox
+    $cmbDrive.Width = 180
+    $cmbDrive.Height = 30
+    $cmbDrive.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
+
+    Set-DbHeaderComboStyle $cmbDrive
+
+    [void]$cmbDrive.Items.Add("All Fixed Drives")
+    $driveValueMap["All Fixed Drives"] = "ALL"
+
+    foreach ($driveInfo in [System.IO.DriveInfo]::GetDrives()) {
+        if ($driveInfo.DriveType -eq [System.IO.DriveType]::Fixed -and $driveInfo.IsReady) {
+            $driveLetter = $driveInfo.Name.Substring(0, 1)
+
+            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
+                "Local Disk"
+            }
+            else {
+                $driveInfo.VolumeLabel
+            }
+
+            $displayText = "$driveLetter`: ($driveLabel)"
+            [void]$cmbDrive.Items.Add($displayText)
+            $driveValueMap[$displayText] = $driveLetter
+        }
+    }
+
+    $cmbDrive.SelectedIndex = 0
+    [void]$controlsPanel.Children.Add($cmbDrive)
+
+    $lblSize = New-DbTextBlock `
+        -Text "Test Size:" `
+        -Foreground $BrushText `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+
+    [void]$controlsPanel.Children.Add($lblSize)
+
+    $cmbSize = New-Object System.Windows.Controls.ComboBox
+    $cmbSize.Width = 110
+    $cmbSize.Height = 30
+    $cmbSize.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
+
+    Set-DbHeaderComboStyle $cmbSize
+
+    foreach ($sizeMb in @(16, 32, 64, 128, 256, 512, 1024, 2048, 4096)) {
+        $sizeText = "$sizeMb MB"
+        [void]$cmbSize.Items.Add($sizeText)
+        $sizeValueMap[$sizeText] = $sizeMb
+    }
+
+    $cmbSize.SelectedItem = "64 MB"
+    [void]$controlsPanel.Children.Add($cmbSize)
+
+    $btnRun = New-Object System.Windows.Controls.Button
+    $btnRun.Content = "Run Benchmark"
+    $btnRun.Width = 125
+    $btnRun.Height = 30
+
+    Set-DbHeaderButtonStyle $btnRun
+
+    [void]$controlsPanel.Children.Add($btnRun)
+    [void]$root.Children.Add($controlsPanel)
+
+    $statusText = New-DbTextBlock `
+        -Text "Ready." `
+        -Foreground $BrushWarn `
+        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+
+    [System.Windows.Controls.Grid]::SetRow($statusText, 2)
+    [void]$root.Children.Add($statusText)
+
+    $logBox = New-Object System.Windows.Controls.TextBox
+    $logBox.IsReadOnly = $true
+    $logBox.AcceptsReturn = $true
+    $logBox.TextWrapping = "NoWrap"
+    $logBox.VerticalScrollBarVisibility = "Auto"
+    $logBox.HorizontalScrollBarVisibility = "Auto"
+    $logBox.FontFamily = "Cascadia Mono, Consolas"
+    $logBox.FontSize = 12
+    $logBox.Background = $BrushPanel
+    $logBox.Foreground = $BrushText
+    $logBox.BorderBrush = $BrushBorder
+    $logBox.BorderThickness = [System.Windows.Thickness]::new(1)
+    $logBox.Padding = [System.Windows.Thickness]::new(10)
+
+    Set-DbSystemColors $logBox
+
+    [System.Windows.Controls.Grid]::SetRow($logBox, 3)
+    [void]$root.Children.Add($logBox)
+
+    $bottom = New-Object System.Windows.Controls.Grid
+    $bottom.Margin = New-Object System.Windows.Thickness(0, 12, 0, 0)
+
+    $colProgress = New-Object System.Windows.Controls.ColumnDefinition
+    $colProgress.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+
+    $colExport = New-Object System.Windows.Controls.ColumnDefinition
+    $colExport.Width = [System.Windows.GridLength]::Auto
+
+    $colClose = New-Object System.Windows.Controls.ColumnDefinition
+    $colClose.Width = [System.Windows.GridLength]::Auto
+
+    [void]$bottom.ColumnDefinitions.Add($colProgress)
+    [void]$bottom.ColumnDefinitions.Add($colExport)
+    [void]$bottom.ColumnDefinitions.Add($colClose)
+
+    $progress = New-Object System.Windows.Controls.ProgressBar
+    $progress.Minimum = 0
+    $progress.Maximum = 100
+    $progress.Height = 12
+    $progress.Margin = New-Object System.Windows.Thickness(0, 8, 12, 0)
+    $progress.Foreground = $BrushAccent
+    $progress.Background = $BrushBorder
+
+    [System.Windows.Controls.Grid]::SetColumn($progress, 0)
+    [void]$bottom.Children.Add($progress)
+
+    $exportBtn = New-Object System.Windows.Controls.Button
+    $exportBtn.Content = "Export"
+    $exportBtn.Width = 80
+    $exportBtn.Height = 32
+    $exportBtn.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+
+    Set-DbButtonStyle $exportBtn
+
+    $exportBtn.Add_Click({
+            $dialog = New-Object System.Windows.Forms.SaveFileDialog
+            $dialog.Filter = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
+            $dialog.FileName = "WMT_DriveBenchmark_Results.txt"
+
+            if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+                try {
+                    [System.IO.File]::WriteAllText($dialog.FileName, $logBox.Text, [System.Text.Encoding]::UTF8)
+                    Write-GuiLog "[Storage Benchmark] Exported results to $($dialog.FileName)"
+                }
+                catch {
+                    Write-GuiLog "[Storage Benchmark] Export failed: $($_.Exception.Message)"
+                }
+            }
+        }.GetNewClosure())
+
+    [System.Windows.Controls.Grid]::SetColumn($exportBtn, 1)
+    [void]$bottom.Children.Add($exportBtn)
+
+    $closeBtn = New-Object System.Windows.Controls.Button
+    $closeBtn.Content = "Close"
+    $closeBtn.Width = 80
+    $closeBtn.Height = 32
+
+    Set-DbButtonStyle $closeBtn
+
+    $closeBtn.Add_Click({
+            try {
+                $benchWindow.Close()
+            }
+            catch {
+                Write-GuiLog "[Storage Benchmark] Close failed: $($_.Exception.Message)"
+            }
+        }.GetNewClosure())
+
+    [System.Windows.Controls.Grid]::SetColumn($closeBtn, 2)
+    [void]$bottom.Children.Add($closeBtn)
+
+    [System.Windows.Controls.Grid]::SetRow($bottom, 4)
+    [void]$root.Children.Add($bottom)
+
+    $benchWindow.Content = $root
+    $script:DriveBenchmarkWindow = $benchWindow
+
+    $timer = New-Object System.Windows.Threading.DispatcherTimer
+    $timer.Interval = [TimeSpan]::FromMilliseconds(200)
+
+    $releaseWindowState = {
+        try {
+            if ($isWindowCleanupDone) {
+                return
+            }
+
+            $isWindowCleanupDone = $true
+
+            $script:DriveBenchmarkWindow = $null
+
+            if ($launcherButton) {
+                $launcherButton.IsEnabled = $true
+            }
+
+            Write-GuiLog "[Storage Benchmark] Window closed."
+        }
+        catch {
+            try {
+                $script:DriveBenchmarkWindow = $null
+            }
+            catch {}
+
+            try {
+                if ($launcherButton) {
+                    $launcherButton.IsEnabled = $true
+                }
+            }
+            catch {}
+        }
+    }.GetNewClosure()
+
+    $setRunningUi = {
+        param([bool]$Running)
+
+        $cmbDrive.IsEnabled = $true
+        $cmbSize.IsEnabled = $true
+        $btnRun.IsEnabled = $true
+
+        if ($Running) {
+            $btnRun.Content = "Running..."
+        }
+        else {
+            $btnRun.Content = "Run Benchmark"
+        }
+
+        $cmbDrive.Background = $BrushHeaderBg
+        $cmbDrive.Foreground = $BrushHeaderText
+        $cmbDrive.BorderBrush = $BrushHeaderBorder
+
+        $cmbSize.Background = $BrushHeaderBg
+        $cmbSize.Foreground = $BrushHeaderText
+        $cmbSize.BorderBrush = $BrushHeaderBorder
+
+        $btnRun.Background = $BrushHeaderBg
+        $btnRun.Foreground = $BrushHeaderText
+        $btnRun.BorderBrush = $BrushHeaderBorder
+
+        $exportBtn.IsEnabled = $true
+        $closeBtn.IsEnabled = $true
+    }.GetNewClosure()
+
+    $disposeWorker = {
+        try {
+            if ($worker["PowerShell"]) {
+                $worker["PowerShell"].Dispose()
+            }
+        }
+        catch {}
+
+        try {
+            if ($worker["Runspace"]) {
+                $worker["Runspace"].Close()
+                $worker["Runspace"].Dispose()
+            }
+        }
+        catch {}
+
+        $worker["PowerShell"] = $null
+        $worker["Runspace"] = $null
+        $worker["Async"] = $null
+        $worker["StartedAt"] = $null
+    }.GetNewClosure()
+
+    $refreshUi = {
+        try {
+            $statusText.Text = [string]$state["Status"]
+            $progress.Value = [double]$state["Progress"]
+
+            if ($state["Lines"]) {
+                $logBox.Text = (@($state["Lines"]) -join "`r`n")
+                $logBox.ScrollToEnd()
+            }
+        }
+        catch {
+            Write-GuiLog "[Storage Benchmark] UI refresh failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $timerTick = {
+        try {
+            & $refreshUi
+
+            if (-not $worker["Async"]) {
+                return
+            }
+
+            if ($state["IsRunning"] -and $worker["StartedAt"]) {
+                $elapsedMinutes = ((Get-Date) - $worker["StartedAt"]).TotalMinutes
+
+                if ($elapsedMinutes -ge 60) {
+                    $state["Cancel"] = $true
+                    $state["Error"] = "Benchmark timed out after 60 minutes."
+                    $state["Status"] = "Benchmark timed out."
+                    $state["Progress"] = 100
+                    $state["IsRunning"] = $false
+                    $state["IsCompleted"] = $true
+
+                    [void]$state["Lines"].Add("")
+                    [void]$state["Lines"].Add("ERROR: Benchmark timed out after 60 minutes.")
+
+                    try {
+                        if ($worker["PowerShell"]) {
+                            $worker["PowerShell"].Stop()
+                        }
+                    }
+                    catch {}
+                }
+            }
+
+            if ($worker["Async"].IsCompleted -or $state["IsCompleted"]) {
+                $timer.Stop()
+
+                try {
+                    if ($worker["Async"] -and $worker["Async"].IsCompleted -and $worker["PowerShell"]) {
+                        [void]$worker["PowerShell"].EndInvoke($worker["Async"])
+                    }
+                }
+                catch {
+                    if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                        $state["Error"] = $_.Exception.Message
+                        [void]$state["Lines"].Add("")
+                        [void]$state["Lines"].Add("ERROR: $($_.Exception.Message)")
+                    }
+
+                    Write-GuiLog "[Storage Benchmark] Runspace failed: $($_.Exception.Message)"
+                }
+
+                $state["IsRunning"] = $false
+                $state["IsCompleted"] = $true
+                $state["Progress"] = 100
+
+                if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                    $state["Status"] = "Benchmark complete."
+                    $statusText.Foreground = $BrushSuccess
+                }
+                else {
+                    $state["Status"] = "Benchmark failed: $($state["Error"])"
+                    $statusText.Foreground = $BrushError
+                }
+
+                & $refreshUi
+
+                foreach ($line in @($state["Lines"])) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
+                        Write-GuiLog "[Storage Benchmark] $line"
+                    }
+                }
+
+                & $setRunningUi $false
+                & $disposeWorker
+            }
+        }
+        catch {
+            $timer.Stop()
+
+            $state["IsRunning"] = $false
+            $state["IsCompleted"] = $true
+            $state["Error"] = $_.Exception.Message
+            $state["Status"] = "Benchmark UI failed."
+            $state["Progress"] = 100
+
+            try {
+                [void]$state["Lines"].Add("")
+                [void]$state["Lines"].Add("TIMER ERROR: $($_.Exception.Message)")
+            }
+            catch {}
+
+            $statusText.Text = "Benchmark UI failed: $($_.Exception.Message)"
+            $statusText.Foreground = $BrushError
+
+            & $refreshUi
+            & $setRunningUi $false
+            & $disposeWorker
+
+            Write-GuiLog "[Storage Benchmark] Timer failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $timer.Add_Tick($timerTick)
+
+    $startBenchmark = {
+        if ($state["IsRunning"]) {
+            return
+        }
+
+        & $disposeWorker
+
+        $selectedDrive = "ALL"
+
+        if ($cmbDrive.SelectedItem) {
+            $driveKey = [string]$cmbDrive.SelectedItem
+
+            if ($driveValueMap.ContainsKey($driveKey)) {
+                $selectedDrive = [string]$driveValueMap[$driveKey]
+            }
+        }
+
+        $selectedSize = 64
+
+        if ($cmbSize.SelectedItem) {
+            $sizeKey = [string]$cmbSize.SelectedItem
+
+            if ($sizeValueMap.ContainsKey($sizeKey)) {
+                $selectedSize = [int]$sizeValueMap[$sizeKey]
+            }
+        }
+
+        $state["Lines"].Clear()
+        $state["Status"] = "Preparing benchmark..."
+        $state["Progress"] = 0
+        $state["IsRunning"] = $true
+        $state["IsCompleted"] = $false
+        $state["Error"] = ""
+        $state["Cancel"] = $false
+        $state["TargetDrive"] = $selectedDrive
+        $state["TargetSize"] = $selectedSize
+
+        $targetLabel = if ($selectedDrive -eq "ALL") {
+            "All Fixed Drives"
+        }
+        else {
+            "{0}:\" -f $selectedDrive
+        }
+
+        [void]$state["Lines"].Add("Quick drive benchmark results (.NET runspace, CDM-style):")
+        [void]$state["Lines"].Add("Target: $targetLabel | Size: $selectedSize MB")
+        [void]$state["Lines"].Add("")
+
+        $statusText.Foreground = $BrushWarn
+
+        & $setRunningUi $true
+        & $refreshUi
+
+        try {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = "MTA"
+            $runspace.ThreadOptions = "ReuseThread"
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+
+            [void]$ps.AddScript({
+                    param($State)
+
+                    $ErrorActionPreference = "Stop"
+
+                    function Add-Line {
+                        param([string]$Text)
+                        [void]$State["Lines"].Add($Text)
+                    }
+
+                    function Set-Status {
+                        param(
+                            [string]$Text,
+                            [int]$Progress
+                        )
+
+                        $State["Status"] = $Text
+                        $State["Progress"] = [math]::Max(0, [math]::Min(100, $Progress))
+                    }
+
+                    function Test-Cancelled {
+                        if ($State["Cancel"]) {
+                            throw "Benchmark cancelled."
+                        }
+                    }
+
+                    function Get-MBps {
+                        param(
+                            [int64]$Bytes,
+                            [double]$Seconds
+                        )
+
+                        if ($Seconds -le 0) {
+                            return 0
+                        }
+
+                        return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+                    }
+
+                    function Get-Iops {
+                        param(
+                            [int]$Operations,
+                            [double]$Seconds
+                        )
+
+                        if ($Seconds -le 0) {
+                            return 0
+                        }
+
+                        return [math]::Round($Operations / $Seconds, 0)
+                    }
+
+                    function Measure-Drive {
+                        param(
+                            [string]$DriveLetter,
+                            [int]$FileSizeMb,
+                            [int]$RandomOps,
+                            [int]$BaseProgress,
+                            [int]$StepWeight
+                        )
+
+                        $root = "{0}:\" -f $DriveLetter
+                        $folder = [System.IO.Path]::Combine($root, "WMT_Benchmark_Temp")
+                        $file = [System.IO.Path]::Combine($folder, "wmt_benchmark_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
+
+                        $seqBufferSize = 1MB
+                        $randomBlockSize = 4096
+                        $targetBytes = [int64]$FileSizeMb * 1MB
+
+                        $seqBuffer = New-Object byte[] $seqBufferSize
+                        $readBuffer = New-Object byte[] $seqBufferSize
+                        $randomBuffer = New-Object byte[] $randomBlockSize
+                        $rng = [System.Random]::new()
+
+                        $rng.NextBytes($seqBuffer)
+                        $rng.NextBytes($randomBuffer)
+
+                        $fs = $null
+
+                        try {
+                            Test-Cancelled
+
+                            if (-not [System.IO.Directory]::Exists($folder)) {
+                                [void][System.IO.Directory]::CreateDirectory($folder)
+                            }
+
+                            try {
+                                foreach ($oldFile in [System.IO.Directory]::GetFiles($folder, "wmt_benchmark_*.tmp")) {
+                                    try {
+                                        [System.IO.File]::Delete($oldFile)
+                                    }
+                                    catch {}
+                                }
+                            }
+                            catch {}
+
+                            Set-Status "Testing $DriveLetter`: sequential write..." $BaseProgress
+
+                            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Create,
+                                [System.IO.FileAccess]::ReadWrite,
+                                [System.IO.FileShare]::None,
+                                $seqBufferSize,
+                                [System.IO.FileOptions]::SequentialScan
+                            )
+
+                            $written = [int64]0
+
+                            while ($written -lt $targetBytes) {
+                                Test-Cancelled
+
+                                $remaining = $targetBytes - $written
+
+                                $toWrite = if ($remaining -lt $seqBuffer.Length) {
+                                    [int]$remaining
+                                }
+                                else {
+                                    $seqBuffer.Length
+                                }
+
+                                $fs.Write($seqBuffer, 0, $toWrite)
+                                $written += $toWrite
+                            }
+
+                            $fs.Flush()
+                            $sw.Stop()
+
+                            $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  SEQ1M Write {0} MB/s" -f $seqWrite)
+                            Set-Status "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
+
+                            Test-Cancelled
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::Read,
+                                [System.IO.FileShare]::ReadWrite,
+                                $seqBufferSize,
+                                [System.IO.FileOptions]::SequentialScan
+                            )
+
+                            $readBytes = [int64]0
+
+                            do {
+                                Test-Cancelled
+
+                                $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
+                                $readBytes += $readNow
+                            } while ($readNow -gt 0)
+
+                            $sw.Stop()
+
+                            $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  SEQ1M Read  {0} MB/s" -f $seqRead)
+                            Set-Status "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
+
+                            Test-Cancelled
+
+                            $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::Read,
+                                [System.IO.FileShare]::ReadWrite,
+                                $randomBlockSize,
+                                [System.IO.FileOptions]::RandomAccess
+                            )
+
+                            for ($i = 0; $i -lt $RandomOps; $i++) {
+                                Test-Cancelled
+
+                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
+                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                                [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
+                            }
+
+                            $sw.Stop()
+
+                            $rndReadSeconds = $sw.Elapsed.TotalSeconds
+                            $rndReadBytes = [int64]$RandomOps * $randomBlockSize
+                            $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
+                            $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
+
+                            $fs.Dispose()
+                            $fs = $null
+
+                            Add-Line ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
+                            Set-Status "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
+
+                            Test-Cancelled
+
+                            $sw.Restart()
+
+                            $fs = [System.IO.FileStream]::new(
+                                $file,
+                                [System.IO.FileMode]::Open,
+                                [System.IO.FileAccess]::ReadWrite,
+                                [System.IO.FileShare]::None,
+                                $randomBlockSize,
+                                [System.IO.FileOptions]::RandomAccess
+                            )
+
+                            for ($i = 0; $i -lt $RandomOps; $i++) {
+                                Test-Cancelled
+
+                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
+                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                                $fs.Write($randomBuffer, 0, $randomBlockSize)
+                            }
+
+                            $fs.Flush()
+                            $sw.Stop()
+
+                            $rndWriteSeconds = $sw.Elapsed.TotalSeconds
+                            $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
+                            $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
+                            $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
+
+                            Add-Line ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
+                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
+                        }
+                        finally {
+                            if ($fs) {
+                                try {
+                                    $fs.Dispose()
+                                }
+                                catch {}
+                            }
+
+                            try {
+                                if ([System.IO.File]::Exists($file)) {
+                                    [System.IO.File]::Delete($file)
+                                }
+                            }
+                            catch {}
+
+                            try {
+                                if ([System.IO.Directory]::Exists($folder)) {
+                                    $entries = [System.IO.Directory]::GetFileSystemEntries($folder)
+
+                                    if (-not $entries -or $entries.Count -eq 0) {
+                                        [System.IO.Directory]::Delete($folder, $false)
+                                    }
+                                }
+                            }
+                            catch {}
+                        }
+                    }
+
+                    try {
+                        $targetDrive = [string]$State["TargetDrive"]
+                        $targetSize = [int]$State["TargetSize"]
+
+                        Set-Status "Finding fixed drives..." 0
+
+                        $drives = @(
+                            [System.IO.DriveInfo]::GetDrives() |
+                            Where-Object {
+                                $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady
+                            }
+                        )
+
+                        if ($targetDrive -ne "ALL") {
+                            $drives = @(
+                                $drives |
+                                Where-Object {
+                                    $_.Name.Substring(0, 1).ToUpperInvariant() -eq $targetDrive.ToUpperInvariant()
+                                }
+                            )
+                        }
+
+                        if (-not $drives -or $drives.Count -eq 0) {
+                            throw "No suitable fixed drives were found."
+                        }
+
+                        $requiredBytes = ([int64]$targetSize * 1MB) + 96MB
+
+                        $testableDrives = @(
+                            $drives |
+                            Where-Object {
+                                [int64]$_.AvailableFreeSpace -ge $requiredBytes
+                            }
+                        )
+
+                        if (-not $testableDrives -or $testableDrives.Count -eq 0) {
+                            throw "Selected drive(s) do not have enough free space for a $targetSize MB benchmark."
+                        }
+
+                        $totalSteps = [math]::Max(1, $testableDrives.Count * 4)
+                        $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
+                        $stepIndex = 0
+
+                        foreach ($driveInfo in $drives) {
+                            Test-Cancelled
+
+                            $driveLetter = $driveInfo.Name.Substring(0, 1)
+
+                            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
+                                "(No label)"
+                            }
+                            else {
+                                $driveInfo.VolumeLabel
+                            }
+
+                            if ([int64]$driveInfo.AvailableFreeSpace -lt $requiredBytes) {
+                                Add-Line ("{0}: {1} - skipped, not enough free space for a {2} MB test." -f $driveLetter, $driveLabel, $targetSize)
+                                continue
+                            }
+
+                            Add-Line ""
+                            Add-Line ("{0}: {1} ({2} MiB test file)" -f $driveLetter, $driveLabel, $targetSize)
+
+                            $baseProgress = $stepIndex * $stepWeight
+
+                            try {
+                                Measure-Drive `
+                                    -DriveLetter $driveLetter `
+                                    -FileSizeMb $targetSize `
+                                    -RandomOps 1024 `
+                                    -BaseProgress $baseProgress `
+                                    -StepWeight $stepWeight
+                            }
+                            catch {
+                                Add-Line ("{0}: {1} - benchmark failed: {2}" -f $driveLetter, $driveLabel, $_.Exception.Message)
+                            }
+
+                            $stepIndex += 4
+                        }
+
+                        Add-Line ""
+                        Add-Line ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
+
+                        Set-Status "Benchmark complete." 100
+                    }
+                    catch {
+                        $State["Error"] = $_.Exception.Message
+
+                        Add-Line ""
+                        Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+
+                        Set-Status "Benchmark failed." 100
+                    }
+                    finally {
+                        $State["IsRunning"] = $false
+                        $State["IsCompleted"] = $true
+                    }
+                }).AddArgument($state)
+
+            $worker["Runspace"] = $runspace
+            $worker["PowerShell"] = $ps
+            $worker["StartedAt"] = Get-Date
+            $worker["Async"] = $ps.BeginInvoke()
+
+            $timer.Start()
+        }
+        catch {
+            $state["IsRunning"] = $false
+            $state["IsCompleted"] = $true
+            $state["Error"] = $_.Exception.Message
+            $state["Status"] = "Failed to start benchmark."
+            $state["Progress"] = 100
+
+            [void]$state["Lines"].Add("")
+            [void]$state["Lines"].Add("START ERROR: $($_.Exception.Message)")
+
+            $statusText.Foreground = $BrushError
+
+            & $refreshUi
+            & $setRunningUi $false
+            & $disposeWorker
+
+            Write-GuiLog "[Storage Benchmark] Start failed: $($_.Exception.Message)"
+        }
+    }.GetNewClosure()
+
+    $btnRun.Add_Click({
+            & $startBenchmark
+        }.GetNewClosure())
+
+    $didAutoStart = $false
+
+    $benchWindow.Add_Loaded({
+            if ($didAutoStart) {
+                return
+            }
+
+            $didAutoStart = $true
+
+            $benchWindow.Dispatcher.BeginInvoke(
+                [Action] {
+                    & $startBenchmark
+                },
+                [System.Windows.Threading.DispatcherPriority]::ApplicationIdle
+            ) | Out-Null
+        }.GetNewClosure())
+
+    $windowCleanup = {
+        $state["Cancel"] = $true
+
+        try {
+            $timer.Stop()
+        }
+        catch {}
+
+        try {
+            if ($worker["PowerShell"] -and $state["IsRunning"]) {
+                $worker["PowerShell"].Stop()
+            }
+        }
+        catch {}
+
+        & $disposeWorker
+        & $releaseWindowState
+    }.GetNewClosure()
+
+    $benchWindow.Add_Closing({
+            & $windowCleanup
+        }.GetNewClosure())
+
+    $benchWindow.Add_Closed({
+            & $releaseWindowState
+        }.GetNewClosure())
+
+    $benchWindow.Show() | Out-Null
+}
 function Show-BrokenShortcuts {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
@@ -6644,9 +9642,9 @@ function Set-Hags {
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/> 
                     <RowDefinition Height="Auto"/> 
-                    <RowDefinition Height="*"/>    
+                    <RowDefinition Height="Auto"/>    
                     <RowDefinition Height="6"/>
-                    <RowDefinition Height="240"/>
+                    <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
 
                 <!-- Header/Search -->
@@ -6684,14 +9682,14 @@ function Set-Hags {
                     </StackPanel>
                 </StackPanel>
                 
-                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{StaticResource BgDark}" BorderThickness="0" Foreground="{StaticResource Accent}" Visibility="Collapsed" Margin="8"/>
+                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{StaticResource BgDark}" BorderThickness="0" Foreground="{StaticResource Accent}" Visibility="Collapsed" Margin="8" MaxHeight="220"/>
 
                 <GridSplitter Grid.Row="3" Height="8" Margin="12,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
                               Background="Transparent" Cursor="SizeNS" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
                               ShowsPreview="True"/>
 
                 <!-- Log Panel -->
-                <Border Grid.Row="4" Background="{StaticResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" MinHeight="140">
+                <Border Grid.Row="4" Background="{StaticResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" MinHeight="140" VerticalAlignment="Stretch">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
@@ -6700,9 +9698,10 @@ function Set-Hags {
                         <Border Grid.Row="0" Background="{StaticResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
                             <TextBlock Text="Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
                         </Border>
-                        <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True">
+                        <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True" VerticalAlignment="Stretch">
                             <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
                                      Background="Transparent" Foreground="#3FB950" BorderThickness="0" Padding="4"
+                                     VerticalAlignment="Stretch" AcceptsReturn="True"
                                      SnapsToDevicePixels="True" TextOptions.TextFormattingMode="Display"/>
                         </ScrollViewer>
                     </Grid>
@@ -7047,7 +10046,8 @@ function Set-Hags {
 
                                 <!-- MY DEVICE PANEL -->
                                 <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-                                        <WrapPanel Margin="20" ItemWidth="350">
+                                    <StackPanel>
+                                        <WrapPanel Name="pnlMyDeviceCards" Margin="20" ItemWidth="350">
                                                 <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                         <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
@@ -7101,6 +10101,7 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <StackPanel Name="pnlDeviceNetworkList" Margin="0,6,0,0"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -7182,8 +10183,11 @@ function Set-Hags {
                                                             <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Plan: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#58A6FF" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
                                                             <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
+                                                            <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -7203,7 +10207,7 @@ function Set-Hags {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Name="bdMyDeviceGPU" Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15" ToolTip="Click a GPU entry to open that GPU vendor's control panel.">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                                         <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
@@ -7240,7 +10244,8 @@ function Set-Hags {
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceGPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
+                                                            <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="#6E6E73" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                                             <Button Name="btnMyDeviceGPUDriver" Content="Check Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
                                                         </StackPanel>
                                                     </Grid>
@@ -7320,11 +10325,28 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceTrim" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
+                                                            <StackPanel x:Name="pnlDeviceStorageList" Margin="0,0,0,0"/>
+                                                            <Grid Margin="0,10,0,0">
+                                                                <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                    <RowDefinition Height="Auto"/>
+                                                                </Grid.RowDefinitions>
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceDiskpart" Grid.Row="0" Grid.Column="0" Content="Disk Mgmt" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceDriveBenchmark" Grid.Row="0" Grid.Column="1" Content="Benchmark" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
                                         </WrapPanel>
+                                        <Border Margin="20,0,20,24" BorderBrush="#2C2C2E" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
+                                            <Button Name="btnMyDeviceExport" Content="Export" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                        </Border>
+                                    </StackPanel>
                                 </ScrollViewer>
 
                                 <!-- FIREWALL PANEL -->
@@ -7570,6 +10592,7 @@ function Set-Hags {
 # ==========================================
 $reader = (New-Object System.Xml.XmlNodeReader $xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
+$script:LogBox = $window.FindName("LogBox")
 
 function Get-Ctrl { param($Name) return $window.FindName($Name) }
 
@@ -7650,7 +10673,134 @@ function Set-WmtTheme {
     $script:CurrentTheme = $Theme
 }
 
-# --- ICON INJECTION SYSTEM (SILENT + TOOLTIPS) ---
+function Update-MyDeviceResponsiveLayout {
+    $cards = Get-Ctrl "pnlMyDeviceCards"
+    $scroll = Get-Ctrl "pnlMyDevice"
+    if (-not $cards -or -not $scroll) { return }
+
+    $available = [double]$scroll.ViewportWidth
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$scroll.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$window.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { return }
+
+    $marginWidth = 40.0
+    $contentWidth = [math]::Max(320.0, $available - $marginWidth)
+    $minCardWidth = 330.0
+    $targetCardWidth = 410.0
+    $columns = [math]::Floor($contentWidth / $targetCardWidth)
+    if ($columns -lt 1) { $columns = 1 }
+    if ($columns -gt 4) { $columns = 4 }
+
+    while ($columns -gt 1 -and ($contentWidth / $columns) -lt $minCardWidth) {
+        $columns--
+    }
+
+    $itemWidth = [math]::Floor($contentWidth / $columns)
+    $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
+}
+
+function Get-MyDeviceExportTextLines {
+    param($Control)
+
+    $lines = New-Object System.Collections.Generic.List[string]
+    if (-not $Control) { return @() }
+
+    if ($Control -is [System.Windows.Controls.TextBlock]) {
+        $text = ([string]$Control.Text).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+    }
+    elseif ($Control -is [System.Windows.Controls.TextBox]) {
+        $text = ([string]$Control.Text).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+    }
+    elseif ($Control -is [System.Windows.Controls.ContentControl]) {
+        if ($Control.Content -is [string]) {
+            $text = ([string]$Control.Content).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$lines.Add($text) }
+        }
+        elseif ($Control.Content -is [System.Windows.DependencyObject]) {
+            foreach ($line in (Get-MyDeviceExportTextLines -Control $Control.Content)) { [void]$lines.Add($line) }
+        }
+    }
+
+    if ($Control -is [System.Windows.Controls.Panel]) {
+        foreach ($child in $Control.Children) {
+            foreach ($line in (Get-MyDeviceExportTextLines -Control $child)) { [void]$lines.Add($line) }
+        }
+    }
+    elseif ($Control -is [System.Windows.Controls.Decorator] -and $Control.Child) {
+        foreach ($line in (Get-MyDeviceExportTextLines -Control $Control.Child)) { [void]$lines.Add($line) }
+    }
+
+    return $lines.ToArray()
+}
+
+function Add-MyDeviceExportSection {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [string]$Title,
+        [string[]]$TextControlNames = @(),
+        [string[]]$PanelControlNames = @()
+    )
+
+    $sectionLines = New-Object System.Collections.Generic.List[string]
+
+    foreach ($name in $TextControlNames) {
+        $ctrl = Get-Ctrl $name
+        if ($ctrl -and $ctrl.Text) {
+            $text = ([string]$ctrl.Text).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$sectionLines.Add($text) }
+        }
+    }
+
+    foreach ($name in $PanelControlNames) {
+        foreach ($line in (Get-MyDeviceExportTextLines -Control (Get-Ctrl $name))) {
+            $text = ([string]$line).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($text)) { [void]$sectionLines.Add($text) }
+        }
+    }
+
+    if ($sectionLines.Count -eq 0) { return }
+
+    if ($Lines.Count -gt 0) { [void]$Lines.Add("") }
+    [void]$Lines.Add($Title)
+    [void]$Lines.Add(("-" * $Title.Length))
+
+    $previous = $null
+    foreach ($line in $sectionLines) {
+        if ($line -ne $previous) { [void]$Lines.Add($line) }
+        $previous = $line
+    }
+}
+
+function Invoke-MyDeviceExport {
+    try {
+        $lines = New-Object System.Collections.Generic.List[string]
+        [void]$lines.Add("Windows Maintenance Tool - My Device Export")
+        [void]$lines.Add("Generated: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+        [void]$lines.Add("Computer: $env:COMPUTERNAME")
+
+        Add-MyDeviceExportSection -Lines $lines -Title "Operating System" -TextControlNames @("txtDeviceOS")
+        Add-MyDeviceExportSection -Lines $lines -Title "Network Info" -TextControlNames @("txtDeviceNetwork") -PanelControlNames @("pnlDeviceNetworkList")
+        Add-MyDeviceExportSection -Lines $lines -Title "Processor (CPU)" -TextControlNames @("txtDeviceCPU")
+        Add-MyDeviceExportSection -Lines $lines -Title "Battery / Power" -TextControlNames @("txtBatteryHealth", "txtBatteryCharge", "txtBatteryStatus", "txtPowerPlan", "txtBatteryTime", "txtPowerDraw", "txtPowerTotal", "txtPowerElectrical")
+        Add-MyDeviceExportSection -Lines $lines -Title "Memory (RAM)" -TextControlNames @("txtDeviceRAM")
+        Add-MyDeviceExportSection -Lines $lines -Title "Graphics (GPU)" -PanelControlNames @("pnlDeviceGPUList")
+        Add-MyDeviceExportSection -Lines $lines -Title "Motherboard" -TextControlNames @("txtDeviceMotherboard")
+        Add-MyDeviceExportSection -Lines $lines -Title "Storage Drives" -TextControlNames @("txtDeviceStorage") -PanelControlNames @("pnlDeviceStorageList")
+
+        $outFile = Join-Path (Get-DataPath) ("MyDevice_{0}.txt" -f (Get-Date -Format "yyyy-MM-dd_HHmmss"))
+        Set-Content -Path $outFile -Value $lines.ToArray() -Encoding UTF8
+
+        Write-GuiLog "[My Device] Exported device summary to $outFile"
+        [System.Windows.MessageBox]::Show("My Device export saved to:`n$outFile", "Export Complete", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+    }
+    catch {
+        Write-GuiLog "[My Device] Export failed: $($_.Exception.Message)"
+        [System.Windows.MessageBox]::Show("Failed to export My Device details:`n$($_.Exception.Message)", "Export Failed", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+    }
+}
+
 function Set-ButtonIcon {
     param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
     $btn = Get-Ctrl $BtnName
@@ -7781,6 +10931,10 @@ Set-ButtonIcon "btnDrvDisableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,
 Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M11,14V9H9L12,6L15,9H13V14H11Z" "Enable Device Metadata" "Allow device metadata downloads"
 Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
 Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
+Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
+Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
+Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
+Set-ButtonIcon "btnMyDeviceExport" "M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M13,9V3.5L18.5,9H13M12,17L8,13H10.5V10H13.5V13H16L12,17Z" "Export" "Saves the current My Device details to the data folder"
 Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
 Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
 Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
@@ -7972,19 +11126,137 @@ if ($btnMyDeviceTrim) {
     $btnMyDeviceTrim.Add_Click({ Start-SSDTrimConsole })
 }
 
+$btnMyDeviceDiskpart = Get-Ctrl "btnMyDeviceDiskpart"
+if ($btnMyDeviceDiskpart) {
+    $btnMyDeviceDiskpart.Add_Click({ Start-DiskManagementGui })
+}
+
+$btnMyDeviceDriveBenchmark = Get-Ctrl "btnMyDeviceDriveBenchmark"
+if ($btnMyDeviceDriveBenchmark) {
+    $btnMyDeviceDriveBenchmark.Add_Click({ Start-DriveBenchmark })
+}
+
+$btnMyDeviceExport = Get-Ctrl "btnMyDeviceExport"
+if ($btnMyDeviceExport) {
+    $btnMyDeviceExport.Add_Click({ Invoke-MyDeviceExport })
+}
+
+$txtPowerPlan = Get-Ctrl "txtPowerPlan"
+if ($txtPowerPlan) {
+    $txtPowerPlan.Add_MouseLeftButtonUp({ Open-PowerSettings })
+}
+
+
+function Get-MyDeviceGpuVendors {
+    try {
+        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+        $vendors = New-Object System.Collections.Generic.List[string]
+        foreach ($gpu in $gpus) {
+            $probe = "$($gpu.Name) $($gpu.AdapterCompatibility) $($gpu.PNPDeviceID)"
+            if ($probe -match "(?i)nvidia|ven_10de" -and -not $vendors.Contains("NVIDIA")) { $vendors.Add("NVIDIA") }
+            elseif ($probe -match "(?i)amd|radeon|advanced micro devices|ven_1002" -and -not $vendors.Contains("AMD")) { $vendors.Add("AMD") }
+            elseif ($probe -match "(?i)intel|iris|arc|uhd graphics|ven_8086" -and -not $vendors.Contains("Intel")) { $vendors.Add("Intel") }
+        }
+        return @($vendors)
+    }
+    catch { return @() }
+}
+
+function Start-AppByStartMenuName {
+    param([string[]]$NamePatterns)
+    try {
+        $apps = @(Get-StartApps -ErrorAction SilentlyContinue)
+        foreach ($pattern in $NamePatterns) {
+            $match = $apps | Where-Object { $_.Name -match $pattern } | Select-Object -First 1
+            if ($match -and $match.AppID) {
+                Start-Process "explorer.exe" -ArgumentList "shell:AppsFolder\$($match.AppID)"
+                return $true
+            }
+        }
+    }
+    catch {}
+    return $false
+}
+
+function Start-ExistingExecutable {
+    param([string[]]$Paths)
+    foreach ($path in $Paths) {
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables($path)
+            if (Test-Path $expanded) {
+                Start-Process $expanded
+                return $true
+            }
+        }
+        catch {}
+    }
+    return $false
+}
+
+function Open-GpuVendorControlPanel {
+    param([string[]]$Vendors)
+
+    if (-not $Vendors -or $Vendors.Count -eq 0) { $Vendors = Get-MyDeviceGpuVendors }
+    $Vendors = @($Vendors | Where-Object { $_ } | Select-Object -Unique)
+
+    if (-not $Vendors -or $Vendors.Count -eq 0) {
+        Write-GuiLog "No known GPU vendor detected for control panel launch."
+        return
+    }
+
+    # Important: only try the detected/selected vendor. Do not fall through to another
+    # vendor's panel if the matching panel is not installed or cannot be launched.
+    $vendor = [string]$Vendors[0]
+    if ($Vendors.Count -gt 1) {
+        Write-GuiLog "Multiple GPU vendors detected ($($Vendors -join ', ')); trying $vendor control panel only."
+    }
+
+    $opened = $false
+    switch ($vendor) {
+        "NVIDIA" {
+            $opened = Start-ExistingExecutable @(
+                "$env:ProgramFiles\NVIDIA Corporation\Control Panel Client\nvcplui.exe",
+                "${env:ProgramFiles(x86)}\NVIDIA Corporation\Control Panel Client\nvcplui.exe"
+            )
+            if (-not $opened) { $opened = Start-AppByStartMenuName @("(?i)^NVIDIA Control Panel$", "(?i)NVIDIA.*Control") }
+            if (-not $opened) {
+                try { Start-Process "nvcplui.exe"; $opened = $true } catch {}
+            }
+        }
+        "AMD" {
+            $opened = Start-ExistingExecutable @(
+                "$env:ProgramFiles\AMD\CNext\CNext\RadeonSoftware.exe",
+                "$env:ProgramFiles\AMD\CNext\CNext\AMDRSServ.exe",
+                "$env:ProgramFiles\AMD\CNext\CCCSlim\CLIStart.exe",
+                "${env:ProgramFiles(x86)}\AMD\CNext\CNext\RadeonSoftware.exe"
+            )
+            if (-not $opened) { $opened = Start-AppByStartMenuName @("(?i)^AMD Software", "(?i)Radeon.*Software", "(?i)AMD.*Adrenalin") }
+        }
+        "Intel" {
+            $opened = Start-AppByStartMenuName @("(?i)Intel.*Graphics.*Command", "(?i)Intel.*Arc.*Control", "(?i)Intel.*Graphics.*Control")
+            if (-not $opened) {
+                $opened = Start-ExistingExecutable @(
+                    "$env:ProgramFiles\WindowsApps\*\GfxUIEx.exe",
+                    "$env:ProgramFiles\Intel\Intel Graphics Command Center\IGCC.exe",
+                    "$env:ProgramFiles\Intel\Intel(R) Graphics Control Panel\GfxUIEx.exe",
+                    "$env:SystemRoot\System32\GfxUIEx.exe"
+                )
+            }
+        }
+        default {
+            Write-GuiLog "No GPU control panel launch targets are defined for vendor '$vendor'."
+            return
+        }
+    }
+
+    if ($opened) { Write-GuiLog "Opened $vendor GPU control panel." }
+    else { Write-GuiLog "$vendor GPU control panel was not found. Use Check Drivers to open the vendor driver page." }
+}
+
 $btnMyDeviceGPUDriver = Get-Ctrl "btnMyDeviceGPUDriver"
 if ($btnMyDeviceGPUDriver) {
     $btnMyDeviceGPUDriver.Add_Click({
-            # Get all GPUs and extract their names as a single string array
-            $gpus = Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name
-
-            # Determine unique vendors present in the system
-            $vendors = @()
-            if ($gpus -match "(?i)NVIDIA") { $vendors += "NVIDIA" }
-            if ($gpus -match "(?i)AMD|Radeon") { $vendors += "AMD" }
-            if ($gpus -match "(?i)Intel") { $vendors += "Intel" }
-
-            # Open the respective download pages
+            $vendors = @(Get-MyDeviceGpuVendors)
             if ($vendors.Count -eq 0) {
                 Start-Process "https://www.google.com/search?q=Graphics+driver+download"
             }
@@ -8098,6 +11370,13 @@ foreach ($btnName in $TabButtons) {
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
                 }
             }
+            if ($s.Name -eq "btnTabMyDevice") {
+                Update-MyDeviceResponsiveLayout
+                if (-not $script:MyDeviceStatsStarted) {
+                    $script:MyDeviceStatsStarted = $true
+                    Update-MyDeviceStats
+                }
+            }
         })
 }
 
@@ -8194,7 +11473,10 @@ Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "b
 Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
 Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
+Add-SearchIndexEntry "btnMyDeviceExport" "Export My Device Details" "btnTabMyDevice"
 
 # 10. Catalog & Providers
 Add-SearchIndexEntry "btnShowCatalog" "Software Catalog" "btnTabUpdates"
@@ -9107,6 +12389,129 @@ function Show-ProviderManager {
     $win.ShowDialog() | Out-Null
 }
 
+
+function Start-WingetScanSourcePreflight {
+    param([string[]]$Sources)
+
+    if (-not $Sources -or $Sources.Count -eq 0) {
+        $script:WingetSourcePreflightReadyForScan = $true
+        if ($btnWingetScan) {
+            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+        return
+    }
+
+    if ($script:WingetScanSourcePreflightInProgress) {
+        Write-GuiLog "Winget source preflight is already running."
+        return
+    }
+
+    $script:WingetScanSourcePreflightInProgress = $true
+    $script:WingetSourcePreflightReadyForScan = $false
+    $script:WingetSourcePreflightSources = @($Sources | Select-Object -Unique)
+
+    Write-GuiLog "Preparing winget sources before package scan: $($script:WingetSourcePreflightSources -join ', ')"
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Preparing winget sources before scan..."
+        $lblWingetStatus.Visibility = "Visible"
+    }
+
+    if ($script:WingetSourcePreflightTimer) {
+        try { $script:WingetSourcePreflightTimer.Stop() } catch {}
+        $script:WingetSourcePreflightTimer = $null
+    }
+    if ($script:WingetSourcePreflightRunspace) {
+        try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
+        try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+        $script:WingetSourcePreflightRunspace = $null
+    }
+
+    $script:WingetSourcePreflightRunspace = [PowerShell]::Create().AddScript({
+            param([string[]]$Sources)
+            [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+            $log = New-Object System.Collections.Generic.List[string]
+
+            function Add-Log { param([string]$Text) if (-not [string]::IsNullOrWhiteSpace($Text)) { [void]$log.Add($Text) } }
+            function Invoke-WingetProcess {
+                param([string]$Arguments, [int]$TimeoutMs = 30000)
+                $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                $psi.FileName = "winget"
+                $psi.Arguments = $Arguments
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+                try { $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+                $proc = [System.Diagnostics.Process]::Start($psi)
+                try { $proc.BeginOutputReadLine() } catch {}
+                try { $proc.BeginErrorReadLine() } catch {}
+                if (-not $proc.WaitForExit($TimeoutMs)) {
+                    try { $proc.Kill() } catch {}
+                    return [PSCustomObject]@{ ExitCode = -1; TimedOut = $true }
+                }
+                return [PSCustomObject]@{ ExitCode = [int]$proc.ExitCode; TimedOut = $false }
+            }
+
+            foreach ($source in @($Sources | Select-Object -Unique)) {
+                try {
+                    $refreshTimeoutMs = if ($source -eq "msstore") { 15000 } else { 30000 }
+                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $([int]($refreshTimeoutMs / 1000))s)..."
+                    $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs $refreshTimeoutMs
+
+                    if ($refresh.TimedOut) {
+                        Add-Log "LOG:$source source refresh timed out after $([int]($refreshTimeoutMs / 1000))s; continuing to scan anyway."
+                    }
+                    elseif ($refresh.ExitCode -eq 0) {
+                        Add-Log "LOG:$source source refresh completed before scan."
+                    }
+                    else {
+                        Add-Log "LOG:$source source refresh exited with code $($refresh.ExitCode); continuing to scan anyway."
+                    }
+                }
+                catch {
+                    Add-Log "LOG:$source source preflight failed: $($_.Exception.Message); continuing to scan anyway."
+                }
+            }
+
+            Add-Log "LOG:Winget source preflight finished; starting package scan."
+            return $log.ToArray()
+        }).AddArgument([string[]]$script:WingetSourcePreflightSources)
+
+    $script:WingetSourcePreflightAsyncResult = $script:WingetSourcePreflightRunspace.BeginInvoke()
+    $script:WingetSourcePreflightTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WingetSourcePreflightTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $script:WingetSourcePreflightTimer.Add_Tick({
+            if (-not $script:WingetSourcePreflightAsyncResult) { return }
+            if (-not $script:WingetSourcePreflightAsyncResult.IsCompleted) { return }
+
+            $script:WingetSourcePreflightTimer.Stop()
+            try {
+                $lines = $script:WingetSourcePreflightRunspace.EndInvoke($script:WingetSourcePreflightAsyncResult)
+                foreach ($line in $lines) {
+                    if ($line -is [string] -and $line.StartsWith("LOG:")) { Write-GuiLog ($line.Substring(4)) }
+                    elseif ($line) { Write-GuiLog ([string]$line) }
+                }
+            }
+            catch {
+                Write-GuiLog "Winget source preflight background error: $($_.Exception.Message)"
+            }
+            finally {
+                try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+                $script:WingetSourcePreflightRunspace = $null
+                $script:WingetSourcePreflightAsyncResult = $null
+                $script:WingetScanSourcePreflightInProgress = $false
+                $script:WingetSourcePreflightReadyForScan = $true
+            }
+
+            if ($btnWingetScan) {
+                $btnWingetScan.IsEnabled = $true
+                $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+            }
+        })
+    $script:WingetSourcePreflightTimer.Start()
+}
+
 # ---------------------------------------------------------
 # PARALLEL SCAN ENGINE
 # ---------------------------------------------------------
@@ -9201,12 +12606,11 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
-
-        # --- NEW: Kill stuck package managers before scanning ---
-        try {
-            Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
-        }
-        catch {}
+        # Winget/MS Store source refresh is handled inside each provider worker now.
+        # That guarantees the provider scan starts only after its source refresh attempt finishes,
+        # while still keeping all winget work off the UI thread.
+        # Do not kill winget here; source preflight may already be running.
+        # Stuck winget processes are cleaned at app start and install/update actions handle their own cleanup.
     
         # --- Load Settings ---
         $settings = Get-WmtSettings
@@ -9219,6 +12623,24 @@ $btnWingetScan.Add_Click({
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+
+        # Gate the actual winget/msstore scan behind a completed source refresh.
+        # This keeps startup clickable but ensures the first visible package results are collected after source prep.
+        $wingetSourcesToPrep = @()
+        if ("winget" -in $enabled) { $wingetSourcesToPrep += "winget" }
+        if ("msstore" -in $enabled) { $wingetSourcesToPrep += "msstore" }
+
+        if ($wingetSourcesToPrep.Count -gt 0 -and -not $script:WingetSourcePreflightReadyForScan) {
+            if (-not $script:WingetScanSourcePreflightInProgress) {
+                Start-WingetScanSourcePreflight -Sources $wingetSourcesToPrep
+            }
+            else {
+                Write-GuiLog "Waiting for winget source preflight to finish before scanning..."
+            }
+            return
+        }
+        #$script:WingetSourcePreflightReadyForScan = $false
+        # Keep the ready flag set after the first preflight so later page/manual refreshes scan immediately.
     
         # --- Reset scan tracking ---
         $script:ActiveScans.Clear()
@@ -9271,7 +12693,7 @@ $btnWingetScan.Add_Click({
                         return $false
                     }
     
-                    Write-Output "LOG:Scanning $SourceName..."
+                    Write-Output "LOG:$SourceName source preflight already completed; starting scan..."
     
                     # Timeout: 45 sec for msstore, 120 sec for winget
                     $timeoutMs = if ($SourceName -eq "msstore") { 45000 } else { 120000 }
@@ -11124,8 +14546,16 @@ $window.Add_ContentRendered({
                 $window.Height = [double]$wb.Height
             }
             if (($wb.Left -ne 0 -or $wb.Top -ne 0) -and $settings.WindowState -ne "Maximized") {
-                $window.Left = [double]$wb.Left
-                $window.Top = [double]$wb.Top
+                $screenW = [System.Windows.SystemParameters]::VirtualScreenWidth
+                $screenH = [System.Windows.SystemParameters]::VirtualScreenHeight
+                $screenX = [System.Windows.SystemParameters]::VirtualScreenLeft
+                $screenY = [System.Windows.SystemParameters]::VirtualScreenTop
+            
+                $clampedLeft = [math]::Max($screenX, [math]::Min([double]$wb.Left, $screenX + $screenW - 100))
+                $clampedTop = [math]::Max($screenY, [math]::Min([double]$wb.Top, $screenY + $screenH - 40))
+            
+                $window.Left = $clampedLeft
+                $window.Top = $clampedTop
             }
         }
 
@@ -11141,9 +14571,12 @@ $window.Add_ContentRendered({
         Start-UpdateCheckBackground
         # 3. Update tweak button states based on system
         Update-TweakButtonStates
-        # 4. Load device hardware statistics into My Device panel
-        Update-MyDeviceStats
+        # 4. Defer My Device hardware statistics until the My Device tab is opened.
+        # CIM/storage/BitLocker queries already run in background runspaces, but delaying them avoids competing with startup and winget preflight.
+        Update-MyDeviceResponsiveLayout
     })
+
+$window.Add_SizeChanged({ Update-MyDeviceResponsiveLayout })
 
 $window.Add_Closing({
         # Cancel any ongoing scan
@@ -11157,6 +14590,17 @@ $window.Add_Closing({
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+        if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
+        if ($script:WingetSourcePreflightRunspace) {
+            try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
+            try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+        }
+        Stop-MyDeviceSectionJobs
+        if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
+        if ($script:BitLockerStatusRunspace) {
+            try { $script:BitLockerStatusRunspace.Stop() } catch {}
+            try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+        }
         try {
             $settings = Get-WmtSettings
             $settings.Theme = $script:CurrentTheme
