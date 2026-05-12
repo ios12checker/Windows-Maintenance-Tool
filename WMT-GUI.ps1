@@ -5585,7 +5585,8 @@ function Start-DriveBenchmark {
             Error       = ""
             Cancel      = $false
             TargetDrive = "ALL"
-            TargetSize  = 64
+            TargetSize  = 1024
+            ActiveFiles  = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
         })
 
     $worker = @{
@@ -5708,7 +5709,7 @@ function Start-DriveBenchmark {
         $sizeValueMap[$sizeText] = $sizeMb
     }
 
-    $cmbSize.SelectedItem = "64 MB"
+    $cmbSize.SelectedItem = "1024 MB"
     [void]$controlsPanel.Children.Add($cmbSize)
 
     $btnRun = New-Object System.Windows.Controls.Button
@@ -5864,15 +5865,17 @@ function Start-DriveBenchmark {
     $setRunningUi = {
         param([bool]$Running)
 
-        $cmbDrive.IsEnabled = $true
-        $cmbSize.IsEnabled = $true
-        $btnRun.IsEnabled = $true
-
         if ($Running) {
-            $btnRun.Content = "Running..."
+            $btnRun.Content = "Stop Benchmark"
+            $cmbDrive.IsEnabled = $false
+            $cmbSize.IsEnabled = $false
+            $btnRun.IsEnabled = $true
         }
         else {
             $btnRun.Content = "Run Benchmark"
+            $cmbDrive.IsEnabled = $true
+            $cmbSize.IsEnabled = $true
+            $btnRun.IsEnabled = $true
         }
 
         $cmbDrive.Background = $BrushHeaderBg
@@ -5911,6 +5914,61 @@ function Start-DriveBenchmark {
         $worker["Runspace"] = $null
         $worker["Async"] = $null
         $worker["StartedAt"] = $null
+    }.GetNewClosure()
+
+    $cleanupTrackedBenchmarkFiles = {
+        try {
+            if (-not $state["ActiveFiles"]) {
+                return
+            }
+
+            foreach ($path in @($state["ActiveFiles"])) {
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$path) -and [System.IO.File]::Exists([string]$path)) {
+                        [System.IO.File]::Delete([string]$path)
+                    }
+                }
+                catch {}
+            }
+
+            try {
+                $state["ActiveFiles"].Clear()
+            }
+            catch {}
+        }
+        catch {}
+    }.GetNewClosure()
+
+    $stopBenchmark = {
+        try {
+            if (-not $state["IsRunning"]) {
+                return
+            }
+
+            $state["Cancel"] = $true
+            $state["Status"] = "Stopping benchmark..."
+            $btnRun.Content = "Stopping..."
+            $btnRun.IsEnabled = $false
+
+            try {
+                [void]$state["Lines"].Add("")
+                [void]$state["Lines"].Add("Stopping benchmark...")
+            }
+            catch {}
+
+            try {
+                if ($worker["PowerShell"]) {
+                    $worker["PowerShell"].Stop()
+                }
+            }
+            catch {}
+
+            Write-GuiLog "[Storage Benchmark] Stop requested."
+            & $refreshUi
+        }
+        catch {
+            Write-GuiLog "[Storage Benchmark] Stop failed: $($_.Exception.Message)"
+        }
     }.GetNewClosure()
 
     $refreshUi = {
@@ -5968,7 +6026,11 @@ function Start-DriveBenchmark {
                     }
                 }
                 catch {
-                    if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                    if ($state["Cancel"]) {
+                        $state["Error"] = ""
+                        [void]$state["Lines"].Add("Benchmark stopped by user.")
+                    }
+                    elseif ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
                         $state["Error"] = $_.Exception.Message
                         [void]$state["Lines"].Add("")
                         [void]$state["Lines"].Add("ERROR: $($_.Exception.Message)")
@@ -5981,7 +6043,11 @@ function Start-DriveBenchmark {
                 $state["IsCompleted"] = $true
                 $state["Progress"] = 100
 
-                if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                if ($state["Cancel"] -and [string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                    $state["Status"] = "Benchmark stopped."
+                    $statusText.Foreground = $BrushWarn
+                }
+                elseif ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
                     $state["Status"] = "Benchmark complete."
                     $statusText.Foreground = $BrushSuccess
                 }
@@ -6000,6 +6066,7 @@ function Start-DriveBenchmark {
 
                 & $setRunningUi $false
                 & $disposeWorker
+                & $cleanupTrackedBenchmarkFiles
             }
         }
         catch {
@@ -6023,6 +6090,7 @@ function Start-DriveBenchmark {
             & $refreshUi
             & $setRunningUi $false
             & $disposeWorker
+            & $cleanupTrackedBenchmarkFiles
 
             Write-GuiLog "[Storage Benchmark] Timer failed: $($_.Exception.Message)"
         }
@@ -6047,7 +6115,7 @@ function Start-DriveBenchmark {
             }
         }
 
-        $selectedSize = 64
+        $selectedSize = 1024
 
         if ($cmbSize.SelectedItem) {
             $sizeKey = [string]$cmbSize.SelectedItem
@@ -6066,6 +6134,10 @@ function Start-DriveBenchmark {
         $state["Cancel"] = $false
         $state["TargetDrive"] = $selectedDrive
         $state["TargetSize"] = $selectedSize
+        try {
+            $state["ActiveFiles"].Clear()
+        }
+        catch {}
 
         $targetLabel = if ($selectedDrive -eq "ALL") {
             "All Fixed Drives"
@@ -6074,8 +6146,9 @@ function Start-DriveBenchmark {
             "{0}:\" -f $selectedDrive
         }
 
-        [void]$state["Lines"].Add("Quick drive benchmark results (.NET runspace, CDM-style):")
+        [void]$state["Lines"].Add("Quick drive benchmark results (.NET runspace, native SSD-style):")
         [void]$state["Lines"].Add("Target: $targetLabel | Size: $selectedSize MB")
+        [void]$state["Lines"].Add("Mode: direct disk I/O (bypasses Windows file cache; device firmware cache may still apply)")
         [void]$state["Lines"].Add("")
 
         $statusText.Foreground = $BrushWarn
@@ -6118,37 +6191,634 @@ function Start-DriveBenchmark {
                         }
                     }
 
-                    function Get-MBps {
-                        param(
-                            [int64]$Bytes,
-                            [double]$Seconds
-                        )
+                    function Get-BenchmarkDriveHardwareMap {
+                        $map = @{}
 
-                        if ($Seconds -le 0) {
-                            return 0
+                        try {
+                            $partitionByDriveLetter = @{}
+                            $diskByNumber = @{}
+                            $cimDiskByIndex = @{}
+
+                            foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $p.DriveLetter -and -not [string]::IsNullOrWhiteSpace([string]$p.DriveLetter)) {
+                                    $partitionByDriveLetter[[string]$p.DriveLetter] = $p
+                                }
+                            }
+
+                            foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $d.Number) {
+                                    $diskByNumber[[int]$d.Number] = $d
+                                }
+                            }
+
+                            foreach ($d in @(Get-CimInstance Win32_DiskDrive -Property Index, Model, InterfaceType -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $d.Index) {
+                                    $cimDiskByIndex[[int]$d.Index] = $d
+                                }
+                            }
+
+                            foreach ($driveLetter in @($partitionByDriveLetter.Keys)) {
+                                $partition = $partitionByDriveLetter[$driveLetter]
+                                $disk = $null
+                                $cimDisk = $null
+
+                                if ($partition -and $null -ne $partition.DiskNumber) {
+                                    $diskNumber = [int]$partition.DiskNumber
+
+                                    if ($diskByNumber.ContainsKey($diskNumber)) {
+                                        $disk = $diskByNumber[$diskNumber]
+                                    }
+
+                                    if ($cimDiskByIndex.ContainsKey($diskNumber)) {
+                                        $cimDisk = $cimDiskByIndex[$diskNumber]
+                                    }
+                                }
+
+                                $model = $null
+
+                                if ($cimDisk -and -not [string]::IsNullOrWhiteSpace([string]$cimDisk.Model)) {
+                                    $model = ([string]$cimDisk.Model).Trim()
+                                }
+                                elseif ($disk -and -not [string]::IsNullOrWhiteSpace([string]$disk.FriendlyName)) {
+                                    $model = ([string]$disk.FriendlyName).Trim()
+                                }
+
+                                $parts = @()
+
+                                if (-not [string]::IsNullOrWhiteSpace($model)) {
+                                    $parts += $model
+                                }
+
+                                if ($partition -and $null -ne $partition.DiskNumber) {
+                                    $parts += ("Disk {0}" -f $partition.DiskNumber)
+                                }
+
+                                if ($disk -and $disk.BusType) {
+                                    $parts += [string]$disk.BusType
+                                }
+                                elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace([string]$cimDisk.InterfaceType)) {
+                                    $parts += [string]$cimDisk.InterfaceType
+                                }
+
+                                if ($parts.Count -gt 0) {
+                                    $map[[string]$driveLetter] = ($parts -join " | ")
+                                }
+                            }
                         }
+                        catch {}
 
-                        return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+                        return $map
                     }
 
-                    function Get-Iops {
-                        param(
-                            [int]$Operations,
-                            [double]$Seconds
-                        )
-
-                        if ($Seconds -le 0) {
-                            return 0
+                    function Initialize-NativeDiskBenchmark {
+                        if (([System.Management.Automation.PSTypeName]'Wmt.NativeDiskBenchmark').Type) {
+                            return
                         }
 
-                        return [math]::Round($Operations / $Seconds, 0)
+                        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
+namespace Wmt {
+    public static class NativeDiskBenchmark {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFile(
+            string lpFileName,
+            uint dwDesiredAccess,
+            uint dwShareMode,
+            IntPtr lpSecurityAttributes,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ReadFile(
+            SafeFileHandle hFile,
+            IntPtr lpBuffer,
+            uint nNumberOfBytesToRead,
+            out uint lpNumberOfBytesRead,
+            IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WriteFile(
+            SafeFileHandle hFile,
+            IntPtr lpBuffer,
+            uint nNumberOfBytesToWrite,
+            out uint lpNumberOfBytesWritten,
+            IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetFilePointerEx(
+            SafeFileHandle hFile,
+            long liDistanceToMove,
+            out long lpNewFilePointer,
+            uint dwMoveMethod);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool FlushFileBuffers(SafeFileHandle hFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetEndOfFile(SafeFileHandle hFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetFileValidData(
+            SafeFileHandle hFile,
+            long ValidDataLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr CreateIoCompletionPort(
+            SafeFileHandle FileHandle,
+            IntPtr ExistingCompletionPort,
+            UIntPtr CompletionKey,
+            uint NumberOfConcurrentThreads);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetQueuedCompletionStatusEx(
+            IntPtr CompletionPort,
+            IntPtr lpCompletionPortEntries,
+            uint ulCount,
+            out uint ulNumEntriesRemoved,
+            uint dwMilliseconds,
+            [MarshalAs(UnmanagedType.Bool)] bool fAlertable);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr VirtualAlloc(
+            IntPtr lpAddress,
+            UIntPtr dwSize,
+            uint flAllocationType,
+            uint flProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool VirtualFree(
+            IntPtr lpAddress,
+            UIntPtr dwSize,
+            uint dwFreeType);
+
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool OpenProcessToken(
+            IntPtr ProcessHandle,
+            uint DesiredAccess,
+            out IntPtr TokenHandle);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool LookupPrivilegeValue(
+            string lpSystemName,
+            string lpName,
+            out long lpLuid);
+
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AdjustTokenPrivileges(
+            IntPtr TokenHandle,
+            [MarshalAs(UnmanagedType.Bool)] bool DisableAllPrivileges,
+            ref TokenPrivileges NewState,
+            uint BufferLength,
+            IntPtr PreviousState,
+            IntPtr ReturnLength);
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        public static extern IntPtr GetCurrentProcess();
+
+        public const uint GENERIC_READ = 0x80000000;
+        public const uint GENERIC_WRITE = 0x40000000;
+        public const uint FILE_SHARE_READ = 0x00000001;
+        public const uint FILE_SHARE_WRITE = 0x00000002;
+        public const uint CREATE_ALWAYS = 2;
+        public const uint OPEN_EXISTING = 3;
+        public const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+        public const uint FILE_FLAG_NO_BUFFERING = 0x20000000;
+        public const uint FILE_FLAG_OVERLAPPED = 0x40000000;
+        public const uint FILE_FLAG_WRITE_THROUGH = 0x80000000;
+        public const uint FILE_FLAG_RANDOM_ACCESS = 0x10000000;
+        public const uint MEM_COMMIT = 0x1000;
+        public const uint MEM_RESERVE = 0x2000;
+        public const uint MEM_RELEASE = 0x8000;
+        public const uint PAGE_READWRITE = 0x04;
+        public const uint FILE_BEGIN = 0;
+        public const int ERROR_IO_PENDING = 997;
+        public const uint INFINITE = 0xFFFFFFFF;
+        public const uint TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+        public const uint TOKEN_QUERY = 0x00000008;
+        public const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeOverlapped {
+            public IntPtr Internal;
+            public IntPtr InternalHigh;
+            public uint Offset;
+            public uint OffsetHigh;
+            public IntPtr hEvent;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct TokenPrivileges {
+            public int PrivilegeCount;
+            public long Luid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct OverlappedEntry {
+            public UIntPtr CompletionKey;
+            public IntPtr Overlapped;
+            public UIntPtr Internal;
+            public uint NumberOfBytesTransferred;
+        }
+
+        private static readonly int OverlappedInternalOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "Internal");
+        private static readonly int OverlappedInternalHighOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "InternalHigh");
+        private static readonly int OverlappedOffsetOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "Offset");
+        private static readonly int OverlappedOffsetHighOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "OffsetHigh");
+        private static readonly int OverlappedEventOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "hEvent");
+        private static readonly int CompletionEntryOverlappedOffset = (int)Marshal.OffsetOf(typeof(OverlappedEntry), "Overlapped");
+        private static readonly int CompletionEntryBytesOffset = (int)Marshal.OffsetOf(typeof(OverlappedEntry), "NumberOfBytesTransferred");
+
+        public sealed class BenchmarkMeasure {
+            public long Bytes { get; set; }
+            public int Operations { get; set; }
+            public double Seconds { get; set; }
+            public double MBps {
+                get {
+                    if (Seconds <= 0) return 0;
+                    return Math.Round((Bytes / 1000000.0) / Seconds, 1);
+                }
+            }
+            public double Iops {
+                get {
+                    if (Seconds <= 0) return 0;
+                    return Math.Round(Operations / Seconds, 0);
+                }
+            }
+        }
+
+        private static Exception LastError(string action) {
+            int code = Marshal.GetLastWin32Error();
+            return new Win32Exception(code, action + " failed");
+        }
+
+        private static long AlignBytes(long bytes, int blockSize) {
+            long blocks = bytes / blockSize;
+            if (blocks < 1) throw new ArgumentOutOfRangeException("bytes", "Benchmark size is smaller than the I/O block size.");
+            return blocks * blockSize;
+        }
+
+        private static SafeFileHandle OpenNativeFile(string path, uint access, uint creationDisposition, bool randomAccess, bool writeThrough, uint shareMode) {
+            return OpenNativeFile(path, access, creationDisposition, randomAccess, writeThrough, shareMode, false);
+        }
+
+        private static SafeFileHandle OpenNativeFile(string path, uint access, uint creationDisposition, bool randomAccess, bool writeThrough, uint shareMode, bool overlapped) {
+            uint flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
+            if (randomAccess) flags |= FILE_FLAG_RANDOM_ACCESS;
+            if (writeThrough) flags |= FILE_FLAG_WRITE_THROUGH;
+            if (overlapped) flags |= FILE_FLAG_OVERLAPPED;
+
+            SafeFileHandle handle = CreateFile(path, access, shareMode, IntPtr.Zero, creationDisposition, flags, IntPtr.Zero);
+            if (handle.IsInvalid) throw LastError("CreateFile " + path);
+            return handle;
+        }
+
+        private static IntPtr AllocateBuffer(int size, int seed) {
+            IntPtr buffer = VirtualAlloc(IntPtr.Zero, new UIntPtr((ulong)size), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+            if (buffer == IntPtr.Zero) throw LastError("VirtualAlloc");
+
+            byte[] managed = new byte[size];
+            new Random(seed).NextBytes(managed);
+            Marshal.Copy(managed, 0, buffer, size);
+            return buffer;
+        }
+
+        private static void FreeBuffer(IntPtr buffer) {
+            if (buffer != IntPtr.Zero) VirtualFree(buffer, UIntPtr.Zero, MEM_RELEASE);
+        }
+
+        private static void SeekExact(SafeFileHandle handle, long offset) {
+            long newOffset;
+            if (!SetFilePointerEx(handle, offset, out newOffset, FILE_BEGIN)) throw LastError("SetFilePointerEx");
+        }
+
+        private static void WriteExact(SafeFileHandle handle, IntPtr buffer, int size) {
+            uint written;
+            if (!WriteFile(handle, buffer, (uint)size, out written, IntPtr.Zero)) throw LastError("WriteFile");
+            if (written != (uint)size) throw new InvalidOperationException("WriteFile returned " + written + " bytes instead of " + size + ".");
+        }
+
+        private static void FlushExact(SafeFileHandle handle) {
+            if (!FlushFileBuffers(handle)) throw LastError("FlushFileBuffers");
+        }
+
+        private static BenchmarkMeasure BuildMeasure(long bytes, int operations, Stopwatch stopwatch) {
+            return new BenchmarkMeasure {
+                Bytes = bytes,
+                Operations = operations,
+                Seconds = stopwatch.Elapsed.TotalSeconds
+            };
+        }
+
+        private static void PrepareFileLength(string path, long bytes) {
+            SafeFileHandle handle = null;
+            bool validDataReady = false;
+
+            try {
+                handle = OpenNativeFile(path, GENERIC_READ | GENERIC_WRITE, CREATE_ALWAYS, false, false, FILE_SHARE_READ | FILE_SHARE_WRITE);
+                SeekExact(handle, bytes);
+                if (!SetEndOfFile(handle)) throw LastError("SetEndOfFile");
+                EnablePrivilege("SeManageVolumePrivilege");
+                validDataReady = SetFileValidData(handle, bytes);
+                FlushExact(handle);
+            }
+            finally {
+                if (handle != null) handle.Dispose();
+            }
+
+            if (!validDataReady) {
+                FillFileSequential(path, bytes, 1048576);
+            }
+        }
+
+        private static void EnablePrivilege(string privilegeName) {
+            IntPtr token = IntPtr.Zero;
+
+            try {
+                if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) {
+                    return;
+                }
+
+                long luid;
+
+                if (!LookupPrivilegeValue(null, privilegeName, out luid)) {
+                    return;
+                }
+
+                TokenPrivileges privileges = new TokenPrivileges {
+                    PrivilegeCount = 1,
+                    Luid = luid,
+                    Attributes = SE_PRIVILEGE_ENABLED
+                };
+
+                AdjustTokenPrivileges(token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero);
+            }
+            finally {
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+
+        private static void FillFileSequential(string path, long totalBytes, int blockSize) {
+            totalBytes = AlignBytes(totalBytes, blockSize);
+            IntPtr buffer = IntPtr.Zero;
+            SafeFileHandle handle = null;
+
+            try {
+                buffer = AllocateBuffer(blockSize, Environment.TickCount);
+                handle = OpenNativeFile(path, GENERIC_READ | GENERIC_WRITE, CREATE_ALWAYS, false, false, 0);
+
+                long bytes = 0;
+
+                while (bytes < totalBytes) {
+                    WriteExact(handle, buffer, blockSize);
+                    bytes += blockSize;
+                }
+
+                FlushExact(handle);
+            }
+            finally {
+                if (handle != null) handle.Dispose();
+                FreeBuffer(buffer);
+            }
+        }
+
+        private sealed class NativeIoSlot : IDisposable {
+            public IntPtr Buffer = IntPtr.Zero;
+            public IntPtr Overlapped = IntPtr.Zero;
+
+            public NativeIoSlot(int blockSize, int seed) {
+                Buffer = AllocateBuffer(blockSize, seed);
+                Overlapped = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(NativeOverlapped)));
+            }
+
+            public void Dispose() {
+                if (Overlapped != IntPtr.Zero) {
+                    Marshal.FreeHGlobal(Overlapped);
+                    Overlapped = IntPtr.Zero;
+                }
+
+                FreeBuffer(Buffer);
+                Buffer = IntPtr.Zero;
+            }
+        }
+
+        private static void PrepareOverlapped(NativeIoSlot slot, long offset) {
+            Marshal.WriteIntPtr(slot.Overlapped, OverlappedInternalOffset, IntPtr.Zero);
+            Marshal.WriteIntPtr(slot.Overlapped, OverlappedInternalHighOffset, IntPtr.Zero);
+            Marshal.WriteInt32(slot.Overlapped, OverlappedOffsetOffset, unchecked((int)(offset & 0xFFFFFFFFL)));
+            Marshal.WriteInt32(slot.Overlapped, OverlappedOffsetHighOffset, unchecked((int)((offset >> 32) & 0xFFFFFFFFL)));
+            Marshal.WriteIntPtr(slot.Overlapped, OverlappedEventOffset, IntPtr.Zero);
+        }
+
+        private static void ThrowIfQueuedIoFailed(bool started, string action) {
+            if (started) return;
+
+            int code = Marshal.GetLastWin32Error();
+            if (code != ERROR_IO_PENDING) throw new Win32Exception(code, action + " failed");
+        }
+
+        private static long GetNextBlockIndex(long blockCount, bool isRandom, Random random, ref long nextSequentialBlock) {
+            if (isRandom) return random.Next((int)blockCount);
+
+            long blockIndex = nextSequentialBlock % blockCount;
+            nextSequentialBlock++;
+            return blockIndex;
+        }
+
+        private static bool ShouldIssueMore(bool timedRun, Stopwatch stopwatch, double durationSeconds, int issued, int operationLimit) {
+            if (timedRun) return stopwatch.Elapsed.TotalSeconds < durationSeconds;
+            return issued < operationLimit;
+        }
+
+        private static void PostQueuedIo(SafeFileHandle handle, NativeIoSlot slot, int blockSize, long offset, bool isWrite) {
+            PrepareOverlapped(slot, offset);
+
+            uint ignored;
+
+            if (isWrite) {
+                ThrowIfQueuedIoFailed(
+                    WriteFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped),
+                    "WriteFile");
+            }
+            else {
+                ThrowIfQueuedIoFailed(
+                    ReadFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped),
+                    "ReadFile");
+            }
+        }
+
+        private static BenchmarkMeasure MeasureQueued(string path, long totalBytes, int blockSize, int operationLimit, double durationSeconds, int queueDepth, bool isWrite, bool isRandom, bool writeThrough) {
+            totalBytes = AlignBytes(totalBytes, blockSize);
+
+            long blockCount = totalBytes / blockSize;
+            if (blockCount > int.MaxValue) throw new ArgumentOutOfRangeException("totalBytes", "Benchmark range is too large.");
+
+            bool timedRun = durationSeconds > 0;
+            if (!timedRun) operationLimit = Math.Max(1, operationLimit);
+            queueDepth = Math.Max(1, timedRun ? queueDepth : Math.Min(queueDepth, operationLimit));
+
+            NativeIoSlot[] slots = new NativeIoSlot[queueDepth];
+            SafeFileHandle handle = null;
+            IntPtr completionPort = IntPtr.Zero;
+
+            try {
+                for (int i = 0; i < queueDepth; i++) {
+                    slots[i] = new NativeIoSlot(blockSize, Environment.TickCount + 500 + i);
+                }
+
+                uint access = isWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
+                uint share = isWrite ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
+                handle = OpenNativeFile(path, access, OPEN_EXISTING, isRandom, isWrite && writeThrough, share, true);
+                completionPort = CreateIoCompletionPort(handle, IntPtr.Zero, UIntPtr.Zero, 1);
+
+                if (completionPort == IntPtr.Zero) {
+                    throw LastError("CreateIoCompletionPort");
+                }
+
+                Random random = isRandom ? new Random(Environment.TickCount + 700) : null;
+                int completed = 0;
+                int issued = 0;
+                long nextSequentialBlock = 0;
+                System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot> slotByOverlapped = new System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot>(queueDepth);
+
+                Stopwatch stopwatch = Stopwatch.StartNew();
+
+                for (int i = 0; i < queueDepth && ShouldIssueMore(timedRun, stopwatch, durationSeconds, issued, operationLimit); i++) {
+                    long blockIndex = GetNextBlockIndex(blockCount, isRandom, random, ref nextSequentialBlock);
+
+                    PostQueuedIo(
+                        handle,
+                        slots[i],
+                        blockSize,
+                        blockIndex * blockSize,
+                        isWrite);
+
+                    slotByOverlapped[slots[i].Overlapped] = slots[i];
+                    issued++;
+                }
+
+                int completionBatchSize = queueDepth;
+                IntPtr completionEntries = IntPtr.Zero;
+                int completionEntrySize = Marshal.SizeOf(typeof(OverlappedEntry));
+
+                try {
+                    completionEntries = Marshal.AllocHGlobal(completionEntrySize * completionBatchSize);
+
+                    while (completed < issued || ShouldIssueMore(timedRun, stopwatch, durationSeconds, issued, operationLimit)) {
+                        uint removed;
+
+                        if (!GetQueuedCompletionStatusEx(completionPort, completionEntries, (uint)completionBatchSize, out removed, INFINITE, false)) {
+                            throw LastError("GetQueuedCompletionStatusEx");
+                        }
+
+                        for (int i = 0; i < removed; i++) {
+                            IntPtr entryPointer = IntPtr.Add(completionEntries, i * completionEntrySize);
+                            IntPtr completedOverlapped = Marshal.ReadIntPtr(entryPointer, CompletionEntryOverlappedOffset);
+                            uint completedBytes = unchecked((uint)Marshal.ReadInt32(entryPointer, CompletionEntryBytesOffset));
+
+                            if (completedOverlapped == IntPtr.Zero) {
+                                throw new InvalidOperationException("GetQueuedCompletionStatusEx returned a null OVERLAPPED pointer.");
+                            }
+
+                            NativeIoSlot slot;
+
+                            if (!slotByOverlapped.TryGetValue(completedOverlapped, out slot)) {
+                                throw new InvalidOperationException("Completion returned an unknown OVERLAPPED pointer.");
+                            }
+
+                            if (completedBytes != (uint)blockSize) {
+                                throw new InvalidOperationException((isWrite ? "WriteFile" : "ReadFile") + " returned " + completedBytes + " bytes instead of " + blockSize + ".");
+                            }
+
+                            completed++;
+
+                            if (ShouldIssueMore(timedRun, stopwatch, durationSeconds, issued, operationLimit)) {
+                                long blockIndex = GetNextBlockIndex(blockCount, isRandom, random, ref nextSequentialBlock);
+
+                                PostQueuedIo(
+                                    handle,
+                                    slot,
+                                    blockSize,
+                                    blockIndex * blockSize,
+                                    isWrite);
+
+                                issued++;
+                            }
+                        }
+                    }
+                }
+                finally {
+                    if (completionEntries != IntPtr.Zero) Marshal.FreeHGlobal(completionEntries);
+                }
+
+                stopwatch.Stop();
+                return BuildMeasure((long)completed * blockSize, completed, stopwatch);
+            }
+            finally {
+                if (completionPort != IntPtr.Zero) CloseHandle(completionPort);
+                if (handle != null) handle.Dispose();
+
+                for (int i = 0; i < slots.Length; i++) {
+                    if (slots[i] != null) slots[i].Dispose();
+                }
+            }
+        }
+
+        public static BenchmarkMeasure MeasureSequentialReadQueued(string path, long totalBytes, int blockSize, int queueDepth, double durationSeconds) {
+            return MeasureQueued(path, totalBytes, blockSize, 0, durationSeconds, queueDepth, false, false, false);
+        }
+
+        public static BenchmarkMeasure MeasureSequentialWriteQueued(string path, long totalBytes, int blockSize, int queueDepth, double durationSeconds) {
+            return MeasureSequentialWriteQueued(path, totalBytes, blockSize, queueDepth, false, durationSeconds);
+        }
+
+        public static BenchmarkMeasure MeasureSequentialWriteQueued(string path, long totalBytes, int blockSize, int queueDepth, bool writeThrough, double durationSeconds) {
+            PrepareFileLength(path, AlignBytes(totalBytes, blockSize));
+            return MeasureQueued(path, totalBytes, blockSize, 0, durationSeconds, queueDepth, true, false, writeThrough);
+        }
+
+        public static BenchmarkMeasure MeasureRandomReadQueued(string path, long totalBytes, int blockSize, int queueDepth, double durationSeconds) {
+            return MeasureQueued(path, totalBytes, blockSize, 0, durationSeconds, queueDepth, false, true, false);
+        }
+
+        public static BenchmarkMeasure MeasureRandomWriteQueued(string path, long totalBytes, int blockSize, int queueDepth, double durationSeconds) {
+            return MeasureRandomWriteQueued(path, totalBytes, blockSize, queueDepth, false, durationSeconds);
+        }
+
+        public static BenchmarkMeasure MeasureRandomWriteQueued(string path, long totalBytes, int blockSize, int queueDepth, bool writeThrough, double durationSeconds) {
+            return MeasureQueued(path, totalBytes, blockSize, 0, durationSeconds, queueDepth, true, true, writeThrough);
+        }
+
+    }
+}
+'@
                     }
 
                     function Measure-Drive {
                         param(
                             [string]$DriveLetter,
                             [int]$FileSizeMb,
-                            [int]$RandomOps,
                             [int]$BaseProgress,
                             [int]$StepWeight
                         )
@@ -6161,17 +6831,41 @@ function Start-DriveBenchmark {
                         $randomBlockSize = 4096
                         $targetBytes = [int64]$FileSizeMb * 1MB
 
-                        $seqBuffer = New-Object byte[] $seqBufferSize
-                        $readBuffer = New-Object byte[] $seqBufferSize
-                        $randomBuffer = New-Object byte[] $randomBlockSize
-                        $rng = [System.Random]::new()
+                        $seqPeakQueueDepth = 8
+                        $randomPeakQueueDepth = 32
+                        $measureSeconds = 5.0
+                        $runMeasure = {
+                            param(
+                                [string]$Label,
+                                [int]$Progress,
+                                [scriptblock]$Measure
+                            )
 
-                        $rng.NextBytes($seqBuffer)
-                        $rng.NextBytes($randomBuffer)
+                            Set-Status "Warming up $DriveLetter`: $Label..." $Progress
+                            Test-Cancelled
+                            $null = & $Measure
 
-                        $fs = $null
+                            Set-Status "Testing $DriveLetter`: $Label..." $Progress
+                            Test-Cancelled
+                            & $Measure
+                        }.GetNewClosure()
 
                         try {
+                            try {
+                                if ($State["ActiveFiles"]) {
+                                    [void]$State["ActiveFiles"].Add($file)
+                                }
+                            }
+                            catch {}
+
+                            try {
+                                if (([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Type) {
+                                    [Win32.TokenManipulator]::EnablePrivilege("SeManageVolumePrivilege") | Out-Null
+                                }
+                            }
+                            catch {}
+
+                            Initialize-NativeDiskBenchmark
                             Test-Cancelled
 
                             if (-not [System.IO.Directory]::Exists($folder)) {
@@ -6188,159 +6882,59 @@ function Start-DriveBenchmark {
                             }
                             catch {}
 
-                            Set-Status "Testing $DriveLetter`: sequential write..." $BaseProgress
+                            Add-Line ("  Test file: {0}" -f $file)
+                            Add-Line ("  Mode: native direct I/O; {0:N0}s warmup + {0:N0}s measured per result (decimal MB/s)" -f $measureSeconds)
+                            Add-Line "  Note: selected size is the active test range; timed tests may read/write it repeatedly."
 
-                            $sw = [System.Diagnostics.Stopwatch]::StartNew()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Create,
-                                [System.IO.FileAccess]::ReadWrite,
-                                [System.IO.FileShare]::None,
-                                $seqBufferSize,
-                                [System.IO.FileOptions]::SequentialScan
-                            )
-
-                            $written = [int64]0
-
-                            while ($written -lt $targetBytes) {
-                                Test-Cancelled
-
-                                $remaining = $targetBytes - $written
-
-                                $toWrite = if ($remaining -lt $seqBuffer.Length) {
-                                    [int]$remaining
-                                }
-                                else {
-                                    $seqBuffer.Length
-                                }
-
-                                $fs.Write($seqBuffer, 0, $toWrite)
-                                $written += $toWrite
+                            $seqQ8Write = & $runMeasure "SEQ1M Q8T1 write" $BaseProgress {
+                                [Wmt.NativeDiskBenchmark]::MeasureSequentialWriteQueued($file, $targetBytes, $seqBufferSize, $seqPeakQueueDepth, $true, $measureSeconds)
                             }
 
-                            $fs.Flush()
-                            $sw.Stop()
+                            $seqQ8Read = & $runMeasure "SEQ1M Q8T1 read" ($BaseProgress + $StepWeight) {
+                                [Wmt.NativeDiskBenchmark]::MeasureSequentialReadQueued($file, $targetBytes, $seqBufferSize, $seqPeakQueueDepth, $measureSeconds)
+                            }
+                            Add-Line ("  SEQ1M Q8T1 Read  {0} MB/s | Write {1} MB/s" -f $seqQ8Read.MBps, $seqQ8Write.MBps)
 
-                            $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  SEQ1M Write {0} MB/s" -f $seqWrite)
-                            Set-Status "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
-
-                            Test-Cancelled
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::Read,
-                                [System.IO.FileShare]::ReadWrite,
-                                $seqBufferSize,
-                                [System.IO.FileOptions]::SequentialScan
-                            )
-
-                            $readBytes = [int64]0
-
-                            do {
-                                Test-Cancelled
-
-                                $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
-                                $readBytes += $readNow
-                            } while ($readNow -gt 0)
-
-                            $sw.Stop()
-
-                            $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  SEQ1M Read  {0} MB/s" -f $seqRead)
-                            Set-Status "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
-
-                            Test-Cancelled
-
-                            $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::Read,
-                                [System.IO.FileShare]::ReadWrite,
-                                $randomBlockSize,
-                                [System.IO.FileOptions]::RandomAccess
-                            )
-
-                            for ($i = 0; $i -lt $RandomOps; $i++) {
-                                Test-Cancelled
-
-                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
-                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                                [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
+                            $seqQ1Write = & $runMeasure "SEQ1M Q1T1 write" ($BaseProgress + ($StepWeight * 2)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureSequentialWriteQueued($file, $targetBytes, $seqBufferSize, 1, $true, $measureSeconds)
                             }
 
-                            $sw.Stop()
+                            $seqQ1Read = & $runMeasure "SEQ1M Q1T1 read" ($BaseProgress + ($StepWeight * 3)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureSequentialReadQueued($file, $targetBytes, $seqBufferSize, 1, $measureSeconds)
+                            }
+                            Add-Line ("  SEQ1M Q1T1 Read  {0} MB/s | Write {1} MB/s" -f $seqQ1Read.MBps, $seqQ1Write.MBps)
 
-                            $rndReadSeconds = $sw.Elapsed.TotalSeconds
-                            $rndReadBytes = [int64]$RandomOps * $randomBlockSize
-                            $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
-                            $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
-                            Set-Status "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
-
-                            Test-Cancelled
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::ReadWrite,
-                                [System.IO.FileShare]::None,
-                                $randomBlockSize,
-                                [System.IO.FileOptions]::RandomAccess
-                            )
-
-                            for ($i = 0; $i -lt $RandomOps; $i++) {
-                                Test-Cancelled
-
-                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
-                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                                $fs.Write($randomBuffer, 0, $randomBlockSize)
+                            $rndQ32Write = & $runMeasure "RND4K Q32T1 write" ($BaseProgress + ($StepWeight * 4)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureRandomWriteQueued($file, $targetBytes, $randomBlockSize, $randomPeakQueueDepth, $measureSeconds)
                             }
 
-                            $fs.Flush()
-                            $sw.Stop()
+                            $rndQ32Read = & $runMeasure "RND4K Q32T1 read" ($BaseProgress + ($StepWeight * 5)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureRandomReadQueued($file, $targetBytes, $randomBlockSize, $randomPeakQueueDepth, $measureSeconds)
+                            }
+                            Add-Line ("  RND4K Q32T1 Read  {0} MB/s ({1} IOPS) | Write {2} MB/s ({3} IOPS)" -f $rndQ32Read.MBps, $rndQ32Read.Iops, $rndQ32Write.MBps, $rndQ32Write.Iops)
 
-                            $rndWriteSeconds = $sw.Elapsed.TotalSeconds
-                            $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
-                            $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
-                            $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
+                            $rndQ1Write = & $runMeasure "RND4K Q1T1 write" ($BaseProgress + ($StepWeight * 6)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureRandomWriteQueued($file, $targetBytes, $randomBlockSize, 1, $measureSeconds)
+                            }
 
-                            Add-Line ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
-                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
+                            $rndQ1Read = & $runMeasure "RND4K Q1T1 read" ($BaseProgress + ($StepWeight * 7)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureRandomReadQueued($file, $targetBytes, $randomBlockSize, 1, $measureSeconds)
+                            }
+                            Add-Line ("  RND4K Q1T1 Read  {0} MB/s ({1} IOPS) | Write {2} MB/s ({3} IOPS)" -f $rndQ1Read.MBps, $rndQ1Read.Iops, $rndQ1Write.MBps, $rndQ1Write.Iops)
+
+                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 8))
                         }
                         finally {
-                            if ($fs) {
-                                try {
-                                    $fs.Dispose()
-                                }
-                                catch {}
-                            }
-
                             try {
                                 if ([System.IO.File]::Exists($file)) {
                                     [System.IO.File]::Delete($file)
+                                }
+                            }
+                            catch {}
+
+                            try {
+                                if ($State["ActiveFiles"]) {
+                                    [void]$State["ActiveFiles"].Remove($file)
                                 }
                             }
                             catch {}
@@ -6384,6 +6978,8 @@ function Start-DriveBenchmark {
                             throw "No suitable fixed drives were found."
                         }
 
+                        $driveHardwareMap = Get-BenchmarkDriveHardwareMap
+
                         $requiredBytes = ([int64]$targetSize * 1MB) + 96MB
 
                         $testableDrives = @(
@@ -6397,7 +6993,7 @@ function Start-DriveBenchmark {
                             throw "Selected drive(s) do not have enough free space for a $targetSize MB benchmark."
                         }
 
-                        $totalSteps = [math]::Max(1, $testableDrives.Count * 4)
+                        $totalSteps = [math]::Max(1, $testableDrives.Count * 8)
                         $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
                         $stepIndex = 0
 
@@ -6413,13 +7009,26 @@ function Start-DriveBenchmark {
                                 $driveInfo.VolumeLabel
                             }
 
+                            $driveHardware = $null
+
+                            if ($driveHardwareMap.ContainsKey($driveLetter)) {
+                                $driveHardware = [string]$driveHardwareMap[$driveLetter]
+                            }
+
+                            $driveDisplayName = if ([string]::IsNullOrWhiteSpace($driveHardware)) {
+                                "{0}: {1}" -f $driveLetter, $driveLabel
+                            }
+                            else {
+                                "{0}: {1} - {2}" -f $driveLetter, $driveLabel, $driveHardware
+                            }
+
                             if ([int64]$driveInfo.AvailableFreeSpace -lt $requiredBytes) {
-                                Add-Line ("{0}: {1} - skipped, not enough free space for a {2} MB test." -f $driveLetter, $driveLabel, $targetSize)
+                                Add-Line ("{0} - skipped, not enough free space for a {1} MB test." -f $driveDisplayName, $targetSize)
                                 continue
                             }
 
                             Add-Line ""
-                            Add-Line ("{0}: {1} ({2} MiB test file)" -f $driveLetter, $driveLabel, $targetSize)
+                            Add-Line ("{0} ({1} MiB test file)" -f $driveDisplayName, $targetSize)
 
                             $baseProgress = $stepIndex * $stepWeight
 
@@ -6427,15 +7036,18 @@ function Start-DriveBenchmark {
                                 Measure-Drive `
                                     -DriveLetter $driveLetter `
                                     -FileSizeMb $targetSize `
-                                    -RandomOps 1024 `
                                     -BaseProgress $baseProgress `
                                     -StepWeight $stepWeight
                             }
                             catch {
-                                Add-Line ("{0}: {1} - benchmark failed: {2}" -f $driveLetter, $driveLabel, $_.Exception.Message)
+                                if ($State["Cancel"]) {
+                                    throw
+                                }
+
+                                Add-Line ("{0} - benchmark failed: {1}" -f $driveDisplayName, $_.Exception.Message)
                             }
 
-                            $stepIndex += 4
+                            $stepIndex += 8
                         }
 
                         Add-Line ""
@@ -6444,12 +7056,22 @@ function Start-DriveBenchmark {
                         Set-Status "Benchmark complete." 100
                     }
                     catch {
-                        $State["Error"] = $_.Exception.Message
+                        if ($State["Cancel"]) {
+                            $State["Error"] = ""
 
-                        Add-Line ""
-                        Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+                            Add-Line ""
+                            Add-Line "Benchmark stopped by user."
 
-                        Set-Status "Benchmark failed." 100
+                            Set-Status "Benchmark stopped." 100
+                        }
+                        else {
+                            $State["Error"] = $_.Exception.Message
+
+                            Add-Line ""
+                            Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+
+                            Set-Status "Benchmark failed." 100
+                        }
                     }
                     finally {
                         $State["IsRunning"] = $false
@@ -6479,30 +7101,19 @@ function Start-DriveBenchmark {
             & $refreshUi
             & $setRunningUi $false
             & $disposeWorker
+            & $cleanupTrackedBenchmarkFiles
 
             Write-GuiLog "[Storage Benchmark] Start failed: $($_.Exception.Message)"
         }
     }.GetNewClosure()
 
     $btnRun.Add_Click({
-            & $startBenchmark
-        }.GetNewClosure())
-
-    $didAutoStart = $false
-
-    $benchWindow.Add_Loaded({
-            if ($didAutoStart) {
-                return
+            if ($state["IsRunning"]) {
+                & $stopBenchmark
             }
-
-            $didAutoStart = $true
-
-            $benchWindow.Dispatcher.BeginInvoke(
-                [Action] {
-                    & $startBenchmark
-                },
-                [System.Windows.Threading.DispatcherPriority]::ApplicationIdle
-            ) | Out-Null
+            else {
+                & $startBenchmark
+            }
         }.GetNewClosure())
 
     $windowCleanup = {
@@ -6521,6 +7132,7 @@ function Start-DriveBenchmark {
         catch {}
 
         & $disposeWorker
+        & $cleanupTrackedBenchmarkFiles
         & $releaseWindowState
     }.GetNewClosure()
 
