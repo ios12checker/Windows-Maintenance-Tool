@@ -12433,7 +12433,7 @@ function Start-WingetScanSourcePreflight {
 
             function Add-Log { param([string]$Text) if (-not [string]::IsNullOrWhiteSpace($Text)) { [void]$log.Add($Text) } }
             function Invoke-WingetProcess {
-                param([string]$Arguments, [int]$TimeoutMs = 90000)
+                param([string]$Arguments, [int]$TimeoutMs = 30000)
                 $psi = [System.Diagnostics.ProcessStartInfo]::new()
                 $psi.FileName = "winget"
                 $psi.Arguments = $Arguments
@@ -12444,6 +12444,8 @@ function Start-WingetScanSourcePreflight {
                 try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
                 try { $psi.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
                 $proc = [System.Diagnostics.Process]::Start($psi)
+                try { $proc.BeginOutputReadLine() } catch {}
+                try { $proc.BeginErrorReadLine() } catch {}
                 if (-not $proc.WaitForExit($TimeoutMs)) {
                     try { $proc.Kill() } catch {}
                     return [PSCustomObject]@{ ExitCode = -1; TimedOut = $true }
@@ -12453,12 +12455,12 @@ function Start-WingetScanSourcePreflight {
 
             foreach ($source in @($Sources | Select-Object -Unique)) {
                 try {
-                    Add-Log "LOG:Preparing $source source before scan..."
-                    [void](Invoke-WingetProcess -Arguments "search --id Microsoft.PowerShell --exact --source $source --accept-source-agreements --disable-interactivity" -TimeoutMs 45000)
-                    $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs 120000
+                    $refreshTimeoutMs = if ($source -eq "msstore") { 15000 } else { 30000 }
+                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $([int]($refreshTimeoutMs / 1000))s)..."
+                    $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs $refreshTimeoutMs
 
                     if ($refresh.TimedOut) {
-                        Add-Log "LOG:$source source refresh timed out; continuing to scan anyway."
+                        Add-Log "LOG:$source source refresh timed out after $([int]($refreshTimeoutMs / 1000))s; continuing to scan anyway."
                     }
                     elseif ($refresh.ExitCode -eq 0) {
                         Add-Log "LOG:$source source refresh completed before scan."
