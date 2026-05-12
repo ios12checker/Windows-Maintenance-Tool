@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.6-green)
+![Version](https://img.shields.io/badge/version-v5.7-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -22,25 +22,31 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ## Screenshot
 
-<img width="1920" height="1034" alt="image" src="https://github.com/user-attachments/assets/9da0ae6e-b5ad-4f43-bbd3-f8a54e35bdfd" />
+<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/428a1a91-2407-423f-857b-b4556072b6a6" />
 
-## What's New in v5.6
+## What's New in v5.7
 
-### Faster Startup and Better Responsiveness
+### Hosts and Network Fixes
 
-- My Device system statistics now load in a background runspace, so the main GUI stays responsive while hardware, storage, network, and battery details are collected.
-- Startup initialization now waits for content rendering, reducing the white PowerShell/window flash during launch.
-- Stuck `winget` and `msiexec` processes are cleared before package scans/actions to reduce updater lockups.
+- Fixed hosts file saving by writing UTF-8 without BOM, preventing Windows from ignoring or misreading saved hosts entries.
+- Improved hosts file permission handling with the built-in Users SID for more consistent read/write behavior across languages.
+- Hosts ad-block updates and the Hosts Editor now use the safer no-BOM write path.
 
-### Expanded My Device Dashboard
+### Winget Scan Reliability
 
-- Added Network Info for the active physical adapter, including IP address, gateway, DNS, and link speed.
-- Added Battery / Power info, including charge level, status, estimated runtime, battery health, and active power plan.
+- Added a Winget source preflight before the first package scan to reduce source database lockups and first-scan hangs.
+- Prevented overlapping Winget source refresh and update scans.
+- Avoids forcing source preflight on every manual refresh, keeping later scans faster.
 
-### Cleanup Improvements
+### My Device Improvements
 
-- Added **Clear Event Logs** to Advanced Cleanup.
-- Event log clearing uses elevated `wevtutil` in a background runspace so the cleanup window does not freeze.
+- Added drive health details, clickable storage entries, Disk Management access, and a drive benchmark tool.
+- Added a **My Device Export** action for saving the current device summary to the data folder.
+- Expanded OS, motherboard, battery, power, network, GPU, and storage details.
+- GPU entries can open vendor control panels where supported.
+- My Device now lazy-loads when opened, so WMT becomes interactive faster after launch.
+- Improved saved window positioning so the app is moved back onto a connected monitor if a previous display is disconnected.
+- Improved Activity Log resizing for easier reading.
 
 ## Core Features
 
