@@ -129,6 +129,249 @@ function Invoke-UiCommand {
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
+function Set-WmtDoubleBuffered {
+    param(
+        [System.Windows.Forms.Control]$Control,
+        [switch]$Children
+    )
+    if (-not $Control) { return }
+
+    try {
+        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    }
+    catch {}
+
+    if ($Children) {
+        foreach ($child in $Control.Controls) {
+            Set-WmtDoubleBuffered -Control $child -Children
+        }
+    }
+}
+
+function Enable-WmtWpfItemsVirtualization {
+    param([System.Windows.Controls.ItemsControl]$Control)
+    if (-not $Control) { return }
+    try {
+        [System.Windows.Controls.VirtualizingStackPanel]::SetIsVirtualizing($Control, $true)
+        [System.Windows.Controls.VirtualizingStackPanel]::SetVirtualizationMode($Control, [System.Windows.Controls.VirtualizationMode]::Recycling)
+        [System.Windows.Controls.ScrollViewer]::SetCanContentScroll($Control, $true)
+    }
+    catch {}
+}
+
+function Get-WmtEnumeratedFiles {
+    param(
+        [string]$Path,
+        [string]$Filter = "*",
+        [switch]$Recurse
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+
+    if (-not $Recurse) {
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($Path, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $file
+            }
+        }
+        catch {}
+        return
+    }
+
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($Path)
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $file
+            }
+        }
+        catch {}
+
+        try {
+            foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $pending.Push($child)
+            }
+        }
+        catch {}
+    }
+}
+
+function Find-WmtFirstEnumeratedFile {
+    param([string]$Path, [string]$Filter)
+    foreach ($file in Get-WmtEnumeratedFiles -Path $Path -Filter $Filter -Recurse) {
+        return $file
+    }
+    return $null
+}
+
+function Measure-WmtPathBytes {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return 0 }
+    try {
+        if ([System.IO.File]::Exists($Path)) {
+            return [System.IO.FileInfo]::new($Path).Length
+        }
+        if ([System.IO.Directory]::Exists($Path)) {
+            $total = [int64]0
+            foreach ($file in Get-WmtEnumeratedFiles -Path $Path -Recurse) {
+                try { $total += [System.IO.FileInfo]::new($file).Length } catch {}
+            }
+            return $total
+        }
+    }
+    catch {}
+    return 0
+}
+
+function Test-WmtDirectoryHasEntries {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return $false }
+    try {
+        foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($Path)) {
+            return $true
+        }
+    }
+    catch {}
+    return $false
+}
+
+function Remove-WmtEmptyChildDirectories {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+    try {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Path, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            Remove-WmtEmptyChildDirectories -Path $dir
+            try { [System.IO.Directory]::Delete($dir, $false) } catch {}
+        }
+    }
+    catch {}
+}
+
+function New-WmtVirtualRows {
+    param([object[]]$Items)
+    $rows = [System.Collections.ArrayList]::new()
+    foreach ($item in @($Items)) { [void]$rows.Add($item) }
+    return ,$rows
+}
+
+function Get-WmtVirtualGridRows {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    if (-not $Grid -or -not $Grid.Tag -or -not $Grid.Tag.PSObject.Properties["VirtualRows"]) {
+        return $null
+    }
+    return ,$Grid.Tag.VirtualRows
+}
+
+function Reset-WmtVirtualGridRowCount {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or $null -eq $rows) { return }
+    $Grid.RowCount = $rows.Count
+    $Grid.ClearSelection()
+    $Grid.Refresh()
+}
+
+function Remove-WmtVirtualGridRowsAt {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [int[]]$Indices
+    )
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or $null -eq $rows -or $null -eq $Indices -or $Indices.Count -eq 0) { return }
+    foreach ($index in ($Indices | Sort-Object -Descending)) {
+        if ($index -ge 0 -and $index -lt $rows.Count) {
+            $rows.RemoveAt($index)
+        }
+    }
+    Reset-WmtVirtualGridRowCount -Grid $Grid
+}
+
+function Set-WmtVirtualGridSort {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [string]$ColumnName
+    )
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or -not $Grid.Tag -or $null -eq $rows -or $rows.Count -le 1 -or [string]::IsNullOrWhiteSpace($ColumnName)) { return }
+
+    $descending = if ($Grid.Tag.SortColumn -eq $ColumnName) { -not [bool]$Grid.Tag.SortDescending } else { $false }
+    $sorted = @($rows | Sort-Object -Property $ColumnName -Descending:$descending)
+    $rows.Clear()
+    foreach ($item in $sorted) { [void]$rows.Add($item) }
+    $Grid.Tag.SortColumn = $ColumnName
+    $Grid.Tag.SortDescending = $descending
+    $Grid.Refresh()
+}
+
+function Initialize-WmtVirtualDataGrid {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [System.Collections.IList]$Rows,
+        [switch]$EnableSort
+    )
+    if (-not $Grid) { return }
+    if (-not $Rows) { $Rows = [System.Collections.ArrayList]::new() }
+
+    Set-WmtDoubleBuffered -Control $Grid
+    $Grid.VirtualMode = $true
+    $Grid.Tag = [PSCustomObject]@{
+        VirtualRows    = $Rows
+        SortColumn     = $null
+        SortDescending = $false
+    }
+
+    $Grid.Add_CellValueNeeded({
+            param($s, $e)
+            $state = $s.Tag
+            if (-not $state -or -not $state.VirtualRows) { return }
+            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
+            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
+
+            $row = $state.VirtualRows[$e.RowIndex]
+            $name = $s.Columns[$e.ColumnIndex].Name
+            if ($row -is [System.Collections.IDictionary] -and $row.Contains($name)) {
+                $e.Value = $row[$name]
+                return
+            }
+            $prop = $row.PSObject.Properties[$name]
+            if ($prop) { $e.Value = $prop.Value }
+        })
+
+    $Grid.Add_CellValuePushed({
+            param($s, $e)
+            $state = $s.Tag
+            if (-not $state -or -not $state.VirtualRows) { return }
+            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
+            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
+
+            $row = $state.VirtualRows[$e.RowIndex]
+            $name = $s.Columns[$e.ColumnIndex].Name
+            if ($row -is [System.Collections.IDictionary]) {
+                $row[$name] = $e.Value
+                return
+            }
+            $prop = $row.PSObject.Properties[$name]
+            if ($prop) { $prop.Value = $e.Value }
+        })
+
+    if ($EnableSort) {
+        foreach ($col in $Grid.Columns) {
+            try { $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic } catch {}
+        }
+        $Grid.Add_ColumnHeaderMouseClick({
+                param($s, $e)
+                if ($e.ColumnIndex -ge 0 -and $e.ColumnIndex -lt $s.Columns.Count) {
+                    Set-WmtVirtualGridSort -Grid $s -ColumnName $s.Columns[$e.ColumnIndex].Name
+                }
+            })
+    }
+
+    $Grid.RowCount = $Rows.Count
+}
+
 function Update-TweakButtonStates {
     try {
         $h = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -EA Ignore).HwSchMode
@@ -2634,8 +2877,8 @@ function Start-GpeditInstall {
 
         Write-Output "Searching packages in $packageRoot..."
         
-        $clientTools = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" -ErrorAction SilentlyContinue
-        $clientExtensions = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" -ErrorAction SilentlyContinue
+        $clientTools = @(Get-WmtEnumeratedFiles -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" | ForEach-Object { [System.IO.FileInfo]::new($_) })
+        $clientExtensions = @(Get-WmtEnumeratedFiles -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" | ForEach-Object { [System.IO.FileInfo]::new($_) })
         
         if (-not $clientTools -or -not $clientExtensions) {
             Write-Output "WARNING: Required GroupPolicy packages were not found."
@@ -2917,7 +3160,7 @@ function Invoke-HostsUpdate {
         catch {
             Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
             # Restore backup if write failed
-            $latestBackup = Get-ChildItem $backupDir | Sort-Object CreationTime -Descending | Select-Object -First 1
+            $latestBackup = @(Get-WmtEnumeratedFiles -Path $backupDir | ForEach-Object { [System.IO.FileInfo]::new($_) } | Sort-Object CreationTime -Descending | Select-Object -First 1)
             if ($latestBackup) {
                 Copy-Item $latestBackup.FullName $hostsPath -Force
                 Write-GuiLog "Restored backup due to failure."
@@ -3199,16 +3442,57 @@ function Get-Winapp2Rules {
     $dataPath = Get-DataPath
     $iniPath = Join-Path $dataPath "winapp2.ini"
     $cachePath = Join-Path $dataPath "winapp2_cache.json" 
+    $cacheMetaPath = Join-Path $dataPath "winapp2_cache.meta.json"
+    $cacheVersion = 2
+    if (-not $script:Winapp2RulesMemoryCache) { $script:Winapp2RulesMemoryCache = @{} }
+    $iniInfoForCache = $null
+    if (Test-Path $iniPath) {
+        try { $iniInfoForCache = Get-Item -LiteralPath $iniPath -ErrorAction Stop } catch {}
+    }
+    $memoryKey = if ($iniInfoForCache) {
+        "{0}|{1}|{2}" -f $cacheVersion, [int64]$iniInfoForCache.Length, $iniInfoForCache.LastWriteTimeUtc.Ticks
+    }
+    elseif (Test-Path $cachePath) {
+        $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction SilentlyContinue
+        if ($cacheInfo) { "cache-only|{0}|{1}" -f [int64]$cacheInfo.Length, $cacheInfo.LastWriteTimeUtc.Ticks } else { "" }
+    }
+    else { "" }
+
+    if (-not $Download -and $memoryKey -and $script:Winapp2RulesMemoryCache.ContainsKey($memoryKey)) {
+        return $script:Winapp2RulesMemoryCache[$memoryKey]
+    }
 
     # --- 1. SMART CACHE CHECK ---
     $forceRebuild = $false
-    
+
     if (Test-Path $cachePath) {
-        if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
-            $scriptTime = (Get-Item $PSCommandPath).LastWriteTime
-            $cacheTime = (Get-Item $cachePath).LastWriteTime
-            if ($scriptTime -gt $cacheTime) { 
-                $forceRebuild = $true 
+        try {
+            if (Test-Path $iniPath) {
+                $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+                $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction Stop
+                $meta = $null
+                if (Test-Path $cacheMetaPath) {
+                    $meta = Get-Content -LiteralPath $cacheMetaPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                }
+
+                if ($meta) {
+                    if ([int]$meta.CacheVersion -ne $cacheVersion -or
+                        [int64]$meta.IniLength -ne [int64]$iniInfo.Length -or
+                        [datetime]$meta.IniLastWriteUtc -ne $iniInfo.LastWriteTimeUtc) {
+                        $forceRebuild = $true
+                    }
+                }
+                elseif ($iniInfo.LastWriteTimeUtc -gt $cacheInfo.LastWriteTimeUtc) {
+                    $forceRebuild = $true
+                }
+            }
+        }
+        catch {
+            if (-not (Test-Path $iniPath)) {
+                $forceRebuild = $false
+            }
+            else {
+                $forceRebuild = $true
             }
         }
     }
@@ -3237,8 +3521,22 @@ function Get-Winapp2Rules {
     # --- 3. CACHE LOAD ---
     if (-not $forceRebuild -and (Test-Path $cachePath)) {
         try { 
-            $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
-            if ($cachedRules.Count -gt 5) { return $cachedRules }
+            $cachedRules = Get-Content -LiteralPath $cachePath -Raw | ConvertFrom-Json
+            if ($cachedRules.Count -gt 5) {
+                if ((Test-Path $iniPath) -and -not (Test-Path $cacheMetaPath)) {
+                    try {
+                        $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+                        [PSCustomObject]@{
+                            CacheVersion    = $cacheVersion
+                            IniLength       = [int64]$iniInfo.Length
+                            IniLastWriteUtc = $iniInfo.LastWriteTimeUtc
+                        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheMetaPath -Force
+                    }
+                    catch {}
+                }
+                if ($memoryKey) { $script:Winapp2RulesMemoryCache[$memoryKey] = $cachedRules }
+                return $cachedRules
+            }
         }
         catch {}
     }
@@ -3380,7 +3678,20 @@ function Get-Winapp2Rules {
         }
     }
 
-    try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
+    try {
+        $finalList | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Force
+        if (Test-Path $iniPath) {
+            $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+            [PSCustomObject]@{
+                CacheVersion    = $cacheVersion
+                IniLength       = [int64]$iniInfo.Length
+                IniLastWriteUtc = $iniInfo.LastWriteTimeUtc
+            } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheMetaPath -Force
+            $memoryKey = "{0}|{1}|{2}" -f $cacheVersion, [int64]$iniInfo.Length, $iniInfo.LastWriteTimeUtc.Ticks
+        }
+    } catch {}
+
+    if ($memoryKey) { $script:Winapp2RulesMemoryCache[$memoryKey] = $finalList }
     
     return $finalList
 }
@@ -3408,12 +3719,15 @@ function Show-AdvancedCleanupSelection {
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    Set-WmtDoubleBuffered -Control $topPanel
 
     $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
     $chkToggleWinapp2.Text = "Load Community Rules *"
     $chkToggleWinapp2.Size = "220, 30"; $chkToggleWinapp2.Location = "15, 10"
     $chkToggleWinapp2.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
     $chkToggleWinapp2.ForeColor = "White"
+    $chkToggleWinapp2.BackColor = $topPanel.BackColor
+    $chkToggleWinapp2.UseVisualStyleBackColor = $false
     $chkToggleWinapp2.Checked = $isWinapp2Enabled
     $tt = New-Object System.Windows.Forms.ToolTip
     $tt.SetToolTip($chkToggleWinapp2, "Enables 1000+ extra rules from Winapp2.ini")
@@ -3430,6 +3744,8 @@ function Show-AdvancedCleanupSelection {
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
     $lblSearch.Location = "370, 15"; $lblSearch.Anchor = "Top, Right"
+    $lblSearch.ForeColor = "White"
+    $lblSearch.BackColor = $topPanel.BackColor
     $topPanel.Controls.Add($lblSearch)
 
     $layoutTopPanel = {
@@ -3443,6 +3759,7 @@ function Show-AdvancedCleanupSelection {
     $btnPanel = New-Object System.Windows.Forms.Panel
     $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
     $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+    Set-WmtDoubleBuffered -Control $btnPanel
 
     $btnClean = New-Object System.Windows.Forms.Button
     $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
@@ -3489,8 +3806,7 @@ function Show-AdvancedCleanupSelection {
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
-    $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance, NonPublic')
-    if ($prop) { $prop.SetValue($mainPanel, $true) }
+    Set-WmtDoubleBuffered -Control $mainPanel
 
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
@@ -3515,6 +3831,10 @@ function Show-AdvancedCleanupSelection {
 
     $global:checkboxes = @{}
     $global:sections = @()
+    $cleanupBackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
+    $cleanupHeaderColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
+    $cleanupTextColor = [System.Drawing.Color]::Gainsboro
+    $cleanupCommunityTextColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
 
     # ------------------------------------------------
     # Render helper – rebuilds the entire panel from a rule list,
@@ -3524,106 +3844,120 @@ function Show-AdvancedCleanupSelection {
         param($allRules)
 
         $mainPanel.SuspendLayout()
-        $mainPanel.Controls.Clear()
+        try {
+            $mainPanel.Controls.Clear()
 
-        # Preserve current checkbox states
-        $prevStates = @{}
-        foreach ($k in $global:checkboxes.Keys) {
-            $prevStates[$k] = $global:checkboxes[$k].Checked
-        }
-        $global:checkboxes.Clear()
-        $global:sections = @()
+            # Preserve current checkbox states
+            $prevStates = @{}
+            foreach ($k in $global:checkboxes.Keys) {
+                $prevStates[$k] = $global:checkboxes[$k].Checked
+            }
+            $global:checkboxes.Clear()
+            $global:sections = @()
 
-        $grouped = $allRules | Group-Object Section | Sort-Object Name
-        $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+            $grouped = $allRules | Group-Object Section | Sort-Object Name
+            $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-        foreach ($group in $grouped) {
-            $sec = $group.Name
+            foreach ($group in $grouped) {
+                $sec = $group.Name
 
-            $secPanel = New-Object System.Windows.Forms.Panel
-            $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
-            $secPanel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-            $secPanel.Tag = "HEADER"
+                $secPanel = New-Object System.Windows.Forms.Panel
+                $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
+                $secPanel.BackColor = $cleanupHeaderColor
+                $secPanel.Tag = "HEADER"
+                Set-WmtDoubleBuffered -Control $secPanel
 
-            $secChk = New-Object System.Windows.Forms.CheckBox
-            $secChk.Text = $sec
-            $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-            $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
-            $secChk.AutoSize = $true; $secChk.Location = "5, 5"
-            $secPanel.Controls.Add($secChk)
+                $secChk = New-Object System.Windows.Forms.CheckBox
+                $secChk.Text = $sec
+                $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+                $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
+                $secChk.BackColor = $cleanupHeaderColor
+                $secChk.UseVisualStyleBackColor = $false
+                $secChk.AutoSize = $true; $secChk.Location = "5, 5"
+                $secPanel.Controls.Add($secChk)
 
-            $controlsToAdd.Add($secPanel)
-            $global:sections += $secPanel
+                $controlsToAdd.Add($secPanel)
+                $global:sections += $secPanel
 
-            $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-            $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
-            $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
+                $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+                $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
+                $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
+                $itemFlow.BackColor = $cleanupBackColor
+                Set-WmtDoubleBuffered -Control $itemFlow
 
-            $secItems = $group.Group | Sort-Object AppGroup, Name
-            $childChecks = @()
-            $currentGroup = $null
-            $isSecChecked = $true
-            $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+                $secItems = $group.Group | Sort-Object AppGroup, Name
+                $childChecks = @()
+                $currentGroup = $null
+                $isSecChecked = $true
+                $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-            foreach ($item in $secItems) {
-                if ($item.AppGroup -ne $currentGroup) {
-                    $currentGroup = $item.AppGroup
-                    $grpLbl = New-Object System.Windows.Forms.Label
-                    $grpLbl.Text = $currentGroup
-                    $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-                    $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
-                    $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
-                    $grpLbl.Tag = "GROUPHEADER"
-                    $flowControlsToAdd.Add($grpLbl)
+                foreach ($item in $secItems) {
+                    if ($item.AppGroup -ne $currentGroup) {
+                        $currentGroup = $item.AppGroup
+                        $grpLbl = New-Object System.Windows.Forms.Label
+                        $grpLbl.Text = $currentGroup
+                        $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+                        $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
+                        $grpLbl.BackColor = $cleanupBackColor
+                        $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
+                        $grpLbl.Tag = "GROUPHEADER"
+                        $flowControlsToAdd.Add($grpLbl)
+                    }
+
+                    $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
+                    $chk = New-Object System.Windows.Forms.CheckBox
+                    $chk.ForeColor = $cleanupTextColor
+
+                    if ($item.IsInternal) {
+                        $chk.Text = $item.Name
+                    }
+                    else {
+                        $cleanName = $item.Name.Trim(" *")
+                        $chk.Text = "$cleanName (*)"
+                        $chk.ForeColor = $cleanupCommunityTextColor
+                    }
+
+                    $chk.BackColor = $cleanupBackColor
+                    $chk.UseVisualStyleBackColor = $false
+                    $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
+                    $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
+
+                    # Restore previous state or use default
+                    if ($prevStates.ContainsKey($itemKey)) {
+                        $chk.Checked = $prevStates[$itemKey]
+                    }
+                    elseif ($savedStates.ContainsKey($itemKey)) {
+                        $chk.Checked = $savedStates[$itemKey]
+                    }
+                    else {
+                        $chk.Checked = ($item.IsInternal -eq $true)
+                    }
+
+                    if (-not $chk.Checked) { $isSecChecked = $false }
+                    if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
+
+                    $flowControlsToAdd.Add($chk)
+                    $global:checkboxes[$itemKey] = $chk
+                    $childChecks += $chk
                 }
 
-                $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
-                $chk = New-Object System.Windows.Forms.CheckBox
+                $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
+                $secChk.Checked = $isSecChecked
 
-                if ($item.IsInternal) {
-                    $chk.Text = $item.Name
-                }
-                else {
-                    $cleanName = $item.Name.Trim(" *")
-                    $chk.Text = "$cleanName (*)"
-                    $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
-                }
+                $secChk.Add_CheckedChanged({
+                        param($s, $e)
+                        foreach ($c in $childChecks) { $c.Checked = $s.Checked }
+                    }.GetNewClosure())
 
-                $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
-                $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
-
-                # Restore previous state or use default
-                if ($prevStates.ContainsKey($itemKey)) {
-                    $chk.Checked = $prevStates[$itemKey]
-                }
-                elseif ($savedStates.ContainsKey($itemKey)) {
-                    $chk.Checked = $savedStates[$itemKey]
-                }
-                else {
-                    $chk.Checked = ($item.IsInternal -eq $true)
-                }
-
-                if (-not $chk.Checked) { $isSecChecked = $false }
-                if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
-
-                $flowControlsToAdd.Add($chk)
-                $global:checkboxes[$itemKey] = $chk
-                $childChecks += $chk
+                $controlsToAdd.Add($itemFlow)
             }
 
-            $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
-            $secChk.Checked = $isSecChecked
-
-            $secChk.Add_CheckedChanged({
-                    param($s, $e)
-                    foreach ($c in $childChecks) { $c.Checked = $s.Checked }
-                }.GetNewClosure())
-
-            $controlsToAdd.Add($itemFlow)
+            $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
         }
-
-        $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
-        $mainPanel.ResumeLayout($true)
+        finally {
+            $mainPanel.ResumeLayout($true)
+            $mainPanel.Invalidate()
+        }
     }
 
     # Instant render of internal rules only
@@ -3637,12 +3971,19 @@ function Show-AdvancedCleanupSelection {
 
         $lbl = New-Object System.Windows.Forms.Label
         $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = "Yellow"
+        $lbl.BackColor = $cleanupBackColor
         $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
         $mainPanel.Controls.Add($lbl)
+        $mainPanel.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
         try {
-            if ($ForceDownload) {
+            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+            $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
+            $shouldDownload = $ForceDownload -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
+
+            if ($shouldDownload) {
                 $winRules = Get-Winapp2Rules -Download:$true
             }
             else {
@@ -3661,14 +4002,18 @@ function Show-AdvancedCleanupSelection {
         }
     }
 
-    # Deferred loading after form is visible
-    $form.Add_Shown({
-            $form.BeginInvoke([Action] {
-                    if ($isWinapp2Enabled) {
-                        & $loadCommunityRules
-                    }
-                })
-        })
+    # Load saved community rules the same way the manual toggle does, once the
+    # form is visible. Activated is a small fallback for hosts that miss Shown.
+    $communityLoadState = @{ Started = $false }
+    $loadCommunityRulesIfEnabled = {
+        if ($communityLoadState.Started -or $form.IsDisposed -or -not $chkToggleWinapp2.Checked) { return }
+        $communityLoadState.Started = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        & $loadCommunityRules
+    }.GetNewClosure()
+
+    $form.Add_Shown({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
+    $form.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
 
     # Toggle handler
     $chkToggleWinapp2.Add_Click({
@@ -3875,6 +4220,7 @@ function Invoke-TempCleanup {
                     $size = $fInfo.Length
                     
                     if (-not $isAnalyze) {
+                        try { $fInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
                         $fInfo.Delete() 
                     }
                     else {
@@ -3901,17 +4247,8 @@ function Invoke-TempCleanup {
             }
 
             if ($Recurse) {
-                $dirs = [System.IO.Directory]::GetDirectories($Path, "*", [System.IO.SearchOption]::AllDirectories)
-                [Array]::Sort($dirs, [System.Collections.Comparer]::Default)
-                [Array]::Reverse($dirs)
-                
-                foreach ($dir in $dirs) {
-                    try {
-                        if (-not $isAnalyze) {
-                            [System.IO.Directory]::Delete($dir, $false) 
-                        }
-                    }
-                    catch {}
+                if (-not $isAnalyze) {
+                    Remove-WmtEmptyChildDirectories -Path $Path
                 }
             }
         }
@@ -3961,7 +4298,7 @@ function Invoke-TempCleanup {
                                     try {
                                         $path = $f.Path
                                         if ($path -and (Test-Path -LiteralPath $path)) {
-                                            $size = (Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                                            $size = Measure-WmtPathBytes -Path $path
                                             $stats.Bytes += $size
                                             
                                             if (-not $isAnalyze) {
@@ -3993,9 +4330,11 @@ function Invoke-TempCleanup {
                     "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" -RuleName $itemName }
                     "Firefox" { 
                         if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
-                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { 
-                                Invoke-RobustClean "$($_.FullName)\cache2\entries" -RuleName $itemName 
-                            }
+                            try {
+                                foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
+                                    Invoke-RobustClean "$profilePath\cache2\entries" -RuleName $itemName
+                                }
+                            } catch {}
                         }
                     }
                     "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
@@ -4107,20 +4446,22 @@ function Invoke-TempCleanup {
             $grid.GridColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
             $grid.RowHeadersVisible = $false
             $grid.SelectionMode = "FullRowSelect"
-            
+
             $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
             
-            $dt = New-Object System.Data.DataTable
-            $dt.Columns.Add("RuleName", [string]) | Out-Null
-            $dt.Columns.Add("FilePath", [string]) | Out-Null
-            # FIX: We changed this to [long] so it sorts mathematically!
-            $dt.Columns.Add("Size", [long]) | Out-Null 
-            
-            foreach ($item in $previewList) {
-                # We feed the raw numbers directly to the table
-                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.RawBytes) | Out-Null
-            }
-            $grid.DataSource = $dt
+            [void]$grid.Columns.Add("RuleName", "RuleName")
+            [void]$grid.Columns.Add("FilePath", "FilePath")
+            [void]$grid.Columns.Add("Size", "Size")
+            $previewRows = New-WmtVirtualRows -Items @(
+                foreach ($item in $previewList) {
+                    [PSCustomObject]@{
+                        RuleName = $item.RuleName
+                        FilePath = $item.FilePath
+                        Size     = [long]$item.RawBytes
+                    }
+                }
+            )
+            Initialize-WmtVirtualDataGrid -Grid $grid -Rows $previewRows -EnableSort
             
             # --- THE MAGIC VISUAL TRICK ---
             # This intercepts the drawing of the grid. If it sees a number in the "Size" column, 
@@ -4153,7 +4494,9 @@ function Invoke-TempCleanup {
 
             $menuOpen.Add_Click({
                     if ($grid.SelectedRows.Count -gt 0) {
-                        $path = $grid.SelectedRows[0].Cells["FilePath"].Value
+                        $rowIndex = $grid.SelectedRows[0].Index
+                        if ($rowIndex -lt 0 -or $rowIndex -ge $previewRows.Count) { return }
+                        $path = $previewRows[$rowIndex].FilePath
                         if (Test-Path -LiteralPath $path) {
                             Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
                         }
@@ -4165,23 +4508,25 @@ function Invoke-TempCleanup {
                         $freedBytes = 0
                         $rowsToRemove = New-Object System.Collections.ArrayList
 
-                        foreach ($row in $grid.SelectedRows) {
-                            $path = $row.Cells["FilePath"].Value
-                            $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
+                        foreach ($row in @($grid.SelectedRows)) {
+                            if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
+                            $item = $previewRows[$row.Index]
+                            $path = $item.FilePath
+                            $bytes = [long]$item.Size
                     
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
                                     $freedBytes += $bytes
                                 }
-                                $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                                $rowsToRemove.Add($row.Index) | Out-Null
                             }
                             catch {
                                 Write-GuiLog "Failed to delete from Context Menu: $path"
                             }
                         }
                 
-                        foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                        Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
                     
                         if ($freedBytes -gt 0) {
                             $freedFormatted = Format-FileSize $freedBytes
@@ -4212,9 +4557,11 @@ function Invoke-TempCleanup {
                     $freedBytes = 0
                     $rowsToRemove = New-Object System.Collections.ArrayList
 
-                    foreach ($row in $grid.SelectedRows) {
-                        $path = $row.Cells["FilePath"].Value
-                        $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
+                    foreach ($row in @($grid.SelectedRows)) {
+                        if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
+                        $item = $previewRows[$row.Index]
+                        $path = $item.FilePath
+                        $bytes = [long]$item.Size
                 
                         try {
                             if (Test-Path -LiteralPath $path) {
@@ -4222,29 +4569,29 @@ function Invoke-TempCleanup {
                                 $freedBytes += $bytes
                                 $cleanedCount++
                             }
-                            $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                            $rowsToRemove.Add($row.Index) | Out-Null
                         }
                         catch {
                             Write-GuiLog "Failed to delete from Analyze: $path"
                         }
                     }
             
-                    foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                    Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
                     $freedFormatted = Format-FileSize $freedBytes
                     [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                 })
 
             $btnCleanAll.Add_Click({
-                    if ($dt.Rows.Count -eq 0) { return }
+                    if ($previewRows.Count -eq 0) { return }
             
-                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($dt.Rows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
+                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
                     if ($confirm -eq "Yes") {
                         $cleanedCount = 0
                         $freedBytes = 0
                 
-                        foreach ($row in $dt.Rows) {
-                            $path = $row["FilePath"]
-                            $bytes = $row["Size"] # Now correctly pulls the raw [long]!
+                        foreach ($row in @($previewRows)) {
+                            $path = $row.FilePath
+                            $bytes = [long]$row.Size
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
@@ -4255,7 +4602,8 @@ function Invoke-TempCleanup {
                             catch {}
                         }
                 
-                        $dt.Rows.Clear()
+                        $previewRows.Clear()
+                        Reset-WmtVirtualGridRowCount -Grid $grid
                         $freedFormatted = Format-FileSize $freedBytes
                         [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                     }
@@ -4306,6 +4654,7 @@ function Show-RegScanSelection {
     # --- Scrollable Panel for Checkboxes ---
     $pnl = New-Object System.Windows.Forms.Panel
     $pnl.Location = "20, 50"; $pnl.Size = "550, 380"; $pnl.AutoScroll = $true
+    Set-WmtDoubleBuffered -Control $pnl
     $f.Controls.Add($pnl)
 
     # --- Define Categories ---
@@ -4419,6 +4768,7 @@ function Show-RegistryCleaner {
     $dg.AllowUserToAddRows = $false
     $dg.SelectionMode = "FullRowSelect"
     $dg.MultiSelect = $true
+    Set-WmtDoubleBuffered -Control $dg
     
     # Header Styling
     $dg.EnableHeadersVisualStyles = $false
@@ -4442,6 +4792,7 @@ function Show-RegistryCleaner {
     $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
     $colChk.HeaderText = " "
     $colChk.Width = 30; $colChk.Name = "Check"; $colChk.TrueValue = $true; $colChk.FalseValue = $false
+    $colChk.ReadOnly = $false
     [void]$dg.Columns.Add($colChk)
 
     # Visible Columns
@@ -4453,18 +4804,30 @@ function Show-RegistryCleaner {
     [void]$dg.Columns.Add("FullPath", "FullPath"); $dg.Columns["FullPath"].Visible = $false
     [void]$dg.Columns.Add("ValueName", "ValueName"); $dg.Columns["ValueName"].Visible = $false
     [void]$dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false
+    foreach ($col in $dg.Columns) {
+        if ($col.Name -ne "Check") { $col.ReadOnly = $true }
+    }
 
     # --- 5. Populate Data ---
-    foreach ($item in $ScanResults) {
-        $row = $dg.Rows.Add()
-        $dg.Rows[$row].Cells["Check"].Value = $true
-        $dg.Rows[$row].Cells["Problem"].Value = $item.Problem
-        $dg.Rows[$row].Cells["Data"].Value = $item.Data
-        $dg.Rows[$row].Cells["Key"].Value = $item.DisplayKey
-        $dg.Rows[$row].Cells["FullPath"].Value = $item.RegPath
-        $dg.Rows[$row].Cells["ValueName"].Value = $item.ValueName
-        $dg.Rows[$row].Cells["Type"].Value = $item.Type
-    }
+    $registryRows = New-WmtVirtualRows -Items @(
+        foreach ($item in $ScanResults) {
+            [PSCustomObject]@{
+                Check     = $true
+                Problem   = $item.Problem
+                Data      = $item.Data
+                Key       = $item.DisplayKey
+                FullPath  = $item.RegPath
+                ValueName = $item.ValueName
+                Type      = $item.Type
+            }
+        }
+    )
+    Initialize-WmtVirtualDataGrid -Grid $dg -Rows $registryRows -EnableSort
+    $dg.Add_CurrentCellDirtyStateChanged({
+            if ($dg.IsCurrentCellDirty) {
+                $dg.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
+            }
+        })
 
     # --- 6. Footer Panel & Buttons ---
     $pnlBot = New-Object System.Windows.Forms.Panel
@@ -4489,13 +4852,14 @@ function Show-RegistryCleaner {
     # --- 7. Fix Button Logic ---
     $btnFix.Add_Click({
             $toFix = @()
-            foreach ($row in $dg.Rows) {
-                if ($row.Cells["Check"].Value -eq $true) {
+            try { $dg.EndEdit() } catch {}
+            foreach ($row in $registryRows) {
+                if ($row.Check -eq $true) {
                     $toFix += [PSCustomObject]@{
-                        RegPath    = $row.Cells["FullPath"].Value
-                        ValueName  = $row.Cells["ValueName"].Value
-                        Type       = $row.Cells["Type"].Value
-                        DisplayKey = $row.Cells["Key"].Value
+                        RegPath    = $row.FullPath
+                        ValueName  = $row.ValueName
+                        Type       = $row.Type
+                        DisplayKey = $row.Key
                     }
                 }
             }
@@ -6411,7 +6775,7 @@ namespace Wmt {
                             if (-not [System.IO.Directory]::Exists($folder)) { [void][System.IO.Directory]::CreateDirectory($folder) }
 
                             try {
-                                foreach ($oldFile in [System.IO.Directory]::GetFiles($folder, "wmt_io_test_*.dat")) {
+                                foreach ($oldFile in [System.IO.Directory]::EnumerateFiles($folder, "wmt_io_test_*.dat")) {
                                     try { [System.IO.File]::Delete($oldFile) } catch {}
                                 }
                             }
@@ -6475,8 +6839,12 @@ namespace Wmt {
                             try { if ($State["ActiveFiles"]) { [void]$State["ActiveFiles"].Remove($file) } } catch {}
                             try {
                                 if ([System.IO.Directory]::Exists($folder)) {
-                                    $entries = [System.IO.Directory]::GetFileSystemEntries($folder)
-                                    if (-not $entries -or $entries.Count -eq 0) { [System.IO.Directory]::Delete($folder, $false) }
+                                    $hasEntries = $false
+                                    foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($folder)) {
+                                        $hasEntries = $true
+                                        break
+                                    }
+                                    if (-not $hasEntries) { [System.IO.Directory]::Delete($folder, $false) }
                                 }
                             }
                             catch {}
@@ -6622,6 +6990,7 @@ function Show-BrokenShortcuts {
     $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
     $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
     $dg.DefaultCellStyle.SelectionForeColor = "White"
+    Set-WmtDoubleBuffered -Control $dg
 
     $f.Controls.Add($dg)
 
@@ -6729,8 +7098,8 @@ function Show-BrokenShortcuts {
                     $lblStatus.Text = "Scanning drive $root for '$searchName'..."
                     $f.Update()
                     try {
-                        $match = Get-ChildItem -Path $root -Filter $searchName -Recurse -ErrorAction SilentlyContinue -Force | Select-Object -First 1
-                        if ($match) { $foundPath = $match.FullName }
+                        $match = Find-WmtFirstEnumeratedFile -Path $root -Filter $searchName
+                        if ($match) { $foundPath = $match }
                     }
                     catch {}
                 }
@@ -6829,8 +7198,8 @@ function Show-BrokenShortcuts {
             $tempList = @()
         
             foreach ($path in $paths) {
-                Get-ChildItem -Path $path -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    $lnkPath = $_.FullName
+                foreach ($lnkPath in Get-WmtEnumeratedFiles -Path $path -Filter "*.lnk" -Recurse) {
+                    try { $shortcutFile = [System.IO.FileInfo]::new($lnkPath) } catch { continue }
                     try {
                         $sc = $shell.CreateShortcut($lnkPath)
                         $target = $sc.TargetPath
@@ -6842,17 +7211,17 @@ function Show-BrokenShortcuts {
 
                     if (-not (Test-Path $target)) {
                         $action = "None"; $details = "Review Needed"; $newT = $null
-                        $baseName = $_.BaseName
+                        $baseName = $shortcutFile.BaseName
 
                         if ($knownFixes.ContainsKey($baseName)) {
                             $action = "Fix"; $details = "Restore System Path"; $newT = $knownFixes[$baseName]
                         }
                         else {
                             $guessName = if ($target) { Split-Path $target -Leaf } else { ($baseName + ".exe") }
-                            $peers = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $lnkPath }
-                            foreach ($p in $peers) {
+                            foreach ($peerPath in Get-WmtEnumeratedFiles -Path $shortcutFile.DirectoryName -Filter "*.lnk") {
+                                if ($peerPath -eq $lnkPath) { continue }
                                 try {
-                                    $pt = $shell.CreateShortcut($p.FullName).TargetPath
+                                    $pt = $shell.CreateShortcut($peerPath).TargetPath
                                     if ($pt -and (Test-Path $pt)) {
                                         $parent = Split-Path $pt -Parent; $candidate = Join-Path $parent $guessName
                                         if (Test-Path $candidate) { $action = "Fix"; $details = "Auto-Found: $parent"; $newT = $candidate; break }
@@ -6863,8 +7232,8 @@ function Show-BrokenShortcuts {
                         }
 
                         $tempList += [PSCustomObject]@{
-                            Shortcut  = $_.Name
-                            Folder    = (Split-Path $_.DirectoryName -Leaf)
+                            Shortcut  = $shortcutFile.Name
+                            Folder    = (Split-Path $shortcutFile.DirectoryName -Leaf)
                             Action    = $action
                             Details   = $details
                             NewTarget = $newT
@@ -7038,6 +7407,16 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+function Set-LocalDoubleBuffered {
+    param([System.Windows.Forms.Control]$Control)
+    if (-not $Control) { return }
+    try {
+        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    }
+    catch {}
+}
+
 # ============================================================
 # FAST NATIVE SCAN
 # ============================================================
@@ -7099,6 +7478,7 @@ $tree.Location = "10,40"
 $tree.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
 $tree.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
 $tree.BorderStyle = "FixedSingle"
+Set-LocalDoubleBuffered $tree
 $form.Controls.Add($tree)
 
 $list = New-Object System.Windows.Forms.ListView
@@ -7110,6 +7490,7 @@ $list.FullRowSelect = $true
 $list.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
 $list.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
 $list.BorderStyle = "FixedSingle"
+Set-LocalDoubleBuffered $list
 
 $list.Columns.Add("Driver", 250)
 $list.Columns.Add("Provider", 150)
@@ -7135,23 +7516,29 @@ foreach ($g in $groups) {
 $root.Expand()
 
 function Update-List {
-    $list.Items.Clear()
-    $filter = $tree.SelectedNode.Tag
-    $search = $txtSearch.Text.ToLower()
+    $list.BeginUpdate()
+    try {
+        $list.Items.Clear()
+        $filter = $tree.SelectedNode.Tag
+        $search = $txtSearch.Text.ToLower()
 
-    $filtered = $drivers
-    if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
-    if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
+        $filtered = $drivers
+        if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
+        if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
 
-    foreach ($d in $filtered) {
-        $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
-        $cleanName = Split-Path $rawName -Leaf
-        
-        $item = $list.Items.Add($cleanName)
-        $item.SubItems.Add($d.Provider)
-        $item.SubItems.Add($d.Version)
-        $item.SubItems.Add($d.Date)
-        $item.Tag = $d
+        foreach ($d in $filtered) {
+            $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
+            $cleanName = Split-Path $rawName -Leaf
+
+            $item = $list.Items.Add($cleanName)
+            $item.SubItems.Add($d.Provider)
+            $item.SubItems.Add($d.Version)
+            $item.SubItems.Add($d.Date)
+            $item.Tag = $d
+        }
+    }
+    finally {
+        $list.EndUpdate()
     }
 }
 
@@ -7336,6 +7723,7 @@ function Show-GhostDevicesDialog {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     $f.Controls.Add($dg)
 
     $pnl = New-Object System.Windows.Forms.Panel
@@ -7586,6 +7974,7 @@ function Show-DriverCleanupDialog {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     
     $f.Controls.Add($dg)
     $dg.BringToFront() # Ensures grid fills the remaining space above the panel
@@ -7804,7 +8193,7 @@ function Invoke-RestoreDrivers {
     $dataPath = Get-DataPath
     $backups = @()
     try {
-        $backups = Get-ChildItem -Path $dataPath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^DriverBackup_' -or $_.Name -match '^Drivers_Backup_' }
+        $backups = @([System.IO.Directory]::EnumerateDirectories($dataPath) | ForEach-Object { [System.IO.DirectoryInfo]::new($_) } | Where-Object { $_.Name -match '^DriverBackup_' -or $_.Name -match '^Drivers_Backup_' })
     }
     catch {}
 
@@ -7824,6 +8213,7 @@ function Invoke-RestoreDrivers {
         $lst.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
         $lst.ForeColor = "White"
         $lst.BorderStyle = "FixedSingle"
+        Set-WmtDoubleBuffered -Control $lst
         $items = @()
         foreach ($b in $backups) {
             $items += [PSCustomObject]@{
@@ -7909,8 +8299,8 @@ function Invoke-RestoreDrivers {
             return
         }
 
-        $infFiles = Get-ChildItem -Path $Path -Filter *.inf -Recurse -ErrorAction SilentlyContinue
-        if (-not $infFiles -or $infFiles.Count -eq 0) {
+        $firstInf = Find-WmtFirstEnumeratedFile -Path $Path -Filter "*.inf"
+        if (-not $firstInf) {
             Write-Output "Restore aborted: no INF files found in $Path"
             [System.Windows.MessageBox]::Show("No INF files found in:`n$Path", "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
             return
@@ -8323,22 +8713,46 @@ $dismRestoreCode = $LASTEXITCODE
 
 Write-Host ""
 Write-Host "[4/4] Cleaning temporary files..." -ForegroundColor Yellow
+function Get-TempFilesStreamed {
+    param([string]$Root)
+    if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $file }
+        } catch {}
+        try {
+            foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $pending.Push($child) }
+        } catch {}
+    }
+}
+function Remove-EmptyTempDirs {
+    param([string]$Root)
+    if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+    try {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Root, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            Remove-EmptyTempDirs $dir
+            try { [System.IO.Directory]::Delete($dir, $false) } catch {}
+        }
+    } catch {}
+}
 $targets = @($env:TEMP, "$env:SystemRoot\Temp")
 $deletedCount = 0
 $deletedBytes = 0
 foreach ($path in $targets) {
-    if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
-    try {
-        Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                if (-not $_.PSIsContainer) {
-                    $deletedBytes += $_.Length
-                    $deletedCount++
-                }
-                Remove-Item -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
-            } catch {}
-        }
-    } catch {}
+    if (-not $path -or -not [System.IO.Directory]::Exists($path)) { continue }
+    foreach ($file in Get-TempFilesStreamed $path) {
+        try {
+            $info = [System.IO.FileInfo]::new($file)
+            $deletedBytes += $info.Length
+            try { [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal) } catch {}
+            [System.IO.File]::Delete($file)
+            $deletedCount++
+        } catch {}
+    }
+    Remove-EmptyTempDirs $path
 }
 $tempMb = [math]::Round(($deletedBytes / 1MB), 2)
 Write-Host ("Temp cleanup done: {0} item(s), ~{1} MB reclaimed." -f $deletedCount, $tempMb) -ForegroundColor Gray
@@ -8402,6 +8816,7 @@ function Show-SystemRestoreManager {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     $f.Controls.Add($dg)
 
     $pnl = New-Object System.Windows.Forms.Panel
@@ -8795,6 +9210,7 @@ function Show-StartupManager {
         $dg.RowHeadersVisible = $false
         $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#202329")
         $dg.GridColor = $clrLine
+        Set-WmtDoubleBuffered -Control $dg
         
         $dg.Add_MouseDown($RowSelectOnRightClick)
 
@@ -8970,7 +9386,8 @@ function Show-StartupManager {
         $items = @()
         if (-not (Test-Path $Path)) { return $items }
         
-        foreach ($file in (Get-ChildItem -Path $Path -File -ErrorAction SilentlyContinue)) {
+        foreach ($filePath in Get-WmtEnumeratedFiles -Path $Path) {
+            $file = [System.IO.FileInfo]::new($filePath)
             $isEnabled = Get-StartupApprovedState -Type "StartupFolder" -RootPath $Path -ValueName $file.Name
             
             $items += [PSCustomObject]@{
@@ -11369,6 +11786,9 @@ $lstSearchResults = Get-Ctrl "lstSearchResults"
 $pnlNavButtons = Get-Ctrl "pnlNavButtons"
 $svLog = Get-Ctrl "svLog"
 $LogBox = Get-Ctrl "LogBox"
+foreach ($itemsControl in @($lstWinget, $lstAppxPackages, $lstFw, $lstCatalog, $lstSearchResults)) {
+    Enable-WmtWpfItemsVirtualization -Control $itemsControl
+}
 if ($LogBox) {
     $LogBox.Add_TextChanged({
             param($s, $e)
@@ -13160,6 +13580,7 @@ $btnWingetUnignore.Add_Click({
         $lb.ForeColor = "White"
         $lb.BorderStyle = "FixedSingle"
         $lb.SelectionMode = "MultiExtended"
+        Set-WmtDoubleBuffered -Control $lb
     
         # Manual Add (Fail-safe)
         $lb.BeginUpdate()
