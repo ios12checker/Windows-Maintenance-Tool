@@ -2519,6 +2519,171 @@ function Show-TextDialog {
     $f.ShowDialog() | Out-Null
 }
 
+function Get-WmtVisualAncestor {
+    param(
+        [object]$Element,
+        [type]$AncestorType
+    )
+
+    $current = $Element
+    while ($current -and ($current -is [System.Windows.DependencyObject])) {
+        if ($AncestorType.IsInstanceOfType($current)) { return $current }
+        try { $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current) }
+        catch { break }
+    }
+    return $null
+}
+
+function Set-WmtListViewRightClickSelection {
+    param(
+        [System.Windows.Controls.ListView]$ListView,
+        [object]$OriginalSource
+    )
+
+    if (-not $ListView -or -not $OriginalSource) { return }
+    $itemContainer = Get-WmtVisualAncestor -Element $OriginalSource -AncestorType ([System.Windows.Controls.ListViewItem])
+    if (-not $itemContainer) { return }
+
+    if (-not $itemContainer.IsSelected) {
+        $ListView.SelectedItems.Clear()
+        $itemContainer.IsSelected = $true
+    }
+    try { $itemContainer.Focus() | Out-Null } catch {}
+}
+
+function Test-WingetManifestSupportedItem {
+    param([object]$Item)
+
+    if (-not $Item) { return $false }
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($id)) { return $false }
+    return ($source -in @("winget", "msstore"))
+}
+
+function ConvertTo-WmtProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return '""' }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Get-WingetManifestText {
+    param(
+        [object]$Item,
+        [int]$TimeoutMs = 45000
+    )
+
+    if (-not (Test-WingetManifestSupportedItem $Item)) {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Text     = "App manifests are only available for winget and Microsoft Store packages."
+        }
+    }
+
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    $argsLine = @(
+        "show",
+        "--id", (ConvertTo-WmtProcessArgument $id),
+        "--source", (ConvertTo-WmtProcessArgument $source),
+        "--exact",
+        "--accept-source-agreements",
+        "--disable-interactivity"
+    ) -join " "
+
+    try {
+        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pInfo.FileName = "winget"
+        $pInfo.Arguments = $argsLine
+        $pInfo.RedirectStandardOutput = $true
+        $pInfo.RedirectStandardError = $true
+        $pInfo.UseShellExecute = $false
+        $pInfo.CreateNoWindow = $true
+        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+        $proc = [System.Diagnostics.Process]::Start($pInfo)
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill() } catch {}
+            return [PSCustomObject]@{
+                Success  = $false
+                ExitCode = $null
+                Text     = "Timed out while loading the manifest for $id.`r`n`r`nCommand: winget $argsLine"
+            }
+        }
+
+        $out = $proc.StandardOutput.ReadToEnd()
+        $err = $proc.StandardError.ReadToEnd()
+        $textParts = @()
+        if (-not [string]::IsNullOrWhiteSpace($out)) { $textParts += $out.TrimEnd() }
+        if (-not [string]::IsNullOrWhiteSpace($err)) { $textParts += $err.TrimEnd() }
+        $text = ($textParts -join "`r`n`r`n")
+        if ([string]::IsNullOrWhiteSpace($text)) { $text = "No manifest output was returned for $id." }
+
+        return [PSCustomObject]@{
+            Success  = ($proc.ExitCode -eq 0)
+            ExitCode = $proc.ExitCode
+            Text     = $text
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Text     = "Failed to load manifest for $id.`r`n`r`n$($_.Exception.Message)"
+        }
+    }
+}
+
+function Show-WingetPackageManifest {
+    param([object]$Item)
+
+    if (-not (Test-WingetManifestSupportedItem $Item)) {
+        [System.Windows.MessageBox]::Show(
+            "App manifests are only available for winget and Microsoft Store packages.",
+            "Manifest Unavailable",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+
+    $name = [string]$Item.Name
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($name)) { $name = $id }
+
+    Write-GuiLog "Loading app manifest for $name ($id) from $source..."
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Loading manifest for $name..."
+        $lblWingetStatus.Visibility = "Visible"
+    }
+
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $result = Get-WingetManifestText -Item $Item
+        if (-not $result.Success) {
+            Write-GuiLog "Manifest lookup failed for $id$(if ($null -ne $result.ExitCode) { " (exit $($result.ExitCode))" })."
+        }
+        else {
+            Write-GuiLog "Manifest loaded for $id."
+        }
+
+        $header = "Package: $name`r`nID: $id`r`nSource: $source`r`nCommand: winget show --id `"$id`" --source $source --exact`r`n"
+        $separator = ("-" * 80)
+        Show-TextDialog -Title "App Manifest - $name" -Text "$header`r`n$separator`r`n`r`n$($result.Text)"
+    }
+    finally {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        if ($lblWingetStatus) {
+            $lblWingetStatus.Text = "Ready"
+            $lblWingetStatus.Visibility = "Hidden"
+        }
+    }
+}
+
 # --- SETTINGS MANAGER ---
 # Initialize cache variable
 $script:WmtSettingsCache = $null
@@ -12699,6 +12864,13 @@ $lstSearchResults.Add_SelectionChanged({
 # WINGET CONTEXT MENU (Right-Click)
 $ctxMenu = New-Object System.Windows.Controls.ContextMenu
 
+if ($lstWinget) {
+    $lstWinget.Add_PreviewMouseRightButtonDown({
+            param($s, $e)
+            Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource
+        })
+}
+
 # 1. Update Selected
 $miUpdate = New-Object System.Windows.Controls.MenuItem
 $miUpdate.Header = "Update Selected"
@@ -12716,10 +12888,29 @@ $miUninstall.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miUninstall)
 
+# 3. View Manifest
+$miManifest = New-Object System.Windows.Controls.MenuItem
+$miManifest.Header = "View App Manifest"
+$miManifest.ToolTip = "Show the winget manifest details for the selected package"
+$miManifest.Add_Click({
+        $selected = @($lstWinget.SelectedItems)
+        if ($selected.Count -ne 1) {
+            [System.Windows.MessageBox]::Show(
+                "Select one winget or Microsoft Store package to view its manifest.",
+                "Select One Package",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Information
+            ) | Out-Null
+            return
+        }
+        Show-WingetPackageManifest -Item $selected[0]
+    })
+[void]$ctxMenu.Items.Add($miManifest)
+
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 3. Ignore Selected
+# 4. Ignore Selected
 $miIgnore = New-Object System.Windows.Controls.MenuItem
 $miIgnore.Header = "Ignore Selected"
 $miIgnore.Add_Click({ 
@@ -12727,7 +12918,7 @@ $miIgnore.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miIgnore)
 
-# 4. Manage Ignored
+# 5. Manage Ignored
 $miManage = New-Object System.Windows.Controls.MenuItem
 $miManage.Header = "Manage Ignored List..."
 $miManage.Add_Click({ 
@@ -12738,7 +12929,7 @@ $miManage.Add_Click({
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 5. Refresh Updates
+# 6. Refresh Updates
 $miRefresh = New-Object System.Windows.Controls.MenuItem
 $miRefresh.Header = "Refresh Updates"
 $miRefresh.Add_Click({ 
@@ -12746,7 +12937,19 @@ $miRefresh.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miRefresh)
 
-# 6. Attach to List
+$ctxMenu.Add_Opened({
+        $selected = @($lstWinget.SelectedItems)
+        $canShowManifest = ($selected.Count -eq 1 -and (Test-WingetManifestSupportedItem $selected[0]))
+        $miManifest.IsEnabled = $canShowManifest
+        if ($canShowManifest) {
+            $miManifest.ToolTip = "Show the winget manifest details for the selected package"
+        }
+        else {
+            $miManifest.ToolTip = "Select one winget or Microsoft Store package to view its manifest"
+        }
+    })
+
+# 7. Attach to List
 $lstWinget.ContextMenu = $ctxMenu
 
 # --- WINGET ---
