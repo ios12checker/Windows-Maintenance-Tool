@@ -374,9 +374,39 @@ function Initialize-WmtVirtualDataGrid {
 
 function Update-TweakButtonStates {
     try {
+        $setButtonEnabled = {
+            param(
+                [string]$Name,
+                [bool]$Enabled
+            )
+
+            $button = Get-Ctrl $Name
+            if ($button) { $button.IsEnabled = $Enabled }
+        }
+
         $h = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -EA Ignore).HwSchMode
-        (Get-Ctrl "btnPerfEnableHags").IsEnabled = ($h -ne 2); (Get-Ctrl "btnPerfDisableHags").IsEnabled = ($h -eq 2)
-        $sm = Get-Service "SysMain" -EA Ignore; if ($sm) { $d = ($sm.StartType -eq 'Disabled'); (Get-Ctrl "btnPerfDisableSuperfetch").IsEnabled = (-not $d); (Get-Ctrl "btnPerfEnableSuperfetch").IsEnabled = $d }
+        & $setButtonEnabled "btnPerfEnableHags" ($h -ne 2); & $setButtonEnabled "btnPerfDisableHags" ($h -eq 2)
+
+        $sm = Get-Service "SysMain" -EA Ignore
+        if ($sm) {
+            $d = ($sm.StartType -eq 'Disabled')
+            & $setButtonEnabled "btnPerfDisableSuperfetch" (-not $d); & $setButtonEnabled "btnPerfEnableSuperfetch" $d
+        }
+
+        $hibernation = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -EA Ignore
+        if ($hibernation -and $null -ne $hibernation.HibernateEnabled) {
+            $hibernateEnabled = ([int]$hibernation.HibernateEnabled -ne 0)
+            & $setButtonEnabled "btnPerfDisableHibernate" $hibernateEnabled; & $setButtonEnabled "btnPerfEnableHibernate" (-not $hibernateEnabled)
+        }
+
+        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
+            $mma = Get-MMAgent -ErrorAction Ignore
+            if ($mma -and $null -ne $mma.MemoryCompression) {
+                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
+                & $setButtonEnabled "btnPerfDisableMemCompress" $memoryCompressionEnabled; & $setButtonEnabled "btnPerfEnableMemCompress" (-not $memoryCompressionEnabled)
+            }
+        }
+
         $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
         $ta = (Get-ItemProperty $ap -Name "TaskbarAl" -EA Ignore).TaskbarAl; (Get-Ctrl "btnTaskbarLeft").IsEnabled = ($ta -ne 0); (Get-Ctrl "btnTaskbarCenter").IsEnabled = ($ta -eq 0 -or $null -eq $ta)
         $tc = (Get-ItemProperty $ap -Name "TaskbarGlomLevel" -EA Ignore).TaskbarGlomLevel; (Get-Ctrl "btnNeverCombine").IsEnabled = ($tc -ne 2); (Get-Ctrl "btnAlwaysCombine").IsEnabled = ($tc -eq 2 -or $null -eq $tc)
@@ -10531,7 +10561,16 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceWinUpdate" Content="Windows Update" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="130"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceWinUpdate" Content="Update" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Open Windows Update settings"/>
+                                                                <Button Name="btnMyDeviceQuickFix" Content="Quick Fix" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Run the guided SFC, DISM, and temp cleanup flow"/>
+                                                                <Button Name="btnMyDeviceWinRE" Content="WinRE" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Check Windows Recovery Environment status"/>
+                                                                <Button Name="btnMyDeviceSysReport" Content="Report" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Generate a detailed system report"/>
+                                                                <Button Name="btnMyDeviceRestoreMgr" Content="Restore" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Manage System Restore points"/>
+                                                                <Button Name="btnMyDeviceStartupMgr" Content="Startup" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Manage startup apps, tasks, context menu entries, and services"/>
+                                                                <Button Name="btnMyDeviceUpdateRepair" Content="WU Fix" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Reset Windows Update components"/>
+                                                                <Button Name="btnMyDeviceUpdateServices" Content="WU Svcs" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restart Windows Update related services"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10577,6 +10616,16 @@ function Set-Hags {
                                                             <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <StackPanel Name="pnlDeviceNetworkList" Margin="0,6,0,0"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceNetInfo" Content="IP Config" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Display full IP configuration"/>
+                                                                <Button Name="btnMyDeviceFlushDNS" Content="Flush DNS" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Clear the DNS resolver cache"/>
+                                                                <Button Name="btnMyDeviceResetWifi" Content="Wi-Fi" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restart active Wi-Fi adapters"/>
+                                                                <Button Name="btnMyDeviceNetRepair" Content="Repair" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Run the full network repair flow"/>
+                                                                <Button Name="btnMyDeviceDnsCustom" Content="DNS" Style="{StaticResource UtilityBtn}" Width="112" ToolTip="Set custom DNS servers"/>
+                                                                <Button Name="btnMyDeviceHostsEdit" Content="Hosts" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Open the Hosts file editor"/>
+                                                                <Button Name="btnMyDeviceHostsAdBlock" Content="AdBlock" Style="{StaticResource PositiveBtn}" Width="112" ToolTip="Download and merge ad-blocking hosts"/>
+                                                                <Button Name="btnMyDeviceRouteView" Content="Routes" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Display the routing table"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10663,6 +10712,15 @@ function Set-Hags {
                                                             <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
                                                             <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
                                                             <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
+                                                            <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceHibernateOn" Grid.Column="0" Content="Hibernate On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Re-enable hibernation"/>
+                                                                <Button Name="btnMyDeviceHibernateOff" Grid.Column="1" Content="Hibernate Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable hibernation and free hiberfil.sys disk space"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10677,7 +10735,15 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="100"/>
+                                                            <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceMemCompressOn" Grid.Column="0" Content="MC On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Windows memory compression"/>
+                                                                <Button Name="btnMyDeviceMemCompressOff" Grid.Column="1" Content="MC Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Windows memory compression"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10721,7 +10787,15 @@ function Set-Hags {
                                                             <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
                                                             <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="#6E6E73" TextWrapping="Wrap" Margin="0,8,0,0"/>
-                                                            <Button Name="btnMyDeviceGPUDriver" Content="Check Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
+                                                            <Button Name="btnMyDeviceGPUDriver" Content="Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Open GPU vendor driver download pages"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceHagsOn" Grid.Column="0" Content="HAGS On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Hardware-Accelerated GPU Scheduling"/>
+                                                                <Button Name="btnMyDeviceHagsOff" Grid.Column="1" Content="HAGS Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Hardware-Accelerated GPU Scheduling"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10781,6 +10855,13 @@ function Set-Hags {
                                                         <StackPanel Grid.Column="1">
                                                             <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
                                                             <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceDriverReport" Content="Drv Log" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Generate an installed driver report"/>
+                                                                <Button Name="btnMyDeviceDriverBackup" Content="Backup" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Export installed drivers"/>
+                                                                <Button Name="btnMyDeviceGhostDrivers" Content="Ghosts" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Remove disconnected ghost devices"/>
+                                                                <Button Name="btnMyDeviceDriverClean" Content="Clean" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Clean old driver versions"/>
+                                                                <Button Name="btnMyDeviceDriverRestore" Content="Restore" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restore drivers from backup"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -10805,6 +10886,7 @@ function Set-Hags {
                                                                 <Grid.RowDefinitions>
                                                                     <RowDefinition Height="Auto"/>
                                                                     <RowDefinition Height="Auto"/>
+                                                                    <RowDefinition Height="Auto"/>
                                                                 </Grid.RowDefinitions>
                                                                 <Grid.ColumnDefinitions>
                                                                     <ColumnDefinition Width="*"/>
@@ -10812,7 +10894,10 @@ function Set-Hags {
                                                                 </Grid.ColumnDefinitions>
                                                                 <Button Name="btnMyDeviceDiskpart" Grid.Row="0" Grid.Column="0" Content="Disk Mgmt" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
                                                                 <Button Name="btnMyDeviceDriveBenchmark" Grid.Row="0" Grid.Column="1" Content="Benchmark" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
-                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceChkdsk" Grid.Row="1" Grid.Column="1" Content="CHKDSK" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Check all drives for filesystem errors"/>
+                                                                <Button Name="btnMyDeviceDiskCleanup" Grid.Row="2" Grid.Column="0" Content="Disk Cleanup" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Open Windows Disk Cleanup"/>
+                                                                <Button Name="btnMyDeviceTempCleanup" Grid.Row="2" Grid.Column="1" Content="Temp Files" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Clean temporary files"/>
                                                             </Grid>
                                                         </StackPanel>
                                                     </Grid>
@@ -15379,6 +15464,65 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
 
     $btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
     $btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
+}
+
+# My Device shortcuts point at the original page buttons so all confirmations, logging, and state checks stay in one place.
+function Connect-WmtMyDeviceShortcut {
+    param(
+        [string]$ShortcutButtonName,
+        [string]$TargetButtonName
+    )
+
+    $shortcutButton = Get-Ctrl $ShortcutButtonName
+    $targetButton = Get-Ctrl $TargetButtonName
+    if (-not $shortcutButton -or -not $targetButton) { return }
+
+    try {
+        $enabledBinding = [System.Windows.Data.Binding]::new("IsEnabled")
+        $enabledBinding.Source = $targetButton
+        [void][System.Windows.Data.BindingOperations]::SetBinding($shortcutButton, [System.Windows.Controls.Button]::IsEnabledProperty, $enabledBinding)
+    }
+    catch {}
+
+    $shortcutButton.Add_Click({
+            if (-not $targetButton.IsEnabled) { return }
+            $targetButton.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+        }.GetNewClosure())
+}
+
+@{
+    btnMyDeviceQuickFix       = "btnQuickFix"
+    btnMyDeviceWinRE          = "btnUtilWinRE"
+    btnMyDeviceSysReport      = "btnUtilSysInfo"
+    btnMyDeviceRestoreMgr     = "btnUtilRestoreMgr"
+    btnMyDeviceStartupMgr     = "btnUtilStartupMgr"
+    btnMyDeviceUpdateRepair   = "btnUpdateRepair"
+    btnMyDeviceUpdateServices = "btnUpdateServices"
+    btnMyDeviceNetInfo        = "btnNetInfo"
+    btnMyDeviceFlushDNS       = "btnFlushDNS"
+    btnMyDeviceResetWifi      = "btnResetWifi"
+    btnMyDeviceNetRepair      = "btnNetRepair"
+    btnMyDeviceDnsCustom      = "btnDnsCustom"
+    btnMyDeviceHostsEdit      = "btnHostsEdit"
+    btnMyDeviceHostsAdBlock   = "btnHostsUpdate"
+    btnMyDeviceRouteView      = "btnRouteView"
+    btnMyDeviceUltimatePower  = "btnPerfUltimatePower"
+    btnMyDeviceHibernateOff   = "btnPerfDisableHibernate"
+    btnMyDeviceHibernateOn    = "btnPerfEnableHibernate"
+    btnMyDeviceMemCompressOff = "btnPerfDisableMemCompress"
+    btnMyDeviceMemCompressOn  = "btnPerfEnableMemCompress"
+    btnMyDeviceHagsOn         = "btnPerfEnableHags"
+    btnMyDeviceHagsOff        = "btnPerfDisableHags"
+    btnMyDeviceDriverReport   = "btnDrvReport"
+    btnMyDeviceDriverBackup   = "btnDrvBackup"
+    btnMyDeviceGhostDrivers   = "btnDrvGhost"
+    btnMyDeviceDriverClean    = "btnDrvClean"
+    btnMyDeviceDriverRestore  = "btnDrvRestore"
+    btnMyDeviceChkdsk         = "btnCHKDSK"
+    btnMyDeviceDiskCleanup    = "btnCleanDisk"
+    btnMyDeviceTempCleanup    = "btnCleanTemp"
+}.GetEnumerator() | ForEach-Object {
+    Connect-WmtMyDeviceShortcut -ShortcutButtonName $_.Key -TargetButtonName $_.Value
 }
 
 # --- LAUNCH ---
