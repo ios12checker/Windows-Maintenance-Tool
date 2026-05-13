@@ -271,7 +271,7 @@ function Reset-WmtVirtualGridRowCount {
     if (-not $Grid -or $null -eq $rows) { return }
     $Grid.RowCount = $rows.Count
     $Grid.ClearSelection()
-    $Grid.Refresh()
+    $Grid.Refresh() 
 }
 
 function Remove-WmtVirtualGridRowsAt {
@@ -2537,6 +2537,9 @@ function Save-WmtSettings {
             WingetIgnore     = $Settings.WingetIgnore
             LoadWinapp2      = [bool]$Settings.LoadWinapp2
             EnabledProviders = $Settings.EnabledProviders
+            CustomDnsServers = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
+            CustomDohTemplate = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
+            CustomDohEnabled = [bool]$Settings.CustomDohEnabled
             Theme            = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
             WindowState      = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
             WindowBounds     = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
@@ -2561,6 +2564,9 @@ function Get-WmtSettings {
         WingetIgnore     = @()
         LoadWinapp2      = $false 
         EnabledProviders = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
+        CustomDnsServers = @()
+        CustomDohTemplate = ""
+        CustomDohEnabled = $false
         Theme            = "dark"
         WindowState      = "Normal"
         WindowBounds     = @{
@@ -2589,6 +2595,16 @@ function Get-WmtSettings {
             }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
+            if ($json.PSObject.Properties["CustomDnsServers"]) {
+                $customDnsServers = @()
+                foreach ($server in @($json.CustomDnsServers)) {
+                    $serverText = ([string]$server).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($serverText)) { $customDnsServers += $serverText }
+                }
+                $defaults.CustomDnsServers = $customDnsServers
+            }
+            if ($json.PSObject.Properties["CustomDohTemplate"]) { $defaults.CustomDohTemplate = [string]$json.CustomDohTemplate }
+            if ($json.PSObject.Properties["CustomDohEnabled"]) { $defaults.CustomDohEnabled = [bool]$json.CustomDohEnabled }
             if ($json.PSObject.Properties["Theme"] -and $json.Theme) { $defaults.Theme = [string]$json.Theme }
             if ($json.PSObject.Properties["WindowState"] -and $json.WindowState) { $defaults.WindowState = [string]$json.WindowState }
             if ($json.PSObject.Properties["WindowBounds"] -and $json.WindowBounds) {
@@ -2932,161 +2948,752 @@ function Start-GpeditInstall {
 
 # --- NETWORK / DNS HELPERS (from CLI) ---
 function Get-ActiveAdapters {
-    Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' }
+    Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' }
+}
+
+# --- SHARED DNS CONFIGURATION ---
+$script:WmtDnsProviders = [ordered]@{
+    Google     = [PSCustomObject]@{
+        Key       = "Google"
+        Label     = "Google DNS"
+        Name      = "Google"
+        Addresses = @("8.8.8.8", "8.8.4.4")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" }
+        )
+    }
+    Cloudflare = [PSCustomObject]@{
+        Key       = "Cloudflare"
+        Label     = "Cloudflare DNS"
+        Name      = "Cloudflare"
+        Addresses = @("1.1.1.1", "1.0.0.1")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" }
+        )
+    }
+    Quad9      = [PSCustomObject]@{
+        Key       = "Quad9"
+        Label     = "Quad9 DNS"
+        Name      = "Quad9"
+        Addresses = @("9.9.9.9", "149.112.112.112")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "2620:fe::9"; Template = "https://dns.quad9.net/dns-query" }
+        )
+    }
+    AdGuard    = [PSCustomObject]@{
+        Key       = "AdGuard"
+        Label     = "AdGuard DNS"
+        Name      = "AdGuard"
+        Addresses = @("94.140.14.14", "94.140.15.15")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
+        )
+    }
+}
+
+$script:DohTargets = @(
+    foreach ($provider in $script:WmtDnsProviders.Values) {
+        foreach ($target in @($provider.Doh)) { $target }
+    }
+)
+
+function Test-WmtDnsAddress {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) { return $false }
+    $parsedAddress = [System.Net.IPAddress]::None
+    return [System.Net.IPAddress]::TryParse($Address.Trim(), [ref]$parsedAddress)
+}
+
+function Get-WmtValidatedDnsAddresses {
+    param([string[]]$Addresses)
+
+    $valid = @()
+    $invalid = @()
+    $seen = @{}
+
+    foreach ($address in @($Addresses)) {
+        $candidate = ([string]$address).Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate) -or $seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+
+        if (Test-WmtDnsAddress -Address $candidate) { $valid += $candidate }
+        else { $invalid += $candidate }
+    }
+
+    [PSCustomObject]@{
+        Valid   = $valid
+        Invalid = $invalid
+    }
+}
+
+function Clear-WmtDnsResolverCache {
+    try {
+        Clear-DnsClientCache -ErrorAction Stop
+        return "DNS resolver cache cleared."
+    }
+    catch {
+        $out = ipconfig /flushdns 2>&1
+        $txt = ($out | Out-String).Trim()
+        if ($txt) { return $txt }
+        return "DNS resolver cache flush attempted."
+    }
+}
+
+function Set-WmtDnsActionButtonsEnabled {
+    param([bool]$Enabled)
+
+    foreach ($buttonName in @(
+            "btnDnsGoogle", "btnDnsCloudflare", "btnDnsQuad9", "btnDnsAdGuard",
+            "btnDnsAuto", "btnDnsCustom", "btnDohAuto", "btnDohDisable"
+        )) {
+        try {
+            $button = Get-Ctrl $buttonName
+            if ($button) { $button.IsEnabled = $Enabled }
+        }
+        catch {}
+    }
+}
+
+function Test-WmtDnsRunspaceBusy {
+    return (($script:DnsRunspace -and $script:DnsAsyncResult -and -not $script:DnsAsyncResult.IsCompleted) -or
+        ($script:DohRunspace -and $script:DohAsyncResult -and -not $script:DohAsyncResult.IsCompleted))
+}
+
+function Stop-WmtDnsRunspaces {
+    if ($script:DnsTimer) {
+        try { $script:DnsTimer.Stop() } catch {}
+        $script:DnsTimer = $null
+    }
+    if ($script:DnsRunspace) {
+        try { $script:DnsRunspace.Stop() } catch {}
+        try { $script:DnsRunspace.Dispose() } catch {}
+        $script:DnsRunspace = $null
+        $script:DnsAsyncResult = $null
+    }
+    if ($script:DohTimer) {
+        try { $script:DohTimer.Stop() } catch {}
+        $script:DohTimer = $null
+    }
+    if ($script:DohRunspace) {
+        try { $script:DohRunspace.Stop() } catch {}
+        try { $script:DohRunspace.Dispose() } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+    }
+}
+
+function Start-DnsAssignmentRunspace {
+    param(
+        [string[]]$Addresses = @(),
+        [string]$Label = "Custom DNS",
+        [switch]$Reset,
+        [scriptblock]$OnComplete
+    )
+
+    if (Test-WmtDnsRunspaceBusy) {
+        Write-GuiLog "A DNS or DoH operation is already running."
+        return $false
+    }
+
+    $addrList = @($Addresses | Where-Object { -not [string]::IsNullOrWhiteSpace(([string]$_).Trim()) })
+    if (-not $Reset -and (-not $addrList -or $addrList.Count -eq 0)) {
+        Write-GuiLog "No valid DNS addresses provided."
+        return $false
+    }
+
+    $labelText = $Label
+    $isReset = [bool]$Reset
+    $completion = $OnComplete
+    $startMessage = if ($isReset) { "Resetting DNS..." } else { "Applying $labelText..." }
+
+    Write-GuiLog $startMessage
+    Set-WmtDnsActionButtonsEnabled $false
+
+    $script:DnsRunspace = [PowerShell]::Create().AddScript({
+            param($ServerAddresses, $OperationLabel, $ResetAddresses)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            $successCount = 0
+            $adapterCount = 0
+
+            function Add-DnsLine {
+                param([string]$Text)
+                if (-not [string]::IsNullOrWhiteSpace($Text)) { $lines.Add($Text) | Out-Null }
+            }
+
+            function Clear-DnsResolverCacheInRunspace {
+                try {
+                    Clear-DnsClientCache -ErrorAction Stop
+                    return "DNS resolver cache cleared."
+                }
+                catch {
+                    $out = ipconfig /flushdns 2>&1
+                    $txt = ($out | Out-String).Trim()
+                    if ($txt) { return $txt }
+                    return "DNS resolver cache flush attempted."
+                }
+            }
+
+            try {
+                $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' } |
+                    Select-Object -ExpandProperty Name)
+
+                $adapterCount = $adapters.Count
+                if (-not $adapters -or $adapters.Count -eq 0) {
+                    Add-DnsLine "No active adapters found."
+                    return [PSCustomObject]@{
+                        Success      = $false
+                        SuccessCount = 0
+                        AdapterCount = 0
+                        Lines        = $lines.ToArray()
+                        Error        = ""
+                    }
+                }
+
+                foreach ($adapter in $adapters) {
+                    try {
+                        if ($ResetAddresses) {
+                            Set-DnsClientServerAddress -InterfaceAlias $adapter -ResetServerAddresses -ErrorAction Stop
+                            Add-DnsLine "[Auto DNS] Reset $adapter to automatic DNS."
+                        }
+                        else {
+                            Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $ServerAddresses -ErrorAction Stop
+                            Add-DnsLine "[$OperationLabel] Applied to $adapter : $($ServerAddresses -join ', ')"
+                        }
+                        $successCount++
+                    }
+                    catch {
+                        if ($ResetAddresses) {
+                            Add-DnsLine "[Auto DNS] Failed on $adapter : $($_.Exception.Message)"
+                        }
+                        else {
+                            Add-DnsLine "[$OperationLabel] Failed on $adapter : $($_.Exception.Message)"
+                        }
+                    }
+                }
+
+                if ($successCount -gt 0) {
+                    Add-DnsLine (Clear-DnsResolverCacheInRunspace)
+                    if ($ResetAddresses) {
+                        Add-DnsLine "[Auto DNS] Reset $successCount of $adapterCount active adapter(s)."
+                    }
+                    else {
+                        Add-DnsLine "[$OperationLabel] Updated $successCount of $adapterCount active adapter(s)."
+                    }
+                }
+
+                [PSCustomObject]@{
+                    Success      = ($successCount -gt 0)
+                    SuccessCount = $successCount
+                    AdapterCount = $adapterCount
+                    Lines        = $lines.ToArray()
+                    Error        = ""
+                }
+            }
+            catch {
+                Add-DnsLine "ERROR: $($_.Exception.Message)"
+                [PSCustomObject]@{
+                    Success      = $false
+                    SuccessCount = $successCount
+                    AdapterCount = $adapterCount
+                    Lines        = $lines.ToArray()
+                    Error        = $_.Exception.Message
+                }
+            }
+        }).AddArgument($addrList).AddArgument($labelText).AddArgument($isReset)
+
+    try {
+        $script:DnsAsyncResult = $script:DnsRunspace.BeginInvoke()
+    }
+    catch {
+        Write-GuiLog "Failed to start DNS runspace: $($_.Exception.Message)"
+        try { $script:DnsRunspace.Dispose() } catch {}
+        $script:DnsRunspace = $null
+        $script:DnsAsyncResult = $null
+        Set-WmtDnsActionButtonsEnabled $true
+        return $false
+    }
+
+    $dnsRunspace = $script:DnsRunspace
+    $dnsAsync = $script:DnsAsyncResult
+    $dnsTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DnsTimer = $dnsTimer
+    $dnsTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $dnsTimer.Add_Tick({
+            if (-not $dnsAsync -or -not $dnsAsync.IsCompleted) { return }
+
+            $dnsTimer.Stop()
+            $result = $null
+            try {
+                $raw = $dnsRunspace.EndInvoke($dnsAsync)
+                if ($raw -is [System.Collections.ObjectModel.Collection[PSObject]]) { $result = $raw | Select-Object -Last 1 }
+                else { $result = $raw }
+
+                if ($result -and $result.Lines) {
+                    $text = ($result.Lines | Out-String).Trim()
+                    if ($text) { Write-GuiLog $text }
+                }
+                elseif ($result -and $result.Success) {
+                    Write-GuiLog "Done."
+                }
+                else {
+                    Write-GuiLog "DNS operation finished with no output."
+                }
+            }
+            catch {
+                Write-GuiLog "DNS Error: $($_.Exception.Message)"
+            }
+            finally {
+                try { $dnsRunspace.Dispose() } catch {}
+                if ([object]::ReferenceEquals($script:DnsRunspace, $dnsRunspace)) { $script:DnsRunspace = $null }
+                if ([object]::ReferenceEquals($script:DnsAsyncResult, $dnsAsync)) { $script:DnsAsyncResult = $null }
+                if ([object]::ReferenceEquals($script:DnsTimer, $dnsTimer)) { $script:DnsTimer = $null }
+                Set-WmtDnsActionButtonsEnabled $true
+            }
+
+            if ($completion) {
+                try { & $completion $result }
+                catch { Write-GuiLog "DNS completion action failed: $($_.Exception.Message)" }
+            }
+        }.GetNewClosure())
+
+    $dnsTimer.Start()
+    return $true
 }
 
 function Set-DnsAddresses {
     param(
         [string[]]$Addresses,
-        [string]$Label = "Custom DNS"
+        [string]$Label = "Custom DNS",
+        [scriptblock]$OnComplete
     )
-    if (-not $Addresses -or $Addresses.Count -eq 0) { return }
-    $addrList = $Addresses
-    $labelText = $Label
-    
-    Invoke-UiCommand {
-        param($addrList, $labelText)
-        $adapters = Get-ActiveAdapters | Select-Object -ExpandProperty Name
-        if (-not $adapters) { Write-Output "No active adapters found."; return }
-        foreach ($adapter in $adapters) {
-            try {
-                Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $addrList -ErrorAction Stop
-                Write-Output "[$labelText] Applied to $adapter : $($addrList -join ', ')"
-            }
-            catch {
-                Write-Output "[$labelText] Failed on $adapter : $($_.Exception.Message)"
-            }
-        }
-    } "Applying $labelText..." -ArgumentList (, $addrList), $labelText
+    $validation = Get-WmtValidatedDnsAddresses -Addresses $Addresses
+    if ($validation.Invalid.Count -gt 0) {
+        Write-GuiLog "Invalid DNS skipped: $($validation.Invalid -join ', ')"
+    }
+    if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+        Write-GuiLog "No valid DNS addresses provided."
+        return
+    }
+
+    $addrList = @($validation.Valid)
+    Start-DnsAssignmentRunspace -Addresses $addrList -Label $Label -OnComplete $OnComplete | Out-Null
 }
 
-# --- SHARED DNS CONFIGURATION ---
-$script:DohTargets = @(
-    @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" }
-    @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" }
-    @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" }
-    @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" }
-    @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
-)
+function Invoke-DnsPreset {
+    param([string]$ProviderKey)
+
+    if (-not $script:WmtDnsProviders.Contains($ProviderKey)) {
+        Write-GuiLog "DNS provider not configured: $ProviderKey"
+        return
+    }
+
+    $provider = $script:WmtDnsProviders[$ProviderKey]
+    $addressText = $provider.Addresses -join " / "
+    $msg = "Set DNS to $($provider.Name) ($addressText) on all active adapters?`n`nDNS cache will be flushed after changes."
+    $res = [System.Windows.MessageBox]::Show($msg, "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+
+    Set-DnsAddresses -Addresses $provider.Addresses -Label $provider.Label
+}
+
+function Reset-DnsAddressesToAutomatic {
+    $res = [System.Windows.MessageBox]::Show("Reset DNS server assignment to automatic (DHCP) on all active adapters?`n`nDNS cache will be flushed after changes.", "DNS Reset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+
+    Start-DnsAssignmentRunspace -Reset -Label "Auto DNS" -OnComplete {
+        param($Result)
+        if ($Result -and $Result.Success) {
+            [System.Windows.MessageBox]::Show("DNS reset to automatic (DHCP).", "DNS Reset", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    } | Out-Null
+}
+
+function Test-WmtDohTemplateUrl {
+    param([string]$Url)
+
+    $candidate = ([string]$Url).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
+
+    $uri = [System.Uri]$null
+    if (-not [System.Uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$uri)) { return $false }
+
+    return ($uri.Scheme -eq [System.Uri]::UriSchemeHttps -and -not [string]::IsNullOrWhiteSpace($uri.Host))
+}
+
+function New-WmtDohTargets {
+    param(
+        [string[]]$Addresses,
+        [string]$Template = ""
+    )
+
+    $templateText = ([string]$Template).Trim()
+    $targets = @()
+    foreach ($address in @($Addresses)) {
+        $server = ([string]$address).Trim()
+        if ([string]::IsNullOrWhiteSpace($server)) { continue }
+        $targets += [PSCustomObject]@{
+            Server   = $server
+            Template = $templateText
+        }
+    }
+    return $targets
+}
+
+function Show-CustomDnsDialog {
+    $settings = Get-WmtSettings
+
+    [xml]$customDnsXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Custom DNS" Height="500" Width="560" WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" Background="#0D1117" Foreground="#E6EDF3">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="#161B22"/>
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="Background" Value="#21262D"/>
+            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,0"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Custom DNS" FontSize="18" FontWeight="SemiBold" Foreground="#58A6FF"/>
+
+        <TextBlock Grid.Row="1" Foreground="#8B949E" Margin="0,12,0,0"
+                   Text="Enter IPv4 and IPv6 DNS servers together. Use commas, spaces, semicolons, or new lines between addresses."/>
+
+        <TextBlock Grid.Row="2" Text="DNS servers" Foreground="#8B949E" Margin="0,16,0,6"/>
+        <TextBox Name="txtDnsServers" Grid.Row="3" Height="78" AcceptsReturn="True"
+                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+
+        <TextBlock Grid.Row="4" Foreground="#8B949E" Margin="0,6,0,0"
+                   Text="Example: 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001"/>
+
+        <CheckBox Name="chkRegisterDoh" Grid.Row="5" Content="Register DoH template" Margin="0,14,0,8"/>
+
+        <TextBlock Grid.Row="6" Text="DoH template URL" Foreground="#8B949E" Margin="0,0,0,6"/>
+        <TextBox Name="txtDohTemplate" Grid.Row="7" Height="34"/>
+
+        <TextBlock Grid.Row="8" Foreground="#8B949E" Margin="0,6,0,0"
+                   Text="Example: https://cloudflare-dns.com/dns-query. Use a DoH template from the same provider as the DNS servers."/>
+
+        <TextBlock Name="lblError" Grid.Row="9" Foreground="#F85149" Margin="0,10,0,0"/>
+
+        <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Name="btnRemoveDoh" Content="Remove DoH" Width="104" Background="#DA3633" Margin="0,0,8,0"/>
+            <Button Name="btnApply" Content="Apply" Width="84" Background="#238636" Margin="0,0,8,0"/>
+            <Button Name="btnCancel" Content="Cancel" Width="84"/>
+        </StackPanel>
+    </Grid>
+</Window>
+'@
+
+    try {
+        $reader = New-Object System.Xml.XmlNodeReader $customDnsXaml
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    }
+    catch {
+        Write-GuiLog "Failed to open custom DNS dialog: $($_.Exception.Message)"
+        return $null
+    }
+
+    try { if ($window) { $dialog.Owner = $window } } catch {}
+
+    $txtDnsServers = $dialog.FindName("txtDnsServers")
+    $chkRegisterDoh = $dialog.FindName("chkRegisterDoh")
+    $txtDohTemplate = $dialog.FindName("txtDohTemplate")
+    $lblError = $dialog.FindName("lblError")
+    $btnApply = $dialog.FindName("btnApply")
+    $btnCancel = $dialog.FindName("btnCancel")
+    $btnRemoveDoh = $dialog.FindName("btnRemoveDoh")
+
+    $savedServers = @($settings.CustomDnsServers | Where-Object { -not [string]::IsNullOrWhiteSpace(([string]$_).Trim()) })
+    if ($savedServers.Count -eq 0) { $savedServers = @("1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001") }
+    $txtDnsServers.Text = ($savedServers -join ", ")
+    $txtDohTemplate.Text = if ($settings.CustomDohTemplate) { [string]$settings.CustomDohTemplate } else { "" }
+    $chkRegisterDoh.IsChecked = [bool]$settings.CustomDohEnabled
+
+    $setDohTemplateState = {
+        $enabled = [bool]$chkRegisterDoh.IsChecked
+        $txtDohTemplate.IsEnabled = $enabled
+        $txtDohTemplate.Opacity = if ($enabled) { 1.0 } else { 0.55 }
+    }.GetNewClosure()
+    $chkRegisterDoh.Add_Checked($setDohTemplateState)
+    $chkRegisterDoh.Add_Unchecked($setDohTemplateState)
+    & $setDohTemplateState
+
+    $dialog.Tag = $null
+
+    $getValidatedCustomDns = {
+        $lblError.Text = ""
+        $addresses = $txtDnsServers.Text -split "[,;\s]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $validation = Get-WmtValidatedDnsAddresses -Addresses $addresses
+        if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+            $lblError.Text = "Enter at least one valid DNS server IP address."
+            $null
+        }
+        else {
+            $registerDoh = [bool]$chkRegisterDoh.IsChecked
+            $dohTemplate = ([string]$txtDohTemplate.Text).Trim()
+
+            if ($registerDoh -and -not (Test-WmtDohTemplateUrl -Url $dohTemplate)) {
+                $lblError.Text = "Enter a valid HTTPS DoH template URL."
+                $null
+            }
+            else {
+                [PSCustomObject]@{
+                    Addresses   = @($validation.Valid)
+                    Invalid     = @($validation.Invalid)
+                    RegisterDoh = $registerDoh
+                    DohTemplate = $dohTemplate
+                    Action      = "Apply"
+                }
+            }
+        }
+    }.GetNewClosure()
+
+    $btnApply.Add_Click({
+            $candidate = & $getValidatedCustomDns
+            if (-not $candidate) { return }
+
+            $dialog.Tag = $candidate
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+
+    $btnRemoveDoh.Add_Click({
+            $lblError.Text = ""
+            $addresses = $txtDnsServers.Text -split "[,;\s]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            $validation = Get-WmtValidatedDnsAddresses -Addresses $addresses
+            if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+                $lblError.Text = "Enter at least one valid DNS server IP address."
+                return
+            }
+
+            $dialog.Tag = [PSCustomObject]@{
+                Addresses   = @($validation.Valid)
+                Invalid     = @($validation.Invalid)
+                RegisterDoh = $false
+                DohTemplate = ([string]$txtDohTemplate.Text).Trim()
+                Action      = "RemoveDoh"
+            }
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+
+    $btnCancel.Add_Click({ $dialog.DialogResult = $false }.GetNewClosure())
+
+    if ($dialog.ShowDialog() -eq $true) { return $dialog.Tag }
+    return $null
+}
+
+function Invoke-CustomDnsSettings {
+    $customDns = Show-CustomDnsDialog
+    if (-not $customDns) { return }
+
+    if ($customDns.Invalid.Count -gt 0) {
+        Write-GuiLog "Invalid DNS skipped: $($customDns.Invalid -join ', ')"
+    }
+
+    $settings = Get-WmtSettings
+    $settings.CustomDnsServers = @($customDns.Addresses)
+    $settings.CustomDohTemplate = [string]$customDns.DohTemplate
+    $settings.CustomDohEnabled = [bool]$customDns.RegisterDoh
+    Save-WmtSettings -Settings $settings
+
+    $customDohTargets = New-WmtDohTargets -Addresses $customDns.Addresses -Template $customDns.DohTemplate
+    if ($customDns.Action -eq "RemoveDoh") {
+        Start-DohJob -List $customDohTargets -IsEnable $false
+        return
+    }
+
+    if ($customDns.RegisterDoh) {
+        Set-DnsAddresses -Addresses $customDns.Addresses -Label "Custom DNS" -OnComplete ({
+                param($Result)
+                if ($Result -and $Result.Success) {
+                    Start-DohJob -List $customDohTargets -IsEnable $true
+                }
+                else {
+                    Write-GuiLog "Skipped DoH registration because custom DNS assignment did not complete successfully."
+                }
+            }.GetNewClosure())
+        return
+    }
+
+    Set-DnsAddresses -Addresses $customDns.Addresses -Label "Custom DNS"
+}
 
 function Start-DohJob {
     param($List, $IsEnable)
 
-    # 1. UI Feedback
-    # Attempt to find buttons. If not found, variables will be null.
-    $btnEnable = Get-Ctrl "btnDohAuto"
-    $btnDisable = Get-Ctrl "btnDohDisable"
-    
-    # Safely disable if found
-    if ($btnEnable) { $btnEnable.IsEnabled = $false }
-    if ($btnDisable) { $btnDisable.IsEnabled = $false }
-    
-    $actionStr = if ($IsEnable) { "Enabling" } else { "Disabling" }
-    Write-GuiLog "$actionStr DoH... (Batch Processing)"
+    $dnsList = @($List)
+    if (-not $dnsList -or $dnsList.Count -eq 0) {
+        Write-GuiLog "No DoH targets configured."
+        return
+    }
 
-    # 2. Start Background Job
-    $script:DohJob = Start-Job -ScriptBlock {
-        param($List, $IsEnable)
-        
-        # Create a temp file for the batch commands
-        $tmpFile = [System.IO.Path]::GetTempFileName()
-        $cnt = 0
-        
-        # Build the batch file content
-        $lines = @()
-        foreach ($dns in $List) {
-            if ($IsEnable) {
-                $lines += "dns add encryption server=$($dns.Server) dohtemplate=$($dns.Template) autoupgrade=yes udpfallback=no"
-            }
-            else {
-                $lines += "dns delete encryption server=$($dns.Server)"
-            }
-            $cnt++
-        }
-        
-        # Write to file
-        $lines | Set-Content -Path $tmpFile -Encoding Ascii
+    if (Test-WmtDnsRunspaceBusy) {
+        Write-GuiLog "A DNS or DoH operation is already running."
+        return
+    }
 
-        # Run netsh in batch mode (-f)
-        $p = Start-Process -FilePath "netsh.exe" -ArgumentList "-f", $tmpFile -NoNewWindow -PassThru -Wait
-        
-        # Cleanup
-        if (Test-Path $tmpFile) { Remove-Item $tmpFile }
-        
-        # Helper tasks
-        ipconfig /flushdns | Out-Null
-        if ($IsEnable) {
-            try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue } catch {}
-        }
-        
-        # Return the result object
-        if ($p.ExitCode -eq 0) {
-            Write-Output ([PSCustomObject]@{ Count = $cnt; Success = $true })
-        }
-        else {
-            Write-Output ([PSCustomObject]@{ Count = 0; Success = $false })
-        }
+    if ($script:DohRunspace) {
+        try { $script:DohRunspace.Dispose() } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+    }
 
-    } -ArgumentList $List, $IsEnable
+    $isEnableForTimer = [bool]$IsEnable
+    $actionStr = if ($isEnableForTimer) { "Registering" } else { "Removing" }
+    Write-GuiLog "$actionStr DoH templates..."
+    Set-WmtDnsActionButtonsEnabled $false
 
-    # 3. Monitor Job
-    if ($script:DohTimer) { $script:DohTimer.Stop() }
-    $script:DohTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:DohTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-    
-    $script:DohTimer.Add_Tick({
-            if ($script:DohJob.State -ne 'Running') {
-                $script:DohTimer.Stop()
-            
-                # Re-fetch buttons in this scope to be safe
-                $btnEnable = Get-Ctrl "btnDohAuto"
-                $btnDisable = Get-Ctrl "btnDohDisable"
+    try {
+        $script:DohRunspace = [PowerShell]::Create().AddScript({
+                param($List, $IsEnable)
 
-                try {
-                    $rawResults = Receive-Job -Job $script:DohJob
-                    $res = $rawResults | Where-Object { $_ -is [PSCustomObject] -and $_.Psobject.Properties.Match('Count') } | Select-Object -Last 1
+                $cnt = 0
+                $failures = @()
 
-                    if ($res -and $res.Success) {
-                        $c = $res.Count
-                        $finMsg = if ($IsEnable) { "Successfully applied $c DoH rules." } else { "Successfully removed $c DoH rules." }
-                    
-                        Write-GuiLog "Done. $finMsg"
-                    
-                        if ($c -gt 0) {
-                            # FIXED: Use [System.Windows.MessageBox] (WPF) to match the Enum types
-                            [System.Windows.MessageBox]::Show($finMsg, "DoH Manager", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-                        }
+                foreach ($dns in $List) {
+                    $server = [string]$dns.Server
+                    $template = [string]$dns.Template
+                    if ([string]::IsNullOrWhiteSpace($server)) { continue }
+
+                    if ($IsEnable) {
+                        & netsh.exe dns delete encryption "server=$server" 2>&1 | Out-Null
+                        & netsh.exe dns add encryption "server=$server" "dohtemplate=$template" autoupgrade=yes udpfallback=no 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $cnt++ }
+                        else { $failures += $server }
                     }
                     else {
-                        Write-GuiLog "Operation failed or no changes were made."
+                        & netsh.exe dns delete encryption "server=$server" 2>&1 | Out-Null
+                        # Treat missing entries as already disabled; the desired end state is still reached.
+                        $cnt++
                     }
                 }
-                catch {
-                    Write-GuiLog "Job Error: $($_.Exception.Message)"
+
+                ipconfig /flushdns | Out-Null
+                try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue } catch {}
+                
+                [PSCustomObject]@{
+                    Count    = $cnt
+                    Failed   = $failures.Count
+                    Failures = $failures
+                    Success  = ($failures.Count -eq 0)
                 }
+            }).AddArgument($dnsList).AddArgument($isEnableForTimer)
 
-                # Cleanup
-                Remove-Job -Job $script:DohJob
-                $script:DohJob = $null
+        $script:DohAsyncResult = $script:DohRunspace.BeginInvoke()
+    }
+    catch {
+        Write-GuiLog "Failed to start DoH runspace: $($_.Exception.Message)"
+        try { if ($script:DohRunspace) { $script:DohRunspace.Dispose() } } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+        Set-WmtDnsActionButtonsEnabled $true
+        return
+    }
 
-                # Unlock Buttons (Safe Check)
-                if ($btnEnable) { $btnEnable.IsEnabled = $true }
-                if ($btnDisable) { $btnDisable.IsEnabled = $true }
-            }
-        })
+    $dohRunspace = $script:DohRunspace
+    $dohAsync = $script:DohAsyncResult
+    if (-not $dohRunspace -or -not $dohAsync) {
+        Write-GuiLog "Failed to start DoH runspace."
+        Set-WmtDnsActionButtonsEnabled $true
+        return
+    }
+
+    if ($script:DohTimer) { $script:DohTimer.Stop() }
+    $dohTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DohTimer = $dohTimer
+    $dohTimer.Interval = [TimeSpan]::FromMilliseconds(250)
     
-    $script:DohTimer.Start()
+    $dohTimer.Add_Tick({
+            if (-not $dohAsync -or -not $dohAsync.IsCompleted) { return }
+
+            $dohTimer.Stop()
+            try {
+                $rawResults = $dohRunspace.EndInvoke($dohAsync)
+                $res = $rawResults | Where-Object { $_ -is [PSCustomObject] -and $_.Psobject.Properties.Match('Count') } | Select-Object -Last 1
+
+                if ($res -and $res.Success) {
+                    $c = $res.Count
+                    if ($isEnableForTimer) {
+                        $finMsg = "Registered $c DoH templates."
+                    }
+                    else {
+                        $finMsg = "Removed or verified $c DoH templates."
+                    }
+
+                    Write-GuiLog "Done. $finMsg"
+
+                    if ($c -gt 0) {
+                        [System.Windows.MessageBox]::Show($finMsg, "DoH Manager", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                    }
+                }
+                else {
+                    $failedText = if ($res -and $res.Failures) { " Failed: $($res.Failures -join ', ')" } else { "" }
+                    Write-GuiLog "DoH operation failed or no changes were made.$failedText"
+                }
+            }
+            catch {
+                Write-GuiLog "DoH Error: $($_.Exception.Message)"
+            }
+            finally {
+                try {
+                    $dohRunspace.Dispose()
+                } catch {}
+                if ([object]::ReferenceEquals($script:DohRunspace, $dohRunspace)) { $script:DohRunspace = $null }
+                if ([object]::ReferenceEquals($script:DohAsyncResult, $dohAsync)) { $script:DohAsyncResult = $null }
+                if ([object]::ReferenceEquals($script:DohTimer, $dohTimer)) { $script:DohTimer = $null }
+                Set-WmtDnsActionButtonsEnabled $true
+            }
+        }.GetNewClosure())
+    
+    $dohTimer.Start()
 }
 
 # Redirect existing function calls to the new Async handler
@@ -10523,14 +11130,15 @@ function Set-Hags {
                                 <Button Name="btnDnsGoogle" Content="Google DNS" Style="{StaticResource ActionBtn}" ToolTip="8.8.8.8 / 8.8.4.4"/>
                                 <Button Name="btnDnsCloudflare" Content="Cloudflare" Style="{StaticResource ActionBtn}" ToolTip="1.1.1.1 / 1.0.0.1"/>
                                 <Button Name="btnDnsQuad9" Content="Quad9" Style="{StaticResource ActionBtn}" ToolTip="9.9.9.9"/>
+                                <Button Name="btnDnsAdGuard" Content="AdGuard" Style="{StaticResource ActionBtn}" ToolTip="94.140.14.14 / 94.140.15.15"/>
                                 <Button Name="btnDnsAuto" Content="Auto (DHCP)" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}"/>
+                                <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}" ToolTip="Set custom DNS servers and optional DoH template"/>
                             </WrapPanel>
                             
                             <TextBlock Text="DNS OVER HTTPS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDohAuto" Content="Enable DoH" Style="{StaticResource PositiveBtn}" ToolTip="Enable DNS encryption for all providers"/>
-                                <Button Name="btnDohDisable" Content="Disable DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Disable DNS encryption"/>
+                                <Button Name="btnDohAuto" Content="Register DoH" Style="{StaticResource PositiveBtn}" ToolTip="Register Windows DoH templates for bundled DNS providers"/>
+                                <Button Name="btnDohDisable" Content="Remove DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Remove bundled Windows DoH templates"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -11462,14 +12070,15 @@ Set-ButtonIcon "btnDonate" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,
 Set-ButtonIcon "btnDnsGoogle" "M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" "Google" "Sets DNS to 8.8.8.8 & 8.8.4.4"
 Set-ButtonIcon "btnDnsCloudflare" "M19.35,10.04C18.67,6.59 15.64,4 12,4C9.11,4 6.6,5.64 5.35,8.04C2.34,8.36 0,10.91 0,14A6,6 0 0,0 6,20H19A5,5 0 0,0 24,15C24,12.36 21.95,10.22 19.35,10.04Z" "Cloudflare" "Sets DNS to 1.1.1.1 & 1.0.0.1"
 Set-ButtonIcon "btnDnsQuad9" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Quad9" "Sets DNS to 9.9.9.9 (Malware Blocking)"
+Set-ButtonIcon "btnDnsAdGuard" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "AdGuard" "Sets DNS to 94.140.14.14 & 94.140.15.15 (Ad/tracker blocking)" 16 "#00FF99"
 Set-ButtonIcon "btnDnsAuto" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Auto (DHCP)" "Resets DNS settings to DHCP (Automatic)"
-Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses across active adapters"
+Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses and optional DoH template"
 Set-ButtonIcon "btnHostsUpdate" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Download AdBlock" "Updates Hosts file with AdBlocking list"
 Set-ButtonIcon "btnHostsEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Edit Hosts" "Opens the Hosts File Editor"
 Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to the data folder"
 Set-ButtonIcon "btnHostsRestore" "M13,3A9,9 0 0,0 4,12H1L4.89,15.89L4.96,16.03L9,12H6A7,7 0 0,1 13,5A7,7 0 0,1 20,12A7,7 0 0,1 13,19C11.07,19 9.32,18.21 8.06,16.94L6.64,18.36C8.27,20 10.5,21 13,21A9,9 0 0,0 22,12A9,9 0 0,0 13,3Z" "Restore Hosts" "Restores a previous hosts file backup"
-Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable DoH (All)" "Enables DNS over HTTPS for all supported providers" "#00FFFF"
-Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable DoH" "Disables DNS over HTTPS" "#FF5555"
+Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Register DoH" "Registers Windows DoH templates for bundled DNS providers; choose a DNS preset separately" "#00FFFF"
+Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Remove DoH" "Removes bundled Windows DoH templates" "#FF5555"
 Set-ButtonIcon "btnFwRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Refreshes the firewall rule list"
 Set-ButtonIcon "btnFwAdd" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Add Rule" "Create a new firewall rule"
 Set-ButtonIcon "btnFwEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Modify" "Edit the selected firewall rule"
@@ -11580,6 +12189,7 @@ $btnRouteView = Get-Ctrl "btnRouteView"
 $btnDnsGoogle = Get-Ctrl "btnDnsGoogle"
 $btnDnsCloudflare = Get-Ctrl "btnDnsCloudflare"
 $btnDnsQuad9 = Get-Ctrl "btnDnsQuad9"
+$btnDnsAdGuard = Get-Ctrl "btnDnsAdGuard"
 $btnDnsAuto = Get-Ctrl "btnDnsAuto"
 $btnDnsCustom = Get-Ctrl "btnDnsCustom"
 $btnDohAuto = Get-Ctrl "btnDohAuto"
@@ -11974,12 +12584,13 @@ Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "b
 Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsAdGuard"        "Set DNS: AdGuard (Ad Blocking)"  "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
 
 # DNS Encryption & Hosts
-Add-SearchIndexEntry "btnDohAuto"           "Enable DoH (DNS over HTTPS)"     "btnTabNetwork"
-Add-SearchIndexEntry "btnDohDisable"        "Disable DoH"                     "btnTabNetwork"
+Add-SearchIndexEntry "btnDohAuto"           "Register DoH Templates"          "btnTabNetwork"
+Add-SearchIndexEntry "btnDohDisable"        "Remove DoH Templates"            "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
@@ -14194,35 +14805,22 @@ $btnRouteView.Add_Click({
     })
 
 $btnDnsGoogle.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Google (8.8.8.8 / 8.8.4.4) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("8.8.8.8", "8.8.4.4") -Label "Google DNS"
+        Invoke-DnsPreset -ProviderKey "Google"
     })
 $btnDnsCloudflare.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Cloudflare (1.1.1.1 / 1.0.0.1) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("1.1.1.1", "1.0.0.1") -Label "Cloudflare DNS"
+        Invoke-DnsPreset -ProviderKey "Cloudflare"
     })
 $btnDnsQuad9.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Quad9 (9.9.9.9 / 149.112.112.112) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("9.9.9.9", "149.112.112.112") -Label "Quad9 DNS"
+        Invoke-DnsPreset -ProviderKey "Quad9"
+    })
+$btnDnsAdGuard.Add_Click({
+        Invoke-DnsPreset -ProviderKey "AdGuard"
     })
 $btnDnsAuto.Add_Click({
-        Invoke-UiCommand {
-            Get-ActiveAdapters | Select-Object -ExpandProperty Name | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_ -ResetServerAddresses }
-            Write-Output "DNS reset to automatic (DHCP)."
-            [System.Windows.MessageBox]::Show("DNS reset to automatic (DHCP).", "DNS Reset", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } "Resetting DNS..."
+        Reset-DnsAddressesToAutomatic
     })
 $btnDnsCustom.Add_Click({
-        $dnsInput = [Microsoft.VisualBasic.Interaction]::InputBox("Enter DNS addresses (comma separated)", "Custom DNS", "1.1.1.1,8.8.8.8")
-        if (-not $dnsInput) { return }
-        $addresses = $dnsInput.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        $valid = @()
-        foreach ($addr in $addresses) { if (Test-Connection -ComputerName $addr -Count 1 -Quiet -ErrorAction SilentlyContinue) { $valid += $addr } else { Write-GuiLog "Unreachable DNS skipped: $addr" } }
-        if (-not $valid) { [System.Windows.MessageBox]::Show("No reachable DNS addresses were provided.", "Custom DNS", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning); return }
-        Set-DnsAddresses -Addresses $valid -Label "Custom DNS"
+        Invoke-CustomDnsSettings
     })
 
 $btnDohAuto.Add_Click({ Enable-AllDoh })
@@ -15589,6 +16187,7 @@ $window.Add_Closing({
         Stop-FirewallRuleLoad
         Stop-FirewallDetailLoad
         Stop-MyDeviceSectionJobs
+        Stop-WmtDnsRunspaces
         if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
         if ($script:BitLockerStatusRunspace) {
             try { $script:BitLockerStatusRunspace.Stop() } catch {}
