@@ -418,6 +418,113 @@ function Update-TweakButtonStates {
         (Get-Ctrl "btnHideWidgets").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarDa" -EA Ignore).TaskbarDa -ne 0)
         (Get-Ctrl "btnHideTaskView").IsEnabled = ((Get-ItemProperty $ap -Name "ShowTaskViewButton" -EA Ignore).ShowTaskViewButton -ne 0)
         (Get-Ctrl "btnHideChat").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarMn" -EA Ignore).TaskbarMn -ne 0)
+
+        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        $hideExt = [int](Get-WmtRegValue $ap "HideFileExt" 1)
+        & $setButtonEnabled "btnExpShowExt" ($hideExt -ne 0); & $setButtonEnabled "btnExpHideExt" ($hideExt -eq 0)
+        $hidden = [int](Get-WmtRegValue $ap "Hidden" 2)
+        & $setButtonEnabled "btnExpShowHidden" ($hidden -ne 1); & $setButtonEnabled "btnExpHideHidden" ($hidden -eq 1)
+        $fullPath = [int](Get-WmtRegValue $cabinetPath "FullPath" 0)
+        & $setButtonEnabled "btnExpFullPathOn" ($fullPath -ne 1); & $setButtonEnabled "btnExpFullPathOff" ($fullPath -eq 1)
+        $launchTo = [int](Get-WmtRegValue $ap "LaunchTo" 2)
+        & $setButtonEnabled "btnExpLaunchThisPc" ($launchTo -ne 1); & $setButtonEnabled "btnExpLaunchQuickAccess" ($launchTo -eq 1)
+        $recentsHidden = ([int](Get-WmtRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $explorerPath "ShowFrequent" 1) -eq 0)
+        & $setButtonEnabled "btnExpHideRecents" (-not $recentsHidden); & $setButtonEnabled "btnExpShowRecents" $recentsHidden
+
+        $mousePath = "HKCU:\Control Panel\Mouse"
+        $mouseSpeed = [int](Get-WmtRegValue $mousePath "MouseSensitivity" 10)
+        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
+        $mouseAccelOn = ([string](Get-WmtRegValue $mousePath "MouseSpeed" "1") -ne "0")
+        & $setButtonEnabled "btnMouseAccelOn" (-not $mouseAccelOn); & $setButtonEnabled "btnMouseAccelOff" $mouseAccelOn
+        $singleClick = Test-WmtExplorerSingleClick
+        & $setButtonEnabled "btnMouseSingleClick" (-not $singleClick); & $setButtonEnabled "btnMouseDoubleClick" $singleClick
+
+        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        & $setButtonEnabled "btnCtxClassic" (-not $classicContext); & $setButtonEnabled "btnCtxModern" $classicContext
+        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        & $setButtonEnabled "btnCtxTakeOwnAdd" (-not $takeOwnInstalled); & $setButtonEnabled "btnCtxTakeOwnRemove" $takeOwnInstalled
+        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        & $setButtonEnabled "btnCtxPsHereAdd" (-not $psHereInstalled); & $setButtonEnabled "btnCtxPsHereRemove" $psHereInstalled
+
+        $adEnabled = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
+        & $setButtonEnabled "btnPrivacyAdsOff" ($adEnabled -ne 0); & $setButtonEnabled "btnPrivacyAdsOn" ($adEnabled -eq 0)
+        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+        $suggestionsOff = $true
+        foreach ($name in $suggestionNames) {
+            if ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" $name 1) -ne 0) { $suggestionsOff = $false; break }
+        }
+        & $setButtonEnabled "btnPrivacySuggestedOff" (-not $suggestionsOff); & $setButtonEnabled "btnPrivacySuggestedOn" $suggestionsOff
+        $tailoredOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
+        & $setButtonEnabled "btnPrivacyTailoredOff" (-not $tailoredOff); & $setButtonEnabled "btnPrivacyTailoredOn" $tailoredOff
+        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        $activityOff = ([int](Get-WmtRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
+        & $setButtonEnabled "btnPrivacyActivityOff" (-not $activityOff); & $setButtonEnabled "btnPrivacyActivityOn" $activityOff
+        $launchTrackingOff = ([int](Get-WmtRegValue $ap "Start_TrackProgs" 1) -eq 0)
+        & $setButtonEnabled "btnPrivacyAppLaunchOff" (-not $launchTrackingOff); & $setButtonEnabled "btnPrivacyAppLaunchOn" $launchTrackingOff
+
+        $webSearchOff = ([int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
+        & $setButtonEnabled "btnSearchWebOff" (-not $webSearchOff); & $setButtonEnabled "btnSearchWebOn" $webSearchOff
+        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
+        if ($searchSvc) {
+            $indexReduced = ($searchSvc.StartType -ne "Automatic")
+            & $setButtonEnabled "btnSearchIndexReduced" (-not $indexReduced); & $setButtonEnabled "btnSearchIndexDefault" $indexReduced
+        }
+
+        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
+        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        $gameCfgPath = "HKCU:\System\GameConfigStore"
+        $gameModeOn = ([int](Get-WmtRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](Get-WmtRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
+        & $setButtonEnabled "btnGameModeOn" (-not $gameModeOn); & $setButtonEnabled "btnGameModeOff" $gameModeOn
+        $gameBarOn = ([int](Get-WmtRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
+        & $setButtonEnabled "btnGameBarOff" $gameBarOn; & $setButtonEnabled "btnGameBarOn" (-not $gameBarOn)
+        $captureOn = ([int](Get-WmtRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
+        & $setButtonEnabled "btnGameCaptureOff" $captureOn; & $setButtonEnabled "btnGameCaptureOn" (-not $captureOn)
+        $fsoOff = ([int](Get-WmtRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+        & $setButtonEnabled "btnGameFsoOff" (-not $fsoOff); & $setButtonEnabled "btnGameFsoDefault" $fsoOff
+
+        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+        $visualMode = [int](Get-WmtRegValue $visualPath "VisualFXSetting" 0)
+        $snappyOn = ($visualMode -eq 3 -and [string](Get-WmtRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](Get-WmtRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
+        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
+
+        $tipsOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SoftLandingEnabled" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338389Enabled" 1) -eq 0)
+        & $setButtonEnabled "btnNotifyTipsOff" (-not $tipsOff); & $setButtonEnabled "btnNotifyTipsOn" $tipsOff
+        $setupOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+        & $setButtonEnabled "btnNotifySetupOff" (-not $setupOff); & $setButtonEnabled "btnNotifySetupOn" $setupOff
+        $lockPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        $lockFactsOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](Get-WmtRegValue $lockPath "SubscribedContent-338387Enabled" 1) -eq 0)
+        $spotlightOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
+        & $setButtonEnabled "btnLockFactsOff" (-not $lockFactsOff); & $setButtonEnabled "btnLockFactsOn" $lockFactsOff
+        & $setButtonEnabled "btnLockSpotlightOff" (-not $spotlightOff); & $setButtonEnabled "btnLockSpotlightOn" $spotlightOff
+        & $setButtonEnabled "btnLockPlain" (-not ($lockFactsOff -and $spotlightOff)); & $setButtonEnabled "btnLockDefault" ($lockFactsOff -or $spotlightOff)
+
+        $fastStartupOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
+        & $setButtonEnabled "btnStartupFastOff" $fastStartupOn; & $setButtonEnabled "btnStartupFastOn" (-not $fastStartupOn)
+        $restoreFoldersOn = ([int](Get-WmtRegValue $ap "PersistBrowsers" 0) -ne 0)
+        & $setButtonEnabled "btnStartupRestoreFoldersOn" (-not $restoreFoldersOn); & $setButtonEnabled "btnStartupRestoreFoldersOff" $restoreFoldersOn
+
+        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
+        if ($null -ne $batteryThreshold) {
+            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
+        }
+        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
+        if ($null -ne $usbAc -and $null -ne $usbDc) {
+            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
+            & $setButtonEnabled "btnPowerUsbSuspendOn" (-not $usbOn); & $setButtonEnabled "btnPowerUsbSuspendOff" ($usbAc -ne 0 -or $usbDc -ne 0)
+        }
+        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
+        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
+            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
+            & $setButtonEnabled "btnPowerPcieModerate" (-not $pcieModerate); & $setButtonEnabled "btnPowerPcieOff" ($pcieAc -ne 0 -or $pcieDc -ne 0)
+        }
+
+        $longPathsOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
+        & $setButtonEnabled "btnDevLongPathsOn" (-not $longPathsOn); & $setButtonEnabled "btnDevLongPathsOff" $longPathsOn
+        $devModeOn = ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
+        & $setButtonEnabled "btnDevModeOn" (-not $devModeOn); & $setButtonEnabled "btnDevModeOff" $devModeOn
     }
     catch {}
 }
@@ -10651,6 +10758,259 @@ function Set-Hags {
     }
 }
 
+function Get-WmtRegValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Default = $null
+    )
+
+    try {
+        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        return $item.$Name
+    }
+    catch {
+        return $Default
+    }
+}
+
+function Set-WmtRegDword {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$Value
+    )
+
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type DWord -Force
+}
+
+function Set-WmtRegString {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Value
+    )
+
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type String -Force
+}
+
+function Remove-WmtRegValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    if (Test-Path $Path) {
+        Remove-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+    }
+}
+
+function Restart-WmtExplorer {
+    try { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+function Invoke-WmtUserSettingRefresh {
+    try {
+        Start-Process -FilePath "$env:SystemRoot\System32\RUNDLL32.EXE" -ArgumentList "USER32.DLL,UpdatePerUserSystemParameters" -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+    }
+    catch {}
+}
+
+function Test-WmtExplorerSingleClick {
+    $shellState = Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShellState"
+    return ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+}
+
+function Set-WmtExplorerClickMode {
+    param([bool]$SingleClick)
+
+    $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+    if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+
+    $shellState = Get-WmtRegValue $path "ShellState"
+    if (-not $shellState -or $shellState.Length -lt 5) {
+        $shellState = [byte[]](0x24, 0x00, 0x00, 0x00, 0x3E, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    }
+
+    $shellState[4] = if ($SingleClick) { [byte]0x1E } else { [byte]0x3E }
+    Set-ItemProperty -Path $path -Name "ShellState" -Value $shellState -Type Binary -Force
+    Set-WmtRegDword $path "IconUnderline" $(if ($SingleClick) { 2 } else { 3 })
+    Restart-WmtExplorer
+}
+
+function Set-WmtMouseSpeed {
+    param([int]$Speed)
+
+    $speed = [math]::Max(1, [math]::Min(20, $Speed))
+    $path = "HKCU:\Control Panel\Mouse"
+    Set-WmtRegString $path "MouseSensitivity" ([string]$speed)
+    Invoke-WmtUserSettingRefresh
+}
+
+function Set-WmtMouseAcceleration {
+    param([bool]$Enable)
+
+    $path = "HKCU:\Control Panel\Mouse"
+    if ($Enable) {
+        Set-WmtRegString $path "MouseSpeed" "1"
+        Set-WmtRegString $path "MouseThreshold1" "6"
+        Set-WmtRegString $path "MouseThreshold2" "10"
+    }
+    else {
+        Set-WmtRegString $path "MouseSpeed" "0"
+        Set-WmtRegString $path "MouseThreshold1" "0"
+        Set-WmtRegString $path "MouseThreshold2" "0"
+    }
+    Invoke-WmtUserSettingRefresh
+}
+
+function Set-WmtContentDeliveryValues {
+    param(
+        [string[]]$Names,
+        [int]$Value
+    )
+
+    $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+    foreach ($name in $Names) {
+        Set-WmtRegDword $path $name $Value
+    }
+}
+
+function Set-WmtClassicContextMenu {
+    param([bool]$Enable)
+
+    $clsid = "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}"
+    $inproc = Join-Path $clsid "InprocServer32"
+    if ($Enable) {
+        if (-not (Test-Path $inproc)) { New-Item -Path $inproc -Force | Out-Null }
+        Set-Item -Path $inproc -Value "" -Force
+    }
+    else {
+        if (Test-Path $clsid) { Remove-Item -Path $clsid -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    Restart-WmtExplorer
+}
+
+function Set-WmtTakeOwnershipMenu {
+    param([bool]$Enable)
+
+    $targets = @(
+        @{Path = "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /a && icacls ""%1"" /grant *S-1-5-32-544:F /c && pause''"' },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /r /d y /a && icacls ""%1"" /grant *S-1-5-32-544:F /t /c && pause''"' },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Drive\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /r /d y /a && icacls ""%1"" /grant *S-1-5-32-544:F /t /c && pause''"' }
+    )
+
+    foreach ($target in $targets) {
+        $path = $target.Path
+        if ($Enable) {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+            Set-Item -Path $path -Value "Take Ownership" -Force
+            New-ItemProperty -Path $path -Name "HasLUAShield" -Value "" -PropertyType String -Force | Out-Null
+            $cmdPath = Join-Path $path "command"
+            if (-not (Test-Path $cmdPath)) { New-Item -Path $cmdPath -Force | Out-Null }
+            Set-Item -Path $cmdPath -Value $target.Command -Force
+        }
+        else {
+            if (Test-Path $path) { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function Set-WmtPowerShellHereMenu {
+    param([bool]$Enable)
+
+    $targets = @(
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"; Location = "%V" },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_OpenPowerShell"; Location = "%1" },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Drive\shell\WMT_OpenPowerShell"; Location = "%1" }
+    )
+
+    foreach ($target in $targets) {
+        $path = $target.Path
+        if ($Enable) {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+            Set-Item -Path $path -Value "Open PowerShell Here" -Force
+            Set-ItemProperty -Path $path -Name "Icon" -Value "powershell.exe" -Type String -Force
+            $cmdPath = Join-Path $path "command"
+            if (-not (Test-Path $cmdPath)) { New-Item -Path $cmdPath -Force | Out-Null }
+            Set-Item -Path $cmdPath -Value "powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -Command `"Set-Location -LiteralPath '$($target.Location)'`"" -Force
+        }
+        else {
+            if (Test-Path $path) { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function Set-WmtVisualPreset {
+    param([ValidateSet("Appearance", "Performance", "Snappy")] [string]$Mode)
+
+    $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+    $desktopPath = "HKCU:\Control Panel\Desktop"
+    $advancedPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $dwmPath = "HKCU:\Software\Microsoft\Windows\DWM"
+    $personalizePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+    switch ($Mode) {
+        "Appearance" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 1
+            Set-WmtRegString $desktopPath "MinAnimate" "1"
+            Set-WmtRegDword $advancedPath "TaskbarAnimations" 1
+            Set-WmtRegDword $dwmPath "EnableAeroPeek" 1
+            Set-WmtRegDword $personalizePath "EnableTransparency" 1
+        }
+        "Performance" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 2
+        }
+        "Snappy" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 3
+            Set-WmtRegString $desktopPath "MinAnimate" "0"
+            Set-WmtRegDword $advancedPath "TaskbarAnimations" 0
+            Set-WmtRegDword $dwmPath "EnableAeroPeek" 0
+            Set-WmtRegDword $personalizePath "EnableTransparency" 0
+        }
+    }
+
+    Restart-WmtExplorer
+}
+
+function Get-WmtPowerSettingIndex {
+    param(
+        [string]$SubGroup,
+        [string]$Setting,
+        [ValidateSet("AC", "DC")] [string]$Mode = "AC"
+    )
+
+    try {
+        $output = powercfg /query SCHEME_CURRENT $SubGroup $Setting 2>$null
+        $label = if ($Mode -eq "DC") { "Current DC Power Setting Index" } else { "Current AC Power Setting Index" }
+        $pattern = [regex]::Escape($label) + "\s*:\s*0x([0-9a-fA-F]+)"
+        foreach ($line in $output) {
+            if ($line -match $pattern) { return [Convert]::ToInt32($matches[1], 16) }
+        }
+        $output = powercfg /qh SCHEME_CURRENT $SubGroup $Setting 2>$null
+        foreach ($line in $output) {
+            if ($line -match $pattern) { return [Convert]::ToInt32($matches[1], 16) }
+        }
+    }
+    catch {}
+    return $null
+}
+
+function Set-WmtPowerSettingIndex {
+    param(
+        [string]$SubGroup,
+        [string]$Setting,
+        [int]$Value,
+        [switch]$DCOnly
+    )
+
+    if (-not $DCOnly) { powercfg /setacvalueindex SCHEME_CURRENT $SubGroup $Setting $Value | Out-Null }
+    powercfg /setdcvalueindex SCHEME_CURRENT $SubGroup $Setting $Value | Out-Null
+    powercfg /S SCHEME_CURRENT | Out-Null
+}
+
 # ==========================================
 # 3. XAML GUI
 # ==========================================
@@ -11238,6 +11598,185 @@ function Set-Hags {
                             <Button Name="btnNeverCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Shows app labels and stops identical app windows from grouping into one button."/>
                             <Button Name="btnAlwaysCombine" Content="Always Combine" Style="{StaticResource ActionBtn}" ToolTip="Hides app labels and groups windows (Windows 11 Default)."/>
                             </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="EXPLORER &amp; FILES" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnExpShowExt" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show known file extensions in File Explorer."/>
+                            <Button Name="btnExpHideExt" Content="Hide Extensions" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows default behavior for known file extensions."/>
+                            <Button Name="btnExpShowHidden" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show hidden files and folders in File Explorer."/>
+                            <Button Name="btnExpHideHidden" Content="Hide Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Hide hidden files and folders."/>
+                            <Button Name="btnExpFullPathOn" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show the full folder path in File Explorer title bars."/>
+                            <Button Name="btnExpFullPathOff" Content="Full Path Off" Style="{StaticResource ActionBtn}" ToolTip="Hide the full folder path in File Explorer title bars."/>
+                            <Button Name="btnExpLaunchThisPc" Content="Open This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC."/>
+                            <Button Name="btnExpLaunchQuickAccess" Content="Open Quick Access" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to Quick Access/Home."/>
+                            <Button Name="btnExpHideRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide recent and frequent items from Quick Access/Home."/>
+                            <Button Name="btnExpShowRecents" Content="Show Recents" Style="{StaticResource ActionBtn}" ToolTip="Restore recent and frequent items in Quick Access/Home."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="MOUSE &amp; FOLDER OPENING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnMouseSpeedSlow" Content="Cursor Slow" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 6."/>
+                            <Button Name="btnMouseSpeedDefault" Content="Cursor Default" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to the Windows default of 10."/>
+                            <Button Name="btnMouseSpeedFast" Content="Cursor Fast" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 15."/>
+                            <Button Name="btnMouseAccelOn" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable enhanced pointer precision / mouse acceleration."/>
+                            <Button Name="btnMouseAccelOff" Content="Acceleration Off" Style="{StaticResource ActionBtn}" ToolTip="Disable enhanced pointer precision / mouse acceleration."/>
+                            <Button Name="btnMouseSingleClick" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click in File Explorer."/>
+                            <Button Name="btnMouseDoubleClick" Content="Double-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Restore double-click to open files and folders."/>
+                            <Button Name="btnMouseSettings" Content="Mouse Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows mouse settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="CONTEXT MENU" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnCtxClassic" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu on Windows 11."/>
+                            <Button Name="btnCtxModern" Content="Modern Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Restore the default Windows 11 context menu."/>
+                            <Button Name="btnCtxTakeOwnAdd" Content="Add Take Ownership" Style="{StaticResource WarningBtn}" ToolTip="Add an elevated Take Ownership action to file, folder, and drive context menus."/>
+                            <Button Name="btnCtxTakeOwnRemove" Content="Remove Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Remove the Take Ownership context menu action."/>
+                            <Button Name="btnCtxPsHereAdd" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add Open PowerShell Here to folder and background context menus."/>
+                            <Button Name="btnCtxPsHereRemove" Content="Remove PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Remove the Open PowerShell Here context menu action."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="PRIVACY" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnPrivacyAdsOff" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable the per-user Windows advertising ID."/>
+                            <Button Name="btnPrivacyAdsOn" Content="Ad ID On" Style="{StaticResource ActionBtn}" ToolTip="Re-enable the per-user Windows advertising ID."/>
+                            <Button Name="btnPrivacySuggestedOff" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable suggested apps, settings suggestions, and consumer content prompts."/>
+                            <Button Name="btnPrivacySuggestedOn" Content="Suggestions On" Style="{StaticResource ActionBtn}" ToolTip="Restore suggested content defaults."/>
+                            <Button Name="btnPrivacyTailoredOff" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable tailored experiences based on diagnostic data."/>
+                            <Button Name="btnPrivacyTailoredOn" Content="Tailored On" Style="{StaticResource ActionBtn}" ToolTip="Restore tailored experiences."/>
+                            <Button Name="btnPrivacyActivityOff" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows activity history publishing and upload policies."/>
+                            <Button Name="btnPrivacyActivityOn" Content="Activity History On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows activity history policy defaults."/>
+                            <Button Name="btnPrivacyAppLaunchOff" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Stop Windows from tracking app launches to personalize Start and Search."/>
+                            <Button Name="btnPrivacyAppLaunchOn" Content="Launch Tracking On" Style="{StaticResource ActionBtn}" ToolTip="Restore app launch tracking."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="SEARCH &amp; INDEXING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnSearchWebOff" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Bing/web results in Windows Start search."/>
+                            <Button Name="btnSearchWebOn" Content="Web Search On" Style="{StaticResource ActionBtn}" ToolTip="Restore web results in Windows Start search."/>
+                            <Button Name="btnSearchIndexReduced" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Set Windows Search indexing service to Manual and stop it."/>
+                            <Button Name="btnSearchIndexDefault" Content="Default Indexing" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Search indexing service to Automatic."/>
+                            <Button Name="btnSearchIndexRebuild" Content="Rebuild Index" Style="{StaticResource WarningBtn}" ToolTip="Delete the Windows search index database so Windows rebuilds it."/>
+                            <Button Name="btnSearchIndexOptions" Content="Index Options" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Indexing Options."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="GAMING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnGameModeOn" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Game Mode."/>
+                            <Button Name="btnGameModeOff" Content="Game Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Game Mode."/>
+                            <Button Name="btnGameBarOff" Content="Game Bar Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Xbox Game Bar and Game DVR toggles."/>
+                            <Button Name="btnGameBarOn" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Restore Xbox Game Bar and Game DVR toggles."/>
+                            <Button Name="btnGameCaptureOff" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable background gameplay capture."/>
+                            <Button Name="btnGameCaptureOn" Content="Capture On" Style="{StaticResource ActionBtn}" ToolTip="Restore background gameplay capture."/>
+                            <Button Name="btnGameFsoOff" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Apply common registry values to disable fullscreen optimizations globally."/>
+                            <Button Name="btnGameFsoDefault" Content="Default FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Restore default fullscreen optimization registry values."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="VISUAL EFFECTS" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnVisualBestAppearance" Content="Best Appearance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best appearance."/>
+                            <Button Name="btnVisualBestPerformance" Content="Best Performance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best performance."/>
+                            <Button Name="btnVisualSnappy" Content="Snappy Desktop" Style="{StaticResource PositiveBtn}" ToolTip="Disable taskbar animations, window minimize animations, Aero Peek, and transparency."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="NOTIFICATIONS &amp; LOCK SCREEN" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnNotifyFocusSettings" Content="Focus Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Focus Assist / Do Not Disturb settings."/>
+                            <Button Name="btnNotifyTipsOff" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows tips, welcome experience, and suggestion notifications."/>
+                            <Button Name="btnNotifyTipsOn" Content="Tips On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows tips and suggestion notifications."/>
+                            <Button Name="btnNotifySetupOff" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable finish setting up this device prompts."/>
+                            <Button Name="btnNotifySetupOn" Content="Setup Prompts On" Style="{StaticResource ActionBtn}" ToolTip="Restore finish setting up this device prompts."/>
+                            <Button Name="btnLockFactsOff" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable fun facts, tips, and overlays on the lock screen."/>
+                            <Button Name="btnLockFactsOn" Content="Lock Facts On" Style="{StaticResource ActionBtn}" ToolTip="Restore lock screen fun facts and overlays."/>
+                            <Button Name="btnLockSpotlightOff" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Spotlight on the lock screen."/>
+                            <Button Name="btnLockSpotlightOn" Content="Spotlight On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Spotlight on the lock screen."/>
+                            <Button Name="btnLockPlain" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Disable lock screen Spotlight and overlay content together."/>
+                            <Button Name="btnLockDefault" Content="Default Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Restore default lock screen content settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="STARTUP BEHAVIOR" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnStartupFastOff" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Fast Startup."/>
+                            <Button Name="btnStartupFastOn" Content="Fast Startup On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Fast Startup."/>
+                            <Button Name="btnStartupRestoreFoldersOn" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore previous folder windows at logon."/>
+                            <Button Name="btnStartupRestoreFoldersOff" Content="Restore Folders Off" Style="{StaticResource ActionBtn}" ToolTip="Do not restore previous folder windows at logon."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="SECURITY SHORTCUTS" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnSecurityUacOpen" Content="UAC Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open User Account Control settings."/>
+                            <Button Name="btnSecurityUacStatus" Content="UAC Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current UAC registry status."/>
+                            <Button Name="btnSecuritySmartScreenOpen" Content="SmartScreen Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows App and Browser Control settings."/>
+                            <Button Name="btnSecuritySmartScreenStatus" Content="SmartScreen Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current SmartScreen status."/>
+                            <Button Name="btnSecurityCfaOpen" Content="Controlled Folders" Style="{StaticResource UtilityBtn}" ToolTip="Open Controlled Folder Access / ransomware protection settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="POWER &amp; BATTERY" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnPowerBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 0 percent."/>
+                            <Button Name="btnPowerBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 20 percent."/>
+                            <Button Name="btnPowerBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 50 percent."/>
+                            <Button Name="btnPowerUsbSuspendOn" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable USB selective suspend for the active power plan."/>
+                            <Button Name="btnPowerUsbSuspendOff" Content="USB Suspend Off" Style="{StaticResource ActionBtn}" ToolTip="Disable USB selective suspend for the active power plan."/>
+                            <Button Name="btnPowerPcieModerate" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings."/>
+                            <Button Name="btnPowerPcieOff" Content="PCIe Savings Off" Style="{StaticResource ActionBtn}" ToolTip="Turn off PCI Express link state power management."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="DEVELOPER" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnDevLongPathsOn" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable Win32 long path support."/>
+                            <Button Name="btnDevLongPathsOff" Content="Long Paths Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Win32 long path support."/>
+                            <Button Name="btnDevModeOn" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Developer Mode policies."/>
+                            <Button Name="btnDevModeOff" Content="Developer Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Developer Mode policies."/>
+                            <Button Name="btnDevSettings" Content="Developer Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Developer Settings."/>
+                        </WrapPanel>
                     </StackPanel>
                 </Border>
             </StackPanel>
@@ -12827,6 +13366,27 @@ Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
 Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
 Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
 Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpShowExt" "Show File Extensions" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpShowHidden" "Show Hidden Files" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpLaunchThisPc" "Open File Explorer to This PC" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseSpeedDefault" "Set Mouse Cursor Speed" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseAccelOff" "Disable Mouse Acceleration" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseSingleClick" "Single Click to Open Folders" "btnTabTweaks"
+Add-SearchIndexEntry "btnCtxClassic" "Classic Windows 11 Context Menu" "btnTabTweaks"
+Add-SearchIndexEntry "btnCtxTakeOwnAdd" "Add Take Ownership Context Menu" "btnTabTweaks"
+Add-SearchIndexEntry "btnPrivacySuggestedOff" "Disable Suggested Content" "btnTabTweaks"
+Add-SearchIndexEntry "btnSearchWebOff" "Disable Start Menu Web Search" "btnTabTweaks"
+Add-SearchIndexEntry "btnSearchIndexRebuild" "Rebuild Windows Search Index" "btnTabTweaks"
+Add-SearchIndexEntry "btnGameModeOn" "Enable Game Mode" "btnTabTweaks"
+Add-SearchIndexEntry "btnGameBarOff" "Disable Xbox Game Bar" "btnTabTweaks"
+Add-SearchIndexEntry "btnVisualSnappy" "Snappy Desktop Visual Effects" "btnTabTweaks"
+Add-SearchIndexEntry "btnNotifyTipsOff" "Disable Windows Tips" "btnTabTweaks"
+Add-SearchIndexEntry "btnLockPlain" "Plain Lock Screen" "btnTabTweaks"
+Add-SearchIndexEntry "btnStartupFastOff" "Disable Fast Startup" "btnTabTweaks"
+Add-SearchIndexEntry "btnSecuritySmartScreenOpen" "Open SmartScreen Settings" "btnTabTweaks"
+Add-SearchIndexEntry "btnPowerUsbSuspendOff" "Disable USB Selective Suspend" "btnTabTweaks"
+Add-SearchIndexEntry "btnDevLongPathsOn" "Enable Long Paths" "btnTabTweaks"
+Add-SearchIndexEntry "btnDevModeOn" "Enable Developer Mode" "btnTabTweaks"
 
 $txtGlobalSearch.Add_TextChanged({
         $q = $txtGlobalSearch.Text
@@ -16175,6 +16735,405 @@ if ($btnAlwaysCombine) {
             Update-TweakButtonStates
         })
 }
+
+function Register-WmtTweakButton {
+    param(
+        [string]$Name,
+        [scriptblock]$Action
+    )
+
+    $button = Get-Ctrl $Name
+    if (-not $button) { return }
+    $button.Add_Click({
+            & $Action
+            Update-TweakButtonStates
+        }.GetNewClosure())
+}
+
+$script:WmtSuggestionContentNames = @(
+    "ContentDeliveryAllowed",
+    "FeatureManagementEnabled",
+    "OemPreInstalledAppsEnabled",
+    "PreInstalledAppsEnabled",
+    "PreInstalledAppsEverEnabled",
+    "SilentInstalledAppsEnabled",
+    "SoftLandingEnabled",
+    "SubscribedContent-310093Enabled",
+    "SubscribedContent-338388Enabled",
+    "SubscribedContent-338389Enabled",
+    "SubscribedContent-338393Enabled",
+    "SubscribedContent-353694Enabled",
+    "SubscribedContent-353696Enabled",
+    "SystemPaneSuggestionsEnabled"
+)
+
+Register-WmtTweakButton "btnExpShowExt" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 0
+        Restart-WmtExplorer
+        Write-GuiLog "File extensions are now visible."
+    } "Showing file extensions..."
+}
+Register-WmtTweakButton "btnExpHideExt" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Known file extensions are now hidden."
+    } "Hiding file extensions..."
+}
+Register-WmtTweakButton "btnExpShowHidden" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Hidden files and folders are now visible."
+    } "Showing hidden files..."
+}
+Register-WmtTweakButton "btnExpHideHidden" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 2
+        Restart-WmtExplorer
+        Write-GuiLog "Hidden files and folders are now hidden."
+    } "Hiding hidden files..."
+}
+Register-WmtTweakButton "btnExpFullPathOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Explorer title bars now show full paths."
+    } "Enabling Explorer full path titles..."
+}
+Register-WmtTweakButton "btnExpFullPathOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Explorer title bars now use default path display."
+    } "Disabling Explorer full path titles..."
+}
+Register-WmtTweakButton "btnExpLaunchThisPc" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 1
+        Write-GuiLog "File Explorer now opens to This PC."
+    } "Setting Explorer to open This PC..."
+}
+Register-WmtTweakButton "btnExpLaunchQuickAccess" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 2
+        Write-GuiLog "File Explorer now opens to Quick Access/Home."
+    } "Setting Explorer to open Quick Access..."
+}
+Register-WmtTweakButton "btnExpHideRecents" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Recent and frequent Quick Access items are hidden."
+    } "Hiding Explorer recent items..."
+}
+Register-WmtTweakButton "btnExpShowRecents" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Recent and frequent Quick Access items are visible."
+    } "Showing Explorer recent items..."
+}
+
+Register-WmtTweakButton "btnMouseSpeedSlow" { Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseSpeedDefault" { Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseSpeedFast" { Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseAccelOn" { Invoke-UiCommand { Set-WmtMouseAcceleration $true; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..." }
+Register-WmtTweakButton "btnMouseAccelOff" { Invoke-UiCommand { Set-WmtMouseAcceleration $false; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..." }
+Register-WmtTweakButton "btnMouseSingleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click folder opening..." }
+Register-WmtTweakButton "btnMouseDoubleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click folder opening..." }
+Register-WmtTweakButton "btnMouseSettings" { Start-Process "ms-settings:mousetouchpad" }
+
+Register-WmtTweakButton "btnCtxClassic" { Invoke-UiCommand { Set-WmtClassicContextMenu $true; Write-GuiLog "Classic Windows 11 context menu enabled." } "Enabling classic context menu..." }
+Register-WmtTweakButton "btnCtxModern" { Invoke-UiCommand { Set-WmtClassicContextMenu $false; Write-GuiLog "Modern Windows 11 context menu restored." } "Restoring modern context menu..." }
+Register-WmtTweakButton "btnCtxTakeOwnAdd" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $true; Write-GuiLog "Take Ownership context menu installed." } "Adding Take Ownership context menu..." }
+Register-WmtTweakButton "btnCtxTakeOwnRemove" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $false; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership context menu..." }
+Register-WmtTweakButton "btnCtxPsHereAdd" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $true; Write-GuiLog "Open PowerShell Here context menu installed." } "Adding PowerShell context menu..." }
+Register-WmtTweakButton "btnCtxPsHereRemove" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $false; Write-GuiLog "Open PowerShell Here context menu removed." } "Removing PowerShell context menu..." }
+
+Register-WmtTweakButton "btnPrivacyAdsOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..." }
+Register-WmtTweakButton "btnPrivacyAdsOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..." }
+Register-WmtTweakButton "btnPrivacySuggestedOff" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures" 1
+        Write-GuiLog "Suggested content disabled."
+    } "Disabling suggested content..."
+}
+Register-WmtTweakButton "btnPrivacySuggestedOn" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures"
+        Write-GuiLog "Suggested content restored."
+    } "Restoring suggested content..."
+}
+Register-WmtTweakButton "btnPrivacyTailoredOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 1
+        Write-GuiLog "Tailored experiences disabled."
+    } "Disabling tailored experiences..."
+}
+Register-WmtTweakButton "btnPrivacyTailoredOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1
+        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData"
+        Write-GuiLog "Tailored experiences restored."
+    } "Restoring tailored experiences..."
+}
+Register-WmtTweakButton "btnPrivacyActivityOff" {
+    Invoke-UiCommand {
+        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        Set-WmtRegDword $path "EnableActivityFeed" 0
+        Set-WmtRegDword $path "PublishUserActivities" 0
+        Set-WmtRegDword $path "UploadUserActivities" 0
+        Write-GuiLog "Activity history policies disabled."
+    } "Disabling activity history..."
+}
+Register-WmtTweakButton "btnPrivacyActivityOn" {
+    Invoke-UiCommand {
+        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        Remove-WmtRegValue $path "EnableActivityFeed"
+        Remove-WmtRegValue $path "PublishUserActivities"
+        Remove-WmtRegValue $path "UploadUserActivities"
+        Write-GuiLog "Activity history policy defaults restored."
+    } "Restoring activity history policies..."
+}
+Register-WmtTweakButton "btnPrivacyAppLaunchOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0; Write-GuiLog "App launch tracking disabled." } "Disabling app launch tracking..." }
+Register-WmtTweakButton "btnPrivacyAppLaunchOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 1; Write-GuiLog "App launch tracking restored." } "Restoring app launch tracking..." }
+
+Register-WmtTweakButton "btnSearchWebOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Web results in Start search disabled."
+    } "Disabling web search results..."
+}
+Register-WmtTweakButton "btnSearchWebOn" {
+    Invoke-UiCommand {
+        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions"
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Web results in Start search restored."
+    } "Restoring web search results..."
+}
+Register-WmtTweakButton "btnSearchIndexReduced" {
+    Invoke-UiCommand {
+        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+        Set-Service -Name WSearch -StartupType Manual -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Search indexing reduced."
+    } "Reducing search indexing..."
+}
+Register-WmtTweakButton "btnSearchIndexDefault" {
+    Invoke-UiCommand {
+        Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name WSearch -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Search indexing restored."
+    } "Restoring search indexing..."
+}
+Register-WmtTweakButton "btnSearchIndexRebuild" {
+    if ([System.Windows.Forms.MessageBox]::Show("Rebuild the Windows Search index? Search results may be incomplete while it rebuilds.", "Rebuild Search Index", "YesNo", "Warning") -eq "Yes") {
+        Invoke-UiCommand {
+            Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+            $db = Join-Path $env:ProgramData "Microsoft\Search\Data\Applications\Windows\Windows.edb"
+            if (Test-Path -LiteralPath $db) {
+                Remove-Item -LiteralPath $db -Force -ErrorAction Stop
+                Write-GuiLog "Deleted Windows.edb; Windows will rebuild the index."
+            }
+            else {
+                Write-GuiLog "Search index database was not found."
+            }
+            Start-Service -Name WSearch -ErrorAction SilentlyContinue
+        } "Rebuilding search index..."
+    }
+}
+Register-WmtTweakButton "btnSearchIndexOptions" { Start-Process "control.exe" "srchadmin.dll" }
+
+Register-WmtTweakButton "btnGameModeOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1
+        Write-GuiLog "Game Mode enabled."
+    } "Enabling Game Mode..."
+}
+Register-WmtTweakButton "btnGameModeOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 0
+        Write-GuiLog "Game Mode disabled."
+    } "Disabling Game Mode..."
+}
+Register-WmtTweakButton "btnGameBarOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
+        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0
+        Write-GuiLog "Xbox Game Bar disabled."
+    } "Disabling Xbox Game Bar..."
+}
+Register-WmtTweakButton "btnGameBarOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1
+        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 1
+        Write-GuiLog "Xbox Game Bar restored."
+    } "Restoring Xbox Game Bar..."
+}
+Register-WmtTweakButton "btnGameCaptureOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 0; Write-GuiLog "Background capture disabled." } "Disabling background capture..." }
+Register-WmtTweakButton "btnGameCaptureOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 1; Write-GuiLog "Background capture restored." } "Restoring background capture..." }
+Register-WmtTweakButton "btnGameFsoOff" {
+    Invoke-UiCommand {
+        $path = "HKCU:\System\GameConfigStore"
+        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 2
+        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 1
+        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 1
+        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+        Write-GuiLog "Fullscreen optimizations disabled globally."
+    } "Disabling fullscreen optimizations..."
+}
+Register-WmtTweakButton "btnGameFsoDefault" {
+    Invoke-UiCommand {
+        $path = "HKCU:\System\GameConfigStore"
+        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 0
+        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 0
+        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 0
+        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+        Write-GuiLog "Fullscreen optimization defaults restored."
+    } "Restoring fullscreen optimizations..."
+}
+
+Register-WmtTweakButton "btnVisualBestAppearance" { Invoke-UiCommand { Set-WmtVisualPreset "Appearance"; Write-GuiLog "Visual effects set to best appearance." } "Applying best appearance..." }
+Register-WmtTweakButton "btnVisualBestPerformance" { Invoke-UiCommand { Set-WmtVisualPreset "Performance"; Write-GuiLog "Visual effects set to best performance." } "Applying best performance..." }
+Register-WmtTweakButton "btnVisualSnappy" { Invoke-UiCommand { Set-WmtVisualPreset "Snappy"; Write-GuiLog "Snappy desktop visual preset applied." } "Applying snappy desktop preset..." }
+
+Register-WmtTweakButton "btnNotifyFocusSettings" { Start-Process "ms-settings:notifications" }
+Register-WmtTweakButton "btnNotifyTipsOff" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0
+        Write-GuiLog "Windows tips and suggestions disabled."
+    } "Disabling notification tips..."
+}
+Register-WmtTweakButton "btnNotifyTipsOn" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1
+        Write-GuiLog "Windows tips and suggestions restored."
+    } "Restoring notification tips..."
+}
+Register-WmtTweakButton "btnNotifySetupOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0; Write-GuiLog "Finish setup prompts disabled." } "Disabling setup prompts..." }
+Register-WmtTweakButton "btnNotifySetupOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1; Write-GuiLog "Finish setup prompts restored." } "Restoring setup prompts..." }
+Register-WmtTweakButton "btnLockFactsOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+        Write-GuiLog "Lock screen fun facts disabled."
+    } "Disabling lock screen fun facts..."
+}
+Register-WmtTweakButton "btnLockFactsOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+        Write-GuiLog "Lock screen fun facts restored."
+    } "Restoring lock screen fun facts..."
+}
+Register-WmtTweakButton "btnLockSpotlightOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+        Write-GuiLog "Lock screen Spotlight disabled."
+    } "Disabling lock screen Spotlight..."
+}
+Register-WmtTweakButton "btnLockSpotlightOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+        Write-GuiLog "Lock screen Spotlight restored."
+    } "Restoring lock screen Spotlight..."
+}
+Register-WmtTweakButton "btnLockPlain" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+        Write-GuiLog "Plain lock screen preset applied."
+    } "Applying plain lock screen..."
+}
+Register-WmtTweakButton "btnLockDefault" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+        Write-GuiLog "Default lock screen content restored."
+    } "Restoring lock screen defaults..."
+}
+
+Register-WmtTweakButton "btnStartupFastOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 0; Write-GuiLog "Fast Startup disabled." } "Disabling Fast Startup..." }
+Register-WmtTweakButton "btnStartupFastOn" {
+    Invoke-UiCommand {
+        powercfg /hibernate on
+        Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1
+        Write-GuiLog "Fast Startup enabled. Hibernation was enabled because Fast Startup depends on it."
+    } "Enabling Fast Startup..."
+}
+Register-WmtTweakButton "btnStartupRestoreFoldersOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 1; Write-GuiLog "Previous folder windows will restore at logon." } "Enabling folder restore at logon..." }
+Register-WmtTweakButton "btnStartupRestoreFoldersOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 0; Write-GuiLog "Previous folder windows will not restore at logon." } "Disabling folder restore at logon..." }
+
+Register-WmtTweakButton "btnSecurityUacOpen" { Start-Process "UserAccountControlSettings.exe" }
+Register-WmtTweakButton "btnSecurityUacStatus" {
+    $systemPolicy = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    Write-GuiLog "UAC EnableLUA: $(Get-WmtRegValue $systemPolicy "EnableLUA" "Unknown")"
+    Write-GuiLog "UAC ConsentPromptBehaviorAdmin: $(Get-WmtRegValue $systemPolicy "ConsentPromptBehaviorAdmin" "Unknown")"
+    Write-GuiLog "UAC PromptOnSecureDesktop: $(Get-WmtRegValue $systemPolicy "PromptOnSecureDesktop" "Unknown")"
+}
+Register-WmtTweakButton "btnSecuritySmartScreenOpen" {
+    try { Start-Process "windowsdefender://AppAndBrowser" } catch { Start-Process "ms-settings:windowsdefender" }
+}
+Register-WmtTweakButton "btnSecuritySmartScreenStatus" {
+    Write-GuiLog "Explorer SmartScreen: $(Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" "SmartScreenEnabled" "Unknown")"
+    Write-GuiLog "AppHost Web Content Evaluation: $(Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppHost" "EnableWebContentEvaluation" "Unknown")"
+    if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) {
+        $mp = Get-MpPreference -ErrorAction SilentlyContinue
+        if ($mp) { Write-GuiLog "Defender PUA protection: $($mp.PUAProtection)" }
+    }
+}
+Register-WmtTweakButton "btnSecurityCfaOpen" {
+    try { Start-Process "windowsdefender://RansomwareProtection" } catch { Start-Process "ms-settings:windowsdefender" }
+}
+
+Register-WmtTweakButton "btnPowerBatterySaverOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 0 -DCOnly; Write-GuiLog "Battery saver threshold set to 0%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerBatterySaver20" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 20 -DCOnly; Write-GuiLog "Battery saver threshold set to 20%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerBatterySaver50" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 50 -DCOnly; Write-GuiLog "Battery saver threshold set to 50%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerUsbSuspendOn" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 1; Write-GuiLog "USB selective suspend enabled." } "Enabling USB selective suspend..." }
+Register-WmtTweakButton "btnPowerUsbSuspendOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 0; Write-GuiLog "USB selective suspend disabled." } "Disabling USB selective suspend..." }
+Register-WmtTweakButton "btnPowerPcieModerate" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 1; Write-GuiLog "PCI Express link state set to moderate savings." } "Setting PCIe link state savings..." }
+Register-WmtTweakButton "btnPowerPcieOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 0; Write-GuiLog "PCI Express link state savings disabled." } "Disabling PCIe link state savings..." }
+
+Register-WmtTweakButton "btnDevLongPathsOn" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 1; Write-GuiLog "Win32 long paths enabled." } "Enabling long paths..." }
+Register-WmtTweakButton "btnDevLongPathsOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0; Write-GuiLog "Win32 long paths disabled." } "Disabling long paths..." }
+Register-WmtTweakButton "btnDevModeOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 1
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 1
+        Write-GuiLog "Developer Mode policies enabled."
+    } "Enabling Developer Mode..."
+}
+Register-WmtTweakButton "btnDevModeOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 0
+        Write-GuiLog "Developer Mode policies disabled."
+    } "Disabling Developer Mode..."
+}
+Register-WmtTweakButton "btnDevSettings" { Start-Process "ms-settings:developers" }
 
 # --- SOFTWARE CATALOG ---
 $script:SoftwareCatalog = @(
