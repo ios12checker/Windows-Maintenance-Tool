@@ -11422,7 +11422,7 @@ foreach ($btnName in $TabButtons) {
             $s.Foreground = "#E6EDF3"
             $s.FontWeight = "SemiBold"
             $s.Tag = "Visible"  # Show indicator
-            if ($s.Name -eq "btnTabFirewall") { $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+            if ($s.Name -eq "btnTabFirewall") { Start-FirewallRuleLoad }
             if ($s.Name -eq "btnTabUpdates") {
                 if ($lstWinget.Items.Count -eq 0) { 
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
@@ -13742,6 +13742,7 @@ $btnHostsRestore.Add_Click({
 $lstFw.Add_MouseDoubleClick({
         $rule = $lstFw.SelectedItem
         if ($null -eq $rule) { return }
+        Initialize-FirewallRuleDetails -Rule $rule -Synchronous
 
         # 1. Open existing dialog with the selected rule
         $result = Show-RuleDialog "Edit Firewall Rule" $rule
@@ -13787,6 +13788,7 @@ $mniCopyPort = New-Object System.Windows.Controls.MenuItem
 $mniCopyPort.Header = "Copy Port/Protocol"
 $mniCopyPort.Add_Click({
         if ($lstFw.SelectedItem) {
+            Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous
             $info = "$($lstFw.SelectedItem.Protocol) : $($lstFw.SelectedItem.LocalPort)"
             try {
                 [System.Windows.Forms.Clipboard]::SetText($info)
@@ -13800,6 +13802,7 @@ $mniCopyAll = New-Object System.Windows.Controls.MenuItem
 $mniCopyAll.Header = "Copy Full Details"
 $mniCopyAll.Add_Click({
         if ($lstFw.SelectedItem) {
+            Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous
             # Create a nice string representation of the rule
             $rule = $lstFw.SelectedItem
             $text = "Name: $($rule.Name)`nEnabled: $($rule.Enabled)`nAction: $($rule.Action)`nDirection: $($rule.Direction)`nProtocol: $($rule.Protocol)`nPort: $($rule.LocalPort)"
@@ -13818,13 +13821,387 @@ $mniCopyAll.Add_Click({
 
 # Attach to the ListView
 $lstFw.ContextMenu = $fwCtxMenu
-$AllFw = @()
-$btnFwRefresh.Add_Click({
-        $lblFwStatus.Visibility = "Visible"; $lstFw.Items.Clear(); [System.Windows.Forms.Application]::DoEvents()
-        $AllFw = Get-NetFirewallRule | Select-Object Name, DisplayName, @{N = 'Enabled'; E = { $_.Enabled.ToString() } }, Direction, @{N = 'Action'; E = { $_.Action.ToString() } }, @{N = 'Protocol'; E = { ($_.GetNetworkProtocols().Protocol) } }, @{N = 'LocalPort'; E = { ($_.GetNetworkProtocols().LocalPort) } }
-        $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        $lblFwStatus.Visibility = "Collapsed"
-    })
+$script:AllFw = @()
+$script:FirewallRulesLoaded = $false
+$script:FirewallLoadInProgress = $false
+$script:FirewallLoadRunspace = $null
+$script:FirewallLoadAsyncResult = $null
+$script:FirewallLoadTimer = $null
+$script:FirewallDetailCache = @{}
+$script:FirewallDetailJob = $null
+$script:FirewallDetailTimer = $null
+$script:FirewallDetailToken = 0
+
+function Test-FirewallSearchIsBlank {
+    param([string]$Text)
+    return ([string]::IsNullOrWhiteSpace($Text) -or $Text -in @("Search Rules...", "Search rules..."))
+}
+
+function Set-FirewallStatus {
+    param(
+        [string]$Text,
+        [bool]$Visible = $true
+    )
+    if (-not $lblFwStatus) { return }
+    if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "Ready" }
+    $lblFwStatus.Text = $Text
+    $lblFwStatus.Visibility = if ($Visible) { "Visible" } else { "Collapsed" }
+}
+
+function Set-FirewallRuleProperty {
+    param($Rule, [string]$Name, $Value)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace($Name)) { return }
+    $prop = $Rule.PSObject.Properties[$Name]
+    if ($prop) {
+        $prop.Value = $Value
+    }
+    else {
+        $Rule | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
+    }
+}
+
+function Format-FirewallFilterValue {
+    param([object[]]$Values)
+    $clean = @(
+        $Values | ForEach-Object {
+            if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
+            else { [string]$_ }
+        } | Select-Object -Unique
+    )
+    if ($clean.Count -eq 0) { return "Any" }
+    return ($clean -join ", ")
+}
+
+function Get-FirewallRuleDetails {
+    param([string]$Name)
+    try {
+        $rule = Get-NetFirewallRule -Name $Name -ErrorAction Stop
+        $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+        if ($filters.Count -eq 0) {
+            return [PSCustomObject]@{ Success = $true; Name = $Name; Protocol = "Any"; LocalPort = "Any"; Error = "" }
+        }
+
+        $protocol = Format-FirewallFilterValue -Values @($filters | ForEach-Object { $_.Protocol })
+        $localPort = Format-FirewallFilterValue -Values @($filters | ForEach-Object { $_.LocalPort })
+        return [PSCustomObject]@{ Success = $true; Name = $Name; Protocol = $protocol; LocalPort = $localPort; Error = "" }
+    }
+    catch {
+        return [PSCustomObject]@{ Success = $false; Name = $Name; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message }
+    }
+}
+
+function Set-FirewallRuleDetails {
+    param($Rule, $Details)
+    if (-not $Rule -or -not $Details) { return }
+    if ($Details.Success) {
+        Set-FirewallRuleProperty -Rule $Rule -Name "Protocol" -Value $Details.Protocol
+        Set-FirewallRuleProperty -Rule $Rule -Name "LocalPort" -Value $Details.LocalPort
+        Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoaded" -Value $true
+    }
+    Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $false
+}
+
+function Test-FirewallRuleMatchesQuery {
+    param($Rule, [string]$Query)
+    if (-not $Rule) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Query)) { return $true }
+
+    $fields = @(
+        $Rule.Name,
+        $Rule.DisplayName,
+        $Rule.Direction,
+        $Rule.Action,
+        $Rule.Enabled,
+        $Rule.Protocol,
+        $Rule.LocalPort
+    )
+    foreach ($field in $fields) {
+        if ($null -ne $field -and ([string]$field).IndexOf($Query, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Update-FirewallListView {
+    if (-not $lstFw) { return }
+    $selectedName = if ($lstFw.SelectedItem) { [string]$lstFw.SelectedItem.Name } else { $null }
+    $query = if ($txtFwSearch) { [string]$txtFwSearch.Text } else { "" }
+    $rules = @($script:AllFw)
+
+    if (-not (Test-FirewallSearchIsBlank $query)) {
+        $rules = @($rules | Where-Object { Test-FirewallRuleMatchesQuery -Rule $_ -Query $query.Trim() })
+    }
+
+    $lstFw.Items.Clear()
+    foreach ($rule in $rules) { [void]$lstFw.Items.Add($rule) }
+    if ($script:FirewallSortChain -and $script:FirewallSortChain.Count -gt 0) {
+        Set-ListViewSort -ListView $lstFw -Chain $script:FirewallSortChain
+    }
+    if ($selectedName) {
+        foreach ($item in $lstFw.Items) {
+            if ($item.Name -eq $selectedName) {
+                $lstFw.SelectedItem = $item
+                break
+            }
+        }
+    }
+}
+
+function Stop-FirewallDetailLoad {
+    if ($script:FirewallDetailTimer) {
+        try { $script:FirewallDetailTimer.Stop() } catch {}
+        $script:FirewallDetailTimer = $null
+    }
+    if ($script:FirewallDetailJob) {
+        try { $script:FirewallDetailJob.PowerShell.Stop() } catch {}
+        try { $script:FirewallDetailJob.PowerShell.Dispose() } catch {}
+        $script:FirewallDetailJob = $null
+    }
+}
+
+function Stop-FirewallRuleLoad {
+    if ($script:FirewallLoadTimer) {
+        try { $script:FirewallLoadTimer.Stop() } catch {}
+        $script:FirewallLoadTimer = $null
+    }
+    if ($script:FirewallLoadRunspace) {
+        try { $script:FirewallLoadRunspace.Stop() } catch {}
+        try { $script:FirewallLoadRunspace.Dispose() } catch {}
+        $script:FirewallLoadRunspace = $null
+    }
+    $script:FirewallLoadAsyncResult = $null
+    $script:FirewallLoadInProgress = $false
+    if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
+}
+
+function Start-FirewallRuleDetailLoad {
+    param($Rule)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
+    if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
+
+    $name = [string]$Rule.Name
+    if ($script:FirewallDetailCache.ContainsKey($name)) {
+        Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        return
+    }
+
+    if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Name -eq $name) { return }
+    Stop-FirewallDetailLoad
+
+    Set-FirewallRuleProperty -Rule $Rule -Name "Protocol" -Value "..."
+    Set-FirewallRuleProperty -Rule $Rule -Name "LocalPort" -Value "..."
+    Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $true
+    if ($lstFw) { $lstFw.Items.Refresh() }
+
+    $script:FirewallDetailToken++
+    $token = $script:FirewallDetailToken
+    Set-FirewallStatus "Loading selected rule details..." -Visible $true
+
+    $ps = [PowerShell]::Create().AddScript({
+            param([string]$RuleName)
+            function Format-RuleValue {
+                param([object[]]$Values)
+                $clean = @(
+                    $Values | ForEach-Object {
+                        if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
+                        else { [string]$_ }
+                    } | Select-Object -Unique
+                )
+                if ($clean.Count -eq 0) { return "Any" }
+                return ($clean -join ", ")
+            }
+
+            try {
+                $rule = Get-NetFirewallRule -Name $RuleName -ErrorAction Stop
+                $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+                if ($filters.Count -eq 0) {
+                    return [PSCustomObject]@{ Success = $true; Name = $RuleName; Protocol = "Any"; LocalPort = "Any"; Error = "" }
+                }
+
+                $protocol = Format-RuleValue -Values @($filters | ForEach-Object { $_.Protocol })
+                $localPort = Format-RuleValue -Values @($filters | ForEach-Object { $_.LocalPort })
+                return [PSCustomObject]@{ Success = $true; Name = $RuleName; Protocol = $protocol; LocalPort = $localPort; Error = "" }
+            }
+            catch {
+                return [PSCustomObject]@{ Success = $false; Name = $RuleName; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message }
+            }
+        }).AddArgument($name)
+
+    $async = $ps.BeginInvoke()
+    $script:FirewallDetailJob = [PSCustomObject]@{ Name = $name; PowerShell = $ps; Async = $async; Token = $token }
+    $script:FirewallDetailTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:FirewallDetailTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:FirewallDetailTimer.Add_Tick({
+            if (-not $script:FirewallDetailJob -or -not $script:FirewallDetailJob.Async.IsCompleted) { return }
+
+            $job = $script:FirewallDetailJob
+            $script:FirewallDetailTimer.Stop()
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Async)
+                if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+                $target = @($script:AllFw | Where-Object { $_.Name -eq $job.Name } | Select-Object -First 1)
+                if ($result -and $result.Success) {
+                    $script:FirewallDetailCache[$result.Name] = $result
+                    if ($target.Count -gt 0) { Set-FirewallRuleDetails -Rule $target[0] -Details $result }
+                }
+                else {
+                    if ($target.Count -gt 0) {
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "Protocol" -Value ""
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "LocalPort" -Value ""
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "DetailsLoading" -Value $false
+                    }
+                    if ($result -and $result.Error) { Write-GuiLog "[Firewall] Failed to load selected rule details: $($result.Error)" }
+                }
+
+                if ($txtFwSearch -and -not (Test-FirewallSearchIsBlank $txtFwSearch.Text)) {
+                    Update-FirewallListView
+                }
+                elseif ($lstFw) {
+                    $lstFw.Items.Refresh()
+                }
+            }
+            catch {
+                Write-GuiLog "[Firewall] Failed to load selected rule details: $($_.Exception.Message)"
+            }
+            finally {
+                try { $job.PowerShell.Dispose() } catch {}
+                if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Token -eq $job.Token) { $script:FirewallDetailJob = $null }
+                $script:FirewallDetailTimer = $null
+                Set-FirewallStatus "" -Visible $false
+            }
+        })
+    $script:FirewallDetailTimer.Start()
+}
+
+function Initialize-FirewallRuleDetails {
+    param($Rule, [switch]$Synchronous)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
+    if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
+
+    $name = [string]$Rule.Name
+    if ($script:FirewallDetailCache.ContainsKey($name)) {
+        Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        return
+    }
+
+    if ($Synchronous) {
+        Stop-FirewallDetailLoad
+        Set-FirewallStatus "Loading selected rule details..." -Visible $true
+        $details = Get-FirewallRuleDetails -Name $name
+        if ($details.Success) {
+            $script:FirewallDetailCache[$name] = $details
+            Set-FirewallRuleDetails -Rule $Rule -Details $details
+        }
+        else {
+            Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $false
+            Write-GuiLog "[Firewall] Failed to load selected rule details: $($details.Error)"
+        }
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        Set-FirewallStatus "" -Visible $false
+        return
+    }
+
+    Start-FirewallRuleDetailLoad -Rule $Rule
+}
+
+function Start-FirewallRuleLoad {
+    param([switch]$Force)
+    if ($script:FirewallLoadInProgress) {
+        if (-not $Force) { return }
+        Stop-FirewallRuleLoad
+    }
+    if ($script:FirewallRulesLoaded -and -not $Force) {
+        Update-FirewallListView
+        return
+    }
+
+    Stop-FirewallDetailLoad
+    $script:FirewallLoadInProgress = $true
+    $script:FirewallRulesLoaded = $false
+    $script:FirewallDetailCache = @{}
+    if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $false }
+    if ($lstFw) { $lstFw.Items.Clear() }
+    Set-FirewallStatus "Loading firewall rules..." -Visible $true
+    Write-GuiLog "[Firewall] Loading base rule list..."
+
+    $script:FirewallLoadRunspace = [PowerShell]::Create().AddScript({
+            try {
+                $rules = @(Get-NetFirewallRule -ErrorAction Stop | ForEach-Object {
+                        $displayName = if ([string]::IsNullOrWhiteSpace([string]$_.DisplayName)) { $_.Name } else { $_.DisplayName }
+                        [PSCustomObject]@{
+                            Name           = [string]$_.Name
+                            DisplayName    = [string]$displayName
+                            Enabled        = $_.Enabled.ToString()
+                            Direction      = $_.Direction.ToString()
+                            Action         = $_.Action.ToString()
+                            Protocol       = ""
+                            LocalPort      = ""
+                            DetailsLoaded  = $false
+                            DetailsLoading = $false
+                        }
+                    })
+                return [PSCustomObject]@{ Success = $true; Rules = $rules; Error = "" }
+            }
+            catch {
+                return [PSCustomObject]@{ Success = $false; Rules = @(); Error = $_.Exception.Message }
+            }
+        })
+    $script:FirewallLoadAsyncResult = $script:FirewallLoadRunspace.BeginInvoke()
+
+    $script:FirewallLoadTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:FirewallLoadTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:FirewallLoadTimer.Add_Tick({
+            if (-not $script:FirewallLoadAsyncResult -or -not $script:FirewallLoadAsyncResult.IsCompleted) { return }
+
+            $script:FirewallLoadTimer.Stop()
+            try {
+                $result = $script:FirewallLoadRunspace.EndInvoke($script:FirewallLoadAsyncResult)
+                if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+                if ($result -and $result.Success) {
+                    $script:AllFw = @($result.Rules | Where-Object { $null -ne $_ })
+                    $script:FirewallRulesLoaded = $true
+                    Update-FirewallListView
+                    Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
+                    Set-FirewallStatus "" -Visible $false
+                }
+                else {
+                    $script:AllFw = @()
+                    $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
+                    Set-FirewallStatus "Firewall load failed" -Visible $true
+                    Write-GuiLog "[Firewall] Load failed: $err"
+                }
+            }
+            catch {
+                $script:AllFw = @()
+                Set-FirewallStatus "Firewall load failed" -Visible $true
+                Write-GuiLog "[Firewall] Load failed: $($_.Exception.Message)"
+            }
+            finally {
+                try { $script:FirewallLoadRunspace.Dispose() } catch {}
+                $script:FirewallLoadRunspace = $null
+                $script:FirewallLoadAsyncResult = $null
+                $script:FirewallLoadInProgress = $false
+                $script:FirewallLoadTimer = $null
+                if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
+            }
+        })
+    $script:FirewallLoadTimer.Start()
+}
+
+$btnFwRefresh.Add_Click({ Start-FirewallRuleLoad -Force })
+
+if ($lstFw) {
+    $lstFw.Add_SelectionChanged({
+            if ($lstFw.SelectedItem) {
+                Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem
+            }
+        })
+}
 
 # --- FIREWALL LISTVIEW SORTING LOGIC ---
 $script:FirewallSortChain = New-Object System.Collections.ArrayList
@@ -13858,22 +14235,13 @@ if ($lstFw) {
     $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler)
 }
 
-$txtFwSearch.Add_TextChanged({
-        $q = $txtFwSearch.Text
-        $lstFw.Items.Clear()
-        if ($q -and $q -notin @("Search Rules...", "Search rules...")) {
-            $AllFw | Where-Object { $_.DisplayName -match $q -or $_.LocalPort -match $q } | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        }
-        else {
-            $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        }
-    })
+$txtFwSearch.Add_TextChanged({ Update-FirewallListView })
 $txtFwSearch.Add_GotFocus({
         $t = $txtFwSearch
         if ($t.Text -in @("Search Rules...", "Search rules...")) { $t.Text = "" }
     })
 $btnFwAdd.Add_Click({ $d = Show-RuleDialog "Add Rule"; if ($d) { try { New-NetFirewallRule -DisplayName $d.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port -ErrorAction Stop; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } })
-$btnFwEdit.Add_Click({ if ($lstFw.SelectedItem) { $d = Show-RuleDialog "Edit" $lstFw.SelectedItem; if ($d) { try { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } } })
+$btnFwEdit.Add_Click({ if ($lstFw.SelectedItem) { Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous; $d = Show-RuleDialog "Edit" $lstFw.SelectedItem; if ($d) { try { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } } })
 $btnFwEnable.Add_Click({ if ($lstFw.SelectedItem) { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Enabled True; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 $btnFwDisable.Add_Click({ if ($lstFw.SelectedItem) { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Enabled False; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 $btnFwDelete.Add_Click({ if ($lstFw.SelectedItem) { Remove-NetFirewallRule -Name $lstFw.SelectedItem.Name; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
@@ -14653,6 +15021,8 @@ $window.Add_Closing({
             try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
             try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
         }
+        Stop-FirewallRuleLoad
+        Stop-FirewallDetailLoad
         Stop-MyDeviceSectionJobs
         if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
         if ($script:BitLockerStatusRunspace) {
