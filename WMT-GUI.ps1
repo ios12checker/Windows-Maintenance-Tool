@@ -5964,6 +5964,7 @@ function Invoke-RegistryTask {
 
         # --- RUNSPACE CONFIGURATION ---
         $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Test-PathExists", ${function:Test-PathExists}.ToString()))
         $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
         # STA Mode is critical for Registry (HKCR) scans to work correctly
         $rs.ApartmentState = "STA"
@@ -5981,19 +5982,6 @@ function Invoke-RegistryTask {
                 Import-Module Microsoft.PowerShell.Management
                 Import-Module Microsoft.PowerShell.Security
                 $SelectedScans = @($SelectedScans)
-
-                # Internal Helper: Check if path exists
-                function Test-PathExists {
-                    param($Path)
-                    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                    if ($Path -match "%.*%" -or $Path -match "\$\(.*\)") { return $true }
-                    if (Test-Path -Path $Path) { return $true }
-                    if ($Path -match "(?i)System32") {
-                        $nativePath = $Path -replace "(?i)System32", "Sysnative"
-                        if (Test-Path -Path $nativePath) { return $true }
-                    }
-                    return $false
-                }
 
                 # Internal Helper: Whitelist
                 function Test-IsWhitelisted {
@@ -7263,7 +7251,7 @@ function Start-DriveBenchmark {
                     $ErrorActionPreference = "Stop"
 
                     function Add-Line([string]$Text) { [void]$State["Lines"].Add($Text) }
-                    function Set-Status([string]$Text, [int]$Progress) {
+                    function Set-BenchmarkStatus([string]$Text, [int]$Progress) {
                         $State["Status"] = $Text
                         $State["Progress"] = [math]::Max(0, [math]::Min(100, $Progress))
                     }
@@ -7692,7 +7680,7 @@ namespace Wmt {
 
                             Add-Line ("  Test file: {0}" -f $file)
                             
-                            Set-Status "Allocating test file on $DriveLetter`..." $BaseProgress
+                            Set-BenchmarkStatus "Allocating test file on $DriveLetter`..." $BaseProgress
                             [Wmt.NativeDiskBenchmark]::PrepareFile($file, $targetBytes)
 
                             if ($useTimedMode) { Add-Line ("  Mode: {0:N0}s measured loop per result (decimal MB/s)" -f $measureSeconds) }
@@ -7700,7 +7688,7 @@ namespace Wmt {
 
                             $runMeasure = {
                                 param([string]$Label, [int]$Progress, [scriptblock]$Measure)
-                                Set-Status "Testing $DriveLetter`: $Label..." $Progress
+                                Set-BenchmarkStatus "Testing $DriveLetter`: $Label..." $Progress
                                 Test-Cancelled
                                 return & $Measure
                             }.GetNewClosure()
@@ -7741,7 +7729,7 @@ namespace Wmt {
                             }
                             Add-Line ("  RND4K Q1T1 Read  {0} MB/s ({1} IOPS) | Write {2} MB/s ({3} IOPS)" -f $rndQ1Read.MBps, $rndQ1Read.Iops, $rndQ1Write.MBps, $rndQ1Write.Iops)
 
-                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 8))
+                            Set-BenchmarkStatus "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 8))
                         }
                         finally {
                             try { if ([System.IO.File]::Exists($file)) { [System.IO.File]::Delete($file) } } catch {}
@@ -7764,7 +7752,7 @@ namespace Wmt {
                         $targetDrive = [string]$State["TargetDrive"]
                         $targetSize = [int]$State["TargetSize"]
 
-                        Set-Status "Finding fixed drives..." 0
+                        Set-BenchmarkStatus "Finding fixed drives..." 0
                         $drives = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady })
                         if ($targetDrive -ne "ALL") {
                             $drives = @($drives | Where-Object { $_.Name.Substring(0, 1).ToUpperInvariant() -eq $targetDrive.ToUpperInvariant() })
@@ -7809,18 +7797,18 @@ namespace Wmt {
 
                         Add-Line ""
                         Add-Line ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
-                        Set-Status "Benchmark complete." 100
+                        Set-BenchmarkStatus "Benchmark complete." 100
                     }
                     catch {
                         if ($State["Cancel"]) {
                             $State["Error"] = ""
                             Add-Line ""; Add-Line "Benchmark stopped by user."
-                            Set-Status "Benchmark stopped." 100
+                            Set-BenchmarkStatus "Benchmark stopped." 100
                         }
                         else {
                             $State["Error"] = $_.Exception.Message
                             Add-Line ""; Add-Line ("ERROR: {0}" -f $_.Exception.Message)
-                            Set-Status "Benchmark failed." 100
+                            Set-BenchmarkStatus "Benchmark failed." 100
                         }
                     }
                     finally {
@@ -7869,6 +7857,28 @@ namespace Wmt {
     $benchWindow.Add_Closed({ & $releaseWindowState }.GetNewClosure())
     $benchWindow.Show() | Out-Null
 }
+
+function Expand-ShortcutTarget {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return "" }
+    $trimmed = $Target.Trim().Trim('"')
+    try { return [System.Environment]::ExpandEnvironmentVariables($trimmed) }
+    catch { return $trimmed }
+}
+
+function Test-ShortcutTargetIsSpecial {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $true }
+    $trimmed = $Target.Trim().Trim('"')
+    if ($trimmed -match '^shell:' -or $trimmed -match '^\s*::{') { return $true }
+    if ($trimmed -match '^[a-zA-Z][a-zA-Z0-9+.-]+:' -and $trimmed -notmatch '^[a-zA-Z]:[\\/]') { return $true }
+    try {
+        if ($trimmed.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return $true }
+    }
+    catch { return $true }
+    return $false
+}
+
 function Show-BrokenShortcuts {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
@@ -8168,7 +8178,10 @@ function Show-BrokenShortcuts {
         & $refreshButtons
 
         try {
-            $runspace = [runspacefactory]::CreateRunspace()
+            $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Expand-ShortcutTarget", ${function:Expand-ShortcutTarget}.ToString()))
+            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Test-ShortcutTargetIsSpecial", ${function:Test-ShortcutTargetIsSpecial}.ToString()))
+            $runspace = [runspacefactory]::CreateRunspace($iss)
             $runspace.ApartmentState = "STA"
             $runspace.ThreadOptions = "ReuseThread"
             $runspace.Open()
@@ -8286,27 +8299,6 @@ function Show-BrokenShortcuts {
                             }
                             catch {}
                         }
-                    }
-
-                    function Expand-ShortcutTarget {
-                        param([string]$Target)
-                        if ([string]::IsNullOrWhiteSpace($Target)) { return "" }
-                        $trimmed = $Target.Trim().Trim('"')
-                        try { return [System.Environment]::ExpandEnvironmentVariables($trimmed) }
-                        catch { return $trimmed }
-                    }
-
-                    function Test-ShortcutTargetIsSpecial {
-                        param([string]$Target)
-                        if ([string]::IsNullOrWhiteSpace($Target)) { return $true }
-                        $trimmed = $Target.Trim().Trim('"')
-                        if ($trimmed -match '^shell:' -or $trimmed -match '^\s*::{') { return $true }
-                        if ($trimmed -match '^[a-zA-Z][a-zA-Z0-9+.-]+:' -and $trimmed -notmatch '^[a-zA-Z]:[\\/]') { return $true }
-                        try {
-                            if ($trimmed.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return $true }
-                        }
-                        catch { return $true }
-                        return $false
                     }
 
                     function Test-ShortcutTargetExists {
@@ -8973,23 +8965,6 @@ function Invoke-ShortcutFix {
     Invoke-UiCommand {
         param($toFix)
         $shell = $null
-
-        function Test-ShortcutTargetIsSpecial {
-            param([string]$Target)
-            if ([string]::IsNullOrWhiteSpace($Target)) { return $false }
-            $trimmed = $Target.Trim().Trim('"')
-            if ($trimmed -match '^shell:' -or $trimmed -match '^\s*::{') { return $true }
-            if ($trimmed -match '^[a-zA-Z][a-zA-Z0-9+.-]+:' -and $trimmed -notmatch '^[a-zA-Z]:[\\/]') { return $true }
-            return $false
-        }
-
-        function Expand-ShortcutTarget {
-            param([string]$Target)
-            if ([string]::IsNullOrWhiteSpace($Target)) { return "" }
-            $trimmed = $Target.Trim().Trim('"')
-            try { return [System.Environment]::ExpandEnvironmentVariables($trimmed) }
-            catch { return $trimmed }
-        }
 
         try {
             $shell = New-Object -ComObject WScript.Shell
@@ -11782,7 +11757,7 @@ function Set-WmtPowerSettingIndex {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Maintenance Tool v$AppVersion" Height="820" Width="1280" MinHeight="620" MinWidth="960"
-        WindowStartupLocation="CenterScreen" Background="#0D1117" Foreground="#E6EDF3"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
@@ -11807,16 +11782,22 @@ function Set-WmtPowerSettingIndex {
         <SolidColorBrush x:Key="Danger" Color="#DA3633"/>
         <SolidColorBrush x:Key="DangerHover" Color="#F85149"/>
         <SolidColorBrush x:Key="Warning" Color="#D29922"/>
+        <SolidColorBrush x:Key="WarningHover" Color="#E3B341"/>
         <SolidColorBrush x:Key="Info" Color="#1F6FEB"/>
+        <SolidColorBrush x:Key="AccentText" Color="#0D1117"/>
+        <SolidColorBrush x:Key="SuccessText" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="DangerText" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="WarningText" Color="#0D1117"/>
+        <SolidColorBrush x:Key="InfoText" Color="#FFFFFF"/>
 
         <!-- Subtle Shadow Effects (reduced for clarity) -->
         <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
 
         <!-- Modern TextBox (crisp text) -->
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#0D1117"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="FontSize" Value="13"/>
@@ -11826,7 +11807,7 @@ function Set-WmtPowerSettingIndex {
             <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Style.Triggers>
                 <Trigger Property="IsFocused" Value="True">
-                    <Setter Property="BorderBrush" Value="#58A6FF"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource BorderAccent}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -11834,7 +11815,7 @@ function Set-WmtPowerSettingIndex {
         <!-- Modern Navigation Button (crisp text) -->
         <Style TargetType="Button" x:Key="NavBtn">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#8B949E"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Height" Value="38"/>
             <Setter Property="Margin" Value="2"/>
@@ -11853,13 +11834,13 @@ function Set-WmtPowerSettingIndex {
                                 <ContentPresenter VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
                             </Border>
                             <!-- Active Indicator Bar (left side) -->
-                            <Border Name="Indicator" Width="3" Background="#58A6FF" HorizontalAlignment="Left" 
+                            <Border Name="Indicator" Width="3" Background="{DynamicResource Accent}" HorizontalAlignment="Left" 
                                     CornerRadius="2,0,0,2" Visibility="{TemplateBinding Tag}" UseLayoutRounding="True"/>
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#21262D"/>
-                                <Setter Property="Foreground" Value="#E6EDF3"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgElevated}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -11869,8 +11850,9 @@ function Set-WmtPowerSettingIndex {
 
         <!-- Modern Action Button (clean, no blur) -->
         <Style TargetType="Button" x:Key="ActionBtn">
-            <Setter Property="Background" Value="#21262D"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Margin" Value="4"/>
             <Setter Property="FontSize" Value="12"/>
@@ -11883,87 +11865,86 @@ function Set-WmtPowerSettingIndex {
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" 
-                                BorderBrush="#30363D" BorderThickness="1">
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16,0"/>
                         </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#30363D"/>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="#8B949E"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
-                                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
-                                <Setter Property="Foreground" Value="#6E7681"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource BgHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource TextSecondary}"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+                    <Setter Property="Opacity" Value="0.55"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <!-- Success/Green Button -->
         <Style TargetType="Button" x:Key="PositiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#238636"/>
-            <Setter Property="BorderBrush" Value="#2EA043"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Success}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource SuccessHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource SuccessText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#2EA043"/>
-                    <Setter Property="BorderBrush" Value="#3FB950"/>
+                    <Setter Property="Background" Value="{DynamicResource SuccessHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource SuccessHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Danger/Red Button -->
         <Style TargetType="Button" x:Key="DestructiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#DA3633"/>
-            <Setter Property="BorderBrush" Value="#F85149"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Danger}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource DangerHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource DangerText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#F85149"/>
-                    <Setter Property="BorderBrush" Value="#FF7B72"/>
+                    <Setter Property="Background" Value="{DynamicResource DangerHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource DangerHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Warning/Yellow Button -->
         <Style TargetType="Button" x:Key="WarningBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#D29922"/>
-            <Setter Property="BorderBrush" Value="#E3B341"/>
-            <Setter Property="Foreground" Value="#0D1117"/>
+            <Setter Property="Background" Value="{DynamicResource Warning}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource WarningHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource WarningText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#E3B341"/>
+                    <Setter Property="Background" Value="{DynamicResource WarningHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource WarningHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Info/Blue Button -->
         <Style TargetType="Button" x:Key="UtilityBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#1F6FEB"/>
-            <Setter Property="BorderBrush" Value="#58A6FF"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Info}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
+            <Setter Property="Foreground" Value="{DynamicResource InfoText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#58A6FF"/>
+                    <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Accent Button -->
         <Style TargetType="Button" x:Key="AccentBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#58A6FF"/>
-            <Setter Property="BorderBrush" Value="#79C0FF"/>
-            <Setter Property="Foreground" Value="#0D1117"/>
+            <Setter Property="Background" Value="{DynamicResource Accent}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#79C0FF"/>
+                    <Setter Property="Background" Value="{DynamicResource AccentHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -11980,26 +11961,26 @@ function Set-WmtPowerSettingIndex {
             <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Style.Triggers>
                 <Trigger Property="ItemsControl.AlternationIndex" Value="0">
-                    <Setter Property="Background" Value="#161B22"/>
+                    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
                 </Trigger>
                 <Trigger Property="ItemsControl.AlternationIndex" Value="1">
-                    <Setter Property="Background" Value="#0D1117"/>
+                    <Setter Property="Background" Value="{DynamicResource BgDark}"/>
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#1F6FEB"/>
-                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
                     <Setter Property="FontWeight" Value="Medium"/>
                 </Trigger>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#30363D"/>
+                    <Setter Property="Background" Value="{DynamicResource BgHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Card Style Border (clean, crisp) -->
         <Style x:Key="CardStyle" TargetType="Border">
-            <Setter Property="Background" Value="#161B22"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="CornerRadius" Value="4"/>
             <Setter Property="Margin" Value="6"/>
@@ -12012,7 +11993,7 @@ function Set-WmtPowerSettingIndex {
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="26"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="Margin" Value="0,0,0,16"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
@@ -12023,7 +12004,7 @@ function Set-WmtPowerSettingIndex {
         <Style x:Key="SubHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="Bold"/>
-            <Setter Property="Foreground" Value="#8B949E"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
             <Setter Property="Margin" Value="0,0,0,10"/>
             <Setter Property="FontFamily" Value="Segoe UI, Arial"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
@@ -12038,7 +12019,7 @@ function Set-WmtPowerSettingIndex {
         </Grid.ColumnDefinitions>
 
         <!-- Sidebar -->
-        <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/> 
@@ -12049,12 +12030,12 @@ function Set-WmtPowerSettingIndex {
                 </Grid.RowDefinitions>
 
                 <!-- Header/Search -->
-                <Border Name="bdQuickFind" Grid.Row="0" Background="{StaticResource BgDark}" Margin="16,20,16,12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Cursor="IBeam">
+                <Border Name="bdQuickFind" Grid.Row="0" Background="{DynamicResource BgDark}" Margin="16,20,16,12" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Cursor="IBeam">
                     <StackPanel Margin="12">
-                        <TextBlock Text="Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Quick Find" FontSize="11" Foreground="{DynamicResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                         <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." VerticalContentAlignment="Center"
-                                 Background="{StaticResource BgPanel}" Foreground="{StaticResource TextPrimary}"
-                                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="10,0"/>
+                                 Background="{DynamicResource BgPanel}" Foreground="{DynamicResource TextPrimary}"
+                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="10,0"/>
                     </StackPanel>
                 </Border>
 
@@ -12073,7 +12054,7 @@ function Set-WmtPowerSettingIndex {
                         <Button Name="btnTabMyDevice" Style="{StaticResource NavBtn}" Tag="pnlMyDevice">
                             <StackPanel Orientation="Horizontal">
                                 <Path Data="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z" 
-                                      Fill="White" 
+                                      Fill="{DynamicResource TextSecondary}" 
                                       Width="16" Height="16" Stretch="Uniform" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                 <TextBlock Text="My Device" VerticalAlignment="Center"/>
                             </StackPanel>
@@ -12083,21 +12064,21 @@ function Set-WmtPowerSettingIndex {
                     </StackPanel>
                 </StackPanel>
                 
-                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{StaticResource BgDark}" BorderThickness="0" Foreground="{StaticResource Accent}" Visibility="Collapsed" Margin="8" MaxHeight="220"/>
+                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{DynamicResource BgDark}" BorderThickness="0" Foreground="{DynamicResource Accent}" Visibility="Collapsed" Margin="8" MaxHeight="220"/>
 
                 <GridSplitter Grid.Row="3" Height="8" Margin="12,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
                               Background="Transparent" Cursor="SizeNS" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
                               ShowsPreview="True"/>
 
                 <!-- Log Panel -->
-                <Border Grid.Row="4" Background="{StaticResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" MinHeight="140" VerticalAlignment="Stretch">
+                <Border Grid.Row="4" Background="{DynamicResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" MinHeight="140" VerticalAlignment="Stretch">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Border Grid.Row="0" Background="{StaticResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
-                            <TextBlock Text="Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
+                        <Border Grid.Row="0" Background="{DynamicResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
+                            <TextBlock Text="Activity Log" FontSize="11" Foreground="{DynamicResource TextMuted}" FontWeight="SemiBold"/>
                         </Border>
                         <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True" VerticalAlignment="Stretch">
                             <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
@@ -12110,7 +12091,7 @@ function Set-WmtPowerSettingIndex {
             </Grid>
         </Border>
 
-        <Border Grid.Column="1" Background="{StaticResource BgDark}">
+        <Border Grid.Column="1" Background="{DynamicResource BgDark}">
             <Grid Margin="20">
                 
                 <!-- UPDATES PANEL -->
@@ -12134,9 +12115,9 @@ function Set-WmtPowerSettingIndex {
                                     <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0" VerticalAlignment="Center">
                                         <ProgressBar Name="pbWingetProgress" Width="260" Height="8" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-                                        <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
+                                        <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{DynamicResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                     </StackPanel>
-                                    <TextBlock Name="lblWingetLastResult" Text="" Margin="0,6,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
+                                    <TextBlock Name="lblWingetLastResult" Text="" Margin="0,6,0,0" Foreground="{DynamicResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                 </StackPanel>
                             </StackPanel>
                             <Grid Grid.Column="1">
@@ -12152,7 +12133,7 @@ function Set-WmtPowerSettingIndex {
 
                     <!-- List Card -->
                     <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstWinget" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                        <ListView Name="lstWinget" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
@@ -12200,7 +12181,7 @@ function Set-WmtPowerSettingIndex {
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                <TextBlock Text="Curated selection of popular applications" Foreground="{StaticResource TextSecondary}" FontSize="13"/>
+                                <TextBlock Text="Curated selection of popular applications" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
                             </StackPanel>
                             <Grid Grid.Column="1">
                                 <Grid.ColumnDefinitions>
@@ -12226,7 +12207,7 @@ function Set-WmtPowerSettingIndex {
 
                     <!-- Catalog List -->
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstCatalog" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                        <ListView Name="lstCatalog" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
@@ -12278,8 +12259,8 @@ function Set-WmtPowerSettingIndex {
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
-                        <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
-                        <ListView Name="lstAppxPackages" Height="200" Background="{StaticResource BgDark}" Foreground="{StaticResource TextPrimary}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
+                        <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
+                        <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
@@ -12325,7 +12306,7 @@ function Set-WmtPowerSettingIndex {
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
-                        <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+                        <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
                         <WrapPanel>
                             <Button Name="btnTasksDisableTelemetry" Content="Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
                             <Button Name="btnTasksRestore" Content="Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
@@ -13011,7 +12992,7 @@ function Set-WmtPowerSettingIndex {
                     
                     <!-- Rules List Card -->
                     <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstFirewall" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                        <ListView Name="lstFirewall" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="Rule Name" Width="360" DisplayMemberBinding="{Binding Name}"/>
@@ -13022,7 +13003,7 @@ function Set-WmtPowerSettingIndex {
                                                 <TextBlock Text="{Binding Action}" FontWeight="Bold">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
-                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Action}" Value="Allow"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
                                                                 <DataTrigger Binding="{Binding Action}" Value="Block"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
@@ -13039,7 +13020,7 @@ function Set-WmtPowerSettingIndex {
                                                 <TextBlock Text="{Binding Enabled}" FontWeight="Bold">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
-                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Enabled}" Value="True"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
                                                                 <DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
@@ -13180,7 +13161,7 @@ function Set-WmtPowerSettingIndex {
                         <StackPanel>
                             <StackPanel Margin="0,0,0,12">
                                 <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
+                                <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -13191,15 +13172,15 @@ function Set-WmtPowerSettingIndex {
                             <TextBlock Text="CONTRIBUTORS" Style="{StaticResource SubHeader}"/>
                             <StackPanel Margin="0,8,0,0">
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="Author: " Foreground="{StaticResource TextSecondary}" Width="120"/>
+                                    <TextBlock Text="Author: " Foreground="{DynamicResource TextSecondary}" Width="120"/>
                                     <Button Name="btnCreditLilBatti" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="GUI &amp; Features: " Foreground="{StaticResource TextSecondary}" Width="120"/>
+                                    <TextBlock Text="GUI &amp; Features: " Foreground="{DynamicResource TextSecondary}" Width="120"/>
                                     <Button Name="btnCreditChaython" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                             </StackPanel>
-                            <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
+                            <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{DynamicResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
                         </StackPanel>
                     </Border>
 
@@ -13253,7 +13234,13 @@ $script:ThemePalettes = @{
         Danger        = "#DA3633"
         DangerHover   = "#F85149"
         Warning       = "#D29922"
+        WarningHover  = "#E3B341"
         Info          = "#1F6FEB"
+        AccentText    = "#0D1117"
+        SuccessText   = "#FFFFFF"
+        DangerText    = "#FFFFFF"
+        WarningText   = "#0D1117"
+        InfoText      = "#FFFFFF"
         LogText       = "#3FB950"
     }
     light = @{
@@ -13273,7 +13260,13 @@ $script:ThemePalettes = @{
         Danger        = "#B91C1C"
         DangerHover   = "#DC2626"
         Warning       = "#B45309"
+        WarningHover  = "#D97706"
         Info          = "#1D4ED8"
+        AccentText    = "#FFFFFF"
+        SuccessText   = "#FFFFFF"
+        DangerText    = "#FFFFFF"
+        WarningText   = "#FFFFFF"
+        InfoText      = "#FFFFFF"
         LogText       = "#166534"
     }
 }
@@ -13285,10 +13278,8 @@ function Set-WmtTheme {
 
     foreach ($key in $palette.Keys) {
         if ($key -eq "LogText") { continue }
-        $brush = $window.Resources[$key]
-        if ($brush -is [System.Windows.Media.SolidColorBrush]) {
-            $brush.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key])
-        }
+        $color = [System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key])
+        $window.Resources[$key] = [System.Windows.Media.SolidColorBrush]::new($color)
     }
 
     $window.Background = $window.Resources["BgDark"]
@@ -13305,6 +13296,21 @@ function Set-WmtTheme {
     $toggleBtn = Get-Ctrl "btnToggleTheme"
     if ($toggleBtn) {
         $toggleBtn.Content = if ($Theme -eq "dark") { "Light Mode" } else { "Dark Mode" }
+    }
+
+    if ($TabButtons) {
+        foreach ($btnName in $TabButtons) {
+            $btn = Get-Ctrl $btnName
+            if (-not $btn) { continue }
+            if ($btn.Tag -eq "Visible") {
+                $btn.Background = $window.Resources["BgElevated"]
+                $btn.Foreground = $window.Resources["TextPrimary"]
+            }
+            else {
+                $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
+                $btn.Foreground = $window.Resources["TextSecondary"]
+            }
+        }
     }
 
     $script:CurrentTheme = $Theme
@@ -13439,15 +13445,25 @@ function Invoke-MyDeviceExport {
 }
 
 function Set-ButtonIcon {
-    param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
+    param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = $null)
     $btn = Get-Ctrl $BtnName
     if (-not $btn) { return }
+
+    if ($Scale -is [string] -and $Scale -match '^#') {
+        $Color = $Scale
+        $Scale = 16
+    }
     
     # Visuals
     $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = "Horizontal"
     $path = New-Object System.Windows.Shapes.Path
     $path.Data = [System.Windows.Media.Geometry]::Parse($PathData)
-    $path.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+    if ([string]::IsNullOrWhiteSpace([string]$Color)) {
+        $path.SetResourceReference([System.Windows.Shapes.Path]::FillProperty, "TextSecondary")
+    }
+    else {
+        $path.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+    }
     $path.Stretch = "Uniform"; $path.Height = $Scale; $path.Width = $Scale; $path.Margin = "0,0,10,0"
     $txt = New-Object System.Windows.Controls.TextBlock; $txt.Text = $Text; $txt.VerticalAlignment = "Center"
     [void]$sp.Children.Add($path); [void]$sp.Children.Add($txt)
@@ -13984,7 +14000,7 @@ foreach ($btnName in $TabButtons) {
             foreach ($b in $TabButtons) { 
                 $btn = Get-Ctrl $b
                 $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
-                $btn.Foreground = "#8B949E"
+                $btn.Foreground = $window.Resources["TextSecondary"]
                 $btn.FontWeight = "Normal"
                 $btn.Tag = "Collapsed"  # Hide indicator
             }
@@ -13994,8 +14010,8 @@ foreach ($btnName in $TabButtons) {
             $target = (Get-Ctrl $panelName)
             $target.Visibility = "Visible"
             # Set active state on clicked button
-            $s.Background = "#21262D"
-            $s.Foreground = "#E6EDF3"
+            $s.Background = $window.Resources["BgElevated"]
+            $s.Foreground = $window.Resources["TextPrimary"]
             $s.FontWeight = "SemiBold"
             $s.Tag = "Visible"  # Show indicator
             if ($s.Name -eq "btnTabFirewall") { Start-FirewallRuleLoad }
@@ -15057,7 +15073,7 @@ function Show-ProviderManager {
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
 
     # Helper for status check
-    function Set-Status($cmd, $lbl) {
+    function Set-ProviderStatus($cmd, $lbl) {
         if (Get-Command $cmd -ErrorAction SilentlyContinue) {
             (Get-WinCtrl $lbl).Text = "Installed"
             (Get-WinCtrl $lbl).Foreground = "LightGreen"
@@ -15068,13 +15084,13 @@ function Show-ProviderManager {
         }
     }
 
-    Set-Status "pip" "lblPipStatus"
-    Set-Status "npm" "lblNpmStatus"
-    Set-Status "pnpm" "lblPnpmStatus"
-    Set-Status "choco" "lblChocoStatus"
-    Set-Status "scoop" "lblScoopStatus"
-    Set-Status "gem" "lblGemStatus"
-    Set-Status "cargo" "lblCargoStatus"
+    Set-ProviderStatus "pip" "lblPipStatus"
+    Set-ProviderStatus "npm" "lblNpmStatus"
+    Set-ProviderStatus "pnpm" "lblPnpmStatus"
+    Set-ProviderStatus "choco" "lblChocoStatus"
+    Set-ProviderStatus "scoop" "lblScoopStatus"
+    Set-ProviderStatus "gem" "lblGemStatus"
+    Set-ProviderStatus "cargo" "lblCargoStatus"
 
     # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
