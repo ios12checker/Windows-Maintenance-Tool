@@ -1921,7 +1921,7 @@ function Set-MyDeviceGpuCards {
 
         $card.Add_MouseLeftButtonUp({
                 param($s, $e)
-                $selectedVendor = [string]$sender.Tag
+                $selectedVendor = [string]$s.Tag
                 if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
                     Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
                 }
@@ -2295,8 +2295,9 @@ function Add-WmtThemeResources {
         [void]$script:WmtThemedElements.Add($Element)
         if ($Element -is [System.Windows.Window]) {
             $Element.Add_Closed({
-                    param($sender, $eventArgs)
-                    try { [void]$script:WmtThemedElements.Remove($sender) } catch {}
+                    param($closedWindow, $closedEventArgs)
+                    $null = $closedEventArgs
+                    try { [void]$script:WmtThemedElements.Remove($closedWindow) } catch {}
                 })
         }
     }
@@ -2336,10 +2337,10 @@ function Get-WmtThemeHex {
         WarningHover  = "#E3B341"
         Info          = "#1F6FEB"
         AccentText    = "#0D1117"
-        SuccessText   = "#FFFFFF"
-        DangerText    = "#FFFFFF"
+        SuccessText   = "#F6FFFA"
+        DangerText    = "#FFF5F5"
         WarningText   = "#0D1117"
-        InfoText      = "#FFFFFF"
+        InfoText      = "#F0F6FC"
     }
 
     if ($darkFallback.ContainsKey($resourceKey)) { return $darkFallback[$resourceKey] }
@@ -5020,16 +5021,72 @@ function Show-AdvancedCleanupSelection {
     # MAIN CONTENT PANEL
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
-    $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
+    $mainPanel.AutoScroll = $true
+    $mainPanel.Dock = "None"
+    $mainPanel.Anchor = "Top, Bottom, Left, Right"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
     Set-WmtDoubleBuffered -Control $mainPanel
 
+    # Keep the scrollable rules region explicitly bounded between the fixed
+    # header and footer. Extra bottom padding made the flow content taller, so
+    # the last community rules could still appear below the visible frame.
+    $layoutAdvancedCleanerPanels = {
+        if ($form.IsDisposed) { return }
+
+        $topPanel.Left = 0
+        $topPanel.Top = 0
+        $topPanel.Width = $form.ClientSize.Width
+
+        $btnPanel.Left = 0
+        $btnPanel.Width = $form.ClientSize.Width
+        $btnPanel.Top = [Math]::Max($topPanel.Bottom, $form.ClientSize.Height - $btnPanel.Height)
+
+        $mainPanel.Left = 0
+        $mainPanel.Top = $topPanel.Bottom
+        $mainPanel.Width = $form.ClientSize.Width
+        $mainPanel.Height = [Math]::Max(0, $btnPanel.Top - $mainPanel.Top)
+    }
+
+    $form.Controls.Add($mainPanel)
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
-    $form.Controls.Add($mainPanel)
-    $mainPanel.BringToFront()
+    $form.Add_SizeChanged({ & $layoutAdvancedCleanerPanels }.GetNewClosure())
+    & $layoutAdvancedCleanerPanels
+    $topPanel.BringToFront()
+    $btnPanel.BringToFront()
+
+    # Keep FlowLayoutPanel's scroll range accurate after community rules are
+    # loaded. Nested AutoSize FlowLayoutPanels can otherwise report a scroll
+    # extent that is a few controls too short, which makes the last options
+    # look like they are rendered under the footer buttons.
+    $updateAdvancedCleanerScrollExtent = {
+        if ($form.IsDisposed -or $mainPanel.IsDisposed) { return }
+
+        foreach ($ctrl in $mainPanel.Controls) {
+            if ($ctrl.Tag -eq 'HEADER') {
+                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 28)
+            }
+            elseif ($ctrl.Tag -eq 'FLOW') {
+                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
+            }
+        }
+
+        $mainPanel.PerformLayout()
+
+        $contentBottom = 0
+        foreach ($ctrl in $mainPanel.Controls) {
+            $bottom = $ctrl.Bottom + $ctrl.Margin.Bottom
+            if ($bottom -gt $contentBottom) { $contentBottom = $bottom }
+        }
+
+        # A small scroll tail lets the final checkbox clear the viewport edge
+        # without increasing the visible frame or overlapping the button panel.
+        $mainPanel.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($contentBottom + 18))
+    }
+
+    $mainPanel.Add_SizeChanged({ & $updateAdvancedCleanerScrollExtent }.GetNewClosure())
     Set-WmtWinFormsTheme -Control $form
     Set-WmtWinFormsButtonTheme -Button $btnClean -Role Success
     Set-WmtWinFormsButtonTheme -Button $btnAnalyze -Role Primary
@@ -5085,7 +5142,7 @@ function Show-AdvancedCleanupSelection {
                 $sec = $group.Name
 
                 $secPanel = New-Object System.Windows.Forms.Panel
-                $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
+                $secPanel.Size = New-Object System.Drawing.Size(([Math]::Max(200, $mainPanel.ClientSize.Width - 28)), 35); $secPanel.Margin = "5, 10, 0, 0"
                 $secPanel.BackColor = $cleanupHeaderColor
                 $secPanel.Tag = "HEADER"
                 Set-WmtDoubleBuffered -Control $secPanel
@@ -5103,7 +5160,12 @@ function Show-AdvancedCleanupSelection {
                 $global:sections += $secPanel
 
                 $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-                $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
+                $itemFlow.FlowDirection = "TopDown"
+                $itemFlow.WrapContents = $false
+                $itemFlow.AutoScroll = $false
+                $itemFlow.AutoSize = $true
+                $itemFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+                $itemFlow.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
                 $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
                 $itemFlow.BackColor = $cleanupBackColor
                 Set-WmtDoubleBuffered -Control $itemFlow
@@ -5179,6 +5241,10 @@ function Show-AdvancedCleanupSelection {
         }
         finally {
             $mainPanel.ResumeLayout($true)
+            & $updateAdvancedCleanerScrollExtent
+            if ($form.IsHandleCreated) {
+                $null = $form.BeginInvoke([System.Action]{ & $updateAdvancedCleanerScrollExtent })
+            }
             $mainPanel.Invalidate()
         }
     }
@@ -7047,18 +7113,6 @@ function Start-DriveBenchmark {
 
     Write-GuiLog "[Storage Benchmark] Opening drive benchmark window."
 
-    $BrushWindow = New-WmtBrush "BgDark"
-    $BrushPanel = New-WmtBrush "BgPanel"
-    $BrushControl = New-WmtBrush "BgElevated"
-    $BrushBorder = New-WmtBrush "BorderBrush"
-    $BrushText = New-WmtBrush "TextPrimary"
-    $BrushTitle = New-WmtBrush "TextPrimary"
-    $BrushWarn = New-WmtBrush "Warning"
-    $BrushSuccess = New-WmtBrush "Success"
-    $BrushError = New-WmtBrush "Danger"
-    $BrushAccent = New-WmtBrush "Accent"
-    $BrushHighlight = New-WmtBrush "Accent"
-    $BrushHighlightTx = New-WmtBrush "AccentText"
 
     $BrushHeaderBg = New-WmtBrush "BgPanel"
     $BrushHeaderText = New-WmtBrush "TextPrimary"
@@ -7068,12 +7122,12 @@ function Start-DriveBenchmark {
     function Set-DbSystemColors {
         param([System.Windows.FrameworkElement]$Element)
 
-        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushPanel
-        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushText
-        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushControl
-        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushText
-        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHighlight
-        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHighlightTx
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = New-WmtBrush "BgPanel"
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = New-WmtBrush "TextPrimary"
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = New-WmtBrush "BgElevated"
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = New-WmtBrush "TextPrimary"
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = New-WmtBrush "Accent"
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = New-WmtBrush "AccentText"
     }
 
     function Set-DbHeaderSystemColors {
@@ -12150,10 +12204,10 @@ function Set-WmtPowerSettingIndex {
         <SolidColorBrush x:Key="WarningHover" Color="#E3B341"/>
         <SolidColorBrush x:Key="Info" Color="#1F6FEB"/>
         <SolidColorBrush x:Key="AccentText" Color="#0D1117"/>
-        <SolidColorBrush x:Key="SuccessText" Color="#FFFFFF"/>
-        <SolidColorBrush x:Key="DangerText" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="SuccessText" Color="#F6FFFA"/>
+        <SolidColorBrush x:Key="DangerText" Color="#FFF5F5"/>
         <SolidColorBrush x:Key="WarningText" Color="#0D1117"/>
-        <SolidColorBrush x:Key="InfoText" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="InfoText" Color="#F0F6FC"/>
 
         <!-- Subtle Shadow Effects (reduced for clarity) -->
         <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
@@ -13523,12 +13577,17 @@ function Set-WmtPowerSettingIndex {
                 <StackPanel Name="pnlSupport" Visibility="Collapsed">
                     <!-- Header Card -->
                     <Border Style="{StaticResource CardStyle}">
-                        <StackPanel>
-                            <StackPanel Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Margin="0,0,16,0">
                                 <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
                                 <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold"/>
                             </StackPanel>
-                        </StackPanel>
+                            <Button Name="btnToggleTheme" Grid.Column="1" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" HorizontalAlignment="Right" VerticalAlignment="Top" ToolTip="Switch between dark and light theme"/>
+                        </Grid>
                     </Border>
 
                     <!-- Credits Card -->
@@ -13556,7 +13615,6 @@ function Set-WmtPowerSettingIndex {
                             <WrapPanel>
                                 <Button Name="btnSupportDiscord" Content="Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
                                 <Button Name="btnSupportIssue" Content="Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
-                                <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" ToolTip="Switch between dark and light theme"/>
                                 <Button Name="btnDonateIos12" Content="Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
                                 <Button Name="btnDonate" Content="Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
                             </WrapPanel>
@@ -13602,10 +13660,10 @@ $script:ThemePalettes = @{
         WarningHover  = "#E3B341"
         Info          = "#1F6FEB"
         AccentText    = "#0D1117"
-        SuccessText   = "#FFFFFF"
-        DangerText    = "#FFFFFF"
+        SuccessText   = "#F6FFFA"
+        DangerText    = "#FFF5F5"
         WarningText   = "#0D1117"
-        InfoText      = "#FFFFFF"
+        InfoText      = "#F0F6FC"
         LogText       = "#3FB950"
     }
     light = @{
