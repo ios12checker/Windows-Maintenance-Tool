@@ -1843,14 +1843,14 @@ function New-MyDeviceTextBlock {
     param(
         [string]$Text,
         [int]$FontSize = 13,
-        [string]$Foreground = "#98989D",
+        [string]$Foreground = "TextSecondary",
         [string]$FontWeight = "Normal",
         [double]$MarginTop = 0
     )
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
     $tb.FontSize = $FontSize
-    $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Foreground)
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Foreground
     $tb.TextWrapping = [System.Windows.TextWrapping]::Wrap
     $tb.LineHeight = 18
     if ($FontWeight -ne "Normal") {
@@ -1904,8 +1904,8 @@ function Set-MyDeviceGpuCards {
         $details = if ($lines.Count -gt 1) { ($lines[1..($lines.Count - 1)] -join "`n") } else { "Vendor: $vendor" }
 
         $card = New-Object System.Windows.Controls.Border
-        $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#141416")
-        $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2C2C2E")
+        Set-WmtThemedBrush -Object $card -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $card -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $card.BorderThickness = [System.Windows.Thickness]::new(1)
         $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
         $card.Padding = [System.Windows.Thickness]::new(10)
@@ -1915,8 +1915,8 @@ function Set-MyDeviceGpuCards {
         $card.ToolTip = if ($vendor -eq "Unknown") { "No known GPU vendor detected for this adapter." } else { "Open $vendor control panel for this GPU." }
 
         $stack = New-Object System.Windows.Controls.StackPanel
-        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $title -FontSize 13 -Foreground "#EBEBF5" -FontWeight "SemiBold"))
-        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $details -FontSize 12 -Foreground "#98989D" -MarginTop 3))
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $title -FontSize 13 -Foreground "TextPrimary" -FontWeight "SemiBold"))
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $details -FontSize 12 -Foreground "TextSecondary" -MarginTop 3))
         $card.Child = $stack
 
         $card.Add_MouseLeftButtonUp({
@@ -2175,16 +2175,319 @@ function Start-MyDeviceBitLockerStatusUpdate {
     $script:BitLockerStatusTimer.Start()
 }
 
+function Resolve-WmtThemeResourceKey {
+    param([string]$ColorOrKey)
+
+    if ([string]::IsNullOrWhiteSpace($ColorOrKey)) { return $null }
+    $value = $ColorOrKey.Trim()
+
+    if ($script:ThemePalettes) {
+        foreach ($theme in @($script:ThemePalettes.Keys)) {
+            if ($script:ThemePalettes[$theme].ContainsKey($value)) { return $value }
+        }
+    }
+
+    switch -Regex ($value.ToUpperInvariant()) {
+        "^#0D1117$" { return "BgDark" }
+        "^#161B22$" { return "BgPanel" }
+        "^#1C1C1E$" { return "BgPanel" }
+        "^#141416$" { return "BgPanel" }
+        "^#21262D$" { return "BgElevated" }
+        "^#252526$" { return "BgElevated" }
+        "^#30363D$" { return "BorderBrush" }
+        "^#2C2C2E$" { return "BorderBrush" }
+        "^#58A6FF$" { return "Accent" }
+        "^#0078D7$" { return "Accent" }
+        "^#1A0078D7$" { return "BgElevated" }
+        "^#79C0FF$" { return "AccentHover" }
+        "^#E6EDF3$" { return "TextPrimary" }
+        "^#EBEBF5$" { return "TextPrimary" }
+        "^#8B949E$" { return "TextSecondary" }
+        "^#98989D$" { return "TextSecondary" }
+        "^#6E7681$" { return "TextMuted" }
+        "^#6E6E73$" { return "TextMuted" }
+        "^#238636$" { return "Success" }
+        "^#3FB950$" { return "SuccessHover" }
+        "^#2EA043$" { return "SuccessHover" }
+        "^#DA3633$" { return "Danger" }
+        "^#F85149$" { return "DangerHover" }
+        "^#D29922$" { return "Warning" }
+        "^#E3B341$" { return "WarningHover" }
+        "^#FFFFFF$" { return "AccentText" }
+        "^WHITE$" { return "AccentText" }
+        "^BLACK$" { return "BgDark" }
+        default { return $null }
+    }
+}
+
 function New-WmtBrush {
-    param([string]$Color)
-    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color) }
+    param([string]$ColorOrKey)
+
+    $resourceKey = Resolve-WmtThemeResourceKey $ColorOrKey
+    if ($resourceKey -and $window -and $window.Resources[$resourceKey]) {
+        return $window.Resources[$resourceKey]
+    }
+
+    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($ColorOrKey) }
     catch { return [System.Windows.Media.BrushConverter]::new().ConvertFromString("#8B949E") }
+}
+
+function Set-WmtThemeResources {
+    param(
+        [System.Windows.FrameworkElement]$Element,
+        [hashtable]$Palette
+    )
+
+    if (-not $Element -or -not $Palette) { return }
+    foreach ($key in $Palette.Keys) {
+        if ($key -eq "LogText") { continue }
+        $color = [System.Windows.Media.ColorConverter]::ConvertFromString($Palette[$key])
+        $Element.Resources[$key] = [System.Windows.Media.SolidColorBrush]::new($color)
+    }
+}
+
+function Set-WmtThemedBrush {
+    param(
+        [System.Windows.DependencyObject]$Object,
+        [System.Windows.DependencyProperty]$Property,
+        [string]$ColorOrKey,
+        [string]$FallbackKey = "TextSecondary"
+    )
+
+    if (-not $Object -or -not $Property) { return }
+
+    $resourceKey = Resolve-WmtThemeResourceKey $ColorOrKey
+    if (-not $resourceKey) { $resourceKey = $FallbackKey }
+
+    if ($resourceKey -and $Object -is [System.Windows.FrameworkElement]) {
+        $Object.SetResourceReference($Property, $resourceKey)
+        return
+    }
+    if ($resourceKey -and $Object -is [System.Windows.FrameworkContentElement]) {
+        $Object.SetResourceReference($Property, $resourceKey)
+        return
+    }
+
+    $Object.SetValue($Property, (New-WmtBrush $ColorOrKey))
+}
+
+function Add-WmtThemeResources {
+    param([System.Windows.FrameworkElement]$Element)
+
+    if (-not $Element -or -not $script:ThemePalettes) { return }
+    $theme = if ($script:CurrentTheme -and $script:ThemePalettes.ContainsKey($script:CurrentTheme)) { $script:CurrentTheme } else { "dark" }
+    $palette = $script:ThemePalettes[$theme]
+    Set-WmtThemeResources -Element $Element -Palette $palette
+
+    if (-not $script:WmtThemedElements) {
+        $script:WmtThemedElements = [System.Collections.ArrayList]::new()
+    }
+
+    $alreadyTracked = $false
+    foreach ($tracked in @($script:WmtThemedElements)) {
+        if ([object]::ReferenceEquals($tracked, $Element)) {
+            $alreadyTracked = $true
+            break
+        }
+    }
+
+    if (-not $alreadyTracked) {
+        [void]$script:WmtThemedElements.Add($Element)
+        if ($Element -is [System.Windows.Window]) {
+            $Element.Add_Closed({
+                    param($sender, $eventArgs)
+                    try { [void]$script:WmtThemedElements.Remove($sender) } catch {}
+                })
+        }
+    }
+}
+
+function Get-WmtThemeHex {
+    param(
+        [string]$Key,
+        [string]$Fallback = "#8B949E"
+    )
+
+    $resourceKey = Resolve-WmtThemeResourceKey $Key
+    if (-not $resourceKey) { $resourceKey = $Key }
+
+    if ($script:ThemePalettes) {
+        $theme = if ($script:CurrentTheme -and $script:ThemePalettes.ContainsKey($script:CurrentTheme)) { $script:CurrentTheme } else { "dark" }
+        $palette = $script:ThemePalettes[$theme]
+        if ($palette -and $palette.ContainsKey($resourceKey)) { return $palette[$resourceKey] }
+    }
+
+    $darkFallback = @{
+        BgDark        = "#0D1117"
+        BgPanel       = "#161B22"
+        BgElevated    = "#21262D"
+        BgHover       = "#30363D"
+        BorderBrush   = "#30363D"
+        Accent        = "#58A6FF"
+        AccentHover   = "#79C0FF"
+        TextPrimary   = "#E6EDF3"
+        TextSecondary = "#8B949E"
+        TextMuted     = "#6E7681"
+        Success       = "#238636"
+        SuccessHover  = "#2EA043"
+        Danger        = "#DA3633"
+        DangerHover   = "#F85149"
+        Warning       = "#D29922"
+        WarningHover  = "#E3B341"
+        Info          = "#1F6FEB"
+        AccentText    = "#0D1117"
+        SuccessText   = "#FFFFFF"
+        DangerText    = "#FFFFFF"
+        WarningText   = "#0D1117"
+        InfoText      = "#FFFFFF"
+    }
+
+    if ($darkFallback.ContainsKey($resourceKey)) { return $darkFallback[$resourceKey] }
+    if ($Key -match "^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$") { return $Key }
+    return $Fallback
+}
+
+function Get-WmtThemeColor {
+    param(
+        [string]$Key,
+        [string]$Fallback = "#8B949E"
+    )
+
+    try { return [System.Drawing.ColorTranslator]::FromHtml((Get-WmtThemeHex -Key $Key -Fallback $Fallback)) }
+    catch { return [System.Drawing.ColorTranslator]::FromHtml($Fallback) }
+}
+
+function Set-WmtWinFormsGridTheme {
+    param([System.Windows.Forms.DataGridView]$Grid)
+
+    if (-not $Grid) { return }
+    $bg = Get-WmtThemeColor "BgDark"
+    $panel = Get-WmtThemeColor "BgPanel"
+    $hover = Get-WmtThemeColor "BgHover"
+    $border = Get-WmtThemeColor "BorderBrush"
+    $text = Get-WmtThemeColor "TextPrimary"
+    $muted = Get-WmtThemeColor "TextSecondary"
+    $accent = Get-WmtThemeColor "Accent"
+    $accentText = Get-WmtThemeColor "AccentText"
+
+    $Grid.BackgroundColor = $bg
+    $Grid.ForeColor = $text
+    $Grid.GridColor = $border
+    $Grid.EnableHeadersVisualStyles = $false
+    $Grid.ColumnHeadersDefaultCellStyle.BackColor = $panel
+    $Grid.ColumnHeadersDefaultCellStyle.ForeColor = $text
+    $Grid.DefaultCellStyle.BackColor = $bg
+    $Grid.DefaultCellStyle.ForeColor = $text
+    $Grid.DefaultCellStyle.SelectionBackColor = $accent
+    $Grid.DefaultCellStyle.SelectionForeColor = $accentText
+    $Grid.AlternatingRowsDefaultCellStyle.BackColor = $panel
+    $Grid.RowHeadersDefaultCellStyle.BackColor = $panel
+    $Grid.RowHeadersDefaultCellStyle.ForeColor = $muted
+    $Grid.RowHeadersDefaultCellStyle.SelectionBackColor = $accent
+    $Grid.RowHeadersDefaultCellStyle.SelectionForeColor = $accentText
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = $hover
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = $text
+}
+
+function Set-WmtWinFormsButtonTheme {
+    param(
+        [System.Windows.Forms.Button]$Button,
+        [ValidateSet("Standard", "Primary", "Success", "Danger", "Warning")]
+        [string]$Role = "Standard"
+    )
+
+    if (-not $Button) { return }
+    $bgKey = switch ($Role) {
+        "Primary" { "Accent" }
+        "Success" { "Success" }
+        "Danger" { "Danger" }
+        "Warning" { "Warning" }
+        default { "BgElevated" }
+    }
+    $fgKey = switch ($Role) {
+        "Primary" { "AccentText" }
+        "Success" { "SuccessText" }
+        "Danger" { "DangerText" }
+        "Warning" { "WarningText" }
+        default { "TextPrimary" }
+    }
+
+    $Button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $Button.BackColor = Get-WmtThemeColor $bgKey
+    $Button.ForeColor = Get-WmtThemeColor $fgKey
+    $Button.FlatAppearance.BorderSize = 1
+    $Button.FlatAppearance.BorderColor = Get-WmtThemeColor "BorderBrush"
+    $hoverKey = if ($Role -eq "Standard") { "BgHover" } else { "${bgKey}Hover" }
+    $Button.FlatAppearance.MouseOverBackColor = Get-WmtThemeColor $hoverKey (Get-WmtThemeHex $bgKey)
+}
+
+function Set-WmtWinFormsContextMenuTheme {
+    param([System.Windows.Forms.ContextMenuStrip]$Menu)
+
+    if (-not $Menu) { return }
+    $Menu.BackColor = Get-WmtThemeColor "BgElevated"
+    $Menu.ForeColor = Get-WmtThemeColor "TextPrimary"
+    foreach ($item in $Menu.Items) {
+        try {
+            if ($item -is [System.Windows.Forms.ToolStripSeparator]) { continue }
+            $item.BackColor = $Menu.BackColor
+            $item.ForeColor = $Menu.ForeColor
+        }
+        catch {}
+    }
+}
+
+function Set-WmtWinFormsTheme {
+    param([System.Windows.Forms.Control]$Control)
+
+    if (-not $Control) { return }
+
+    $bg = Get-WmtThemeColor "BgDark"
+    $panel = Get-WmtThemeColor "BgPanel"
+    $elevated = Get-WmtThemeColor "BgElevated"
+    $text = Get-WmtThemeColor "TextPrimary"
+    $secondary = Get-WmtThemeColor "TextSecondary"
+
+    if ($Control -is [System.Windows.Forms.Form]) {
+        $Control.BackColor = $bg
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.Panel] -or $Control -is [System.Windows.Forms.FlowLayoutPanel]) {
+        $Control.BackColor = $panel
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.DataGridView]) {
+        Set-WmtWinFormsGridTheme -Grid $Control
+    }
+    elseif ($Control -is [System.Windows.Forms.Button]) {
+        Set-WmtWinFormsButtonTheme -Button $Control
+    }
+    elseif ($Control -is [System.Windows.Forms.TextBox] -or $Control -is [System.Windows.Forms.RichTextBox] -or $Control -is [System.Windows.Forms.ListBox] -or $Control -is [System.Windows.Forms.ComboBox]) {
+        $Control.BackColor = $elevated
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.CheckBox] -or $Control -is [System.Windows.Forms.RadioButton]) {
+        $Control.ForeColor = $text
+        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
+        try { $Control.UseVisualStyleBackColor = $false } catch {}
+    }
+    elseif ($Control -is [System.Windows.Forms.Label]) {
+        $Control.ForeColor = $secondary
+        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
+    }
+    else {
+        try { $Control.ForeColor = $text } catch {}
+    }
+
+    foreach ($child in @($Control.Controls)) {
+        Set-WmtWinFormsTheme -Control $child
+    }
 }
 
 function New-WmtStorageTextBlock {
     param(
         [string]$Text,
-        [string]$Color = "#98989D",
+        [string]$Color = "TextSecondary",
         [double]$FontSize = 12,
         [string]$FontWeight = "Normal",
         [string]$Margin = "0"
@@ -2192,7 +2495,7 @@ function New-WmtStorageTextBlock {
 
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
-    $tb.Foreground = New-WmtBrush $Color
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Color
     $tb.FontSize = $FontSize
     $tb.Margin = $Margin
     $tb.TextWrapping = "Wrap"
@@ -2256,7 +2559,7 @@ function Set-MyDeviceStorageDetails {
         $header.ToolTip = "Open $driveRoot"
         $header.Add_MouseLeftButtonUp({ Open-MyDeviceDriveRoot -Drive $driveRoot }.GetNewClosure())
 
-        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "Accent" -FontSize 13 -FontWeight "SemiBold"
         [void]$header.Children.Add($driveTitle)
 
         $healthText = New-WmtStorageTextBlock -Text $d.Health -Color $d.HealthBrush -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
@@ -2264,9 +2567,9 @@ function Set-MyDeviceStorageDetails {
         [void]$header.Children.Add($healthText)
         [void]$panel.Children.Add($header)
 
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "#E6EDF3" -FontSize 12 -Margin "0,4,0,0"))
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "#8B949E" -FontSize 11 -Margin "0,2,0,0"))
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "#6E7681" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "TextPrimary" -FontSize 12 -Margin "0,4,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "TextSecondary" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "TextMuted" -FontSize 11 -Margin "0,2,0,0"))
 
         $bar = New-Object System.Windows.Controls.ProgressBar
         $bar.Minimum = 0
@@ -2274,8 +2577,8 @@ function Set-MyDeviceStorageDetails {
         $bar.Value = [double]$d.FreePercent
         $bar.Height = 7
         $bar.Margin = "0,7,0,2"
-        $bar.Foreground = New-WmtBrush $d.FreeBrush
-        $bar.Background = New-WmtBrush "#30363D"
+        Set-WmtThemedBrush -Object $bar -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey $d.FreeBrush -FallbackKey "Accent"
+        Set-WmtThemedBrush -Object $bar -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BorderBrush"
         [void]$panel.Children.Add($bar)
 
         [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.FreeText -Color $d.FreeBrush -FontSize 12 -FontWeight "SemiBold" -Margin "0,2,0,0"))
@@ -2283,7 +2586,7 @@ function Set-MyDeviceStorageDetails {
         if ($i -lt ($deviceList.Count - 1)) {
             $separator = New-Object System.Windows.Controls.Border
             $separator.Height = 1
-            $separator.Background = New-WmtBrush "#30363D"
+            Set-WmtThemedBrush -Object $separator -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BorderBrush"
             $separator.Margin = "0,10,0,0"
             [void]$panel.Children.Add($separator)
         }
@@ -2293,7 +2596,7 @@ function Set-MyDeviceStorageDetails {
 function New-WmtNetworkTextBlock {
     param(
         [string]$Text,
-        [string]$Color = "#98989D",
+        [string]$Color = "TextSecondary",
         [double]$FontSize = 12,
         [string]$FontWeight = "Normal",
         [string]$Margin = "0"
@@ -2301,7 +2604,7 @@ function New-WmtNetworkTextBlock {
 
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
-    $tb.Foreground = New-WmtBrush $Color
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Color
     $tb.FontSize = $FontSize
     $tb.Margin = $Margin
     $tb.TextWrapping = "Wrap"
@@ -2437,7 +2740,7 @@ function Add-WmtNetworkLine {
     if (-not $Panel -or [string]::IsNullOrWhiteSpace($Value)) { return }
 
     $tb = New-Object System.Windows.Controls.TextBlock
-    $tb.Foreground = New-WmtBrush "#98989D"
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
     $tb.FontSize = 12
     $tb.TextWrapping = "Wrap"
     $tb.LineHeight = 17
@@ -2445,14 +2748,14 @@ function Add-WmtNetworkLine {
 
     $labelRun = New-Object System.Windows.Documents.Run
     $labelRun.Text = ("{0}: " -f $Label)
-    $labelRun.Foreground = New-WmtBrush "#8B949E"
+    Set-WmtThemedBrush -Object $labelRun -Property ([System.Windows.Documents.TextElement]::ForegroundProperty) -ColorOrKey "TextSecondary"
     $labelRun.FontWeight = [System.Windows.FontWeights]::SemiBold
     [void]$tb.Inlines.Add($labelRun)
 
     if ($ClickAction) {
         $action = $ClickAction
         $link = New-Object System.Windows.Documents.Hyperlink
-        $link.Foreground = New-WmtBrush "#58A6FF"
+        Set-WmtThemedBrush -Object $link -Property ([System.Windows.Documents.TextElement]::ForegroundProperty) -ColorOrKey "Accent"
         $link.Cursor = [System.Windows.Input.Cursors]::Hand
         if (-not [string]::IsNullOrWhiteSpace($ToolTip)) { $link.ToolTip = $ToolTip }
         $valueRun = New-Object System.Windows.Documents.Run
@@ -2516,7 +2819,7 @@ function Set-MyDeviceNetworkDetails {
         [void]$header.ColumnDefinitions.Add($colMain)
         [void]$header.ColumnDefinitions.Add($colStatus)
 
-        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "Accent" -FontSize 13 -FontWeight "SemiBold"
         $adapterTitle.Cursor = [System.Windows.Input.Cursors]::Hand
         $adapterTitle.TextDecorations = [System.Windows.TextDecorations]::Underline
         $adapterTitle.ToolTip = "Open Network Connections"
@@ -2574,7 +2877,7 @@ function Set-MyDeviceNetworkDetails {
         if ($i -lt ($adapterList.Count - 1)) {
             $separator = New-Object System.Windows.Controls.Border
             $separator.Height = 1
-            $separator.Background = New-WmtBrush "#30363D"
+            Set-WmtThemedBrush -Object $separator -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BorderBrush"
             $separator.Margin = "0,10,0,0"
             [void]$panel.Children.Add($separator)
         }
@@ -2623,6 +2926,7 @@ function Show-TextDialog {
     $btn.Add_Click({ $f.Close() })
     $f.Controls.Add($btn)
 
+    Set-WmtWinFormsTheme -Control $f
     $f.ShowDialog() | Out-Null
 }
 
@@ -3632,29 +3936,29 @@ function Show-CustomDnsDialog {
     [xml]$customDnsXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         Title="Custom DNS" Height="500" Width="560" WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize" Background="#0D1117" Foreground="#E6EDF3">
+        ResizeMode="NoResize" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock">
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="TextWrapping" Value="Wrap"/>
         </Style>
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#161B22"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="8"/>
             <Setter Property="VerticalContentAlignment" Value="Center"/>
         </Style>
         <Style TargetType="CheckBox">
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="VerticalAlignment" Value="Center"/>
         </Style>
         <Style TargetType="Button">
             <Setter Property="Height" Value="32"/>
-            <Setter Property="Foreground" Value="White"/>
-            <Setter Property="Background" Value="#21262D"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="12,0"/>
         </Style>
@@ -3674,31 +3978,31 @@ function Show-CustomDnsDialog {
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Grid.Row="0" Text="Custom DNS" FontSize="18" FontWeight="SemiBold" Foreground="#58A6FF"/>
+        <TextBlock Grid.Row="0" Text="Custom DNS" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource Accent}"/>
 
-        <TextBlock Grid.Row="1" Foreground="#8B949E" Margin="0,12,0,0"
+        <TextBlock Grid.Row="1" Foreground="{DynamicResource TextSecondary}" Margin="0,12,0,0"
                    Text="Enter IPv4 and IPv6 DNS servers together. Use commas, spaces, semicolons, or new lines between addresses."/>
 
-        <TextBlock Grid.Row="2" Text="DNS servers" Foreground="#8B949E" Margin="0,16,0,6"/>
+        <TextBlock Grid.Row="2" Text="DNS servers" Foreground="{DynamicResource TextSecondary}" Margin="0,16,0,6"/>
         <TextBox Name="txtDnsServers" Grid.Row="3" Height="78" AcceptsReturn="True"
                  TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
 
-        <TextBlock Grid.Row="4" Foreground="#8B949E" Margin="0,6,0,0"
+        <TextBlock Grid.Row="4" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,0"
                    Text="Example: 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001"/>
 
         <CheckBox Name="chkRegisterDoh" Grid.Row="5" Content="Register DoH template" Margin="0,14,0,8"/>
 
-        <TextBlock Grid.Row="6" Text="DoH template URL" Foreground="#8B949E" Margin="0,0,0,6"/>
+        <TextBlock Grid.Row="6" Text="DoH template URL" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6"/>
         <TextBox Name="txtDohTemplate" Grid.Row="7" Height="34"/>
 
-        <TextBlock Grid.Row="8" Foreground="#8B949E" Margin="0,6,0,0"
+        <TextBlock Grid.Row="8" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,0"
                    Text="Example: https://cloudflare-dns.com/dns-query. Use a DoH template from the same provider as the DNS servers."/>
 
-        <TextBlock Name="lblError" Grid.Row="9" Foreground="#F85149" Margin="0,10,0,0"/>
+        <TextBlock Name="lblError" Grid.Row="9" Foreground="{DynamicResource DangerHover}" Margin="0,10,0,0"/>
 
         <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
-            <Button Name="btnRemoveDoh" Content="Remove DoH" Width="104" Background="#DA3633" Margin="0,0,8,0"/>
-            <Button Name="btnApply" Content="Apply" Width="84" Background="#238636" Margin="0,0,8,0"/>
+            <Button Name="btnRemoveDoh" Content="Remove DoH" Width="104" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,0"/>
+            <Button Name="btnApply" Content="Apply" Width="84" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
             <Button Name="btnCancel" Content="Cancel" Width="84"/>
         </StackPanel>
     </Grid>
@@ -3708,6 +4012,7 @@ function Show-CustomDnsDialog {
     try {
         $reader = New-Object System.Xml.XmlNodeReader $customDnsXaml
         $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
     }
     catch {
         Write-GuiLog "Failed to open custom DNS dialog: $($_.Exception.Message)"
@@ -4123,6 +4428,10 @@ function Show-HostsEditor {
     $lblInfo.Top = 15
     $lblInfo.Left = 140
     $pnl.Controls.Add($lblInfo)
+
+    Set-WmtWinFormsTheme -Control $hForm
+    Set-WmtWinFormsButtonTheme -Button $btn -Role Success
+    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
     
     $hostsPath = "$env:windir\System32\drivers\etc\hosts"
     
@@ -4144,12 +4453,12 @@ function Show-HostsEditor {
         $sel = $txtHosts.SelectionStart
         $len = $txtHosts.SelectionLength
         $txtHosts.SelectAll()
-        $txtHosts.SelectionColor = "White"
+        $txtHosts.SelectionColor = Get-WmtThemeColor "TextPrimary"
         $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
         $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
         if ($s -ge 0 -and $e -gt $s) {
             $txtHosts.Select($s, ($e + 33) - $s)
-            $txtHosts.SelectionColor = "Cyan"
+            $txtHosts.SelectionColor = Get-WmtThemeColor "Accent"
         }
         $txtHosts.Select($sel, $len)
     }
@@ -4721,6 +5030,11 @@ function Show-AdvancedCleanupSelection {
     $form.Controls.Add($topPanel)
     $form.Controls.Add($mainPanel)
     $mainPanel.BringToFront()
+    Set-WmtWinFormsTheme -Control $form
+    Set-WmtWinFormsButtonTheme -Button $btnClean -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnAnalyze -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
+    Set-WmtWinFormsButtonTheme -Button $btnEventLogs -Role Warning
 
     # --- INTERNAL RULES (static) ---
     $internalRules = @(
@@ -4740,10 +5054,10 @@ function Show-AdvancedCleanupSelection {
 
     $global:checkboxes = @{}
     $global:sections = @()
-    $cleanupBackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $cleanupHeaderColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-    $cleanupTextColor = [System.Drawing.Color]::Gainsboro
-    $cleanupCommunityTextColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
+    $cleanupBackColor = Get-WmtThemeColor "BgDark"
+    $cleanupHeaderColor = Get-WmtThemeColor "BgPanel"
+    $cleanupTextColor = Get-WmtThemeColor "TextPrimary"
+    $cleanupCommunityTextColor = Get-WmtThemeColor "Accent"
 
     # ------------------------------------------------
     # Render helper – rebuilds the entire panel from a rule list,
@@ -4779,7 +5093,7 @@ function Show-AdvancedCleanupSelection {
                 $secChk = New-Object System.Windows.Forms.CheckBox
                 $secChk.Text = $sec
                 $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-                $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
+                $secChk.ForeColor = Get-WmtThemeColor "Accent"
                 $secChk.BackColor = $cleanupHeaderColor
                 $secChk.UseVisualStyleBackColor = $false
                 $secChk.AutoSize = $true; $secChk.Location = "5, 5"
@@ -4806,7 +5120,7 @@ function Show-AdvancedCleanupSelection {
                         $grpLbl = New-Object System.Windows.Forms.Label
                         $grpLbl.Text = $currentGroup
                         $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-                        $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
+                        $grpLbl.ForeColor = Get-WmtThemeColor "TextSecondary"
                         $grpLbl.BackColor = $cleanupBackColor
                         $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
                         $grpLbl.Tag = "GROUPHEADER"
@@ -4879,7 +5193,7 @@ function Show-AdvancedCleanupSelection {
         if (-not $chkToggleWinapp2.Checked) { return }
 
         $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = "Yellow"
+        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = Get-WmtThemeColor "Warning"
         $lbl.BackColor = $cleanupBackColor
         $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
         $mainPanel.Controls.Add($lbl)
@@ -5086,6 +5400,7 @@ function Invoke-TempCleanup {
     $pBar.Location = "20,70"; $pBar.Size = "440,20"
     $pForm.Controls.Add($pBar)
 
+    Set-WmtWinFormsTheme -Control $pForm
     $pForm.Show()
     [System.Windows.Forms.Application]::DoEvents()
 
@@ -5523,7 +5838,12 @@ function Invoke-TempCleanup {
             $gridForm.Controls.Add($grid)
             $gridBtnPanel.SendToBack() 
             $grid.BringToFront()       
-            
+
+            Set-WmtWinFormsTheme -Control $gridForm
+            Set-WmtWinFormsButtonTheme -Button $btnCleanSelected -Role Primary
+            Set-WmtWinFormsButtonTheme -Button $btnCleanAll -Role Danger
+            Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
+            Set-WmtWinFormsContextMenuTheme -Menu $ctxMenu
             $gridForm.ShowDialog() | Out-Null
         }
         else {
@@ -5628,6 +5948,10 @@ function Show-RegScanSelection {
     
     $f.AcceptButton = $btnScan; $f.CancelButton = $btnCancel
 
+    Set-WmtWinFormsTheme -Control $f
+    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $btnScan -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
     if ($f.ShowDialog() -eq "OK") {
         $selected = @()
         
@@ -5784,6 +6108,10 @@ function Show-RegistryCleaner {
             $f.Close()
         })
 
+    Set-WmtWinFormsTheme -Control $f
+    $lblStatus.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $btnFix -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
     [void]$f.ShowDialog()
     return $f.Tag
 }
@@ -5887,6 +6215,11 @@ function Show-SafetyDialog {
     $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Force Clean (No Backup)"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
     $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
     
+    Set-WmtWinFormsTheme -Control $f
+    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $b1 -Role Success
+    Set-WmtWinFormsButtonTheme -Button $b2 -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $b3 -Role Standard
     return $f.ShowDialog()
 }
 
@@ -5951,6 +6284,8 @@ function Invoke-RegistryTask {
         $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $pForm.ForeColor = "White"
         $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location = "20,15"; $pLabel.Size = "460,20"; $pLabel.Text = "Initializing Background Scan..."; $pForm.Controls.Add($pLabel)
         $pBar = New-Object System.Windows.Forms.ProgressBar; $pBar.Location = "20,45"; $pBar.Size = "440,20"; $pForm.Controls.Add($pBar)
+        Set-WmtWinFormsTheme -Control $pForm
+        $pLabel.ForeColor = Get-WmtThemeColor "TextPrimary"
         $pForm.Show()
 
         # Shared Data for Thread
@@ -6712,23 +7047,23 @@ function Start-DriveBenchmark {
 
     Write-GuiLog "[Storage Benchmark] Opening drive benchmark window."
 
-    $BrushWindow = New-WmtBrush "#0D1117"
-    $BrushPanel = New-WmtBrush "#161B22"
-    $BrushControl = New-WmtBrush "#21262D"
-    $BrushBorder = New-WmtBrush "#30363D"
-    $BrushText = New-WmtBrush "#E6EDF3"
-    $BrushTitle = New-WmtBrush "#EBEBF5"
-    $BrushWarn = New-WmtBrush "#D29922"
-    $BrushSuccess = New-WmtBrush "#3FB950"
-    $BrushError = New-WmtBrush "#F85149"
-    $BrushAccent = New-WmtBrush "#58A6FF"
-    $BrushHighlight = New-WmtBrush "#1F6FEB"
-    $BrushHighlightTx = New-WmtBrush "#FFFFFF"
+    $BrushWindow = New-WmtBrush "BgDark"
+    $BrushPanel = New-WmtBrush "BgPanel"
+    $BrushControl = New-WmtBrush "BgElevated"
+    $BrushBorder = New-WmtBrush "BorderBrush"
+    $BrushText = New-WmtBrush "TextPrimary"
+    $BrushTitle = New-WmtBrush "TextPrimary"
+    $BrushWarn = New-WmtBrush "Warning"
+    $BrushSuccess = New-WmtBrush "Success"
+    $BrushError = New-WmtBrush "Danger"
+    $BrushAccent = New-WmtBrush "Accent"
+    $BrushHighlight = New-WmtBrush "Accent"
+    $BrushHighlightTx = New-WmtBrush "AccentText"
 
-    $BrushHeaderBg = New-WmtBrush "#FFFFFF"
-    $BrushHeaderText = New-WmtBrush "#000000"
-    $BrushHeaderBorder = New-WmtBrush "#BDBDBD"
-    $BrushHeaderSelectBg = New-WmtBrush "#DCEBFF"
+    $BrushHeaderBg = New-WmtBrush "BgPanel"
+    $BrushHeaderText = New-WmtBrush "TextPrimary"
+    $BrushHeaderBorder = New-WmtBrush "BorderBrush"
+    $BrushHeaderSelectBg = New-WmtBrush "BgHover"
 
     function Set-DbSystemColors {
         param([System.Windows.FrameworkElement]$Element)
@@ -6757,14 +7092,19 @@ function Start-DriveBenchmark {
         param(
             [string]$Text,
             [double]$FontSize = 12,
-            [System.Windows.Media.Brush]$Foreground = $BrushText,
+            [object]$Foreground = "TextPrimary",
             [System.Windows.Thickness]$Margin = (New-Object System.Windows.Thickness(0))
         )
 
         $tb = New-Object System.Windows.Controls.TextBlock
         $tb.Text = $Text
         $tb.FontSize = $FontSize
-        $tb.Foreground = $Foreground
+        if ($Foreground -is [string]) {
+            Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey ([string]$Foreground)
+        }
+        else {
+            $tb.Foreground = $Foreground
+        }
         $tb.Margin = $Margin
         $tb.VerticalAlignment = "Center"
         $tb.TextWrapping = "Wrap"
@@ -6775,9 +7115,9 @@ function Start-DriveBenchmark {
     function Set-DbButtonStyle {
         param([System.Windows.Controls.Button]$Button)
 
-        $Button.Background = $BrushControl
-        $Button.Foreground = $BrushText
-        $Button.BorderBrush = $BrushBorder
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
 
         Set-DbSystemColors $Button
@@ -6786,9 +7126,9 @@ function Start-DriveBenchmark {
     function Set-DbHeaderButtonStyle {
         param([System.Windows.Controls.Button]$Button)
 
-        $Button.Background = $BrushHeaderBg
-        $Button.Foreground = $BrushHeaderText
-        $Button.BorderBrush = $BrushHeaderBorder
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
 
         Set-DbHeaderSystemColors $Button
@@ -6797,9 +7137,9 @@ function Start-DriveBenchmark {
     function Set-DbHeaderComboStyle {
         param([System.Windows.Controls.ComboBox]$ComboBox)
 
-        $ComboBox.Background = $BrushHeaderBg
-        $ComboBox.Foreground = $BrushHeaderText
-        $ComboBox.BorderBrush = $BrushHeaderBorder
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $ComboBox.IsEditable = $false
 
         Set-DbHeaderSystemColors $ComboBox
@@ -6845,15 +7185,16 @@ function Start-DriveBenchmark {
     $benchWindow.MinWidth = 620
     $benchWindow.MinHeight = 420
     $benchWindow.WindowStartupLocation = "CenterOwner"
-    $benchWindow.Background = $BrushWindow
-    $benchWindow.Foreground = $BrushText
+    Add-WmtThemeResources -Element $benchWindow
+    Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgDark"
+    Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
 
     if ($window) { $benchWindow.Owner = $window }
     Set-DbSystemColors $benchWindow
 
     $root = New-Object System.Windows.Controls.Grid
     $root.Margin = New-Object System.Windows.Thickness(18)
-    $root.Background = $BrushWindow
+    Set-WmtThemedBrush -Object $root -Property ([System.Windows.Controls.Panel]::BackgroundProperty) -ColorOrKey "BgDark"
     Set-DbSystemColors $root
 
     foreach ($rowHeight in @("Auto", "Auto", "Auto", "*", "Auto")) {
@@ -6863,7 +7204,7 @@ function Start-DriveBenchmark {
         [void]$root.RowDefinitions.Add($row)
     }
 
-    $title = New-DbTextBlock -Text "Drive Benchmark" -FontSize 18 -Foreground $BrushTitle -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+    $title = New-DbTextBlock -Text "Drive Benchmark" -FontSize 18 -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
     $title.FontWeight = [System.Windows.FontWeights]::SemiBold
     [System.Windows.Controls.Grid]::SetRow($title, 0)
     [void]$root.Children.Add($title)
@@ -6873,7 +7214,7 @@ function Start-DriveBenchmark {
     $controlsPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
     [System.Windows.Controls.Grid]::SetRow($controlsPanel, 1)
 
-    $lblDrive = New-DbTextBlock -Text "Target:" -Foreground $BrushText -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+    $lblDrive = New-DbTextBlock -Text "Target:" -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
     [void]$controlsPanel.Children.Add($lblDrive)
 
     $cmbDrive = New-Object System.Windows.Controls.ComboBox
@@ -6897,7 +7238,7 @@ function Start-DriveBenchmark {
     $cmbDrive.SelectedIndex = 0
     [void]$controlsPanel.Children.Add($cmbDrive)
 
-    $lblSize = New-DbTextBlock -Text "Test Size:" -Foreground $BrushText -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
+    $lblSize = New-DbTextBlock -Text "Test Size:" -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
     [void]$controlsPanel.Children.Add($lblSize)
 
     $cmbSize = New-Object System.Windows.Controls.ComboBox
@@ -6922,7 +7263,7 @@ function Start-DriveBenchmark {
     [void]$controlsPanel.Children.Add($btnRun)
     [void]$root.Children.Add($controlsPanel)
 
-    $statusText = New-DbTextBlock -Text "Ready." -Foreground $BrushWarn -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
+    $statusText = New-DbTextBlock -Text "Ready." -Foreground "Warning" -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
     [System.Windows.Controls.Grid]::SetRow($statusText, 2)
     [void]$root.Children.Add($statusText)
 
@@ -6934,9 +7275,9 @@ function Start-DriveBenchmark {
     $logBox.HorizontalScrollBarVisibility = "Auto"
     $logBox.FontFamily = "Cascadia Mono, Consolas"
     $logBox.FontSize = 12
-    $logBox.Background = $BrushPanel
-    $logBox.Foreground = $BrushText
-    $logBox.BorderBrush = $BrushBorder
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
     $logBox.BorderThickness = [System.Windows.Thickness]::new(1)
     $logBox.Padding = [System.Windows.Thickness]::new(10)
     Set-DbSystemColors $logBox
@@ -6962,8 +7303,8 @@ function Start-DriveBenchmark {
     $progress.Maximum = 100
     $progress.Height = 12
     $progress.Margin = New-Object System.Windows.Thickness(0, 8, 12, 0)
-    $progress.Foreground = $BrushAccent
-    $progress.Background = $BrushBorder
+    Set-WmtThemedBrush -Object $progress -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "Accent"
+    Set-WmtThemedBrush -Object $progress -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BorderBrush"
     [System.Windows.Controls.Grid]::SetColumn($progress, 0)
     [void]$bottom.Children.Add($progress)
 
@@ -7042,15 +7383,15 @@ function Start-DriveBenchmark {
         }
         $btnRun.IsEnabled = $true
         
-        $cmbDrive.Background = $BrushHeaderBg
-        $cmbDrive.Foreground = $BrushHeaderText
-        $cmbDrive.BorderBrush = $BrushHeaderBorder
-        $cmbSize.Background = $BrushHeaderBg
-        $cmbSize.Foreground = $BrushHeaderText
-        $cmbSize.BorderBrush = $BrushHeaderBorder
-        $btnRun.Background = $BrushHeaderBg
-        $btnRun.Foreground = $BrushHeaderText
-        $btnRun.BorderBrush = $BrushHeaderBorder
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
 
         $exportBtn.IsEnabled = $true
         $closeBtn.IsEnabled = $true
@@ -7155,15 +7496,15 @@ function Start-DriveBenchmark {
 
                 if ($state["Cancel"] -and [string]::IsNullOrWhiteSpace([string]$state["Error"])) {
                     $state["Status"] = "Benchmark stopped."
-                    $statusText.Foreground = $BrushWarn
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
                 }
                 elseif ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
                     $state["Status"] = "Benchmark complete."
-                    $statusText.Foreground = $BrushSuccess
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
                 }
                 else {
                     $state["Status"] = "Benchmark failed: $($state["Error"])"
-                    $statusText.Foreground = $BrushError
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
                 }
 
                 & $refreshUi
@@ -7185,7 +7526,7 @@ function Start-DriveBenchmark {
             $state["Progress"] = 100
             try { [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("TIMER ERROR: $($_.Exception.Message)") } catch {}
             $statusText.Text = "Benchmark UI failed: $($_.Exception.Message)"
-            $statusText.Foreground = $BrushError
+            Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
 
             & $refreshUi
             & $setRunningUi $false
@@ -7232,7 +7573,7 @@ function Start-DriveBenchmark {
         [void]$state["Lines"].Add("Note: Uses direct volume mappings to test physical capabilities.")
         [void]$state["Lines"].Add("")
 
-        $statusText.Foreground = $BrushWarn
+        Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
         & $setRunningUi $true
         & $refreshUi
 
@@ -7830,7 +8171,7 @@ namespace Wmt {
             $state["Status"] = "Failed to start benchmark."
             $state["Progress"] = 100
             [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("START ERROR: $($_.Exception.Message)")
-            $statusText.Foreground = $BrushError
+            Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
 
             & $refreshUi
             & $setRunningUi $false
@@ -8020,13 +8361,13 @@ function Show-BrokenShortcuts {
         if (-not $GridRow -or $GridRow.IsNewRow) { return }
         $action = [string]$GridRow.Cells["Action"].Value
         if ($action -eq "Fix") {
-            $GridRow.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Success"
         }
         elseif ($action -eq "None") {
-            $GridRow.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Warning"
         }
         else {
-            $GridRow.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gainsboro
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "TextPrimary"
         }
     }.GetNewClosure()
 
@@ -8854,7 +9195,7 @@ function Show-BrokenShortcuts {
 
     $itemDeep = $ctx.Items.Add("Deep Search (all fixed drives)")
     $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $itemDeep.ForeColor = [System.Drawing.Color]::DarkBlue
+    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
     $itemDeep.Add_Click({
             $rows = & $getSelectedGridRows
             if ($rows.Count -eq 1) { & $startDeepSearch $rows[0] }
@@ -8925,6 +9266,16 @@ function Show-BrokenShortcuts {
     & $configureGridColumns
     & $refreshButtons
 
+    Set-WmtWinFormsTheme -Control $f
+    $lblStatus.ForeColor = Get-WmtThemeColor "Warning"
+    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
+    Set-WmtWinFormsButtonTheme -Button $btnDelete -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnRescan -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnStop -Role Warning
+    Set-WmtWinFormsButtonTheme -Button $btnApply -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
+    Set-WmtWinFormsContextMenuTheme -Menu $ctx
+    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
     if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $finalList = @()
         foreach ($row in $dg.Rows) {
@@ -9443,6 +9794,11 @@ function Show-GhostDevicesDialog {
         })
     $btnClose.Add_Click({ $f.Close() })
 
+    Set-WmtWinFormsTheme -Control $f
+    Set-WmtWinFormsButtonTheme -Button $btnRefresh -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveAll -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
     & $Load
     $f.ShowDialog() | Out-Null
 }
@@ -9588,7 +9944,7 @@ function Show-DriverCleanupDialog {
     # Draw a subtle top border on the panel
     $pnl.Add_Paint({
             param($s, $e) # Renamed from $sender to $s
-            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60, 60), 1)
+            $pen = New-Object System.Drawing.Pen((Get-WmtThemeColor "BorderBrush"), 1)
             $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
         })
     $f.Controls.Add($pnl)
@@ -9732,6 +10088,11 @@ function Show-DriverCleanupDialog {
         $bCancel.BackColor = "DimGray"; $bCancel.ForeColor = "White"; $bCancel.FlatStyle = "Flat"
         $cf.Controls.Add($bCancel)
 
+        Set-WmtWinFormsTheme -Control $cf
+        $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+        Set-WmtWinFormsButtonTheme -Button $bBackup -Role Success
+        Set-WmtWinFormsButtonTheme -Button $bNoBackup -Role Danger
+        Set-WmtWinFormsButtonTheme -Button $bCancel -Role Standard
         $result = $cf.ShowDialog()
         
         if ($result -eq "Cancel") { return }
@@ -9832,6 +10193,10 @@ function Show-DriverCleanupDialog {
         })
     $btnClose.Add_Click({ $f.Close() })
 
+    Set-WmtWinFormsTheme -Control $f
+    Set-WmtWinFormsButtonTheme -Button $btnBackupClean -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
     $LoadGrid.Invoke()
     $f.ShowDialog() | Out-Null
 }
@@ -12611,14 +12976,14 @@ function Set-WmtPowerSettingIndex {
                                 <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                                     <StackPanel>
                                         <WrapPanel Name="pnlMyDeviceCards" Margin="20" ItemWidth="350">
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
-                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M0 3.4l10-1.4v9H0V3.4zm11-1.5L23 0v11H11V1.9zM0 12h10v8.6l-10-1.4V12zm11 0h12v10l-12-1.9V12z"/>
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="{DynamicResource Accent}" Stretch="Uniform" Width="22" Height="22" Data="M0 3.4l10-1.4v9H0V3.4zm11-1.5L23 0v11H11V1.9zM0 12h10v8.6l-10-1.4V12zm11 0h12v10l-12-1.9V12z"/>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <WrapPanel Margin="0,10,0,0">
                                                                 <Button Name="btnMyDeviceWinUpdate" Content="Update" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Open Windows Update settings"/>
                                                                 <Button Name="btnMyDeviceQuickFix" Content="Quick Fix" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Run the guided SFC, DISM, and temp cleanup flow"/>
@@ -12633,14 +12998,14 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
                                                             <ColumnDefinition Width="*"/>
                                                         </Grid.ColumnDefinitions>
                                                         <!-- Network icon (stylised globe + network lines) -->
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
     <Viewbox Width="28" Height="28">
         <Canvas Width="400" Height="400">
             <!-- Gradients converted to XAML Resources -->
@@ -12671,8 +13036,8 @@ function Set-WmtPowerSettingIndex {
     </Viewbox>
 </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <StackPanel Name="pnlDeviceNetworkList" Margin="0,6,0,0"/>
                                                             <WrapPanel Margin="0,10,0,0">
                                                                 <Button Name="btnMyDeviceNetInfo" Content="IP Config" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Display full IP configuration"/>
@@ -12688,45 +13053,45 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
                                                             <ColumnDefinition Width="*"/>
                                                         </Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
-                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="0" Width="32.771" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="0" Width="32.761" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="0" Width="32.761" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="0" Width="32.77" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="440.326" Width="32.771" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="440.326" Width="32.77" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Path Fill="#0078D7" Data="M255.246,252.209c6.171,0,9.862-3.586,9.862-9.06c0-5.485-3.69-9.176-9.862-9.176h-11.16c-0.4,0-0.6,0.21-0.6,0.61v17.025c0,0.4,0.2,0.601,0.6,0.601H255.246z"/>
-                                                                    <Path Fill="#0078D7" Data="M92.165,419.84h327.67V92.17H92.165V419.84z M367.359,130.568c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,137.434,358.88,130.568,367.359,130.568z M367.359,353.287c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,360.154,358.88,353.287,367.359,353.287z M290.821,222.318c0-0.591,0.4-0.991,1.001-0.991h12.648c0.6,0,1.001,0.4,1.001,0.991v42.242c0,8.069,4.483,12.648,11.35,12.648c6.772,0,11.264-4.578,11.264-12.648v-42.242c0-0.591,0.4-0.991,0.992-0.991h12.646c0.601,0,0.992,0.4,0.992,0.991v41.851c0,16.825-10.749,25.99-25.895,25.99c-15.232,0-25.999-9.165-25.999-25.99V222.318z M228.846,222.318c0-0.591,0.4-0.991,1.001-0.991h26.295c14.745,0,23.605,8.87,23.605,21.822c0,12.741-8.966,21.707-23.605,21.707h-12.056c-0.4,0-0.6,0.2-0.6,0.6v22.614c0,0.591-0.391,0.991-0.991,0.991h-12.648c-0.601,0-1.001-0.4-1.001-0.991V222.318z M167.673,236.872c3.586-11.063,12.256-16.633,24.112-16.633c11.454,0,19.819,5.57,23.605,15.03c0.295,0.496,0.095,0.992-0.496,1.202l-10.863,4.874c-0.592,0.296-1.097,0.104-1.393-0.486c-1.889-4.387-5.084-7.678-10.759-7.678c-5.274,0-8.66,2.795-10.157,7.468c-0.801,2.499-1.097,4.883-1.097,14.554c0,9.652,0.296,12.046,1.097,14.535c1.497,4.673,4.883,7.468,10.157,7.468c5.675,0,8.87-3.291,10.759-7.669c0.296-0.6,0.801-0.791,1.393-0.496l10.863,4.874c0.591,0.21,0.791,0.706,0.496,1.202c-3.786,9.461-12.152,15.04-23.605,15.04c-11.856,0-20.525-5.58-24.112-16.643c-1.487-4.368-1.888-7.859-1.888-18.312C165.785,244.732,166.186,241.26,167.673,236.872z M144.64,130.568c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.876-15.355-15.355C129.285,137.444,136.152,130.568,144.64,130.568z M144.64,353.287c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.877-15.355-15.355C129.285,360.163,136.152,353.287,144.64,353.287z"/>
+                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="0" Width="32.771" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="0" Width="32.761" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="0" Width="32.761" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="0" Width="32.77" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="440.326" Width="32.771" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="440.326" Width="32.77" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Path Fill="{DynamicResource Accent}" Data="M255.246,252.209c6.171,0,9.862-3.586,9.862-9.06c0-5.485-3.69-9.176-9.862-9.176h-11.16c-0.4,0-0.6,0.21-0.6,0.61v17.025c0,0.4,0.2,0.601,0.6,0.601H255.246z"/>
+                                                                    <Path Fill="{DynamicResource Accent}" Data="M92.165,419.84h327.67V92.17H92.165V419.84z M367.359,130.568c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,137.434,358.88,130.568,367.359,130.568z M367.359,353.287c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,360.154,358.88,353.287,367.359,353.287z M290.821,222.318c0-0.591,0.4-0.991,1.001-0.991h12.648c0.6,0,1.001,0.4,1.001,0.991v42.242c0,8.069,4.483,12.648,11.35,12.648c6.772,0,11.264-4.578,11.264-12.648v-42.242c0-0.591,0.4-0.991,0.992-0.991h12.646c0.601,0,0.992,0.4,0.992,0.991v41.851c0,16.825-10.749,25.99-25.895,25.99c-15.232,0-25.999-9.165-25.999-25.99V222.318z M228.846,222.318c0-0.591,0.4-0.991,1.001-0.991h26.295c14.745,0,23.605,8.87,23.605,21.822c0,12.741-8.966,21.707-23.605,21.707h-12.056c-0.4,0-0.6,0.2-0.6,0.6v22.614c0,0.591-0.391,0.991-0.991,0.991h-12.648c-0.601,0-1.001-0.4-1.001-0.991V222.318z M167.673,236.872c3.586-11.063,12.256-16.633,24.112-16.633c11.454,0,19.819,5.57,23.605,15.03c0.295,0.496,0.095,0.992-0.496,1.202l-10.863,4.874c-0.592,0.296-1.097,0.104-1.393-0.486c-1.889-4.387-5.084-7.678-10.759-7.678c-5.274,0-8.66,2.795-10.157,7.468c-0.801,2.499-1.097,4.883-1.097,14.554c0,9.652,0.296,12.046,1.097,14.535c1.497,4.673,4.883,7.468,10.157,7.468c5.675,0,8.87-3.291,10.759-7.669c0.296-0.6,0.801-0.791,1.393-0.496l10.863,4.874c0.591,0.21,0.791,0.706,0.496,1.202c-3.786,9.461-12.152,15.04-23.605,15.04c-11.856,0-20.525-5.58-24.112-16.643c-1.487-4.368-1.888-7.859-1.888-18.312C165.785,244.732,166.186,241.26,167.673,236.872z M144.64,130.568c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.876-15.355-15.355C129.285,137.444,136.152,130.568,144.64,130.568z M144.64,353.287c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.877-15.355-15.355C129.285,360.163,136.152,353.287,144.64,353.287z"/>
                                                                 </Canvas>
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Processor (CPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceCPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Processor (CPU)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceCPU" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
                                                 <!-- Battery / Power Card -->
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
@@ -12734,7 +13099,7 @@ function Set-WmtPowerSettingIndex {
                                                         </Grid.ColumnDefinitions>
 
                                                         <!-- Battery Icon -->
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="26" Height="26">
                                                                 <Canvas Width="94" Height="236">
                                                                     <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="7" 
@@ -12761,15 +13126,15 @@ function Set-WmtPowerSettingIndex {
                                                         </Border>
 
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#58A6FF" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
+                                                        <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                        <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="{DynamicResource Accent}" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                             <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
                                                             <Grid Margin="0,4,0,0">
                                                                 <Grid.ColumnDefinitions>
@@ -12785,14 +13150,14 @@ function Set-WmtPowerSettingIndex {
 
                                                 
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
-                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M223.125 24.938L205.062 43l-5.875-5.875-6.625-6.594-6.593 6.595-132.314 132.28L47.03 176l6.626 6.594 5.907 5.906-18.032 18.063-2.75 2.718v38.97h18.69V217l15.31-15.28 35.657 35.624-18.062 18.062-2.72 2.75v38.939h18.69v-31.22l15.31-15.312 35.157 35.157-18.062 18.06-2.75 2.72v38.969h18.688v-31.19l15.343-15.342 36.657 36.656-18.062 18.062-2.75 2.72v38.968h18.688v-31.25l15.312-15.313 35.656 35.658-18.06 18.062-2.72 2.75v38.938h18.688v-31.22l15.312-15.312 35.156 35.156-18.062 18.063-2.75 2.72v38.966h18.687v-31.187l15.345-15.344 5.78 5.783 6.595 6.625 6.594-6.625 132.312-132.25 6.625-6.625-6.624-6.594-5.812-5.813 18.062-18.06-13.22-13.19-18.06 18.033-35.126-35.125 18.03-18.063-13.217-13.22L401 238.938l-35.625-35.625 18.063-18.062-13.22-13.22-18.062 18.064-36.656-36.656 18.063-18.063-13.22-13.188-18.03 18.063-35.188-35.188 18.063-18.03-13.22-13.22-18.03 18.063L218.28 56.22l18.064-18.064-13.22-13.218zm-29.22 67l209.376 209.718-73.5 73.5L120.376 165.75l73.53-73.813zm-32.5 64.968l-13.186 13.25 173.968 172.72 6.562 6.53 6.594-6.53 34.5-34.25-13.156-13.282-27.938 27.75-167.344-166.188zM102.5 174.312L320.938 392.75v30.688L74 176.53l28.5-2.218zm319.688 134.875l25.875 3.25.5.5-108.938 108.938V391.78l82.563-82.592z"/>
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="{DynamicResource Accent}" Stretch="Uniform" Width="22" Height="22" Data="M223.125 24.938L205.062 43l-5.875-5.875-6.625-6.594-6.593 6.595-132.314 132.28L47.03 176l6.626 6.594 5.907 5.906-18.032 18.063-2.75 2.718v38.97h18.69V217l15.31-15.28 35.657 35.624-18.062 18.062-2.72 2.75v38.939h18.69v-31.22l15.31-15.312 35.157 35.157-18.062 18.06-2.75 2.72v38.969h18.688v-31.19l15.343-15.342 36.657 36.656-18.062 18.062-2.75 2.72v38.968h18.688v-31.25l15.312-15.313 35.656 35.658-18.06 18.062-2.72 2.75v38.938h18.688v-31.22l15.312-15.312 35.156 35.156-18.062 18.063-2.75 2.72v38.966h18.687v-31.187l15.345-15.344 5.78 5.783 6.595 6.625 6.594-6.625 132.312-132.25 6.625-6.625-6.624-6.594-5.812-5.813 18.062-18.06-13.22-13.19-18.06 18.033-35.126-35.125 18.03-18.063-13.217-13.22L401 238.938l-35.625-35.625 18.063-18.062-13.22-13.22-18.062 18.064-36.656-36.656 18.063-18.063-13.22-13.188-18.03 18.063-35.188-35.188 18.063-18.03-13.22-13.22-18.03 18.063L218.28 56.22l18.064-18.064-13.22-13.218zm-29.22 67l209.376 209.718-73.5 73.5L120.376 165.75l73.53-73.813zm-32.5 64.968l-13.186 13.25 173.968 172.72 6.562 6.53 6.594-6.53 34.5-34.25-13.156-13.282-27.938 27.75-167.344-166.188zM102.5 174.312L320.938 392.75v30.688L74 176.53l28.5-2.218zm319.688 134.875l25.875 3.25.5.5-108.938 108.938V391.78l82.563-82.592z"/>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                        <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                        <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
                                                             <Grid Margin="0,4,0,0">
                                                                 <Grid.ColumnDefinitions>
@@ -12806,9 +13171,9 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Name="bdMyDeviceGPU" Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15" ToolTip="Click a GPU entry to open that GPU vendor's control panel.">
+                                                <Border Name="bdMyDeviceGPU" Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15" ToolTip="Click a GPU entry to open that GPU vendor's control panel.">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                    <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="59" Height="59">
                                                                     <Rectangle Canvas.Left="4" Canvas.Top="12.5" Width="55" Height="32" Fill="#38454F"/>
@@ -12820,7 +13185,7 @@ function Set-WmtPowerSettingIndex {
                                                                     <Path Fill="#F3CC6D" Data="M3,26.5H1c-0.553,0-1-0.447-1-1s0.447-1,1-1h2c0.553,0,1,0.447,1,1S3.553,26.5,3,26.5z"/>
                                                                     <Path Fill="#F3CC6D" Data="M3,43.5H1c-0.553,0-1-0.447-1-1s0.447-1,1-1h2c0.553,0,1,0.447,1,1S3.553,43.5,3,43.5z"/>
                                                                     <Rectangle Canvas.Left="0" Canvas.Top="15.5" Width="3" Height="4" Fill="#839594"/>
-                                                                    <Rectangle Canvas.Left="12" Canvas.Top="44.5" Width="24" Height="4" Fill="#0078D7"/>
+                                                                    <Rectangle Canvas.Left="12" Canvas.Top="44.5" Width="24" Height="4" Fill="{DynamicResource Accent}"/>
                                                                     <Path Fill="#6C797A" Data="M24.389,38.655c-1.76-2.032-2.974-4.996-3.295-8.376c-0.003-0.025-0.005-0.05-0.008-0.075C21.035,29.645,21,29.079,21,28.5s0.035-1.145,0.086-1.704c0.003-0.025,0.005-0.05,0.008-0.075c0.321-3.38,1.535-6.344,3.295-8.376c0.781-1.046,1.67-2.005,2.667-2.845H17c-4.971,0-9,5.82-9,13s4.029,13,9,13h10.057C26.059,40.66,25.171,39.7,24.389,38.655z"/>
                                                                     <Path Fill="#283238" Data="M34.846,41.5C29.534,39.394,26,34.23,26,28.5s3.534-10.894,8.846-13h10.309C50.466,17.606,54,22.77,54,28.5s-3.534,10.894-8.846,13H34.846z"/>
                                                                     <Ellipse Canvas.Left="37" Canvas.Top="25.5" Width="6" Height="6" Fill="#CBD4D8"/>
@@ -12842,9 +13207,9 @@ function Set-WmtPowerSettingIndex {
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                        <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
                                                             <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
-                                                            <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="#6E6E73" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                                        <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                                             <Button Name="btnMyDeviceGPUDriver" Content="Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Open GPU vendor driver download pages"/>
                                                             <Grid Margin="0,4,0,0">
                                                                 <Grid.ColumnDefinitions>
@@ -12858,9 +13223,9 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
                                                                     <Canvas.RenderTransform>
@@ -12911,8 +13276,8 @@ function Set-WmtPowerSettingIndex {
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <WrapPanel Margin="0,10,0,0">
                                                                 <Button Name="btnMyDeviceDriverReport" Content="Drv Log" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Generate an installed driver report"/>
                                                                 <Button Name="btnMyDeviceDriverBackup" Content="Backup" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Export installed drivers"/>
@@ -12924,21 +13289,21 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="24" Height="24">
-                                                                    <Rectangle Canvas.Left="4.36" Canvas.Top="16.77" Width="15.27" Height="5.73" RadiusX="1.91" RadiusY="1.91" Stroke="#0078D7" StrokeThickness="1.91" Fill="Transparent"/>
-                                                                    <Path Stroke="#0078D7" StrokeThickness="1.91" Fill="Transparent" Data="M19.64,18.68V3.41A1.91,1.91,0,0,0,17.73,1.5H6.27A1.91,1.91,0,0,0,4.36,3.41V18.68"/>
-                                                                    <Line X1="13.91" Y1="19.64" X2="17.73" Y2="19.64" Stroke="#0078D7" StrokeThickness="1.91"/>
-                                                                    <Ellipse Canvas.Left="6.28" Canvas.Top="18.69" Width="1.9" Height="1.9" Fill="#0078D7"/>
+                                                                    <Rectangle Canvas.Left="4.36" Canvas.Top="16.77" Width="15.27" Height="5.73" RadiusX="1.91" RadiusY="1.91" Stroke="{DynamicResource Accent}" StrokeThickness="1.91" Fill="Transparent"/>
+                                                                    <Path Stroke="{DynamicResource Accent}" StrokeThickness="1.91" Fill="Transparent" Data="M19.64,18.68V3.41A1.91,1.91,0,0,0,17.73,1.5H6.27A1.91,1.91,0,0,0,4.36,3.41V18.68"/>
+                                                                    <Line X1="13.91" Y1="19.64" X2="17.73" Y2="19.64" Stroke="{DynamicResource Accent}" StrokeThickness="1.91"/>
+                                                                    <Ellipse Canvas.Left="6.28" Canvas.Top="18.69" Width="1.9" Height="1.9" Fill="{DynamicResource Accent}"/>
                                                                 </Canvas>
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <StackPanel x:Name="pnlDeviceStorageList" Margin="0,0,0,0"/>
                                                             <Grid Margin="0,10,0,0">
                                                                 <Grid.RowDefinitions>
@@ -12961,7 +13326,7 @@ function Set-WmtPowerSettingIndex {
                                                     </Grid>
                                                 </Border>
                                         </WrapPanel>
-                                        <Border Margin="20,0,20,24" BorderBrush="#2C2C2E" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
+                                         <Border Margin="20,0,20,24" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
                                             <Button Name="btnMyDeviceExport" Content="Export" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
                                         </Border>
                                     </StackPanel>
@@ -13099,18 +13464,18 @@ function Set-WmtPowerSettingIndex {
                         </StackPanel>
                     </Border>
                     
-                    <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                 <Viewbox Width="24" Height="24">
                                     <Canvas Width="24" Height="24">
-                                        <Path Fill="#0078D7" Data="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
                                     </Canvas>
                                 </Viewbox>
                             </Border>
                             <StackPanel Grid.Column="1">
-                                <TextBlock Text="OneDrive" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                <TextBlock Text="Set all OneDrive files to 'Online Only' to immediately free up local disk space." FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                <TextBlock Text="OneDrive" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Set all OneDrive files to 'Online Only' to immediately free up local disk space." FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                 <Button Name="btnCleanupOneDrive" Content="Free Up Space" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="130"/>
                             </StackPanel>
                         </Grid>
@@ -13276,14 +13641,24 @@ function Set-WmtTheme {
     if (-not $script:ThemePalettes.ContainsKey($Theme)) { $Theme = "dark" }
     $palette = $script:ThemePalettes[$Theme]
 
-    foreach ($key in $palette.Keys) {
-        if ($key -eq "LogText") { continue }
-        $color = [System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key])
-        $window.Resources[$key] = [System.Windows.Media.SolidColorBrush]::new($color)
-    }
+    Set-WmtThemeResources -Element $window -Palette $palette
 
     $window.Background = $window.Resources["BgDark"]
     $window.Foreground = $window.Resources["TextPrimary"]
+
+    if ($script:WmtThemedElements) {
+        foreach ($element in @($script:WmtThemedElements)) {
+            try {
+                if (-not $element -or [object]::ReferenceEquals($element, $window)) { continue }
+                Set-WmtThemeResources -Element $element -Palette $palette
+                if ($element -is [System.Windows.Window]) {
+                    $element.Background = $element.Resources["BgDark"]
+                    $element.Foreground = $element.Resources["TextPrimary"]
+                }
+            }
+            catch {}
+        }
+    }
 
     $logBoxCtrl = Get-Ctrl "LogBox"
     if ($logBoxCtrl) { $logBoxCtrl.Foreground = $palette.LogText }
@@ -14972,30 +15347,38 @@ function Show-ProviderManager {
     $enabled = $settings.EnabledProviders
 
     # 2. Define UI
-    [xml]$pXaml = @"
+[xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#252526">
+        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
-        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#DDD"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
-        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="White"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="Button">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,0"/>
+        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         
         <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
-        <TextBlock Text="Select which package managers to scan." Foreground="#AAA" Margin="0,25,0,0" Grid.Row="0"/>
+        <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
 
         <StackPanel Grid.Row="1" Margin="0,15,0,0">
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
                 <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Windows Package Manager" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Windows Package Manager" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkMsStore" Grid.Column="0"/>
                 <TextBlock Text="MS Store" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Microsoft Store Apps" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Microsoft Store Apps" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -15043,13 +15426,14 @@ function Show-ProviderManager {
         </StackPanel>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Name="btnSave" Content="Save &amp; Close" Background="#007ACC" Width="120" Height="30" Foreground="White"/>
+            <Button Name="btnSave" Content="Save &amp; Close" Background="{DynamicResource Accent}" Width="120" Height="30" Foreground="{DynamicResource AccentText}"/>
         </StackPanel>
     </Grid>
 </Window>
 "@
     $reader = (New-Object System.Xml.XmlNodeReader $pXaml)
     $win = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $win
 
     function Get-WinCtrl($name) { $win.FindName($name) }
     
@@ -15074,13 +15458,14 @@ function Show-ProviderManager {
 
     # Helper for status check
     function Set-ProviderStatus($cmd, $lbl) {
+        $labelCtrl = Get-WinCtrl $lbl
         if (Get-Command $cmd -ErrorAction SilentlyContinue) {
-            (Get-WinCtrl $lbl).Text = "Installed"
-            (Get-WinCtrl $lbl).Foreground = "LightGreen"
+            $labelCtrl.Text = "Installed"
+            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
         }
         else {
-            (Get-WinCtrl $lbl).Text = "Not Found"
-            (Get-WinCtrl $lbl).Foreground = "Orange"
+            $labelCtrl.Text = "Not Found"
+            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
         }
     }
 
@@ -16989,10 +17374,11 @@ $btnCleanReg.Add_Click({
             $btn.Add_Click({ param($s, $e) $form.Tag = $s.Tag; $form.Close() })
             $form.Controls.Add($btn); $y += 40
         }
+        Set-WmtWinFormsTheme -Control $form
         $form.ShowDialog() | Out-Null
         if ($form.Tag) { Invoke-RegistryTask -Action $form.Tag }
     })
-$# --- OneDrive Cleanup ---
+# --- OneDrive Cleanup ---
 $btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
 if ($btnCleanupOneDrive) {
     # Check if OneDrive is actually present on the system before enabling the button
