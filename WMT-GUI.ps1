@@ -3183,7 +3183,7 @@ function Start-XboxClean {
 function Start-GpeditInstall {
     # Check for User Confirmation
     $msg = "Install Local Group Policy Editor?`n`nThis enables the Group Policy Editor (gpedit.msc) on Windows Home editions by installing the built-in system packages.`n`nContinue?"
-    $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Install", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxImage]::Question)
+    $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Install", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($res -eq "No") { return }
 
     Invoke-UiCommand {
@@ -5527,13 +5527,13 @@ function Invoke-TempCleanup {
             $gridForm.ShowDialog() | Out-Null
         }
         else {
-            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         }
     }
     else {
         Write-GuiLog "Total Removed: $finalTotalFormatted"
         $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalTotalFormatted"
-        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
     }
 }
 
@@ -12173,6 +12173,7 @@ function Set-WmtPowerSettingIndex {
                             <Button Name="btnShowCatalog" Content="Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
                             <Button Name="btnWingetScan" Content="Refresh All" Style="{StaticResource AccentBtn}"/>
                             <Button Name="btnWingetUpdateSel" Content="Update Selected" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnWingetUpdateAll" Content="Update All" Style="{StaticResource PositiveBtn}"/>
                             <Button Name="btnWingetInstall" Content="Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
                             <Button Name="btnWingetUninstall" Content="Uninstall" Style="{StaticResource DestructiveBtn}"/>
                             <Button Name="btnWingetIgnore" Content="Ignore" Style="{StaticResource WarningBtn}"/>
@@ -13191,11 +13192,11 @@ function Set-WmtPowerSettingIndex {
                             <StackPanel Margin="0,8,0,0">
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
                                     <TextBlock Text="Author: " Foreground="{StaticResource TextSecondary}" Width="120"/>
-                                    <Button Name="btnCreditLilBattiCLI" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                    <Button Name="btnCreditLilBatti" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
                                     <TextBlock Text="GUI &amp; Features: " Foreground="{StaticResource TextSecondary}" Width="120"/>
-                                    <Button Name="btnCreditChaythonGUI" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                    <Button Name="btnCreditChaython" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                             </StackPanel>
                             <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
@@ -13528,6 +13529,7 @@ Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H
 Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
+Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
 Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
 Set-ButtonIcon "btnSupportDiscord" "M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09c-.01-.02-.04-.03-.07-.03c-1.5.26-2.93.71-4.27 1.33c-.01 0-.02.01-.03.02c-2.72 4.07-3.47 8.03-3.1 11.95c0 .02.01.04.03.05c1.8 1.32 3.53 2.12 5.2 2.65c.03.01.06 0 .07-.02c.4-.55.76-1.13 1.07-1.74c.02-.04 0-.08-.04-.09c-.57-.22-1.11-.48-1.64-.78c-.04-.02-.04-.08.01-.11c.11-.08.22-.17.33-.25c.02-.02.05-.02.07-.01c3.44 1.57 7.15 1.57 10.55 0c.02-.01.05-.01.07.01c.11.09.22.17.33.26c.04.03.04.09-.01.11c-.52.31-1.07.56-1.64.78c-.04.01-.05.06-.04.09c.32.61.68 1.19 1.07 1.74c.03.01.06.02.09.01c1.67-.53 3.4-1.33 5.2-2.65c.02-.01.03-.03.03-.05c.44-4.53-.73-8.46-3.1-11.95c-.01-.01-.02-.02-.04-.02z" "Join Discord" "Opens the community support Discord server"
@@ -13599,12 +13601,6 @@ $lblWingetTitle = Get-Ctrl "lblWingetTitle"
 $pbWingetProgress = Get-Ctrl "pbWingetProgress"
 $lblWingetProgress = Get-Ctrl "lblWingetProgress"
 $lblWingetLastResult = Get-Ctrl "lblWingetLastResult"
-$cmbPackageManager = Get-Ctrl "cmbPackageManager"
-if ($cmbPackageManager) {
-    $cmbPackageManager.Add_SelectionChanged({ 
-            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-        })
-}
 
 $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
@@ -13937,11 +13933,8 @@ $btnToggleTheme = Get-Ctrl "btnToggleTheme"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
 $btnDonateIos12 = Get-Ctrl "btnDonateIos12"
 $btnDonate = Get-Ctrl "btnDonate"
-$btnCreditLilBattiCLI = Get-Ctrl "btnCreditLilBattiCLI"
-$btnCreditChaythonCLI = Get-Ctrl "btnCreditChaythonCLI"
-$btnCreditChaythonGUI = Get-Ctrl "btnCreditChaythonGUI"
-$btnCreditChaythonFeatures = Get-Ctrl "btnCreditChaythonFeatures"
-$btnCreditIos12checker = Get-Ctrl "btnCreditIos12checker"
+$btnCreditLilBatti = Get-Ctrl "btnCreditLilBatti"
+$btnCreditChaython = Get-Ctrl "btnCreditChaython"
 
 $bdQuickFind = Get-Ctrl "bdQuickFind"
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
@@ -14029,6 +14022,7 @@ function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b = Get-Ctrl
 # 1. Updates (Winget)
 Add-SearchIndexEntry "btnWingetScan"        "Check for Updates (Winget)"      "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
@@ -14204,7 +14198,17 @@ $miUpdate.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miUpdate)
 
-# 2. Uninstall Selected
+# 2. Update All
+$miUpdateAll = New-Object System.Windows.Controls.MenuItem
+$miUpdateAll.Header = "Update All"
+$miUpdateAll.Add_Click({
+        if ($btnWingetUpdateAll) {
+            $btnWingetUpdateAll.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+    })
+[void]$ctxMenu.Items.Add($miUpdateAll)
+
+# 3. Uninstall Selected
 $miUninstall = New-Object System.Windows.Controls.MenuItem
 $miUninstall.Header = "Uninstall Selected"
 $miUninstall.Add_Click({ 
@@ -14212,7 +14216,7 @@ $miUninstall.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miUninstall)
 
-# 3. View Manifest
+# 4. View Manifest
 $miManifest = New-Object System.Windows.Controls.MenuItem
 $miManifest.Header = "View App Manifest"
 $miManifest.ToolTip = "Show the winget manifest details for the selected package"
@@ -14234,7 +14238,7 @@ $miManifest.Add_Click({
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 4. Ignore Selected
+# 5. Ignore Selected
 $miIgnore = New-Object System.Windows.Controls.MenuItem
 $miIgnore.Header = "Ignore Selected"
 $miIgnore.Add_Click({ 
@@ -14242,7 +14246,7 @@ $miIgnore.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miIgnore)
 
-# 5. Manage Ignored
+# 6. Manage Ignored
 $miManage = New-Object System.Windows.Controls.MenuItem
 $miManage.Header = "Manage Ignored List..."
 $miManage.Add_Click({ 
@@ -14253,7 +14257,7 @@ $miManage.Add_Click({
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 6. Refresh Updates
+# 7. Refresh Updates
 $miRefresh = New-Object System.Windows.Controls.MenuItem
 $miRefresh.Header = "Refresh Updates"
 $miRefresh.Add_Click({ 
@@ -14264,6 +14268,7 @@ $miRefresh.Add_Click({
 $ctxMenu.Add_Opened({
         $selected = @($lstWinget.SelectedItems)
         $canShowManifest = ($selected.Count -eq 1 -and (Test-WingetManifestSupportedItem $selected[0]))
+        $miUpdateAll.IsEnabled = ($btnWingetUpdateAll -and $btnWingetUpdateAll.Visibility -eq [System.Windows.Visibility]::Visible)
         $miManifest.IsEnabled = $canShowManifest
         if ($canShowManifest) {
             $miManifest.ToolTip = "Show the winget manifest details for the selected package"
@@ -14273,7 +14278,7 @@ $ctxMenu.Add_Opened({
         }
     })
 
-# 7. Attach to List
+# 8. Attach to List
 $lstWinget.ContextMenu = $ctxMenu
 
 # --- WINGET ---
@@ -14303,6 +14308,7 @@ $Script:StartWingetAction = {
     # UI Updates
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
+    if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
     if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $false }
     if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $false }
     $lblWingetStatus.Text = "$ActionName in progress..."
@@ -14919,6 +14925,7 @@ timeout /t 5
 
                 $btnWingetScan.IsEnabled = $true
                 $btnWingetUpdateSel.IsEnabled = $true
+                if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                 if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
                 if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
 
@@ -15304,6 +15311,7 @@ $btnWingetScan.Add_Click({
         $btnWingetUpdateSel.IsEnabled = $false
         $btnWingetInstall.Visibility = "Collapsed"
         $btnWingetUpdateSel.Visibility = "Visible"
+        if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
@@ -16009,7 +16017,9 @@ $btnWingetFind.Add_Click({
         $query = $txtWingetSearch.Text
         $lblWingetTitle.Text = "Search Results: $query"
         $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
-        $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
+        $btnWingetUpdateSel.Visibility = "Collapsed"
+        if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Collapsed" }
+        $btnWingetInstall.Visibility = "Visible"
         $lstWinget.Items.Clear()
         $btnWingetFind.IsEnabled = $false 
     
@@ -16077,9 +16087,14 @@ $btnWingetFind.Add_Click({
 
                             # Split by 2 OR MORE spaces (\s{2,}). 
                             # This perfectly separates columns without breaking names that have 1 space!
-                            $parts = $line -split '\s{2,}'
+                            $parts = @($line -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
+                            $headerTokens = @("name", "id", "version", "match", "source")
+                            $nonDividerParts = @($parts | Where-Object { $_ -notmatch "^-+$" })
+                            if ($nonDividerParts.Count -eq 0) { continue }
+                            if (@($nonDividerParts | Where-Object { $headerTokens -notcontains $_.ToLowerInvariant() }).Count -eq 0) { continue }
+
                             $len = $parts.Count
-                        
+
                             $n = $null; $i = $null; $v = $null; $s = "winget"
 
                             if ($len -ge 5) {
@@ -16105,9 +16120,13 @@ $btnWingetFind.Add_Click({
 
                             if ($n -and $i -and $i.Length -gt 2) {
                                 # Final header checks just in case
-                                if ($n -eq "Name" -and $i -eq "Id") { continue }
-                                if ($i -eq "Version" -or $v -eq "Source") { continue }
-                            
+                                $nText = ([string]$n).Trim()
+                                $iText = ([string]$i).Trim()
+                                $vText = ([string]$v).Trim()
+                                if ($nText -eq "-" -or $nText.ToLowerInvariant() -eq "name") { continue }
+                                if ($iText -eq "-" -or $headerTokens -contains $iText.ToLowerInvariant()) { continue }
+                                if ($vText -eq "-" -or $headerTokens -contains $vText.ToLowerInvariant()) { continue }
+
                                 if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
                                 if ($v -eq "Unknown") { $v = "?" }
                             
@@ -16202,6 +16221,35 @@ $btnWingetUpdateSel.Add_Click({
         }
         & $Script:StartWingetAction -ListItems $selected -ActionName "Update"
     })
+
+function Get-WingetListedUpdateItems {
+    if (-not $lstWinget) { return @() }
+    return @($lstWinget.Items | Where-Object {
+            $id = [string]$_.Id
+            $source = [string]$_.Source
+            $name = [string]$_.Name
+            -not [string]::IsNullOrWhiteSpace($id) -and
+            -not [string]::IsNullOrWhiteSpace($source) -and
+            $name -notin @("No results found", "No updates available")
+        })
+}
+
+if ($btnWingetUpdateAll) {
+    $btnWingetUpdateAll.Add_Click({
+            $items = @(Get-WingetListedUpdateItems)
+            if ($items.Count -eq 0) { return }
+
+            $msg = "Update all $($items.Count) listed package(s)?"
+            $res = [System.Windows.MessageBox]::Show($msg, "Update All", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+            if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+            if (-not (Show-WingetRestartRiskWarning -Items $items -Action "Update")) {
+                Write-GuiLog "[Update All] Cancelled by user after restart warning."
+                return
+            }
+            & $Script:StartWingetAction -ListItems $items -ActionName "Update"
+        })
+}
 
 # 2. Install Selected (Removed CmdTemplate so it includes --accept-agreements)
 $btnWingetInstall.Add_Click({ 
@@ -17012,11 +17060,8 @@ $btnCtxBuilder.Add_Click({ Show-ContextMenuBuilder })
 if ($btnSupportDiscord) { $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" }) }
 if ($btnSupportIssue) { $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" }) }
 if ($btnDonateIos12) { $btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" }) }
-if ($btnCreditLilBattiCLI) { $btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
-if ($btnCreditChaythonFeatures) { $btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditChaythonCLI) { $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditChaythonGUI) { $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditIos12checker) { $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnCreditLilBatti) { $btnCreditLilBatti.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnCreditChaython) { $btnCreditChaython.Add_Click({ Start-Process "https://github.com/Chaython" }) }
 if ($btnToggleTheme) {
     $btnToggleTheme.Add_Click({
             $nextTheme = if ($script:CurrentTheme -eq "dark") { "light" } else { "dark" }
