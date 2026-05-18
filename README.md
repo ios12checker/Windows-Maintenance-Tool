@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.7-green)
+![Version](https://img.shields.io/badge/version-v5.8-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -22,31 +22,37 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ## Screenshot
 
-<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/428a1a91-2407-423f-857b-b4556072b6a6" />
+<img width="1920" height="1034" alt="image" src="https://github.com/user-attachments/assets/1045be3d-6feb-430a-81ec-0f7787fc74b0" />
 
-## What's New in v5.7
+## What's New in v5.8
 
-### Hosts and Network Fixes
+### Theme and Interface
 
-- Fixed hosts file saving by writing UTF-8 without BOM, preventing Windows from ignoring or misreading saved hosts entries.
-- Improved hosts file permission handling with the built-in Users SID for more consistent read/write behavior across languages.
-- Hosts ad-block updates and the Hosts Editor now use the safer no-BOM write path.
+- Added a full light theme for the main WPF interface and supporting WPF windows.
+- Improved theme naming, colors, and visibility across dark and light modes.
+- Added a theme toggle in Support & Credits.
+- Improved UI responsiveness for large lists and heavy tabs.
 
-### Winget Scan Reliability
+### Performance and Large List Optimizations
 
-- Added a Winget source preflight before the first package scan to reduce source database lockups and first-scan hangs.
-- Prevented overlapping Winget source refresh and update scans.
-- Avoids forcing source preflight on every manual refresh, keeping later scans faster.
+- Optimized Firewall Manager loading by lazy-loading rules, using background runspaces, caching base rules, and loading heavy per-rule details only when selected.
+- Improved large-list rendering with double buffering and better layout behavior.
+- Improved community cleanup rule list rendering so controls do not overlap the bottom buttons.
 
-### My Device Improvements
+### Benchmark, DNS, and Updates
 
-- Added drive health details, clickable storage entries, Disk Management access, and a drive benchmark tool.
-- Added a **My Device Export** action for saving the current device summary to the data folder.
-- Expanded OS, motherboard, battery, power, network, GPU, and storage details.
-- GPU entries can open vendor control panels where supported.
-- My Device now lazy-loads when opened, so WMT becomes interactive faster after launch.
-- Improved saved window positioning so the app is moved back onto a connected monitor if a previous display is disconnected.
-- Improved Activity Log resizing for easier reading.
+- Reworked Drive Benchmark for more reliable real disk I/O results and less misleading Windows cache behavior.
+- Reworked DNS and DoH actions to run in background runspaces.
+- Added a richer Custom DNS dialog with IPv4/IPv6 validation and optional DoH template registration/removal.
+- Added right-click Winget manifest lookup for supported package rows.
+- Restored **Update All** and improved Winget result header parsing.
+
+### Tweaks and Cleanup
+
+- Added many new tweak controls for Explorer, mouse behavior, context menus, privacy, search, gaming, visual effects, notifications, and lock screen behavior.
+- Rewrote the Broken Shortcut Manager with rescan/stop support, status feedback, better detection, and right-click tools.
+- Added more relevant quick-action buttons to My Device cards.
+
 
 ## Core Features
 
