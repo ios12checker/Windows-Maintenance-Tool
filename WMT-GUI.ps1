@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.7"
+$AppVersion = "5.8"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -129,11 +129,284 @@ function Invoke-UiCommand {
     [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
 }
 
+function Set-WmtDoubleBuffered {
+    param(
+        [System.Windows.Forms.Control]$Control,
+        [switch]$Children
+    )
+    if (-not $Control) { return }
+
+    try {
+        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    }
+    catch {}
+
+    if ($Children) {
+        foreach ($child in $Control.Controls) {
+            Set-WmtDoubleBuffered -Control $child -Children
+        }
+    }
+}
+
+function Enable-WmtWpfItemsVirtualization {
+    param([System.Windows.Controls.ItemsControl]$Control)
+    if (-not $Control) { return }
+    try {
+        [System.Windows.Controls.VirtualizingStackPanel]::SetIsVirtualizing($Control, $true)
+        [System.Windows.Controls.VirtualizingStackPanel]::SetVirtualizationMode($Control, [System.Windows.Controls.VirtualizationMode]::Recycling)
+        [System.Windows.Controls.ScrollViewer]::SetCanContentScroll($Control, $true)
+    }
+    catch {}
+}
+
+function Get-WmtEnumeratedFiles {
+    param(
+        [string]$Path,
+        [string]$Filter = "*",
+        [switch]$Recurse
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+
+    if (-not $Recurse) {
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($Path, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $file
+            }
+        }
+        catch {}
+        return
+    }
+
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($Path)
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $file
+            }
+        }
+        catch {}
+
+        try {
+            foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                $pending.Push($child)
+            }
+        }
+        catch {}
+    }
+}
+
+function Find-WmtFirstEnumeratedFile {
+    param([string]$Path, [string]$Filter)
+    foreach ($file in Get-WmtEnumeratedFiles -Path $Path -Filter $Filter -Recurse) {
+        return $file
+    }
+    return $null
+}
+
+function Measure-WmtPathBytes {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return 0 }
+    try {
+        if ([System.IO.File]::Exists($Path)) {
+            return [System.IO.FileInfo]::new($Path).Length
+        }
+        if ([System.IO.Directory]::Exists($Path)) {
+            $total = [int64]0
+            foreach ($file in Get-WmtEnumeratedFiles -Path $Path -Recurse) {
+                try { $total += [System.IO.FileInfo]::new($file).Length } catch {}
+            }
+            return $total
+        }
+    }
+    catch {}
+    return 0
+}
+
+function Test-WmtDirectoryHasEntries {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return $false }
+    try {
+        foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($Path)) {
+            return $true
+        }
+    }
+    catch {}
+    return $false
+}
+
+function Remove-WmtEmptyChildDirectories {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+    try {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Path, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            Remove-WmtEmptyChildDirectories -Path $dir
+            try { [System.IO.Directory]::Delete($dir, $false) } catch {}
+        }
+    }
+    catch {}
+}
+
+function New-WmtVirtualRows {
+    param([object[]]$Items)
+    $rows = [System.Collections.ArrayList]::new()
+    foreach ($item in @($Items)) { [void]$rows.Add($item) }
+    return ,$rows
+}
+
+function Get-WmtVirtualGridRows {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    if (-not $Grid -or -not $Grid.Tag -or -not $Grid.Tag.PSObject.Properties["VirtualRows"]) {
+        return $null
+    }
+    return ,$Grid.Tag.VirtualRows
+}
+
+function Reset-WmtVirtualGridRowCount {
+    param([System.Windows.Forms.DataGridView]$Grid)
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or $null -eq $rows) { return }
+    $Grid.RowCount = $rows.Count
+    $Grid.ClearSelection()
+    $Grid.Refresh() 
+}
+
+function Remove-WmtVirtualGridRowsAt {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [int[]]$Indices
+    )
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or $null -eq $rows -or $null -eq $Indices -or $Indices.Count -eq 0) { return }
+    foreach ($index in ($Indices | Sort-Object -Descending)) {
+        if ($index -ge 0 -and $index -lt $rows.Count) {
+            $rows.RemoveAt($index)
+        }
+    }
+    Reset-WmtVirtualGridRowCount -Grid $Grid
+}
+
+function Set-WmtVirtualGridSort {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [string]$ColumnName
+    )
+    $rows = Get-WmtVirtualGridRows -Grid $Grid
+    if (-not $Grid -or -not $Grid.Tag -or $null -eq $rows -or $rows.Count -le 1 -or [string]::IsNullOrWhiteSpace($ColumnName)) { return }
+
+    $descending = if ($Grid.Tag.SortColumn -eq $ColumnName) { -not [bool]$Grid.Tag.SortDescending } else { $false }
+    $sorted = @($rows | Sort-Object -Property $ColumnName -Descending:$descending)
+    $rows.Clear()
+    foreach ($item in $sorted) { [void]$rows.Add($item) }
+    $Grid.Tag.SortColumn = $ColumnName
+    $Grid.Tag.SortDescending = $descending
+    $Grid.Refresh()
+}
+
+function Initialize-WmtVirtualDataGrid {
+    param(
+        [System.Windows.Forms.DataGridView]$Grid,
+        [System.Collections.IList]$Rows,
+        [switch]$EnableSort
+    )
+    if (-not $Grid) { return }
+    if (-not $Rows) { $Rows = [System.Collections.ArrayList]::new() }
+
+    Set-WmtDoubleBuffered -Control $Grid
+    $Grid.VirtualMode = $true
+    $Grid.Tag = [PSCustomObject]@{
+        VirtualRows    = $Rows
+        SortColumn     = $null
+        SortDescending = $false
+    }
+
+    $Grid.Add_CellValueNeeded({
+            param($s, $e)
+            $state = $s.Tag
+            if (-not $state -or -not $state.VirtualRows) { return }
+            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
+            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
+
+            $row = $state.VirtualRows[$e.RowIndex]
+            $name = $s.Columns[$e.ColumnIndex].Name
+            if ($row -is [System.Collections.IDictionary] -and $row.Contains($name)) {
+                $e.Value = $row[$name]
+                return
+            }
+            $prop = $row.PSObject.Properties[$name]
+            if ($prop) { $e.Value = $prop.Value }
+        })
+
+    $Grid.Add_CellValuePushed({
+            param($s, $e)
+            $state = $s.Tag
+            if (-not $state -or -not $state.VirtualRows) { return }
+            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
+            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
+
+            $row = $state.VirtualRows[$e.RowIndex]
+            $name = $s.Columns[$e.ColumnIndex].Name
+            if ($row -is [System.Collections.IDictionary]) {
+                $row[$name] = $e.Value
+                return
+            }
+            $prop = $row.PSObject.Properties[$name]
+            if ($prop) { $prop.Value = $e.Value }
+        })
+
+    if ($EnableSort) {
+        foreach ($col in $Grid.Columns) {
+            try { $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic } catch {}
+        }
+        $Grid.Add_ColumnHeaderMouseClick({
+                param($s, $e)
+                if ($e.ColumnIndex -ge 0 -and $e.ColumnIndex -lt $s.Columns.Count) {
+                    Set-WmtVirtualGridSort -Grid $s -ColumnName $s.Columns[$e.ColumnIndex].Name
+                }
+            })
+    }
+
+    $Grid.RowCount = $Rows.Count
+}
+
 function Update-TweakButtonStates {
     try {
+        $setButtonEnabled = {
+            param(
+                [string]$Name,
+                [bool]$Enabled
+            )
+
+            $button = Get-Ctrl $Name
+            if ($button) { $button.IsEnabled = $Enabled }
+        }
+
         $h = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -EA Ignore).HwSchMode
-        (Get-Ctrl "btnPerfEnableHags").IsEnabled = ($h -ne 2); (Get-Ctrl "btnPerfDisableHags").IsEnabled = ($h -eq 2)
-        $sm = Get-Service "SysMain" -EA Ignore; if ($sm) { $d = ($sm.StartType -eq 'Disabled'); (Get-Ctrl "btnPerfDisableSuperfetch").IsEnabled = (-not $d); (Get-Ctrl "btnPerfEnableSuperfetch").IsEnabled = $d }
+        & $setButtonEnabled "btnPerfEnableHags" ($h -ne 2); & $setButtonEnabled "btnPerfDisableHags" ($h -eq 2)
+
+        $sm = Get-Service "SysMain" -EA Ignore
+        if ($sm) {
+            $d = ($sm.StartType -eq 'Disabled')
+            & $setButtonEnabled "btnPerfDisableSuperfetch" (-not $d); & $setButtonEnabled "btnPerfEnableSuperfetch" $d
+        }
+
+        $hibernation = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -EA Ignore
+        if ($hibernation -and $null -ne $hibernation.HibernateEnabled) {
+            $hibernateEnabled = ([int]$hibernation.HibernateEnabled -ne 0)
+            & $setButtonEnabled "btnPerfDisableHibernate" $hibernateEnabled; & $setButtonEnabled "btnPerfEnableHibernate" (-not $hibernateEnabled)
+        }
+
+        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
+            $mma = Get-MMAgent -ErrorAction Ignore
+            if ($mma -and $null -ne $mma.MemoryCompression) {
+                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
+                & $setButtonEnabled "btnPerfDisableMemCompress" $memoryCompressionEnabled; & $setButtonEnabled "btnPerfEnableMemCompress" (-not $memoryCompressionEnabled)
+            }
+        }
+
         $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
         $ta = (Get-ItemProperty $ap -Name "TaskbarAl" -EA Ignore).TaskbarAl; (Get-Ctrl "btnTaskbarLeft").IsEnabled = ($ta -ne 0); (Get-Ctrl "btnTaskbarCenter").IsEnabled = ($ta -eq 0 -or $null -eq $ta)
         $tc = (Get-ItemProperty $ap -Name "TaskbarGlomLevel" -EA Ignore).TaskbarGlomLevel; (Get-Ctrl "btnNeverCombine").IsEnabled = ($tc -ne 2); (Get-Ctrl "btnAlwaysCombine").IsEnabled = ($tc -eq 2 -or $null -eq $tc)
@@ -145,6 +418,113 @@ function Update-TweakButtonStates {
         (Get-Ctrl "btnHideWidgets").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarDa" -EA Ignore).TaskbarDa -ne 0)
         (Get-Ctrl "btnHideTaskView").IsEnabled = ((Get-ItemProperty $ap -Name "ShowTaskViewButton" -EA Ignore).ShowTaskViewButton -ne 0)
         (Get-Ctrl "btnHideChat").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarMn" -EA Ignore).TaskbarMn -ne 0)
+
+        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        $hideExt = [int](Get-WmtRegValue $ap "HideFileExt" 1)
+        & $setButtonEnabled "btnExpShowExt" ($hideExt -ne 0); & $setButtonEnabled "btnExpHideExt" ($hideExt -eq 0)
+        $hidden = [int](Get-WmtRegValue $ap "Hidden" 2)
+        & $setButtonEnabled "btnExpShowHidden" ($hidden -ne 1); & $setButtonEnabled "btnExpHideHidden" ($hidden -eq 1)
+        $fullPath = [int](Get-WmtRegValue $cabinetPath "FullPath" 0)
+        & $setButtonEnabled "btnExpFullPathOn" ($fullPath -ne 1); & $setButtonEnabled "btnExpFullPathOff" ($fullPath -eq 1)
+        $launchTo = [int](Get-WmtRegValue $ap "LaunchTo" 2)
+        & $setButtonEnabled "btnExpLaunchThisPc" ($launchTo -ne 1); & $setButtonEnabled "btnExpLaunchQuickAccess" ($launchTo -eq 1)
+        $recentsHidden = ([int](Get-WmtRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $explorerPath "ShowFrequent" 1) -eq 0)
+        & $setButtonEnabled "btnExpHideRecents" (-not $recentsHidden); & $setButtonEnabled "btnExpShowRecents" $recentsHidden
+
+        $mousePath = "HKCU:\Control Panel\Mouse"
+        $mouseSpeed = [int](Get-WmtRegValue $mousePath "MouseSensitivity" 10)
+        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
+        $mouseAccelOn = ([string](Get-WmtRegValue $mousePath "MouseSpeed" "1") -ne "0")
+        & $setButtonEnabled "btnMouseAccelOn" (-not $mouseAccelOn); & $setButtonEnabled "btnMouseAccelOff" $mouseAccelOn
+        $singleClick = Test-WmtExplorerSingleClick
+        & $setButtonEnabled "btnMouseSingleClick" (-not $singleClick); & $setButtonEnabled "btnMouseDoubleClick" $singleClick
+
+        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        & $setButtonEnabled "btnCtxClassic" (-not $classicContext); & $setButtonEnabled "btnCtxModern" $classicContext
+        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        & $setButtonEnabled "btnCtxTakeOwnAdd" (-not $takeOwnInstalled); & $setButtonEnabled "btnCtxTakeOwnRemove" $takeOwnInstalled
+        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        & $setButtonEnabled "btnCtxPsHereAdd" (-not $psHereInstalled); & $setButtonEnabled "btnCtxPsHereRemove" $psHereInstalled
+
+        $adEnabled = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
+        & $setButtonEnabled "btnPrivacyAdsOff" ($adEnabled -ne 0); & $setButtonEnabled "btnPrivacyAdsOn" ($adEnabled -eq 0)
+        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+        $suggestionsOff = $true
+        foreach ($name in $suggestionNames) {
+            if ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" $name 1) -ne 0) { $suggestionsOff = $false; break }
+        }
+        & $setButtonEnabled "btnPrivacySuggestedOff" (-not $suggestionsOff); & $setButtonEnabled "btnPrivacySuggestedOn" $suggestionsOff
+        $tailoredOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
+        & $setButtonEnabled "btnPrivacyTailoredOff" (-not $tailoredOff); & $setButtonEnabled "btnPrivacyTailoredOn" $tailoredOff
+        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        $activityOff = ([int](Get-WmtRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
+        & $setButtonEnabled "btnPrivacyActivityOff" (-not $activityOff); & $setButtonEnabled "btnPrivacyActivityOn" $activityOff
+        $launchTrackingOff = ([int](Get-WmtRegValue $ap "Start_TrackProgs" 1) -eq 0)
+        & $setButtonEnabled "btnPrivacyAppLaunchOff" (-not $launchTrackingOff); & $setButtonEnabled "btnPrivacyAppLaunchOn" $launchTrackingOff
+
+        $webSearchOff = ([int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
+        & $setButtonEnabled "btnSearchWebOff" (-not $webSearchOff); & $setButtonEnabled "btnSearchWebOn" $webSearchOff
+        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
+        if ($searchSvc) {
+            $indexReduced = ($searchSvc.StartType -ne "Automatic")
+            & $setButtonEnabled "btnSearchIndexReduced" (-not $indexReduced); & $setButtonEnabled "btnSearchIndexDefault" $indexReduced
+        }
+
+        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
+        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        $gameCfgPath = "HKCU:\System\GameConfigStore"
+        $gameModeOn = ([int](Get-WmtRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](Get-WmtRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
+        & $setButtonEnabled "btnGameModeOn" (-not $gameModeOn); & $setButtonEnabled "btnGameModeOff" $gameModeOn
+        $gameBarOn = ([int](Get-WmtRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
+        & $setButtonEnabled "btnGameBarOff" $gameBarOn; & $setButtonEnabled "btnGameBarOn" (-not $gameBarOn)
+        $captureOn = ([int](Get-WmtRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
+        & $setButtonEnabled "btnGameCaptureOff" $captureOn; & $setButtonEnabled "btnGameCaptureOn" (-not $captureOn)
+        $fsoOff = ([int](Get-WmtRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+        & $setButtonEnabled "btnGameFsoOff" (-not $fsoOff); & $setButtonEnabled "btnGameFsoDefault" $fsoOff
+
+        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+        $visualMode = [int](Get-WmtRegValue $visualPath "VisualFXSetting" 0)
+        $snappyOn = ($visualMode -eq 3 -and [string](Get-WmtRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](Get-WmtRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
+        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
+
+        $tipsOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SoftLandingEnabled" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338389Enabled" 1) -eq 0)
+        & $setButtonEnabled "btnNotifyTipsOff" (-not $tipsOff); & $setButtonEnabled "btnNotifyTipsOn" $tipsOff
+        $setupOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+        & $setButtonEnabled "btnNotifySetupOff" (-not $setupOff); & $setButtonEnabled "btnNotifySetupOn" $setupOff
+        $lockPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        $lockFactsOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](Get-WmtRegValue $lockPath "SubscribedContent-338387Enabled" 1) -eq 0)
+        $spotlightOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
+        & $setButtonEnabled "btnLockFactsOff" (-not $lockFactsOff); & $setButtonEnabled "btnLockFactsOn" $lockFactsOff
+        & $setButtonEnabled "btnLockSpotlightOff" (-not $spotlightOff); & $setButtonEnabled "btnLockSpotlightOn" $spotlightOff
+        & $setButtonEnabled "btnLockPlain" (-not ($lockFactsOff -and $spotlightOff)); & $setButtonEnabled "btnLockDefault" ($lockFactsOff -or $spotlightOff)
+
+        $fastStartupOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
+        & $setButtonEnabled "btnStartupFastOff" $fastStartupOn; & $setButtonEnabled "btnStartupFastOn" (-not $fastStartupOn)
+        $restoreFoldersOn = ([int](Get-WmtRegValue $ap "PersistBrowsers" 0) -ne 0)
+        & $setButtonEnabled "btnStartupRestoreFoldersOn" (-not $restoreFoldersOn); & $setButtonEnabled "btnStartupRestoreFoldersOff" $restoreFoldersOn
+
+        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
+        if ($null -ne $batteryThreshold) {
+            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
+        }
+        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
+        if ($null -ne $usbAc -and $null -ne $usbDc) {
+            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
+            & $setButtonEnabled "btnPowerUsbSuspendOn" (-not $usbOn); & $setButtonEnabled "btnPowerUsbSuspendOff" ($usbAc -ne 0 -or $usbDc -ne 0)
+        }
+        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
+        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
+            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
+            & $setButtonEnabled "btnPowerPcieModerate" (-not $pcieModerate); & $setButtonEnabled "btnPowerPcieOff" ($pcieAc -ne 0 -or $pcieDc -ne 0)
+        }
+
+        $longPathsOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
+        & $setButtonEnabled "btnDevLongPathsOn" (-not $longPathsOn); & $setButtonEnabled "btnDevLongPathsOff" $longPathsOn
+        $devModeOn = ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
+        & $setButtonEnabled "btnDevModeOn" (-not $devModeOn); & $setButtonEnabled "btnDevModeOff" $devModeOn
     }
     catch {}
 }
@@ -1463,14 +1843,14 @@ function New-MyDeviceTextBlock {
     param(
         [string]$Text,
         [int]$FontSize = 13,
-        [string]$Foreground = "#98989D",
+        [string]$Foreground = "TextSecondary",
         [string]$FontWeight = "Normal",
         [double]$MarginTop = 0
     )
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
     $tb.FontSize = $FontSize
-    $tb.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Foreground)
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Foreground
     $tb.TextWrapping = [System.Windows.TextWrapping]::Wrap
     $tb.LineHeight = 18
     if ($FontWeight -ne "Normal") {
@@ -1524,8 +1904,8 @@ function Set-MyDeviceGpuCards {
         $details = if ($lines.Count -gt 1) { ($lines[1..($lines.Count - 1)] -join "`n") } else { "Vendor: $vendor" }
 
         $card = New-Object System.Windows.Controls.Border
-        $card.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#141416")
-        $card.BorderBrush = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#2C2C2E")
+        Set-WmtThemedBrush -Object $card -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $card -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $card.BorderThickness = [System.Windows.Thickness]::new(1)
         $card.CornerRadius = [System.Windows.CornerRadius]::new(8)
         $card.Padding = [System.Windows.Thickness]::new(10)
@@ -1535,13 +1915,13 @@ function Set-MyDeviceGpuCards {
         $card.ToolTip = if ($vendor -eq "Unknown") { "No known GPU vendor detected for this adapter." } else { "Open $vendor control panel for this GPU." }
 
         $stack = New-Object System.Windows.Controls.StackPanel
-        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $title -FontSize 13 -Foreground "#EBEBF5" -FontWeight "SemiBold"))
-        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $details -FontSize 12 -Foreground "#98989D" -MarginTop 3))
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $title -FontSize 13 -Foreground "TextPrimary" -FontWeight "SemiBold"))
+        [void]$stack.Children.Add((New-MyDeviceTextBlock -Text $details -FontSize 12 -Foreground "TextSecondary" -MarginTop 3))
         $card.Child = $stack
 
         $card.Add_MouseLeftButtonUp({
                 param($s, $e)
-                $selectedVendor = [string]$sender.Tag
+                $selectedVendor = [string]$s.Tag
                 if ([string]::IsNullOrWhiteSpace($selectedVendor) -or $selectedVendor -eq "Unknown") {
                     Write-GuiLog "No known GPU vendor detected for the clicked GPU entry."
                 }
@@ -1795,16 +2175,320 @@ function Start-MyDeviceBitLockerStatusUpdate {
     $script:BitLockerStatusTimer.Start()
 }
 
+function Resolve-WmtThemeResourceKey {
+    param([string]$ColorOrKey)
+
+    if ([string]::IsNullOrWhiteSpace($ColorOrKey)) { return $null }
+    $value = $ColorOrKey.Trim()
+
+    if ($script:ThemePalettes) {
+        foreach ($theme in @($script:ThemePalettes.Keys)) {
+            if ($script:ThemePalettes[$theme].ContainsKey($value)) { return $value }
+        }
+    }
+
+    switch -Regex ($value.ToUpperInvariant()) {
+        "^#0D1117$" { return "BgDark" }
+        "^#161B22$" { return "BgPanel" }
+        "^#1C1C1E$" { return "BgPanel" }
+        "^#141416$" { return "BgPanel" }
+        "^#21262D$" { return "BgElevated" }
+        "^#252526$" { return "BgElevated" }
+        "^#30363D$" { return "BorderBrush" }
+        "^#2C2C2E$" { return "BorderBrush" }
+        "^#58A6FF$" { return "Accent" }
+        "^#0078D7$" { return "Accent" }
+        "^#1A0078D7$" { return "BgElevated" }
+        "^#79C0FF$" { return "AccentHover" }
+        "^#E6EDF3$" { return "TextPrimary" }
+        "^#EBEBF5$" { return "TextPrimary" }
+        "^#8B949E$" { return "TextSecondary" }
+        "^#98989D$" { return "TextSecondary" }
+        "^#6E7681$" { return "TextMuted" }
+        "^#6E6E73$" { return "TextMuted" }
+        "^#238636$" { return "Success" }
+        "^#3FB950$" { return "SuccessHover" }
+        "^#2EA043$" { return "SuccessHover" }
+        "^#DA3633$" { return "Danger" }
+        "^#F85149$" { return "DangerHover" }
+        "^#D29922$" { return "Warning" }
+        "^#E3B341$" { return "WarningHover" }
+        "^#FFFFFF$" { return "AccentText" }
+        "^WHITE$" { return "AccentText" }
+        "^BLACK$" { return "BgDark" }
+        default { return $null }
+    }
+}
+
 function New-WmtBrush {
-    param([string]$Color)
-    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color) }
+    param([string]$ColorOrKey)
+
+    $resourceKey = Resolve-WmtThemeResourceKey $ColorOrKey
+    if ($resourceKey -and $window -and $window.Resources[$resourceKey]) {
+        return $window.Resources[$resourceKey]
+    }
+
+    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($ColorOrKey) }
     catch { return [System.Windows.Media.BrushConverter]::new().ConvertFromString("#8B949E") }
+}
+
+function Set-WmtThemeResources {
+    param(
+        [System.Windows.FrameworkElement]$Element,
+        [hashtable]$Palette
+    )
+
+    if (-not $Element -or -not $Palette) { return }
+    foreach ($key in $Palette.Keys) {
+        if ($key -eq "LogText") { continue }
+        $color = [System.Windows.Media.ColorConverter]::ConvertFromString($Palette[$key])
+        $Element.Resources[$key] = [System.Windows.Media.SolidColorBrush]::new($color)
+    }
+}
+
+function Set-WmtThemedBrush {
+    param(
+        [System.Windows.DependencyObject]$Object,
+        [System.Windows.DependencyProperty]$Property,
+        [string]$ColorOrKey,
+        [string]$FallbackKey = "TextSecondary"
+    )
+
+    if (-not $Object -or -not $Property) { return }
+
+    $resourceKey = Resolve-WmtThemeResourceKey $ColorOrKey
+    if (-not $resourceKey) { $resourceKey = $FallbackKey }
+
+    if ($resourceKey -and $Object -is [System.Windows.FrameworkElement]) {
+        $Object.SetResourceReference($Property, $resourceKey)
+        return
+    }
+    if ($resourceKey -and $Object -is [System.Windows.FrameworkContentElement]) {
+        $Object.SetResourceReference($Property, $resourceKey)
+        return
+    }
+
+    $Object.SetValue($Property, (New-WmtBrush $ColorOrKey))
+}
+
+function Add-WmtThemeResources {
+    param([System.Windows.FrameworkElement]$Element)
+
+    if (-not $Element -or -not $script:ThemePalettes) { return }
+    $theme = if ($script:CurrentTheme -and $script:ThemePalettes.ContainsKey($script:CurrentTheme)) { $script:CurrentTheme } else { "dark" }
+    $palette = $script:ThemePalettes[$theme]
+    Set-WmtThemeResources -Element $Element -Palette $palette
+
+    if (-not $script:WmtThemedElements) {
+        $script:WmtThemedElements = [System.Collections.ArrayList]::new()
+    }
+
+    $alreadyTracked = $false
+    foreach ($tracked in @($script:WmtThemedElements)) {
+        if ([object]::ReferenceEquals($tracked, $Element)) {
+            $alreadyTracked = $true
+            break
+        }
+    }
+
+    if (-not $alreadyTracked) {
+        [void]$script:WmtThemedElements.Add($Element)
+        if ($Element -is [System.Windows.Window]) {
+            $Element.Add_Closed({
+                    param($closedWindow, $closedEventArgs)
+                    $null = $closedEventArgs
+                    try { [void]$script:WmtThemedElements.Remove($closedWindow) } catch {}
+                })
+        }
+    }
+}
+
+function Get-WmtThemeHex {
+    param(
+        [string]$Key,
+        [string]$Fallback = "#8B949E"
+    )
+
+    $resourceKey = Resolve-WmtThemeResourceKey $Key
+    if (-not $resourceKey) { $resourceKey = $Key }
+
+    if ($script:ThemePalettes) {
+        $theme = if ($script:CurrentTheme -and $script:ThemePalettes.ContainsKey($script:CurrentTheme)) { $script:CurrentTheme } else { "dark" }
+        $palette = $script:ThemePalettes[$theme]
+        if ($palette -and $palette.ContainsKey($resourceKey)) { return $palette[$resourceKey] }
+    }
+
+    $darkFallback = @{
+        BgDark        = "#0D1117"
+        BgPanel       = "#161B22"
+        BgElevated    = "#21262D"
+        BgHover       = "#30363D"
+        BorderBrush   = "#30363D"
+        Accent        = "#58A6FF"
+        AccentHover   = "#79C0FF"
+        TextPrimary   = "#E6EDF3"
+        TextSecondary = "#8B949E"
+        TextMuted     = "#6E7681"
+        Success       = "#238636"
+        SuccessHover  = "#2EA043"
+        Danger        = "#DA3633"
+        DangerHover   = "#F85149"
+        Warning       = "#D29922"
+        WarningHover  = "#E3B341"
+        Info          = "#1F6FEB"
+        AccentText    = "#0D1117"
+        SuccessText   = "#F6FFFA"
+        DangerText    = "#FFF5F5"
+        WarningText   = "#0D1117"
+        InfoText      = "#F0F6FC"
+    }
+
+    if ($darkFallback.ContainsKey($resourceKey)) { return $darkFallback[$resourceKey] }
+    if ($Key -match "^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$") { return $Key }
+    return $Fallback
+}
+
+function Get-WmtThemeColor {
+    param(
+        [string]$Key,
+        [string]$Fallback = "#8B949E"
+    )
+
+    try { return [System.Drawing.ColorTranslator]::FromHtml((Get-WmtThemeHex -Key $Key -Fallback $Fallback)) }
+    catch { return [System.Drawing.ColorTranslator]::FromHtml($Fallback) }
+}
+
+function Set-WmtWinFormsGridTheme {
+    param([System.Windows.Forms.DataGridView]$Grid)
+
+    if (-not $Grid) { return }
+    $bg = Get-WmtThemeColor "BgDark"
+    $panel = Get-WmtThemeColor "BgPanel"
+    $hover = Get-WmtThemeColor "BgHover"
+    $border = Get-WmtThemeColor "BorderBrush"
+    $text = Get-WmtThemeColor "TextPrimary"
+    $muted = Get-WmtThemeColor "TextSecondary"
+    $accent = Get-WmtThemeColor "Accent"
+    $accentText = Get-WmtThemeColor "AccentText"
+
+    $Grid.BackgroundColor = $bg
+    $Grid.ForeColor = $text
+    $Grid.GridColor = $border
+    $Grid.EnableHeadersVisualStyles = $false
+    $Grid.ColumnHeadersDefaultCellStyle.BackColor = $panel
+    $Grid.ColumnHeadersDefaultCellStyle.ForeColor = $text
+    $Grid.DefaultCellStyle.BackColor = $bg
+    $Grid.DefaultCellStyle.ForeColor = $text
+    $Grid.DefaultCellStyle.SelectionBackColor = $accent
+    $Grid.DefaultCellStyle.SelectionForeColor = $accentText
+    $Grid.AlternatingRowsDefaultCellStyle.BackColor = $panel
+    $Grid.RowHeadersDefaultCellStyle.BackColor = $panel
+    $Grid.RowHeadersDefaultCellStyle.ForeColor = $muted
+    $Grid.RowHeadersDefaultCellStyle.SelectionBackColor = $accent
+    $Grid.RowHeadersDefaultCellStyle.SelectionForeColor = $accentText
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = $hover
+    $Grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = $text
+}
+
+function Set-WmtWinFormsButtonTheme {
+    param(
+        [System.Windows.Forms.Button]$Button,
+        [ValidateSet("Standard", "Primary", "Success", "Danger", "Warning")]
+        [string]$Role = "Standard"
+    )
+
+    if (-not $Button) { return }
+    $bgKey = switch ($Role) {
+        "Primary" { "Accent" }
+        "Success" { "Success" }
+        "Danger" { "Danger" }
+        "Warning" { "Warning" }
+        default { "BgElevated" }
+    }
+    $fgKey = switch ($Role) {
+        "Primary" { "AccentText" }
+        "Success" { "SuccessText" }
+        "Danger" { "DangerText" }
+        "Warning" { "WarningText" }
+        default { "TextPrimary" }
+    }
+
+    $Button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
+    $Button.BackColor = Get-WmtThemeColor $bgKey
+    $Button.ForeColor = Get-WmtThemeColor $fgKey
+    $Button.FlatAppearance.BorderSize = 1
+    $Button.FlatAppearance.BorderColor = Get-WmtThemeColor "BorderBrush"
+    $hoverKey = if ($Role -eq "Standard") { "BgHover" } else { "${bgKey}Hover" }
+    $Button.FlatAppearance.MouseOverBackColor = Get-WmtThemeColor $hoverKey (Get-WmtThemeHex $bgKey)
+}
+
+function Set-WmtWinFormsContextMenuTheme {
+    param([System.Windows.Forms.ContextMenuStrip]$Menu)
+
+    if (-not $Menu) { return }
+    $Menu.BackColor = Get-WmtThemeColor "BgElevated"
+    $Menu.ForeColor = Get-WmtThemeColor "TextPrimary"
+    foreach ($item in $Menu.Items) {
+        try {
+            if ($item -is [System.Windows.Forms.ToolStripSeparator]) { continue }
+            $item.BackColor = $Menu.BackColor
+            $item.ForeColor = $Menu.ForeColor
+        }
+        catch {}
+    }
+}
+
+function Set-WmtWinFormsTheme {
+    param([System.Windows.Forms.Control]$Control)
+
+    if (-not $Control) { return }
+
+    $bg = Get-WmtThemeColor "BgDark"
+    $panel = Get-WmtThemeColor "BgPanel"
+    $elevated = Get-WmtThemeColor "BgElevated"
+    $text = Get-WmtThemeColor "TextPrimary"
+    $secondary = Get-WmtThemeColor "TextSecondary"
+
+    if ($Control -is [System.Windows.Forms.Form]) {
+        $Control.BackColor = $bg
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.Panel] -or $Control -is [System.Windows.Forms.FlowLayoutPanel]) {
+        $Control.BackColor = $panel
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.DataGridView]) {
+        Set-WmtWinFormsGridTheme -Grid $Control
+    }
+    elseif ($Control -is [System.Windows.Forms.Button]) {
+        Set-WmtWinFormsButtonTheme -Button $Control
+    }
+    elseif ($Control -is [System.Windows.Forms.TextBox] -or $Control -is [System.Windows.Forms.RichTextBox] -or $Control -is [System.Windows.Forms.ListBox] -or $Control -is [System.Windows.Forms.ComboBox]) {
+        $Control.BackColor = $elevated
+        $Control.ForeColor = $text
+    }
+    elseif ($Control -is [System.Windows.Forms.CheckBox] -or $Control -is [System.Windows.Forms.RadioButton]) {
+        $Control.ForeColor = $text
+        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
+        try { $Control.UseVisualStyleBackColor = $false } catch {}
+    }
+    elseif ($Control -is [System.Windows.Forms.Label]) {
+        $Control.ForeColor = $secondary
+        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
+    }
+    else {
+        try { $Control.ForeColor = $text } catch {}
+    }
+
+    foreach ($child in @($Control.Controls)) {
+        Set-WmtWinFormsTheme -Control $child
+    }
 }
 
 function New-WmtStorageTextBlock {
     param(
         [string]$Text,
-        [string]$Color = "#98989D",
+        [string]$Color = "TextSecondary",
         [double]$FontSize = 12,
         [string]$FontWeight = "Normal",
         [string]$Margin = "0"
@@ -1812,7 +2496,7 @@ function New-WmtStorageTextBlock {
 
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
-    $tb.Foreground = New-WmtBrush $Color
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Color
     $tb.FontSize = $FontSize
     $tb.Margin = $Margin
     $tb.TextWrapping = "Wrap"
@@ -1876,7 +2560,7 @@ function Set-MyDeviceStorageDetails {
         $header.ToolTip = "Open $driveRoot"
         $header.Add_MouseLeftButtonUp({ Open-MyDeviceDriveRoot -Drive $driveRoot }.GetNewClosure())
 
-        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $driveTitle = New-WmtStorageTextBlock -Text ("{0}  {1}" -f $d.Drive, $d.Label) -Color "Accent" -FontSize 13 -FontWeight "SemiBold"
         [void]$header.Children.Add($driveTitle)
 
         $healthText = New-WmtStorageTextBlock -Text $d.Health -Color $d.HealthBrush -FontSize 12 -FontWeight "SemiBold" -Margin "8,0,0,0"
@@ -1884,9 +2568,9 @@ function Set-MyDeviceStorageDetails {
         [void]$header.Children.Add($healthText)
         [void]$panel.Children.Add($header)
 
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "#E6EDF3" -FontSize 12 -Margin "0,4,0,0"))
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "#8B949E" -FontSize 11 -Margin "0,2,0,0"))
-        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "#6E7681" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Hardware -Color "TextPrimary" -FontSize 12 -Margin "0,4,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Meta -Color "TextSecondary" -FontSize 11 -Margin "0,2,0,0"))
+        [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.Operational -Color "TextMuted" -FontSize 11 -Margin "0,2,0,0"))
 
         $bar = New-Object System.Windows.Controls.ProgressBar
         $bar.Minimum = 0
@@ -1894,8 +2578,8 @@ function Set-MyDeviceStorageDetails {
         $bar.Value = [double]$d.FreePercent
         $bar.Height = 7
         $bar.Margin = "0,7,0,2"
-        $bar.Foreground = New-WmtBrush $d.FreeBrush
-        $bar.Background = New-WmtBrush "#30363D"
+        Set-WmtThemedBrush -Object $bar -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey $d.FreeBrush -FallbackKey "Accent"
+        Set-WmtThemedBrush -Object $bar -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BorderBrush"
         [void]$panel.Children.Add($bar)
 
         [void]$panel.Children.Add((New-WmtStorageTextBlock -Text $d.FreeText -Color $d.FreeBrush -FontSize 12 -FontWeight "SemiBold" -Margin "0,2,0,0"))
@@ -1903,7 +2587,7 @@ function Set-MyDeviceStorageDetails {
         if ($i -lt ($deviceList.Count - 1)) {
             $separator = New-Object System.Windows.Controls.Border
             $separator.Height = 1
-            $separator.Background = New-WmtBrush "#30363D"
+            Set-WmtThemedBrush -Object $separator -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BorderBrush"
             $separator.Margin = "0,10,0,0"
             [void]$panel.Children.Add($separator)
         }
@@ -1913,7 +2597,7 @@ function Set-MyDeviceStorageDetails {
 function New-WmtNetworkTextBlock {
     param(
         [string]$Text,
-        [string]$Color = "#98989D",
+        [string]$Color = "TextSecondary",
         [double]$FontSize = 12,
         [string]$FontWeight = "Normal",
         [string]$Margin = "0"
@@ -1921,7 +2605,7 @@ function New-WmtNetworkTextBlock {
 
     $tb = New-Object System.Windows.Controls.TextBlock
     $tb.Text = $Text
-    $tb.Foreground = New-WmtBrush $Color
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey $Color
     $tb.FontSize = $FontSize
     $tb.Margin = $Margin
     $tb.TextWrapping = "Wrap"
@@ -2057,7 +2741,7 @@ function Add-WmtNetworkLine {
     if (-not $Panel -or [string]::IsNullOrWhiteSpace($Value)) { return }
 
     $tb = New-Object System.Windows.Controls.TextBlock
-    $tb.Foreground = New-WmtBrush "#98989D"
+    Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
     $tb.FontSize = 12
     $tb.TextWrapping = "Wrap"
     $tb.LineHeight = 17
@@ -2065,14 +2749,14 @@ function Add-WmtNetworkLine {
 
     $labelRun = New-Object System.Windows.Documents.Run
     $labelRun.Text = ("{0}: " -f $Label)
-    $labelRun.Foreground = New-WmtBrush "#8B949E"
+    Set-WmtThemedBrush -Object $labelRun -Property ([System.Windows.Documents.TextElement]::ForegroundProperty) -ColorOrKey "TextSecondary"
     $labelRun.FontWeight = [System.Windows.FontWeights]::SemiBold
     [void]$tb.Inlines.Add($labelRun)
 
     if ($ClickAction) {
         $action = $ClickAction
         $link = New-Object System.Windows.Documents.Hyperlink
-        $link.Foreground = New-WmtBrush "#58A6FF"
+        Set-WmtThemedBrush -Object $link -Property ([System.Windows.Documents.TextElement]::ForegroundProperty) -ColorOrKey "Accent"
         $link.Cursor = [System.Windows.Input.Cursors]::Hand
         if (-not [string]::IsNullOrWhiteSpace($ToolTip)) { $link.ToolTip = $ToolTip }
         $valueRun = New-Object System.Windows.Documents.Run
@@ -2136,7 +2820,7 @@ function Set-MyDeviceNetworkDetails {
         [void]$header.ColumnDefinitions.Add($colMain)
         [void]$header.ColumnDefinitions.Add($colStatus)
 
-        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "#58A6FF" -FontSize 13 -FontWeight "SemiBold"
+        $adapterTitle = New-WmtNetworkTextBlock -Text $d.Name -Color "Accent" -FontSize 13 -FontWeight "SemiBold"
         $adapterTitle.Cursor = [System.Windows.Input.Cursors]::Hand
         $adapterTitle.TextDecorations = [System.Windows.TextDecorations]::Underline
         $adapterTitle.ToolTip = "Open Network Connections"
@@ -2194,7 +2878,7 @@ function Set-MyDeviceNetworkDetails {
         if ($i -lt ($adapterList.Count - 1)) {
             $separator = New-Object System.Windows.Controls.Border
             $separator.Height = 1
-            $separator.Background = New-WmtBrush "#30363D"
+            Set-WmtThemedBrush -Object $separator -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BorderBrush"
             $separator.Margin = "0,10,0,0"
             [void]$panel.Children.Add($separator)
         }
@@ -2243,7 +2927,173 @@ function Show-TextDialog {
     $btn.Add_Click({ $f.Close() })
     $f.Controls.Add($btn)
 
+    Set-WmtWinFormsTheme -Control $f
     $f.ShowDialog() | Out-Null
+}
+
+function Get-WmtVisualAncestor {
+    param(
+        [object]$Element,
+        [type]$AncestorType
+    )
+
+    $current = $Element
+    while ($current -and ($current -is [System.Windows.DependencyObject])) {
+        if ($AncestorType.IsInstanceOfType($current)) { return $current }
+        try { $current = [System.Windows.Media.VisualTreeHelper]::GetParent($current) }
+        catch { break }
+    }
+    return $null
+}
+
+function Set-WmtListViewRightClickSelection {
+    param(
+        [System.Windows.Controls.ListView]$ListView,
+        [object]$OriginalSource
+    )
+
+    if (-not $ListView -or -not $OriginalSource) { return }
+    $itemContainer = Get-WmtVisualAncestor -Element $OriginalSource -AncestorType ([System.Windows.Controls.ListViewItem])
+    if (-not $itemContainer) { return }
+
+    if (-not $itemContainer.IsSelected) {
+        $ListView.SelectedItems.Clear()
+        $itemContainer.IsSelected = $true
+    }
+    try { $itemContainer.Focus() | Out-Null } catch {}
+}
+
+function Test-WingetManifestSupportedItem {
+    param([object]$Item)
+
+    if (-not $Item) { return $false }
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($id)) { return $false }
+    return ($source -in @("winget", "msstore"))
+}
+
+function ConvertTo-WmtProcessArgument {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return '""' }
+    return '"' + ($Value -replace '"', '\"') + '"'
+}
+
+function Get-WingetManifestText {
+    param(
+        [object]$Item,
+        [int]$TimeoutMs = 45000
+    )
+
+    if (-not (Test-WingetManifestSupportedItem $Item)) {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Text     = "App manifests are only available for winget and Microsoft Store packages."
+        }
+    }
+
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    $argsLine = @(
+        "show",
+        "--id", (ConvertTo-WmtProcessArgument $id),
+        "--source", (ConvertTo-WmtProcessArgument $source),
+        "--exact",
+        "--accept-source-agreements",
+        "--disable-interactivity"
+    ) -join " "
+
+    try {
+        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $pInfo.FileName = "winget"
+        $pInfo.Arguments = $argsLine
+        $pInfo.RedirectStandardOutput = $true
+        $pInfo.RedirectStandardError = $true
+        $pInfo.UseShellExecute = $false
+        $pInfo.CreateNoWindow = $true
+        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+        $proc = [System.Diagnostics.Process]::Start($pInfo)
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill() } catch {}
+            return [PSCustomObject]@{
+                Success  = $false
+                ExitCode = $null
+                Text     = "Timed out while loading the manifest for $id.`r`n`r`nCommand: winget $argsLine"
+            }
+        }
+
+        $out = $proc.StandardOutput.ReadToEnd()
+        $err = $proc.StandardError.ReadToEnd()
+        $textParts = @()
+        if (-not [string]::IsNullOrWhiteSpace($out)) { $textParts += $out.TrimEnd() }
+        if (-not [string]::IsNullOrWhiteSpace($err)) { $textParts += $err.TrimEnd() }
+        $text = ($textParts -join "`r`n`r`n")
+        if ([string]::IsNullOrWhiteSpace($text)) { $text = "No manifest output was returned for $id." }
+
+        return [PSCustomObject]@{
+            Success  = ($proc.ExitCode -eq 0)
+            ExitCode = $proc.ExitCode
+            Text     = $text
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Success  = $false
+            ExitCode = $null
+            Text     = "Failed to load manifest for $id.`r`n`r`n$($_.Exception.Message)"
+        }
+    }
+}
+
+function Show-WingetPackageManifest {
+    param([object]$Item)
+
+    if (-not (Test-WingetManifestSupportedItem $Item)) {
+        [System.Windows.MessageBox]::Show(
+            "App manifests are only available for winget and Microsoft Store packages.",
+            "Manifest Unavailable",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+
+    $name = [string]$Item.Name
+    $id = [string]$Item.Id
+    $source = ([string]$Item.Source).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($name)) { $name = $id }
+
+    Write-GuiLog "Loading app manifest for $name ($id) from $source..."
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Loading manifest for $name..."
+        $lblWingetStatus.Visibility = "Visible"
+    }
+
+    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+    try {
+        $result = Get-WingetManifestText -Item $Item
+        if (-not $result.Success) {
+            Write-GuiLog "Manifest lookup failed for $id$(if ($null -ne $result.ExitCode) { " (exit $($result.ExitCode))" })."
+        }
+        else {
+            Write-GuiLog "Manifest loaded for $id."
+        }
+
+        $header = "Package: $name`r`nID: $id`r`nSource: $source`r`nCommand: winget show --id `"$id`" --source $source --exact`r`n"
+        $separator = ("-" * 80)
+        Show-TextDialog -Title "App Manifest - $name" -Text "$header`r`n$separator`r`n`r`n$($result.Text)"
+    }
+    finally {
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        if ($lblWingetStatus) {
+            $lblWingetStatus.Text = "Ready"
+            $lblWingetStatus.Visibility = "Hidden"
+        }
+    }
 }
 
 # --- SETTINGS MANAGER ---
@@ -2264,6 +3114,9 @@ function Save-WmtSettings {
             WingetIgnore     = $Settings.WingetIgnore
             LoadWinapp2      = [bool]$Settings.LoadWinapp2
             EnabledProviders = $Settings.EnabledProviders
+            CustomDnsServers = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
+            CustomDohTemplate = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
+            CustomDohEnabled = [bool]$Settings.CustomDohEnabled
             Theme            = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
             WindowState      = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
             WindowBounds     = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
@@ -2288,6 +3141,9 @@ function Get-WmtSettings {
         WingetIgnore     = @()
         LoadWinapp2      = $false 
         EnabledProviders = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
+        CustomDnsServers = @()
+        CustomDohTemplate = ""
+        CustomDohEnabled = $false
         Theme            = "dark"
         WindowState      = "Normal"
         WindowBounds     = @{
@@ -2316,6 +3172,16 @@ function Get-WmtSettings {
             }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
+            if ($json.PSObject.Properties["CustomDnsServers"]) {
+                $customDnsServers = @()
+                foreach ($server in @($json.CustomDnsServers)) {
+                    $serverText = ([string]$server).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($serverText)) { $customDnsServers += $serverText }
+                }
+                $defaults.CustomDnsServers = $customDnsServers
+            }
+            if ($json.PSObject.Properties["CustomDohTemplate"]) { $defaults.CustomDohTemplate = [string]$json.CustomDohTemplate }
+            if ($json.PSObject.Properties["CustomDohEnabled"]) { $defaults.CustomDohEnabled = [bool]$json.CustomDohEnabled }
             if ($json.PSObject.Properties["Theme"] -and $json.Theme) { $defaults.Theme = [string]$json.Theme }
             if ($json.PSObject.Properties["WindowState"] -and $json.WindowState) { $defaults.WindowState = [string]$json.WindowState }
             if ($json.PSObject.Properties["WindowBounds"] -and $json.WindowBounds) {
@@ -2622,7 +3488,7 @@ function Start-XboxClean {
 function Start-GpeditInstall {
     # Check for User Confirmation
     $msg = "Install Local Group Policy Editor?`n`nThis enables the Group Policy Editor (gpedit.msc) on Windows Home editions by installing the built-in system packages.`n`nContinue?"
-    $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Install", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxImage]::Question)
+    $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Install", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
     if ($res -eq "No") { return }
 
     Invoke-UiCommand {
@@ -2634,8 +3500,8 @@ function Start-GpeditInstall {
 
         Write-Output "Searching packages in $packageRoot..."
         
-        $clientTools = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" -ErrorAction SilentlyContinue
-        $clientExtensions = Get-ChildItem -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" -ErrorAction SilentlyContinue
+        $clientTools = @(Get-WmtEnumeratedFiles -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" | ForEach-Object { [System.IO.FileInfo]::new($_) })
+        $clientExtensions = @(Get-WmtEnumeratedFiles -Path $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" | ForEach-Object { [System.IO.FileInfo]::new($_) })
         
         if (-not $clientTools -or -not $clientExtensions) {
             Write-Output "WARNING: Required GroupPolicy packages were not found."
@@ -2659,161 +3525,753 @@ function Start-GpeditInstall {
 
 # --- NETWORK / DNS HELPERS (from CLI) ---
 function Get-ActiveAdapters {
-    Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' }
+    Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' }
+}
+
+# --- SHARED DNS CONFIGURATION ---
+$script:WmtDnsProviders = [ordered]@{
+    Google     = [PSCustomObject]@{
+        Key       = "Google"
+        Label     = "Google DNS"
+        Name      = "Google"
+        Addresses = @("8.8.8.8", "8.8.4.4")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" }
+            [PSCustomObject]@{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" }
+        )
+    }
+    Cloudflare = [PSCustomObject]@{
+        Key       = "Cloudflare"
+        Label     = "Cloudflare DNS"
+        Name      = "Cloudflare"
+        Addresses = @("1.1.1.1", "1.0.0.1")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" }
+            [PSCustomObject]@{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" }
+        )
+    }
+    Quad9      = [PSCustomObject]@{
+        Key       = "Quad9"
+        Label     = "Quad9 DNS"
+        Name      = "Quad9"
+        Addresses = @("9.9.9.9", "149.112.112.112")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" }
+            [PSCustomObject]@{ Server = "2620:fe::9"; Template = "https://dns.quad9.net/dns-query" }
+        )
+    }
+    AdGuard    = [PSCustomObject]@{
+        Key       = "AdGuard"
+        Label     = "AdGuard DNS"
+        Name      = "AdGuard"
+        Addresses = @("94.140.14.14", "94.140.15.15")
+        Doh       = @(
+            [PSCustomObject]@{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" }
+            [PSCustomObject]@{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
+        )
+    }
+}
+
+$script:DohTargets = @(
+    foreach ($provider in $script:WmtDnsProviders.Values) {
+        foreach ($target in @($provider.Doh)) { $target }
+    }
+)
+
+function Test-WmtDnsAddress {
+    param([string]$Address)
+
+    if ([string]::IsNullOrWhiteSpace($Address)) { return $false }
+    $parsedAddress = [System.Net.IPAddress]::None
+    return [System.Net.IPAddress]::TryParse($Address.Trim(), [ref]$parsedAddress)
+}
+
+function Get-WmtValidatedDnsAddresses {
+    param([string[]]$Addresses)
+
+    $valid = @()
+    $invalid = @()
+    $seen = @{}
+
+    foreach ($address in @($Addresses)) {
+        $candidate = ([string]$address).Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate) -or $seen.ContainsKey($candidate)) { continue }
+        $seen[$candidate] = $true
+
+        if (Test-WmtDnsAddress -Address $candidate) { $valid += $candidate }
+        else { $invalid += $candidate }
+    }
+
+    [PSCustomObject]@{
+        Valid   = $valid
+        Invalid = $invalid
+    }
+}
+
+function Clear-WmtDnsResolverCache {
+    try {
+        Clear-DnsClientCache -ErrorAction Stop
+        return "DNS resolver cache cleared."
+    }
+    catch {
+        $out = ipconfig /flushdns 2>&1
+        $txt = ($out | Out-String).Trim()
+        if ($txt) { return $txt }
+        return "DNS resolver cache flush attempted."
+    }
+}
+
+function Set-WmtDnsActionButtonsEnabled {
+    param([bool]$Enabled)
+
+    foreach ($buttonName in @(
+            "btnDnsGoogle", "btnDnsCloudflare", "btnDnsQuad9", "btnDnsAdGuard",
+            "btnDnsAuto", "btnDnsCustom", "btnDohAuto", "btnDohDisable"
+        )) {
+        try {
+            $button = Get-Ctrl $buttonName
+            if ($button) { $button.IsEnabled = $Enabled }
+        }
+        catch {}
+    }
+}
+
+function Test-WmtDnsRunspaceBusy {
+    return (($script:DnsRunspace -and $script:DnsAsyncResult -and -not $script:DnsAsyncResult.IsCompleted) -or
+        ($script:DohRunspace -and $script:DohAsyncResult -and -not $script:DohAsyncResult.IsCompleted))
+}
+
+function Stop-WmtDnsRunspaces {
+    if ($script:DnsTimer) {
+        try { $script:DnsTimer.Stop() } catch {}
+        $script:DnsTimer = $null
+    }
+    if ($script:DnsRunspace) {
+        try { $script:DnsRunspace.Stop() } catch {}
+        try { $script:DnsRunspace.Dispose() } catch {}
+        $script:DnsRunspace = $null
+        $script:DnsAsyncResult = $null
+    }
+    if ($script:DohTimer) {
+        try { $script:DohTimer.Stop() } catch {}
+        $script:DohTimer = $null
+    }
+    if ($script:DohRunspace) {
+        try { $script:DohRunspace.Stop() } catch {}
+        try { $script:DohRunspace.Dispose() } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+    }
+}
+
+function Start-DnsAssignmentRunspace {
+    param(
+        [string[]]$Addresses = @(),
+        [string]$Label = "Custom DNS",
+        [switch]$Reset,
+        [scriptblock]$OnComplete
+    )
+
+    if (Test-WmtDnsRunspaceBusy) {
+        Write-GuiLog "A DNS or DoH operation is already running."
+        return $false
+    }
+
+    $addrList = @($Addresses | Where-Object { -not [string]::IsNullOrWhiteSpace(([string]$_).Trim()) })
+    if (-not $Reset -and (-not $addrList -or $addrList.Count -eq 0)) {
+        Write-GuiLog "No valid DNS addresses provided."
+        return $false
+    }
+
+    $labelText = $Label
+    $isReset = [bool]$Reset
+    $completion = $OnComplete
+    $startMessage = if ($isReset) { "Resetting DNS..." } else { "Applying $labelText..." }
+
+    Write-GuiLog $startMessage
+    Set-WmtDnsActionButtonsEnabled $false
+
+    $script:DnsRunspace = [PowerShell]::Create().AddScript({
+            param($ServerAddresses, $OperationLabel, $ResetAddresses)
+
+            $lines = New-Object System.Collections.Generic.List[string]
+            $successCount = 0
+            $adapterCount = 0
+
+            function Add-DnsLine {
+                param([string]$Text)
+                if (-not [string]::IsNullOrWhiteSpace($Text)) { $lines.Add($Text) | Out-Null }
+            }
+
+            function Clear-DnsResolverCacheInRunspace {
+                try {
+                    Clear-DnsClientCache -ErrorAction Stop
+                    return "DNS resolver cache cleared."
+                }
+                catch {
+                    $out = ipconfig /flushdns 2>&1
+                    $txt = ($out | Out-String).Trim()
+                    if ($txt) { return $txt }
+                    return "DNS resolver cache flush attempted."
+                }
+            }
+
+            try {
+                $adapters = @(Get-NetAdapter -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -notlike '*Virtual*' -and $_.Name -notlike '*vEthernet*' } |
+                    Select-Object -ExpandProperty Name)
+
+                $adapterCount = $adapters.Count
+                if (-not $adapters -or $adapters.Count -eq 0) {
+                    Add-DnsLine "No active adapters found."
+                    return [PSCustomObject]@{
+                        Success      = $false
+                        SuccessCount = 0
+                        AdapterCount = 0
+                        Lines        = $lines.ToArray()
+                        Error        = ""
+                    }
+                }
+
+                foreach ($adapter in $adapters) {
+                    try {
+                        if ($ResetAddresses) {
+                            Set-DnsClientServerAddress -InterfaceAlias $adapter -ResetServerAddresses -ErrorAction Stop
+                            Add-DnsLine "[Auto DNS] Reset $adapter to automatic DNS."
+                        }
+                        else {
+                            Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $ServerAddresses -ErrorAction Stop
+                            Add-DnsLine "[$OperationLabel] Applied to $adapter : $($ServerAddresses -join ', ')"
+                        }
+                        $successCount++
+                    }
+                    catch {
+                        if ($ResetAddresses) {
+                            Add-DnsLine "[Auto DNS] Failed on $adapter : $($_.Exception.Message)"
+                        }
+                        else {
+                            Add-DnsLine "[$OperationLabel] Failed on $adapter : $($_.Exception.Message)"
+                        }
+                    }
+                }
+
+                if ($successCount -gt 0) {
+                    Add-DnsLine (Clear-DnsResolverCacheInRunspace)
+                    if ($ResetAddresses) {
+                        Add-DnsLine "[Auto DNS] Reset $successCount of $adapterCount active adapter(s)."
+                    }
+                    else {
+                        Add-DnsLine "[$OperationLabel] Updated $successCount of $adapterCount active adapter(s)."
+                    }
+                }
+
+                [PSCustomObject]@{
+                    Success      = ($successCount -gt 0)
+                    SuccessCount = $successCount
+                    AdapterCount = $adapterCount
+                    Lines        = $lines.ToArray()
+                    Error        = ""
+                }
+            }
+            catch {
+                Add-DnsLine "ERROR: $($_.Exception.Message)"
+                [PSCustomObject]@{
+                    Success      = $false
+                    SuccessCount = $successCount
+                    AdapterCount = $adapterCount
+                    Lines        = $lines.ToArray()
+                    Error        = $_.Exception.Message
+                }
+            }
+        }).AddArgument($addrList).AddArgument($labelText).AddArgument($isReset)
+
+    try {
+        $script:DnsAsyncResult = $script:DnsRunspace.BeginInvoke()
+    }
+    catch {
+        Write-GuiLog "Failed to start DNS runspace: $($_.Exception.Message)"
+        try { $script:DnsRunspace.Dispose() } catch {}
+        $script:DnsRunspace = $null
+        $script:DnsAsyncResult = $null
+        Set-WmtDnsActionButtonsEnabled $true
+        return $false
+    }
+
+    $dnsRunspace = $script:DnsRunspace
+    $dnsAsync = $script:DnsAsyncResult
+    $dnsTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DnsTimer = $dnsTimer
+    $dnsTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $dnsTimer.Add_Tick({
+            if (-not $dnsAsync -or -not $dnsAsync.IsCompleted) { return }
+
+            $dnsTimer.Stop()
+            $result = $null
+            try {
+                $raw = $dnsRunspace.EndInvoke($dnsAsync)
+                if ($raw -is [System.Collections.ObjectModel.Collection[PSObject]]) { $result = $raw | Select-Object -Last 1 }
+                else { $result = $raw }
+
+                if ($result -and $result.Lines) {
+                    $text = ($result.Lines | Out-String).Trim()
+                    if ($text) { Write-GuiLog $text }
+                }
+                elseif ($result -and $result.Success) {
+                    Write-GuiLog "Done."
+                }
+                else {
+                    Write-GuiLog "DNS operation finished with no output."
+                }
+            }
+            catch {
+                Write-GuiLog "DNS Error: $($_.Exception.Message)"
+            }
+            finally {
+                try { $dnsRunspace.Dispose() } catch {}
+                if ([object]::ReferenceEquals($script:DnsRunspace, $dnsRunspace)) { $script:DnsRunspace = $null }
+                if ([object]::ReferenceEquals($script:DnsAsyncResult, $dnsAsync)) { $script:DnsAsyncResult = $null }
+                if ([object]::ReferenceEquals($script:DnsTimer, $dnsTimer)) { $script:DnsTimer = $null }
+                Set-WmtDnsActionButtonsEnabled $true
+            }
+
+            if ($completion) {
+                try { & $completion $result }
+                catch { Write-GuiLog "DNS completion action failed: $($_.Exception.Message)" }
+            }
+        }.GetNewClosure())
+
+    $dnsTimer.Start()
+    return $true
 }
 
 function Set-DnsAddresses {
     param(
         [string[]]$Addresses,
-        [string]$Label = "Custom DNS"
+        [string]$Label = "Custom DNS",
+        [scriptblock]$OnComplete
     )
-    if (-not $Addresses -or $Addresses.Count -eq 0) { return }
-    $addrList = $Addresses
-    $labelText = $Label
-    
-    Invoke-UiCommand {
-        param($addrList, $labelText)
-        $adapters = Get-ActiveAdapters | Select-Object -ExpandProperty Name
-        if (-not $adapters) { Write-Output "No active adapters found."; return }
-        foreach ($adapter in $adapters) {
-            try {
-                Set-DnsClientServerAddress -InterfaceAlias $adapter -ServerAddresses $addrList -ErrorAction Stop
-                Write-Output "[$labelText] Applied to $adapter : $($addrList -join ', ')"
-            }
-            catch {
-                Write-Output "[$labelText] Failed on $adapter : $($_.Exception.Message)"
-            }
-        }
-    } "Applying $labelText..." -ArgumentList (, $addrList), $labelText
+    $validation = Get-WmtValidatedDnsAddresses -Addresses $Addresses
+    if ($validation.Invalid.Count -gt 0) {
+        Write-GuiLog "Invalid DNS skipped: $($validation.Invalid -join ', ')"
+    }
+    if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+        Write-GuiLog "No valid DNS addresses provided."
+        return
+    }
+
+    $addrList = @($validation.Valid)
+    Start-DnsAssignmentRunspace -Addresses $addrList -Label $Label -OnComplete $OnComplete | Out-Null
 }
 
-# --- SHARED DNS CONFIGURATION ---
-$script:DohTargets = @(
-    @{ Server = "1.1.1.1"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "1.0.0.1"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "2606:4700:4700::1111"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "2606:4700:4700::1001"; Template = "https://cloudflare-dns.com/dns-query" }
-    @{ Server = "8.8.8.8"; Template = "https://dns.google/dns-query" }
-    @{ Server = "8.8.4.4"; Template = "https://dns.google/dns-query" }
-    @{ Server = "2001:4860:4860::8888"; Template = "https://dns.google/dns-query" }
-    @{ Server = "2001:4860:4860::8844"; Template = "https://dns.google/dns-query" }
-    @{ Server = "9.9.9.9"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "149.112.112.112"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "2620:fe::fe"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "2620:fe::fe:9"; Template = "https://dns.quad9.net/dns-query" }
-    @{ Server = "94.140.14.14"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "94.140.15.15"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "2a10:50c0::ad1:ff"; Template = "https://dns.adguard.com/dns-query" }
-    @{ Server = "2a10:50c0::ad2:ff"; Template = "https://dns.adguard.com/dns-query" }
-)
+function Invoke-DnsPreset {
+    param([string]$ProviderKey)
+
+    if (-not $script:WmtDnsProviders.Contains($ProviderKey)) {
+        Write-GuiLog "DNS provider not configured: $ProviderKey"
+        return
+    }
+
+    $provider = $script:WmtDnsProviders[$ProviderKey]
+    $addressText = $provider.Addresses -join " / "
+    $msg = "Set DNS to $($provider.Name) ($addressText) on all active adapters?`n`nDNS cache will be flushed after changes."
+    $res = [System.Windows.MessageBox]::Show($msg, "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+
+    Set-DnsAddresses -Addresses $provider.Addresses -Label $provider.Label
+}
+
+function Reset-DnsAddressesToAutomatic {
+    $res = [System.Windows.MessageBox]::Show("Reset DNS server assignment to automatic (DHCP) on all active adapters?`n`nDNS cache will be flushed after changes.", "DNS Reset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+    if ($res -ne "Yes") { return }
+
+    Start-DnsAssignmentRunspace -Reset -Label "Auto DNS" -OnComplete {
+        param($Result)
+        if ($Result -and $Result.Success) {
+            [System.Windows.MessageBox]::Show("DNS reset to automatic (DHCP).", "DNS Reset", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        }
+    } | Out-Null
+}
+
+function Test-WmtDohTemplateUrl {
+    param([string]$Url)
+
+    $candidate = ([string]$Url).Trim()
+    if ([string]::IsNullOrWhiteSpace($candidate)) { return $false }
+
+    $uri = [System.Uri]$null
+    if (-not [System.Uri]::TryCreate($candidate, [System.UriKind]::Absolute, [ref]$uri)) { return $false }
+
+    return ($uri.Scheme -eq [System.Uri]::UriSchemeHttps -and -not [string]::IsNullOrWhiteSpace($uri.Host))
+}
+
+function New-WmtDohTargets {
+    param(
+        [string[]]$Addresses,
+        [string]$Template = ""
+    )
+
+    $templateText = ([string]$Template).Trim()
+    $targets = @()
+    foreach ($address in @($Addresses)) {
+        $server = ([string]$address).Trim()
+        if ([string]::IsNullOrWhiteSpace($server)) { continue }
+        $targets += [PSCustomObject]@{
+            Server   = $server
+            Template = $templateText
+        }
+    }
+    return $targets
+}
+
+function Show-CustomDnsDialog {
+    $settings = Get-WmtSettings
+
+    [xml]$customDnsXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        Title="Custom DNS" Height="500" Width="560" WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
+    <Window.Resources>
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+        </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="8"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,0"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" Text="Custom DNS" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource Accent}"/>
+
+        <TextBlock Grid.Row="1" Foreground="{DynamicResource TextSecondary}" Margin="0,12,0,0"
+                   Text="Enter IPv4 and IPv6 DNS servers together. Use commas, spaces, semicolons, or new lines between addresses."/>
+
+        <TextBlock Grid.Row="2" Text="DNS servers" Foreground="{DynamicResource TextSecondary}" Margin="0,16,0,6"/>
+        <TextBox Name="txtDnsServers" Grid.Row="3" Height="78" AcceptsReturn="True"
+                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+
+        <TextBlock Grid.Row="4" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,0"
+                   Text="Example: 1.1.1.1, 1.0.0.1, 2606:4700:4700::1111, 2606:4700:4700::1001"/>
+
+        <CheckBox Name="chkRegisterDoh" Grid.Row="5" Content="Register DoH template" Margin="0,14,0,8"/>
+
+        <TextBlock Grid.Row="6" Text="DoH template URL" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,6"/>
+        <TextBox Name="txtDohTemplate" Grid.Row="7" Height="34"/>
+
+        <TextBlock Grid.Row="8" Foreground="{DynamicResource TextSecondary}" Margin="0,6,0,0"
+                   Text="Example: https://cloudflare-dns.com/dns-query. Use a DoH template from the same provider as the DNS servers."/>
+
+        <TextBlock Name="lblError" Grid.Row="9" Foreground="{DynamicResource DangerHover}" Margin="0,10,0,0"/>
+
+        <StackPanel Grid.Row="10" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Name="btnRemoveDoh" Content="Remove DoH" Width="104" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,0"/>
+            <Button Name="btnApply" Content="Apply" Width="84" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+            <Button Name="btnCancel" Content="Cancel" Width="84"/>
+        </StackPanel>
+    </Grid>
+</Window>
+'@
+
+    try {
+        $reader = New-Object System.Xml.XmlNodeReader $customDnsXaml
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
+    }
+    catch {
+        Write-GuiLog "Failed to open custom DNS dialog: $($_.Exception.Message)"
+        return $null
+    }
+
+    try { if ($window) { $dialog.Owner = $window } } catch {}
+
+    $txtDnsServers = $dialog.FindName("txtDnsServers")
+    $chkRegisterDoh = $dialog.FindName("chkRegisterDoh")
+    $txtDohTemplate = $dialog.FindName("txtDohTemplate")
+    $lblError = $dialog.FindName("lblError")
+    $btnApply = $dialog.FindName("btnApply")
+    $btnCancel = $dialog.FindName("btnCancel")
+    $btnRemoveDoh = $dialog.FindName("btnRemoveDoh")
+
+    $savedServers = @($settings.CustomDnsServers | Where-Object { -not [string]::IsNullOrWhiteSpace(([string]$_).Trim()) })
+    if ($savedServers.Count -eq 0) { $savedServers = @("1.1.1.1", "1.0.0.1", "2606:4700:4700::1111", "2606:4700:4700::1001") }
+    $txtDnsServers.Text = ($savedServers -join ", ")
+    $txtDohTemplate.Text = if ($settings.CustomDohTemplate) { [string]$settings.CustomDohTemplate } else { "" }
+    $chkRegisterDoh.IsChecked = [bool]$settings.CustomDohEnabled
+
+    $setDohTemplateState = {
+        $enabled = [bool]$chkRegisterDoh.IsChecked
+        $txtDohTemplate.IsEnabled = $enabled
+        $txtDohTemplate.Opacity = if ($enabled) { 1.0 } else { 0.55 }
+    }.GetNewClosure()
+    $chkRegisterDoh.Add_Checked($setDohTemplateState)
+    $chkRegisterDoh.Add_Unchecked($setDohTemplateState)
+    & $setDohTemplateState
+
+    $dialog.Tag = $null
+
+    $getValidatedCustomDns = {
+        $lblError.Text = ""
+        $addresses = $txtDnsServers.Text -split "[,;\s]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        $validation = Get-WmtValidatedDnsAddresses -Addresses $addresses
+        if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+            $lblError.Text = "Enter at least one valid DNS server IP address."
+            $null
+        }
+        else {
+            $registerDoh = [bool]$chkRegisterDoh.IsChecked
+            $dohTemplate = ([string]$txtDohTemplate.Text).Trim()
+
+            if ($registerDoh -and -not (Test-WmtDohTemplateUrl -Url $dohTemplate)) {
+                $lblError.Text = "Enter a valid HTTPS DoH template URL."
+                $null
+            }
+            else {
+                [PSCustomObject]@{
+                    Addresses   = @($validation.Valid)
+                    Invalid     = @($validation.Invalid)
+                    RegisterDoh = $registerDoh
+                    DohTemplate = $dohTemplate
+                    Action      = "Apply"
+                }
+            }
+        }
+    }.GetNewClosure()
+
+    $btnApply.Add_Click({
+            $candidate = & $getValidatedCustomDns
+            if (-not $candidate) { return }
+
+            $dialog.Tag = $candidate
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+
+    $btnRemoveDoh.Add_Click({
+            $lblError.Text = ""
+            $addresses = $txtDnsServers.Text -split "[,;\s]+" | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+            $validation = Get-WmtValidatedDnsAddresses -Addresses $addresses
+            if (-not $validation.Valid -or $validation.Valid.Count -eq 0) {
+                $lblError.Text = "Enter at least one valid DNS server IP address."
+                return
+            }
+
+            $dialog.Tag = [PSCustomObject]@{
+                Addresses   = @($validation.Valid)
+                Invalid     = @($validation.Invalid)
+                RegisterDoh = $false
+                DohTemplate = ([string]$txtDohTemplate.Text).Trim()
+                Action      = "RemoveDoh"
+            }
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+
+    $btnCancel.Add_Click({ $dialog.DialogResult = $false }.GetNewClosure())
+
+    if ($dialog.ShowDialog() -eq $true) { return $dialog.Tag }
+    return $null
+}
+
+function Invoke-CustomDnsSettings {
+    $customDns = Show-CustomDnsDialog
+    if (-not $customDns) { return }
+
+    if ($customDns.Invalid.Count -gt 0) {
+        Write-GuiLog "Invalid DNS skipped: $($customDns.Invalid -join ', ')"
+    }
+
+    $settings = Get-WmtSettings
+    $settings.CustomDnsServers = @($customDns.Addresses)
+    $settings.CustomDohTemplate = [string]$customDns.DohTemplate
+    $settings.CustomDohEnabled = [bool]$customDns.RegisterDoh
+    Save-WmtSettings -Settings $settings
+
+    $customDohTargets = New-WmtDohTargets -Addresses $customDns.Addresses -Template $customDns.DohTemplate
+    if ($customDns.Action -eq "RemoveDoh") {
+        Start-DohJob -List $customDohTargets -IsEnable $false
+        return
+    }
+
+    if ($customDns.RegisterDoh) {
+        Set-DnsAddresses -Addresses $customDns.Addresses -Label "Custom DNS" -OnComplete ({
+                param($Result)
+                if ($Result -and $Result.Success) {
+                    Start-DohJob -List $customDohTargets -IsEnable $true
+                }
+                else {
+                    Write-GuiLog "Skipped DoH registration because custom DNS assignment did not complete successfully."
+                }
+            }.GetNewClosure())
+        return
+    }
+
+    Set-DnsAddresses -Addresses $customDns.Addresses -Label "Custom DNS"
+}
 
 function Start-DohJob {
     param($List, $IsEnable)
 
-    # 1. UI Feedback
-    # Attempt to find buttons. If not found, variables will be null.
-    $btnEnable = Get-Ctrl "btnDohAuto"
-    $btnDisable = Get-Ctrl "btnDohDisable"
-    
-    # Safely disable if found
-    if ($btnEnable) { $btnEnable.IsEnabled = $false }
-    if ($btnDisable) { $btnDisable.IsEnabled = $false }
-    
-    $actionStr = if ($IsEnable) { "Enabling" } else { "Disabling" }
-    Write-GuiLog "$actionStr DoH... (Batch Processing)"
+    $dnsList = @($List)
+    if (-not $dnsList -or $dnsList.Count -eq 0) {
+        Write-GuiLog "No DoH targets configured."
+        return
+    }
 
-    # 2. Start Background Job
-    $script:DohJob = Start-Job -ScriptBlock {
-        param($List, $IsEnable)
-        
-        # Create a temp file for the batch commands
-        $tmpFile = [System.IO.Path]::GetTempFileName()
-        $cnt = 0
-        
-        # Build the batch file content
-        $lines = @()
-        foreach ($dns in $List) {
-            if ($IsEnable) {
-                $lines += "dns add encryption server=$($dns.Server) dohtemplate=$($dns.Template) autoupgrade=yes udpfallback=no"
-            }
-            else {
-                $lines += "dns delete encryption server=$($dns.Server)"
-            }
-            $cnt++
-        }
-        
-        # Write to file
-        $lines | Set-Content -Path $tmpFile -Encoding Ascii
+    if (Test-WmtDnsRunspaceBusy) {
+        Write-GuiLog "A DNS or DoH operation is already running."
+        return
+    }
 
-        # Run netsh in batch mode (-f)
-        $p = Start-Process -FilePath "netsh.exe" -ArgumentList "-f", $tmpFile -NoNewWindow -PassThru -Wait
-        
-        # Cleanup
-        if (Test-Path $tmpFile) { Remove-Item $tmpFile }
-        
-        # Helper tasks
-        ipconfig /flushdns | Out-Null
-        if ($IsEnable) {
-            try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue } catch {}
-        }
-        
-        # Return the result object
-        if ($p.ExitCode -eq 0) {
-            Write-Output ([PSCustomObject]@{ Count = $cnt; Success = $true })
-        }
-        else {
-            Write-Output ([PSCustomObject]@{ Count = 0; Success = $false })
-        }
+    if ($script:DohRunspace) {
+        try { $script:DohRunspace.Dispose() } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+    }
 
-    } -ArgumentList $List, $IsEnable
+    $isEnableForTimer = [bool]$IsEnable
+    $actionStr = if ($isEnableForTimer) { "Registering" } else { "Removing" }
+    Write-GuiLog "$actionStr DoH templates..."
+    Set-WmtDnsActionButtonsEnabled $false
 
-    # 3. Monitor Job
-    if ($script:DohTimer) { $script:DohTimer.Stop() }
-    $script:DohTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:DohTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-    
-    $script:DohTimer.Add_Tick({
-            if ($script:DohJob.State -ne 'Running') {
-                $script:DohTimer.Stop()
-            
-                # Re-fetch buttons in this scope to be safe
-                $btnEnable = Get-Ctrl "btnDohAuto"
-                $btnDisable = Get-Ctrl "btnDohDisable"
+    try {
+        $script:DohRunspace = [PowerShell]::Create().AddScript({
+                param($List, $IsEnable)
 
-                try {
-                    $rawResults = Receive-Job -Job $script:DohJob
-                    $res = $rawResults | Where-Object { $_ -is [PSCustomObject] -and $_.Psobject.Properties.Match('Count') } | Select-Object -Last 1
+                $cnt = 0
+                $failures = @()
 
-                    if ($res -and $res.Success) {
-                        $c = $res.Count
-                        $finMsg = if ($IsEnable) { "Successfully applied $c DoH rules." } else { "Successfully removed $c DoH rules." }
-                    
-                        Write-GuiLog "Done. $finMsg"
-                    
-                        if ($c -gt 0) {
-                            # FIXED: Use [System.Windows.MessageBox] (WPF) to match the Enum types
-                            [System.Windows.MessageBox]::Show($finMsg, "DoH Manager", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-                        }
+                foreach ($dns in $List) {
+                    $server = [string]$dns.Server
+                    $template = [string]$dns.Template
+                    if ([string]::IsNullOrWhiteSpace($server)) { continue }
+
+                    if ($IsEnable) {
+                        & netsh.exe dns delete encryption "server=$server" 2>&1 | Out-Null
+                        & netsh.exe dns add encryption "server=$server" "dohtemplate=$template" autoupgrade=yes udpfallback=no 2>&1 | Out-Null
+                        if ($LASTEXITCODE -eq 0) { $cnt++ }
+                        else { $failures += $server }
                     }
                     else {
-                        Write-GuiLog "Operation failed or no changes were made."
+                        & netsh.exe dns delete encryption "server=$server" 2>&1 | Out-Null
+                        # Treat missing entries as already disabled; the desired end state is still reached.
+                        $cnt++
                     }
                 }
-                catch {
-                    Write-GuiLog "Job Error: $($_.Exception.Message)"
+
+                ipconfig /flushdns | Out-Null
+                try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue } catch {}
+                
+                [PSCustomObject]@{
+                    Count    = $cnt
+                    Failed   = $failures.Count
+                    Failures = $failures
+                    Success  = ($failures.Count -eq 0)
                 }
+            }).AddArgument($dnsList).AddArgument($isEnableForTimer)
 
-                # Cleanup
-                Remove-Job -Job $script:DohJob
-                $script:DohJob = $null
+        $script:DohAsyncResult = $script:DohRunspace.BeginInvoke()
+    }
+    catch {
+        Write-GuiLog "Failed to start DoH runspace: $($_.Exception.Message)"
+        try { if ($script:DohRunspace) { $script:DohRunspace.Dispose() } } catch {}
+        $script:DohRunspace = $null
+        $script:DohAsyncResult = $null
+        Set-WmtDnsActionButtonsEnabled $true
+        return
+    }
 
-                # Unlock Buttons (Safe Check)
-                if ($btnEnable) { $btnEnable.IsEnabled = $true }
-                if ($btnDisable) { $btnDisable.IsEnabled = $true }
-            }
-        })
+    $dohRunspace = $script:DohRunspace
+    $dohAsync = $script:DohAsyncResult
+    if (-not $dohRunspace -or -not $dohAsync) {
+        Write-GuiLog "Failed to start DoH runspace."
+        Set-WmtDnsActionButtonsEnabled $true
+        return
+    }
+
+    if ($script:DohTimer) { $script:DohTimer.Stop() }
+    $dohTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:DohTimer = $dohTimer
+    $dohTimer.Interval = [TimeSpan]::FromMilliseconds(250)
     
-    $script:DohTimer.Start()
+    $dohTimer.Add_Tick({
+            if (-not $dohAsync -or -not $dohAsync.IsCompleted) { return }
+
+            $dohTimer.Stop()
+            try {
+                $rawResults = $dohRunspace.EndInvoke($dohAsync)
+                $res = $rawResults | Where-Object { $_ -is [PSCustomObject] -and $_.Psobject.Properties.Match('Count') } | Select-Object -Last 1
+
+                if ($res -and $res.Success) {
+                    $c = $res.Count
+                    if ($isEnableForTimer) {
+                        $finMsg = "Registered $c DoH templates."
+                    }
+                    else {
+                        $finMsg = "Removed or verified $c DoH templates."
+                    }
+
+                    Write-GuiLog "Done. $finMsg"
+
+                    if ($c -gt 0) {
+                        [System.Windows.MessageBox]::Show($finMsg, "DoH Manager", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                    }
+                }
+                else {
+                    $failedText = if ($res -and $res.Failures) { " Failed: $($res.Failures -join ', ')" } else { "" }
+                    Write-GuiLog "DoH operation failed or no changes were made.$failedText"
+                }
+            }
+            catch {
+                Write-GuiLog "DoH Error: $($_.Exception.Message)"
+            }
+            finally {
+                try {
+                    $dohRunspace.Dispose()
+                } catch {}
+                if ([object]::ReferenceEquals($script:DohRunspace, $dohRunspace)) { $script:DohRunspace = $null }
+                if ([object]::ReferenceEquals($script:DohAsyncResult, $dohAsync)) { $script:DohAsyncResult = $null }
+                if ([object]::ReferenceEquals($script:DohTimer, $dohTimer)) { $script:DohTimer = $null }
+                Set-WmtDnsActionButtonsEnabled $true
+            }
+        }.GetNewClosure())
+    
+    $dohTimer.Start()
 }
 
 # Redirect existing function calls to the new Async handler
@@ -2917,7 +4375,7 @@ function Invoke-HostsUpdate {
         catch {
             Write-GuiLog "CRITICAL ERROR: $($_.Exception.Message)"
             # Restore backup if write failed
-            $latestBackup = Get-ChildItem $backupDir | Sort-Object CreationTime -Descending | Select-Object -First 1
+            $latestBackup = @(Get-WmtEnumeratedFiles -Path $backupDir | ForEach-Object { [System.IO.FileInfo]::new($_) } | Sort-Object CreationTime -Descending | Select-Object -First 1)
             if ($latestBackup) {
                 Copy-Item $latestBackup.FullName $hostsPath -Force
                 Write-GuiLog "Restored backup due to failure."
@@ -2971,6 +4429,10 @@ function Show-HostsEditor {
     $lblInfo.Top = 15
     $lblInfo.Left = 140
     $pnl.Controls.Add($lblInfo)
+
+    Set-WmtWinFormsTheme -Control $hForm
+    Set-WmtWinFormsButtonTheme -Button $btn -Role Success
+    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
     
     $hostsPath = "$env:windir\System32\drivers\etc\hosts"
     
@@ -2992,12 +4454,12 @@ function Show-HostsEditor {
         $sel = $txtHosts.SelectionStart
         $len = $txtHosts.SelectionLength
         $txtHosts.SelectAll()
-        $txtHosts.SelectionColor = "White"
+        $txtHosts.SelectionColor = Get-WmtThemeColor "TextPrimary"
         $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
         $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
         if ($s -ge 0 -and $e -gt $s) {
             $txtHosts.Select($s, ($e + 33) - $s)
-            $txtHosts.SelectionColor = "Cyan"
+            $txtHosts.SelectionColor = Get-WmtThemeColor "Accent"
         }
         $txtHosts.Select($sel, $len)
     }
@@ -3199,16 +4661,57 @@ function Get-Winapp2Rules {
     $dataPath = Get-DataPath
     $iniPath = Join-Path $dataPath "winapp2.ini"
     $cachePath = Join-Path $dataPath "winapp2_cache.json" 
+    $cacheMetaPath = Join-Path $dataPath "winapp2_cache.meta.json"
+    $cacheVersion = 2
+    if (-not $script:Winapp2RulesMemoryCache) { $script:Winapp2RulesMemoryCache = @{} }
+    $iniInfoForCache = $null
+    if (Test-Path $iniPath) {
+        try { $iniInfoForCache = Get-Item -LiteralPath $iniPath -ErrorAction Stop } catch {}
+    }
+    $memoryKey = if ($iniInfoForCache) {
+        "{0}|{1}|{2}" -f $cacheVersion, [int64]$iniInfoForCache.Length, $iniInfoForCache.LastWriteTimeUtc.Ticks
+    }
+    elseif (Test-Path $cachePath) {
+        $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction SilentlyContinue
+        if ($cacheInfo) { "cache-only|{0}|{1}" -f [int64]$cacheInfo.Length, $cacheInfo.LastWriteTimeUtc.Ticks } else { "" }
+    }
+    else { "" }
+
+    if (-not $Download -and $memoryKey -and $script:Winapp2RulesMemoryCache.ContainsKey($memoryKey)) {
+        return $script:Winapp2RulesMemoryCache[$memoryKey]
+    }
 
     # --- 1. SMART CACHE CHECK ---
     $forceRebuild = $false
-    
+
     if (Test-Path $cachePath) {
-        if ($PSCommandPath -and (Test-Path $PSCommandPath)) {
-            $scriptTime = (Get-Item $PSCommandPath).LastWriteTime
-            $cacheTime = (Get-Item $cachePath).LastWriteTime
-            if ($scriptTime -gt $cacheTime) { 
-                $forceRebuild = $true 
+        try {
+            if (Test-Path $iniPath) {
+                $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+                $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction Stop
+                $meta = $null
+                if (Test-Path $cacheMetaPath) {
+                    $meta = Get-Content -LiteralPath $cacheMetaPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                }
+
+                if ($meta) {
+                    if ([int]$meta.CacheVersion -ne $cacheVersion -or
+                        [int64]$meta.IniLength -ne [int64]$iniInfo.Length -or
+                        [datetime]$meta.IniLastWriteUtc -ne $iniInfo.LastWriteTimeUtc) {
+                        $forceRebuild = $true
+                    }
+                }
+                elseif ($iniInfo.LastWriteTimeUtc -gt $cacheInfo.LastWriteTimeUtc) {
+                    $forceRebuild = $true
+                }
+            }
+        }
+        catch {
+            if (-not (Test-Path $iniPath)) {
+                $forceRebuild = $false
+            }
+            else {
+                $forceRebuild = $true
             }
         }
     }
@@ -3237,8 +4740,22 @@ function Get-Winapp2Rules {
     # --- 3. CACHE LOAD ---
     if (-not $forceRebuild -and (Test-Path $cachePath)) {
         try { 
-            $cachedRules = Get-Content $cachePath -Raw | ConvertFrom-Json
-            if ($cachedRules.Count -gt 5) { return $cachedRules }
+            $cachedRules = Get-Content -LiteralPath $cachePath -Raw | ConvertFrom-Json
+            if ($cachedRules.Count -gt 5) {
+                if ((Test-Path $iniPath) -and -not (Test-Path $cacheMetaPath)) {
+                    try {
+                        $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+                        [PSCustomObject]@{
+                            CacheVersion    = $cacheVersion
+                            IniLength       = [int64]$iniInfo.Length
+                            IniLastWriteUtc = $iniInfo.LastWriteTimeUtc
+                        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheMetaPath -Force
+                    }
+                    catch {}
+                }
+                if ($memoryKey) { $script:Winapp2RulesMemoryCache[$memoryKey] = $cachedRules }
+                return $cachedRules
+            }
         }
         catch {}
     }
@@ -3380,7 +4897,20 @@ function Get-Winapp2Rules {
         }
     }
 
-    try { $finalList | ConvertTo-Json -Depth 5 | Set-Content $cachePath -Force } catch {}
+    try {
+        $finalList | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cachePath -Force
+        if (Test-Path $iniPath) {
+            $iniInfo = Get-Item -LiteralPath $iniPath -ErrorAction Stop
+            [PSCustomObject]@{
+                CacheVersion    = $cacheVersion
+                IniLength       = [int64]$iniInfo.Length
+                IniLastWriteUtc = $iniInfo.LastWriteTimeUtc
+            } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheMetaPath -Force
+            $memoryKey = "{0}|{1}|{2}" -f $cacheVersion, [int64]$iniInfo.Length, $iniInfo.LastWriteTimeUtc.Ticks
+        }
+    } catch {}
+
+    if ($memoryKey) { $script:Winapp2RulesMemoryCache[$memoryKey] = $finalList }
     
     return $finalList
 }
@@ -3408,12 +4938,15 @@ function Show-AdvancedCleanupSelection {
     $topPanel = New-Object System.Windows.Forms.Panel
     $topPanel.Dock = "Top"; $topPanel.Height = 50
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
+    Set-WmtDoubleBuffered -Control $topPanel
 
     $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
     $chkToggleWinapp2.Text = "Load Community Rules *"
     $chkToggleWinapp2.Size = "220, 30"; $chkToggleWinapp2.Location = "15, 10"
     $chkToggleWinapp2.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
     $chkToggleWinapp2.ForeColor = "White"
+    $chkToggleWinapp2.BackColor = $topPanel.BackColor
+    $chkToggleWinapp2.UseVisualStyleBackColor = $false
     $chkToggleWinapp2.Checked = $isWinapp2Enabled
     $tt = New-Object System.Windows.Forms.ToolTip
     $tt.SetToolTip($chkToggleWinapp2, "Enables 1000+ extra rules from Winapp2.ini")
@@ -3430,6 +4963,8 @@ function Show-AdvancedCleanupSelection {
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
     $lblSearch.Location = "370, 15"; $lblSearch.Anchor = "Top, Right"
+    $lblSearch.ForeColor = "White"
+    $lblSearch.BackColor = $topPanel.BackColor
     $topPanel.Controls.Add($lblSearch)
 
     $layoutTopPanel = {
@@ -3443,6 +4978,7 @@ function Show-AdvancedCleanupSelection {
     $btnPanel = New-Object System.Windows.Forms.Panel
     $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
     $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
+    Set-WmtDoubleBuffered -Control $btnPanel
 
     $btnClean = New-Object System.Windows.Forms.Button
     $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
@@ -3485,17 +5021,77 @@ function Show-AdvancedCleanupSelection {
     # MAIN CONTENT PANEL
     $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
     $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
-    $mainPanel.AutoScroll = $true; $mainPanel.Dock = "Fill"
+    $mainPanel.AutoScroll = $true
+    $mainPanel.Dock = "None"
+    $mainPanel.Anchor = "Top, Bottom, Left, Right"
     $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
 
-    $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', 'Instance, NonPublic')
-    if ($prop) { $prop.SetValue($mainPanel, $true) }
+    Set-WmtDoubleBuffered -Control $mainPanel
 
+    # Keep the scrollable rules region explicitly bounded between the fixed
+    # header and footer. Extra bottom padding made the flow content taller, so
+    # the last community rules could still appear below the visible frame.
+    $layoutAdvancedCleanerPanels = {
+        if ($form.IsDisposed) { return }
+
+        $topPanel.Left = 0
+        $topPanel.Top = 0
+        $topPanel.Width = $form.ClientSize.Width
+
+        $btnPanel.Left = 0
+        $btnPanel.Width = $form.ClientSize.Width
+        $btnPanel.Top = [Math]::Max($topPanel.Bottom, $form.ClientSize.Height - $btnPanel.Height)
+
+        $mainPanel.Left = 0
+        $mainPanel.Top = $topPanel.Bottom
+        $mainPanel.Width = $form.ClientSize.Width
+        $mainPanel.Height = [Math]::Max(0, $btnPanel.Top - $mainPanel.Top)
+    }
+
+    $form.Controls.Add($mainPanel)
     $form.Controls.Add($btnPanel)
     $form.Controls.Add($topPanel)
-    $form.Controls.Add($mainPanel)
-    $mainPanel.BringToFront()
+    $form.Add_SizeChanged({ & $layoutAdvancedCleanerPanels }.GetNewClosure())
+    & $layoutAdvancedCleanerPanels
+    $topPanel.BringToFront()
+    $btnPanel.BringToFront()
+
+    # Keep FlowLayoutPanel's scroll range accurate after community rules are
+    # loaded. Nested AutoSize FlowLayoutPanels can otherwise report a scroll
+    # extent that is a few controls too short, which makes the last options
+    # look like they are rendered under the footer buttons.
+    $updateAdvancedCleanerScrollExtent = {
+        if ($form.IsDisposed -or $mainPanel.IsDisposed) { return }
+
+        foreach ($ctrl in $mainPanel.Controls) {
+            if ($ctrl.Tag -eq 'HEADER') {
+                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 28)
+            }
+            elseif ($ctrl.Tag -eq 'FLOW') {
+                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
+            }
+        }
+
+        $mainPanel.PerformLayout()
+
+        $contentBottom = 0
+        foreach ($ctrl in $mainPanel.Controls) {
+            $bottom = $ctrl.Bottom + $ctrl.Margin.Bottom
+            if ($bottom -gt $contentBottom) { $contentBottom = $bottom }
+        }
+
+        # A small scroll tail lets the final checkbox clear the viewport edge
+        # without increasing the visible frame or overlapping the button panel.
+        $mainPanel.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($contentBottom + 18))
+    }
+
+    $mainPanel.Add_SizeChanged({ & $updateAdvancedCleanerScrollExtent }.GetNewClosure())
+    Set-WmtWinFormsTheme -Control $form
+    Set-WmtWinFormsButtonTheme -Button $btnClean -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnAnalyze -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
+    Set-WmtWinFormsButtonTheme -Button $btnEventLogs -Role Warning
 
     # --- INTERNAL RULES (static) ---
     $internalRules = @(
@@ -3515,6 +5111,10 @@ function Show-AdvancedCleanupSelection {
 
     $global:checkboxes = @{}
     $global:sections = @()
+    $cleanupBackColor = Get-WmtThemeColor "BgDark"
+    $cleanupHeaderColor = Get-WmtThemeColor "BgPanel"
+    $cleanupTextColor = Get-WmtThemeColor "TextPrimary"
+    $cleanupCommunityTextColor = Get-WmtThemeColor "Accent"
 
     # ------------------------------------------------
     # Render helper – rebuilds the entire panel from a rule list,
@@ -3524,106 +5124,129 @@ function Show-AdvancedCleanupSelection {
         param($allRules)
 
         $mainPanel.SuspendLayout()
-        $mainPanel.Controls.Clear()
+        try {
+            $mainPanel.Controls.Clear()
 
-        # Preserve current checkbox states
-        $prevStates = @{}
-        foreach ($k in $global:checkboxes.Keys) {
-            $prevStates[$k] = $global:checkboxes[$k].Checked
-        }
-        $global:checkboxes.Clear()
-        $global:sections = @()
+            # Preserve current checkbox states
+            $prevStates = @{}
+            foreach ($k in $global:checkboxes.Keys) {
+                $prevStates[$k] = $global:checkboxes[$k].Checked
+            }
+            $global:checkboxes.Clear()
+            $global:sections = @()
 
-        $grouped = $allRules | Group-Object Section | Sort-Object Name
-        $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+            $grouped = $allRules | Group-Object Section | Sort-Object Name
+            $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-        foreach ($group in $grouped) {
-            $sec = $group.Name
+            foreach ($group in $grouped) {
+                $sec = $group.Name
 
-            $secPanel = New-Object System.Windows.Forms.Panel
-            $secPanel.Size = "600, 35"; $secPanel.Margin = "5, 10, 0, 0"
-            $secPanel.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-            $secPanel.Tag = "HEADER"
+                $secPanel = New-Object System.Windows.Forms.Panel
+                $secPanel.Size = New-Object System.Drawing.Size(([Math]::Max(200, $mainPanel.ClientSize.Width - 28)), 35); $secPanel.Margin = "5, 10, 0, 0"
+                $secPanel.BackColor = $cleanupHeaderColor
+                $secPanel.Tag = "HEADER"
+                Set-WmtDoubleBuffered -Control $secPanel
 
-            $secChk = New-Object System.Windows.Forms.CheckBox
-            $secChk.Text = $sec
-            $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-            $secChk.ForeColor = [System.Drawing.Color]::DeepSkyBlue
-            $secChk.AutoSize = $true; $secChk.Location = "5, 5"
-            $secPanel.Controls.Add($secChk)
+                $secChk = New-Object System.Windows.Forms.CheckBox
+                $secChk.Text = $sec
+                $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+                $secChk.ForeColor = Get-WmtThemeColor "Accent"
+                $secChk.BackColor = $cleanupHeaderColor
+                $secChk.UseVisualStyleBackColor = $false
+                $secChk.AutoSize = $true; $secChk.Location = "5, 5"
+                $secPanel.Controls.Add($secChk)
 
-            $controlsToAdd.Add($secPanel)
-            $global:sections += $secPanel
+                $controlsToAdd.Add($secPanel)
+                $global:sections += $secPanel
 
-            $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-            $itemFlow.FlowDirection = "TopDown"; $itemFlow.AutoSize = $true
-            $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
+                $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+                $itemFlow.FlowDirection = "TopDown"
+                $itemFlow.WrapContents = $false
+                $itemFlow.AutoScroll = $false
+                $itemFlow.AutoSize = $true
+                $itemFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
+                $itemFlow.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
+                $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
+                $itemFlow.BackColor = $cleanupBackColor
+                Set-WmtDoubleBuffered -Control $itemFlow
 
-            $secItems = $group.Group | Sort-Object AppGroup, Name
-            $childChecks = @()
-            $currentGroup = $null
-            $isSecChecked = $true
-            $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
+                $secItems = $group.Group | Sort-Object AppGroup, Name
+                $childChecks = @()
+                $currentGroup = $null
+                $isSecChecked = $true
+                $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
-            foreach ($item in $secItems) {
-                if ($item.AppGroup -ne $currentGroup) {
-                    $currentGroup = $item.AppGroup
-                    $grpLbl = New-Object System.Windows.Forms.Label
-                    $grpLbl.Text = $currentGroup
-                    $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-                    $grpLbl.ForeColor = [System.Drawing.Color]::LightGray
-                    $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
-                    $grpLbl.Tag = "GROUPHEADER"
-                    $flowControlsToAdd.Add($grpLbl)
+                foreach ($item in $secItems) {
+                    if ($item.AppGroup -ne $currentGroup) {
+                        $currentGroup = $item.AppGroup
+                        $grpLbl = New-Object System.Windows.Forms.Label
+                        $grpLbl.Text = $currentGroup
+                        $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+                        $grpLbl.ForeColor = Get-WmtThemeColor "TextSecondary"
+                        $grpLbl.BackColor = $cleanupBackColor
+                        $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
+                        $grpLbl.Tag = "GROUPHEADER"
+                        $flowControlsToAdd.Add($grpLbl)
+                    }
+
+                    $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
+                    $chk = New-Object System.Windows.Forms.CheckBox
+                    $chk.ForeColor = $cleanupTextColor
+
+                    if ($item.IsInternal) {
+                        $chk.Text = $item.Name
+                    }
+                    else {
+                        $cleanName = $item.Name.Trim(" *")
+                        $chk.Text = "$cleanName (*)"
+                        $chk.ForeColor = $cleanupCommunityTextColor
+                    }
+
+                    $chk.BackColor = $cleanupBackColor
+                    $chk.UseVisualStyleBackColor = $false
+                    $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
+                    $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
+
+                    # Restore previous state or use default
+                    if ($prevStates.ContainsKey($itemKey)) {
+                        $chk.Checked = $prevStates[$itemKey]
+                    }
+                    elseif ($savedStates.ContainsKey($itemKey)) {
+                        $chk.Checked = $savedStates[$itemKey]
+                    }
+                    else {
+                        $chk.Checked = ($item.IsInternal -eq $true)
+                    }
+
+                    if (-not $chk.Checked) { $isSecChecked = $false }
+                    if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
+
+                    $flowControlsToAdd.Add($chk)
+                    $global:checkboxes[$itemKey] = $chk
+                    $childChecks += $chk
                 }
 
-                $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
-                $chk = New-Object System.Windows.Forms.CheckBox
+                $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
+                $secChk.Checked = $isSecChecked
 
-                if ($item.IsInternal) {
-                    $chk.Text = $item.Name
-                }
-                else {
-                    $cleanName = $item.Name.Trim(" *")
-                    $chk.Text = "$cleanName (*)"
-                    $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 200, 255)
-                }
+                $secChk.Add_CheckedChanged({
+                        param($s, $e)
+                        foreach ($c in $childChecks) { $c.Checked = $s.Checked }
+                    }.GetNewClosure())
 
-                $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
-                $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
-
-                # Restore previous state or use default
-                if ($prevStates.ContainsKey($itemKey)) {
-                    $chk.Checked = $prevStates[$itemKey]
-                }
-                elseif ($savedStates.ContainsKey($itemKey)) {
-                    $chk.Checked = $savedStates[$itemKey]
-                }
-                else {
-                    $chk.Checked = ($item.IsInternal -eq $true)
-                }
-
-                if (-not $chk.Checked) { $isSecChecked = $false }
-                if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
-
-                $flowControlsToAdd.Add($chk)
-                $global:checkboxes[$itemKey] = $chk
-                $childChecks += $chk
+                $controlsToAdd.Add($itemFlow)
             }
 
-            $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
-            $secChk.Checked = $isSecChecked
-
-            $secChk.Add_CheckedChanged({
-                    param($s, $e)
-                    foreach ($c in $childChecks) { $c.Checked = $s.Checked }
-                }.GetNewClosure())
-
-            $controlsToAdd.Add($itemFlow)
+            $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
         }
-
-        $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
-        $mainPanel.ResumeLayout($true)
+        finally {
+            $mainPanel.ResumeLayout($true)
+            & $updateAdvancedCleanerScrollExtent
+            if ($form.IsHandleCreated) {
+                $null = $form.BeginInvoke([System.Action]{ & $updateAdvancedCleanerScrollExtent })
+            }
+            $mainPanel.Invalidate()
+        }
     }
 
     # Instant render of internal rules only
@@ -3636,13 +5259,20 @@ function Show-AdvancedCleanupSelection {
         if (-not $chkToggleWinapp2.Checked) { return }
 
         $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = "Yellow"
+        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = Get-WmtThemeColor "Warning"
+        $lbl.BackColor = $cleanupBackColor
         $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
         $mainPanel.Controls.Add($lbl)
+        $mainPanel.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
         try {
-            if ($ForceDownload) {
+            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+            $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
+            $shouldDownload = $ForceDownload -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
+
+            if ($shouldDownload) {
                 $winRules = Get-Winapp2Rules -Download:$true
             }
             else {
@@ -3661,14 +5291,18 @@ function Show-AdvancedCleanupSelection {
         }
     }
 
-    # Deferred loading after form is visible
-    $form.Add_Shown({
-            $form.BeginInvoke([Action] {
-                    if ($isWinapp2Enabled) {
-                        & $loadCommunityRules
-                    }
-                })
-        })
+    # Load saved community rules the same way the manual toggle does, once the
+    # form is visible. Activated is a small fallback for hosts that miss Shown.
+    $communityLoadState = @{ Started = $false }
+    $loadCommunityRulesIfEnabled = {
+        if ($communityLoadState.Started -or $form.IsDisposed -or -not $chkToggleWinapp2.Checked) { return }
+        $communityLoadState.Started = $true
+        [System.Windows.Forms.Application]::DoEvents()
+        & $loadCommunityRules
+    }.GetNewClosure()
+
+    $form.Add_Shown({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
+    $form.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
 
     # Toggle handler
     $chkToggleWinapp2.Add_Click({
@@ -3832,6 +5466,7 @@ function Invoke-TempCleanup {
     $pBar.Location = "20,70"; $pBar.Size = "440,20"
     $pForm.Controls.Add($pBar)
 
+    Set-WmtWinFormsTheme -Control $pForm
     $pForm.Show()
     [System.Windows.Forms.Application]::DoEvents()
 
@@ -3875,6 +5510,7 @@ function Invoke-TempCleanup {
                     $size = $fInfo.Length
                     
                     if (-not $isAnalyze) {
+                        try { $fInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
                         $fInfo.Delete() 
                     }
                     else {
@@ -3901,17 +5537,8 @@ function Invoke-TempCleanup {
             }
 
             if ($Recurse) {
-                $dirs = [System.IO.Directory]::GetDirectories($Path, "*", [System.IO.SearchOption]::AllDirectories)
-                [Array]::Sort($dirs, [System.Collections.Comparer]::Default)
-                [Array]::Reverse($dirs)
-                
-                foreach ($dir in $dirs) {
-                    try {
-                        if (-not $isAnalyze) {
-                            [System.IO.Directory]::Delete($dir, $false) 
-                        }
-                    }
-                    catch {}
+                if (-not $isAnalyze) {
+                    Remove-WmtEmptyChildDirectories -Path $Path
                 }
             }
         }
@@ -3961,7 +5588,7 @@ function Invoke-TempCleanup {
                                     try {
                                         $path = $f.Path
                                         if ($path -and (Test-Path -LiteralPath $path)) {
-                                            $size = (Get-ChildItem -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum
+                                            $size = Measure-WmtPathBytes -Path $path
                                             $stats.Bytes += $size
                                             
                                             if (-not $isAnalyze) {
@@ -3993,9 +5620,11 @@ function Invoke-TempCleanup {
                     "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" -RuleName $itemName }
                     "Firefox" { 
                         if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
-                            Get-ChildItem "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles" -Directory | ForEach-Object { 
-                                Invoke-RobustClean "$($_.FullName)\cache2\entries" -RuleName $itemName 
-                            }
+                            try {
+                                foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
+                                    Invoke-RobustClean "$profilePath\cache2\entries" -RuleName $itemName
+                                }
+                            } catch {}
                         }
                     }
                     "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
@@ -4107,20 +5736,22 @@ function Invoke-TempCleanup {
             $grid.GridColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
             $grid.RowHeadersVisible = $false
             $grid.SelectionMode = "FullRowSelect"
-            
+
             $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
             
-            $dt = New-Object System.Data.DataTable
-            $dt.Columns.Add("RuleName", [string]) | Out-Null
-            $dt.Columns.Add("FilePath", [string]) | Out-Null
-            # FIX: We changed this to [long] so it sorts mathematically!
-            $dt.Columns.Add("Size", [long]) | Out-Null 
-            
-            foreach ($item in $previewList) {
-                # We feed the raw numbers directly to the table
-                $dt.Rows.Add($item.RuleName, $item.FilePath, $item.RawBytes) | Out-Null
-            }
-            $grid.DataSource = $dt
+            [void]$grid.Columns.Add("RuleName", "RuleName")
+            [void]$grid.Columns.Add("FilePath", "FilePath")
+            [void]$grid.Columns.Add("Size", "Size")
+            $previewRows = New-WmtVirtualRows -Items @(
+                foreach ($item in $previewList) {
+                    [PSCustomObject]@{
+                        RuleName = $item.RuleName
+                        FilePath = $item.FilePath
+                        Size     = [long]$item.RawBytes
+                    }
+                }
+            )
+            Initialize-WmtVirtualDataGrid -Grid $grid -Rows $previewRows -EnableSort
             
             # --- THE MAGIC VISUAL TRICK ---
             # This intercepts the drawing of the grid. If it sees a number in the "Size" column, 
@@ -4153,7 +5784,9 @@ function Invoke-TempCleanup {
 
             $menuOpen.Add_Click({
                     if ($grid.SelectedRows.Count -gt 0) {
-                        $path = $grid.SelectedRows[0].Cells["FilePath"].Value
+                        $rowIndex = $grid.SelectedRows[0].Index
+                        if ($rowIndex -lt 0 -or $rowIndex -ge $previewRows.Count) { return }
+                        $path = $previewRows[$rowIndex].FilePath
                         if (Test-Path -LiteralPath $path) {
                             Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
                         }
@@ -4165,23 +5798,25 @@ function Invoke-TempCleanup {
                         $freedBytes = 0
                         $rowsToRemove = New-Object System.Collections.ArrayList
 
-                        foreach ($row in $grid.SelectedRows) {
-                            $path = $row.Cells["FilePath"].Value
-                            $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
+                        foreach ($row in @($grid.SelectedRows)) {
+                            if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
+                            $item = $previewRows[$row.Index]
+                            $path = $item.FilePath
+                            $bytes = [long]$item.Size
                     
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
                                     $freedBytes += $bytes
                                 }
-                                $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                                $rowsToRemove.Add($row.Index) | Out-Null
                             }
                             catch {
                                 Write-GuiLog "Failed to delete from Context Menu: $path"
                             }
                         }
                 
-                        foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                        Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
                     
                         if ($freedBytes -gt 0) {
                             $freedFormatted = Format-FileSize $freedBytes
@@ -4212,9 +5847,11 @@ function Invoke-TempCleanup {
                     $freedBytes = 0
                     $rowsToRemove = New-Object System.Collections.ArrayList
 
-                    foreach ($row in $grid.SelectedRows) {
-                        $path = $row.Cells["FilePath"].Value
-                        $bytes = $row.Cells["Size"].Value # Now correctly pulls the raw [long]!
+                    foreach ($row in @($grid.SelectedRows)) {
+                        if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
+                        $item = $previewRows[$row.Index]
+                        $path = $item.FilePath
+                        $bytes = [long]$item.Size
                 
                         try {
                             if (Test-Path -LiteralPath $path) {
@@ -4222,29 +5859,29 @@ function Invoke-TempCleanup {
                                 $freedBytes += $bytes
                                 $cleanedCount++
                             }
-                            $rowsToRemove.Add($row.DataBoundItem.Row) | Out-Null
+                            $rowsToRemove.Add($row.Index) | Out-Null
                         }
                         catch {
                             Write-GuiLog "Failed to delete from Analyze: $path"
                         }
                     }
             
-                    foreach ($r in $rowsToRemove) { $dt.Rows.Remove($r) }
+                    Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
                     $freedFormatted = Format-FileSize $freedBytes
                     [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                 })
 
             $btnCleanAll.Add_Click({
-                    if ($dt.Rows.Count -eq 0) { return }
+                    if ($previewRows.Count -eq 0) { return }
             
-                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($dt.Rows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
+                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
                     if ($confirm -eq "Yes") {
                         $cleanedCount = 0
                         $freedBytes = 0
                 
-                        foreach ($row in $dt.Rows) {
-                            $path = $row["FilePath"]
-                            $bytes = $row["Size"] # Now correctly pulls the raw [long]!
+                        foreach ($row in @($previewRows)) {
+                            $path = $row.FilePath
+                            $bytes = [long]$row.Size
                             try {
                                 if (Test-Path -LiteralPath $path) {
                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
@@ -4255,7 +5892,8 @@ function Invoke-TempCleanup {
                             catch {}
                         }
                 
-                        $dt.Rows.Clear()
+                        $previewRows.Clear()
+                        Reset-WmtVirtualGridRowCount -Grid $grid
                         $freedFormatted = Format-FileSize $freedBytes
                         [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
                     }
@@ -4266,17 +5904,22 @@ function Invoke-TempCleanup {
             $gridForm.Controls.Add($grid)
             $gridBtnPanel.SendToBack() 
             $grid.BringToFront()       
-            
+
+            Set-WmtWinFormsTheme -Control $gridForm
+            Set-WmtWinFormsButtonTheme -Button $btnCleanSelected -Role Primary
+            Set-WmtWinFormsButtonTheme -Button $btnCleanAll -Role Danger
+            Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
+            Set-WmtWinFormsContextMenuTheme -Menu $ctxMenu
             $gridForm.ShowDialog() | Out-Null
         }
         else {
-            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
         }
     }
     else {
         Write-GuiLog "Total Removed: $finalTotalFormatted"
         $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalTotalFormatted"
-        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information) | Out-Null
+        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
     }
 }
 
@@ -4306,6 +5949,7 @@ function Show-RegScanSelection {
     # --- Scrollable Panel for Checkboxes ---
     $pnl = New-Object System.Windows.Forms.Panel
     $pnl.Location = "20, 50"; $pnl.Size = "550, 380"; $pnl.AutoScroll = $true
+    Set-WmtDoubleBuffered -Control $pnl
     $f.Controls.Add($pnl)
 
     # --- Define Categories ---
@@ -4370,6 +6014,10 @@ function Show-RegScanSelection {
     
     $f.AcceptButton = $btnScan; $f.CancelButton = $btnCancel
 
+    Set-WmtWinFormsTheme -Control $f
+    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $btnScan -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
     if ($f.ShowDialog() -eq "OK") {
         $selected = @()
         
@@ -4419,6 +6067,7 @@ function Show-RegistryCleaner {
     $dg.AllowUserToAddRows = $false
     $dg.SelectionMode = "FullRowSelect"
     $dg.MultiSelect = $true
+    Set-WmtDoubleBuffered -Control $dg
     
     # Header Styling
     $dg.EnableHeadersVisualStyles = $false
@@ -4442,6 +6091,7 @@ function Show-RegistryCleaner {
     $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
     $colChk.HeaderText = " "
     $colChk.Width = 30; $colChk.Name = "Check"; $colChk.TrueValue = $true; $colChk.FalseValue = $false
+    $colChk.ReadOnly = $false
     [void]$dg.Columns.Add($colChk)
 
     # Visible Columns
@@ -4453,18 +6103,30 @@ function Show-RegistryCleaner {
     [void]$dg.Columns.Add("FullPath", "FullPath"); $dg.Columns["FullPath"].Visible = $false
     [void]$dg.Columns.Add("ValueName", "ValueName"); $dg.Columns["ValueName"].Visible = $false
     [void]$dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Visible = $false
+    foreach ($col in $dg.Columns) {
+        if ($col.Name -ne "Check") { $col.ReadOnly = $true }
+    }
 
     # --- 5. Populate Data ---
-    foreach ($item in $ScanResults) {
-        $row = $dg.Rows.Add()
-        $dg.Rows[$row].Cells["Check"].Value = $true
-        $dg.Rows[$row].Cells["Problem"].Value = $item.Problem
-        $dg.Rows[$row].Cells["Data"].Value = $item.Data
-        $dg.Rows[$row].Cells["Key"].Value = $item.DisplayKey
-        $dg.Rows[$row].Cells["FullPath"].Value = $item.RegPath
-        $dg.Rows[$row].Cells["ValueName"].Value = $item.ValueName
-        $dg.Rows[$row].Cells["Type"].Value = $item.Type
-    }
+    $registryRows = New-WmtVirtualRows -Items @(
+        foreach ($item in $ScanResults) {
+            [PSCustomObject]@{
+                Check     = $true
+                Problem   = $item.Problem
+                Data      = $item.Data
+                Key       = $item.DisplayKey
+                FullPath  = $item.RegPath
+                ValueName = $item.ValueName
+                Type      = $item.Type
+            }
+        }
+    )
+    Initialize-WmtVirtualDataGrid -Grid $dg -Rows $registryRows -EnableSort
+    $dg.Add_CurrentCellDirtyStateChanged({
+            if ($dg.IsCurrentCellDirty) {
+                $dg.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
+            }
+        })
 
     # --- 6. Footer Panel & Buttons ---
     $pnlBot = New-Object System.Windows.Forms.Panel
@@ -4489,13 +6151,14 @@ function Show-RegistryCleaner {
     # --- 7. Fix Button Logic ---
     $btnFix.Add_Click({
             $toFix = @()
-            foreach ($row in $dg.Rows) {
-                if ($row.Cells["Check"].Value -eq $true) {
+            try { $dg.EndEdit() } catch {}
+            foreach ($row in $registryRows) {
+                if ($row.Check -eq $true) {
                     $toFix += [PSCustomObject]@{
-                        RegPath    = $row.Cells["FullPath"].Value
-                        ValueName  = $row.Cells["ValueName"].Value
-                        Type       = $row.Cells["Type"].Value
-                        DisplayKey = $row.Cells["Key"].Value
+                        RegPath    = $row.FullPath
+                        ValueName  = $row.ValueName
+                        Type       = $row.Type
+                        DisplayKey = $row.Key
                     }
                 }
             }
@@ -4511,6 +6174,10 @@ function Show-RegistryCleaner {
             $f.Close()
         })
 
+    Set-WmtWinFormsTheme -Control $f
+    $lblStatus.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $btnFix -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
     [void]$f.ShowDialog()
     return $f.Tag
 }
@@ -4614,6 +6281,11 @@ function Show-SafetyDialog {
     $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Force Clean (No Backup)"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
     $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
     
+    Set-WmtWinFormsTheme -Control $f
+    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $b1 -Role Success
+    Set-WmtWinFormsButtonTheme -Button $b2 -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $b3 -Role Standard
     return $f.ShowDialog()
 }
 
@@ -4678,6 +6350,8 @@ function Invoke-RegistryTask {
         $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $pForm.ForeColor = "White"
         $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location = "20,15"; $pLabel.Size = "460,20"; $pLabel.Text = "Initializing Background Scan..."; $pForm.Controls.Add($pLabel)
         $pBar = New-Object System.Windows.Forms.ProgressBar; $pBar.Location = "20,45"; $pBar.Size = "440,20"; $pForm.Controls.Add($pBar)
+        Set-WmtWinFormsTheme -Control $pForm
+        $pLabel.ForeColor = Get-WmtThemeColor "TextPrimary"
         $pForm.Show()
 
         # Shared Data for Thread
@@ -4691,6 +6365,7 @@ function Invoke-RegistryTask {
 
         # --- RUNSPACE CONFIGURATION ---
         $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+        $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Test-PathExists", ${function:Test-PathExists}.ToString()))
         $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
         # STA Mode is critical for Registry (HKCR) scans to work correctly
         $rs.ApartmentState = "STA"
@@ -4708,19 +6383,6 @@ function Invoke-RegistryTask {
                 Import-Module Microsoft.PowerShell.Management
                 Import-Module Microsoft.PowerShell.Security
                 $SelectedScans = @($SelectedScans)
-
-                # Internal Helper: Check if path exists
-                function Test-PathExists {
-                    param($Path)
-                    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                    if ($Path -match "%.*%" -or $Path -match "\$\(.*\)") { return $true }
-                    if (Test-Path -Path $Path) { return $true }
-                    if ($Path -match "(?i)System32") {
-                        $nativePath = $Path -replace "(?i)System32", "Sysnative"
-                        if (Test-Path -Path $nativePath) { return $true }
-                    }
-                    return $false
-                }
 
                 # Internal Helper: Whitelist
                 function Test-IsWhitelisted {
@@ -5451,33 +7113,21 @@ function Start-DriveBenchmark {
 
     Write-GuiLog "[Storage Benchmark] Opening drive benchmark window."
 
-    $BrushWindow = New-WmtBrush "#0D1117"
-    $BrushPanel = New-WmtBrush "#161B22"
-    $BrushControl = New-WmtBrush "#21262D"
-    $BrushBorder = New-WmtBrush "#30363D"
-    $BrushText = New-WmtBrush "#E6EDF3"
-    $BrushTitle = New-WmtBrush "#EBEBF5"
-    $BrushWarn = New-WmtBrush "#D29922"
-    $BrushSuccess = New-WmtBrush "#3FB950"
-    $BrushError = New-WmtBrush "#F85149"
-    $BrushAccent = New-WmtBrush "#58A6FF"
-    $BrushHighlight = New-WmtBrush "#1F6FEB"
-    $BrushHighlightTx = New-WmtBrush "#FFFFFF"
 
-    $BrushHeaderBg = New-WmtBrush "#FFFFFF"
-    $BrushHeaderText = New-WmtBrush "#000000"
-    $BrushHeaderBorder = New-WmtBrush "#BDBDBD"
-    $BrushHeaderSelectBg = New-WmtBrush "#DCEBFF"
+    $BrushHeaderBg = New-WmtBrush "BgPanel"
+    $BrushHeaderText = New-WmtBrush "TextPrimary"
+    $BrushHeaderBorder = New-WmtBrush "BorderBrush"
+    $BrushHeaderSelectBg = New-WmtBrush "BgHover"
 
     function Set-DbSystemColors {
         param([System.Windows.FrameworkElement]$Element)
 
-        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = $BrushPanel
-        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = $BrushText
-        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = $BrushControl
-        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = $BrushText
-        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = $BrushHighlight
-        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = $BrushHighlightTx
+        $Element.Resources[[System.Windows.SystemColors]::WindowBrushKey] = New-WmtBrush "BgPanel"
+        $Element.Resources[[System.Windows.SystemColors]::WindowTextBrushKey] = New-WmtBrush "TextPrimary"
+        $Element.Resources[[System.Windows.SystemColors]::ControlBrushKey] = New-WmtBrush "BgElevated"
+        $Element.Resources[[System.Windows.SystemColors]::ControlTextBrushKey] = New-WmtBrush "TextPrimary"
+        $Element.Resources[[System.Windows.SystemColors]::HighlightBrushKey] = New-WmtBrush "Accent"
+        $Element.Resources[[System.Windows.SystemColors]::HighlightTextBrushKey] = New-WmtBrush "AccentText"
     }
 
     function Set-DbHeaderSystemColors {
@@ -5496,14 +7146,19 @@ function Start-DriveBenchmark {
         param(
             [string]$Text,
             [double]$FontSize = 12,
-            [System.Windows.Media.Brush]$Foreground = $BrushText,
+            [object]$Foreground = "TextPrimary",
             [System.Windows.Thickness]$Margin = (New-Object System.Windows.Thickness(0))
         )
 
         $tb = New-Object System.Windows.Controls.TextBlock
         $tb.Text = $Text
         $tb.FontSize = $FontSize
-        $tb.Foreground = $Foreground
+        if ($Foreground -is [string]) {
+            Set-WmtThemedBrush -Object $tb -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey ([string]$Foreground)
+        }
+        else {
+            $tb.Foreground = $Foreground
+        }
         $tb.Margin = $Margin
         $tb.VerticalAlignment = "Center"
         $tb.TextWrapping = "Wrap"
@@ -5514,9 +7169,9 @@ function Start-DriveBenchmark {
     function Set-DbButtonStyle {
         param([System.Windows.Controls.Button]$Button)
 
-        $Button.Background = $BrushControl
-        $Button.Foreground = $BrushText
-        $Button.BorderBrush = $BrushBorder
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
 
         Set-DbSystemColors $Button
@@ -5525,9 +7180,9 @@ function Start-DriveBenchmark {
     function Set-DbHeaderButtonStyle {
         param([System.Windows.Controls.Button]$Button)
 
-        $Button.Background = $BrushHeaderBg
-        $Button.Foreground = $BrushHeaderText
-        $Button.BorderBrush = $BrushHeaderBorder
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $Button.Padding = New-Object System.Windows.Thickness(8, 3, 8, 3)
 
         Set-DbHeaderSystemColors $Button
@@ -5536,42 +7191,19 @@ function Start-DriveBenchmark {
     function Set-DbHeaderComboStyle {
         param([System.Windows.Controls.ComboBox]$ComboBox)
 
-        $ComboBox.Background = $BrushHeaderBg
-        $ComboBox.Foreground = $BrushHeaderText
-        $ComboBox.BorderBrush = $BrushHeaderBorder
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $ComboBox -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $ComboBox.IsEditable = $false
 
         Set-DbHeaderSystemColors $ComboBox
 
         $itemStyle = New-Object System.Windows.Style([System.Windows.Controls.ComboBoxItem])
 
-        [void]$itemStyle.Setters.Add(
-            (New-Object System.Windows.Setter(
-                [System.Windows.Controls.Control]::BackgroundProperty,
-                $BrushHeaderBg
-            ))
-        )
-
-        [void]$itemStyle.Setters.Add(
-            (New-Object System.Windows.Setter(
-                [System.Windows.Controls.Control]::ForegroundProperty,
-                $BrushHeaderText
-            ))
-        )
-
-        [void]$itemStyle.Setters.Add(
-            (New-Object System.Windows.Setter(
-                [System.Windows.Controls.Control]::BorderBrushProperty,
-                $BrushHeaderBorder
-            ))
-        )
-
-        [void]$itemStyle.Setters.Add(
-            (New-Object System.Windows.Setter(
-                [System.Windows.Controls.Control]::PaddingProperty,
-                (New-Object System.Windows.Thickness(8, 3, 8, 3))
-            ))
-        )
+        [void]$itemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BackgroundProperty, $BrushHeaderBg)))
+        [void]$itemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::ForegroundProperty, $BrushHeaderText)))
+        [void]$itemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::BorderBrushProperty, $BrushHeaderBorder)))
+        [void]$itemStyle.Setters.Add((New-Object System.Windows.Setter([System.Windows.Controls.Control]::PaddingProperty, (New-Object System.Windows.Thickness(8, 3, 8, 3)))))
 
         $ComboBox.ItemContainerStyle = $itemStyle
     }
@@ -5585,7 +7217,8 @@ function Start-DriveBenchmark {
             Error       = ""
             Cancel      = $false
             TargetDrive = "ALL"
-            TargetSize  = 64
+            TargetSize  = 1024
+            ActiveFiles = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
         })
 
     $worker = @{
@@ -5606,63 +7239,42 @@ function Start-DriveBenchmark {
     $benchWindow.MinWidth = 620
     $benchWindow.MinHeight = 420
     $benchWindow.WindowStartupLocation = "CenterOwner"
-    $benchWindow.Background = $BrushWindow
-    $benchWindow.Foreground = $BrushText
+    Add-WmtThemeResources -Element $benchWindow
+    Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgDark"
+    Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
 
-    if ($window) {
-        $benchWindow.Owner = $window
-    }
-
+    if ($window) { $benchWindow.Owner = $window }
     Set-DbSystemColors $benchWindow
 
     $root = New-Object System.Windows.Controls.Grid
     $root.Margin = New-Object System.Windows.Thickness(18)
-    $root.Background = $BrushWindow
-
+    Set-WmtThemedBrush -Object $root -Property ([System.Windows.Controls.Panel]::BackgroundProperty) -ColorOrKey "BgDark"
     Set-DbSystemColors $root
 
     foreach ($rowHeight in @("Auto", "Auto", "Auto", "*", "Auto")) {
         $row = New-Object System.Windows.Controls.RowDefinition
-
-        if ($rowHeight -eq "*") {
-            $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-        }
-        else {
-            $row.Height = [System.Windows.GridLength]::Auto
-        }
-
+        if ($rowHeight -eq "*") { $row.Height = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) }
+        else { $row.Height = [System.Windows.GridLength]::Auto }
         [void]$root.RowDefinitions.Add($row)
     }
 
-    $title = New-DbTextBlock `
-        -Text "Drive Benchmark" `
-        -FontSize 18 `
-        -Foreground $BrushTitle `
-        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
-
+    $title = New-DbTextBlock -Text "Drive Benchmark" -FontSize 18 -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
     $title.FontWeight = [System.Windows.FontWeights]::SemiBold
-
     [System.Windows.Controls.Grid]::SetRow($title, 0)
     [void]$root.Children.Add($title)
 
     $controlsPanel = New-Object System.Windows.Controls.StackPanel
     $controlsPanel.Orientation = "Horizontal"
     $controlsPanel.Margin = New-Object System.Windows.Thickness(0, 0, 0, 12)
-
     [System.Windows.Controls.Grid]::SetRow($controlsPanel, 1)
 
-    $lblDrive = New-DbTextBlock `
-        -Text "Target:" `
-        -Foreground $BrushText `
-        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
-
+    $lblDrive = New-DbTextBlock -Text "Target:" -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
     [void]$controlsPanel.Children.Add($lblDrive)
 
     $cmbDrive = New-Object System.Windows.Controls.ComboBox
     $cmbDrive.Width = 180
     $cmbDrive.Height = 30
     $cmbDrive.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
-
     Set-DbHeaderComboStyle $cmbDrive
 
     [void]$cmbDrive.Items.Add("All Fixed Drives")
@@ -5671,61 +7283,41 @@ function Start-DriveBenchmark {
     foreach ($driveInfo in [System.IO.DriveInfo]::GetDrives()) {
         if ($driveInfo.DriveType -eq [System.IO.DriveType]::Fixed -and $driveInfo.IsReady) {
             $driveLetter = $driveInfo.Name.Substring(0, 1)
-
-            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
-                "Local Disk"
-            }
-            else {
-                $driveInfo.VolumeLabel
-            }
-
+            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) { "Local Disk" } else { $driveInfo.VolumeLabel }
             $displayText = "$driveLetter`: ($driveLabel)"
             [void]$cmbDrive.Items.Add($displayText)
             $driveValueMap[$displayText] = $driveLetter
         }
     }
-
     $cmbDrive.SelectedIndex = 0
     [void]$controlsPanel.Children.Add($cmbDrive)
 
-    $lblSize = New-DbTextBlock `
-        -Text "Test Size:" `
-        -Foreground $BrushText `
-        -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
-
+    $lblSize = New-DbTextBlock -Text "Test Size:" -Foreground "TextPrimary" -Margin (New-Object System.Windows.Thickness(0, 0, 8, 0))
     [void]$controlsPanel.Children.Add($lblSize)
 
     $cmbSize = New-Object System.Windows.Controls.ComboBox
     $cmbSize.Width = 110
     $cmbSize.Height = 30
     $cmbSize.Margin = New-Object System.Windows.Thickness(0, 0, 16, 0)
-
     Set-DbHeaderComboStyle $cmbSize
 
-    foreach ($sizeMb in @(16, 32, 64, 128, 256, 512, 1024, 2048, 4096)) {
+    foreach ($sizeMb in @(16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)) {
         $sizeText = "$sizeMb MB"
         [void]$cmbSize.Items.Add($sizeText)
         $sizeValueMap[$sizeText] = $sizeMb
     }
-
-    $cmbSize.SelectedItem = "64 MB"
+    $cmbSize.SelectedItem = "1024 MB"
     [void]$controlsPanel.Children.Add($cmbSize)
 
     $btnRun = New-Object System.Windows.Controls.Button
     $btnRun.Content = "Run Benchmark"
     $btnRun.Width = 125
     $btnRun.Height = 30
-
     Set-DbHeaderButtonStyle $btnRun
-
     [void]$controlsPanel.Children.Add($btnRun)
     [void]$root.Children.Add($controlsPanel)
 
-    $statusText = New-DbTextBlock `
-        -Text "Ready." `
-        -Foreground $BrushWarn `
-        -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
-
+    $statusText = New-DbTextBlock -Text "Ready." -Foreground "Warning" -Margin (New-Object System.Windows.Thickness(0, 0, 0, 8))
     [System.Windows.Controls.Grid]::SetRow($statusText, 2)
     [void]$root.Children.Add($statusText)
 
@@ -5737,14 +7329,12 @@ function Start-DriveBenchmark {
     $logBox.HorizontalScrollBarVisibility = "Auto"
     $logBox.FontFamily = "Cascadia Mono, Consolas"
     $logBox.FontSize = 12
-    $logBox.Background = $BrushPanel
-    $logBox.Foreground = $BrushText
-    $logBox.BorderBrush = $BrushBorder
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+    Set-WmtThemedBrush -Object $logBox -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
     $logBox.BorderThickness = [System.Windows.Thickness]::new(1)
     $logBox.Padding = [System.Windows.Thickness]::new(10)
-
     Set-DbSystemColors $logBox
-
     [System.Windows.Controls.Grid]::SetRow($logBox, 3)
     [void]$root.Children.Add($logBox)
 
@@ -5753,10 +7343,8 @@ function Start-DriveBenchmark {
 
     $colProgress = New-Object System.Windows.Controls.ColumnDefinition
     $colProgress.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-
     $colExport = New-Object System.Windows.Controls.ColumnDefinition
     $colExport.Width = [System.Windows.GridLength]::Auto
-
     $colClose = New-Object System.Windows.Controls.ColumnDefinition
     $colClose.Width = [System.Windows.GridLength]::Auto
 
@@ -5769,9 +7357,8 @@ function Start-DriveBenchmark {
     $progress.Maximum = 100
     $progress.Height = 12
     $progress.Margin = New-Object System.Windows.Thickness(0, 8, 12, 0)
-    $progress.Foreground = $BrushAccent
-    $progress.Background = $BrushBorder
-
+    Set-WmtThemedBrush -Object $progress -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "Accent"
+    Set-WmtThemedBrush -Object $progress -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BorderBrush"
     [System.Windows.Controls.Grid]::SetColumn($progress, 0)
     [void]$bottom.Children.Add($progress)
 
@@ -5780,7 +7367,6 @@ function Start-DriveBenchmark {
     $exportBtn.Width = 80
     $exportBtn.Height = 32
     $exportBtn.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
-
     Set-DbButtonStyle $exportBtn
 
     $exportBtn.Add_Click({
@@ -5793,9 +7379,7 @@ function Start-DriveBenchmark {
                     [System.IO.File]::WriteAllText($dialog.FileName, $logBox.Text, [System.Text.Encoding]::UTF8)
                     Write-GuiLog "[Storage Benchmark] Exported results to $($dialog.FileName)"
                 }
-                catch {
-                    Write-GuiLog "[Storage Benchmark] Export failed: $($_.Exception.Message)"
-                }
+                catch { Write-GuiLog "[Storage Benchmark] Export failed: $($_.Exception.Message)" }
             }
         }.GetNewClosure())
 
@@ -5806,16 +7390,11 @@ function Start-DriveBenchmark {
     $closeBtn.Content = "Close"
     $closeBtn.Width = 80
     $closeBtn.Height = 32
-
     Set-DbButtonStyle $closeBtn
 
     $closeBtn.Add_Click({
-            try {
-                $benchWindow.Close()
-            }
-            catch {
-                Write-GuiLog "[Storage Benchmark] Close failed: $($_.Exception.Message)"
-            }
+            try { $benchWindow.Close() }
+            catch { Write-GuiLog "[Storage Benchmark] Close failed: $($_.Exception.Message)" }
         }.GetNewClosure())
 
     [System.Windows.Controls.Grid]::SetColumn($closeBtn, 2)
@@ -5832,85 +7411,85 @@ function Start-DriveBenchmark {
 
     $releaseWindowState = {
         try {
-            if ($isWindowCleanupDone) {
-                return
-            }
-
+            if ($isWindowCleanupDone) { return }
             $isWindowCleanupDone = $true
-
             $script:DriveBenchmarkWindow = $null
-
-            if ($launcherButton) {
-                $launcherButton.IsEnabled = $true
-            }
-
+            if ($launcherButton) { $launcherButton.IsEnabled = $true }
             Write-GuiLog "[Storage Benchmark] Window closed."
         }
         catch {
-            try {
-                $script:DriveBenchmarkWindow = $null
-            }
-            catch {}
-
-            try {
-                if ($launcherButton) {
-                    $launcherButton.IsEnabled = $true
-                }
-            }
-            catch {}
+            try { $script:DriveBenchmarkWindow = $null } catch {}
+            try { if ($launcherButton) { $launcherButton.IsEnabled = $true } } catch {}
         }
     }.GetNewClosure()
 
     $setRunningUi = {
         param([bool]$Running)
-
-        $cmbDrive.IsEnabled = $true
-        $cmbSize.IsEnabled = $true
-        $btnRun.IsEnabled = $true
-
         if ($Running) {
-            $btnRun.Content = "Running..."
+            $btnRun.Content = "Stop Benchmark"
+            $cmbDrive.IsEnabled = $false
+            $cmbSize.IsEnabled = $false
         }
         else {
             $btnRun.Content = "Run Benchmark"
+            $cmbDrive.IsEnabled = $true
+            $cmbSize.IsEnabled = $true
         }
-
-        $cmbDrive.Background = $BrushHeaderBg
-        $cmbDrive.Foreground = $BrushHeaderText
-        $cmbDrive.BorderBrush = $BrushHeaderBorder
-
-        $cmbSize.Background = $BrushHeaderBg
-        $cmbSize.Foreground = $BrushHeaderText
-        $cmbSize.BorderBrush = $BrushHeaderBorder
-
-        $btnRun.Background = $BrushHeaderBg
-        $btnRun.Foreground = $BrushHeaderText
-        $btnRun.BorderBrush = $BrushHeaderBorder
+        $btnRun.IsEnabled = $true
+        
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $cmbSize -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $btnRun -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
 
         $exportBtn.IsEnabled = $true
         $closeBtn.IsEnabled = $true
     }.GetNewClosure()
 
     $disposeWorker = {
-        try {
-            if ($worker["PowerShell"]) {
-                $worker["PowerShell"].Dispose()
-            }
-        }
-        catch {}
-
-        try {
-            if ($worker["Runspace"]) {
-                $worker["Runspace"].Close()
-                $worker["Runspace"].Dispose()
-            }
-        }
-        catch {}
-
+        try { if ($worker["PowerShell"]) { $worker["PowerShell"].Dispose() } } catch {}
+        try { if ($worker["Runspace"]) { $worker["Runspace"].Close(); $worker["Runspace"].Dispose() } } catch {}
         $worker["PowerShell"] = $null
         $worker["Runspace"] = $null
         $worker["Async"] = $null
         $worker["StartedAt"] = $null
+    }.GetNewClosure()
+
+    $cleanupTrackedBenchmarkFiles = {
+        try {
+            if (-not $state["ActiveFiles"]) { return }
+            foreach ($path in @($state["ActiveFiles"])) {
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$path) -and [System.IO.File]::Exists([string]$path)) {
+                        [System.IO.File]::Delete([string]$path)
+                    }
+                }
+                catch {}
+            }
+            try { $state["ActiveFiles"].Clear() } catch {}
+        }
+        catch {}
+    }.GetNewClosure()
+
+    $stopBenchmark = {
+        try {
+            if (-not $state["IsRunning"]) { return }
+            $state["Cancel"] = $true
+            $state["Status"] = "Stopping benchmark..."
+            $btnRun.Content = "Stopping..."
+            $btnRun.IsEnabled = $false
+
+            try { [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("Stopping benchmark...") } catch {}
+            try { if ($worker["PowerShell"]) { $worker["PowerShell"].Stop() } } catch {}
+            Write-GuiLog "[Storage Benchmark] Stop requested."
+            & $refreshUi
+        }
+        catch { Write-GuiLog "[Storage Benchmark] Stop failed: $($_.Exception.Message)" }
     }.GetNewClosure()
 
     $refreshUi = {
@@ -5923,22 +7502,16 @@ function Start-DriveBenchmark {
                 $logBox.ScrollToEnd()
             }
         }
-        catch {
-            Write-GuiLog "[Storage Benchmark] UI refresh failed: $($_.Exception.Message)"
-        }
+        catch { Write-GuiLog "[Storage Benchmark] UI refresh failed: $($_.Exception.Message)" }
     }.GetNewClosure()
 
     $timerTick = {
         try {
             & $refreshUi
-
-            if (-not $worker["Async"]) {
-                return
-            }
+            if (-not $worker["Async"]) { return }
 
             if ($state["IsRunning"] -and $worker["StartedAt"]) {
                 $elapsedMinutes = ((Get-Date) - $worker["StartedAt"]).TotalMinutes
-
                 if ($elapsedMinutes -ge 60) {
                     $state["Cancel"] = $true
                     $state["Error"] = "Benchmark timed out after 60 minutes."
@@ -5946,16 +7519,8 @@ function Start-DriveBenchmark {
                     $state["Progress"] = 100
                     $state["IsRunning"] = $false
                     $state["IsCompleted"] = $true
-
-                    [void]$state["Lines"].Add("")
-                    [void]$state["Lines"].Add("ERROR: Benchmark timed out after 60 minutes.")
-
-                    try {
-                        if ($worker["PowerShell"]) {
-                            $worker["PowerShell"].Stop()
-                        }
-                    }
-                    catch {}
+                    [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("ERROR: Benchmark timed out after 60 minutes.")
+                    try { if ($worker["PowerShell"]) { $worker["PowerShell"].Stop() } } catch {}
                 }
             }
 
@@ -5968,12 +7533,14 @@ function Start-DriveBenchmark {
                     }
                 }
                 catch {
-                    if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
-                        $state["Error"] = $_.Exception.Message
-                        [void]$state["Lines"].Add("")
-                        [void]$state["Lines"].Add("ERROR: $($_.Exception.Message)")
+                    if ($state["Cancel"]) {
+                        $state["Error"] = ""
+                        [void]$state["Lines"].Add("Benchmark stopped by user.")
                     }
-
+                    elseif ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                        $state["Error"] = $_.Exception.Message
+                        [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("ERROR: $($_.Exception.Message)")
+                    }
                     Write-GuiLog "[Storage Benchmark] Runspace failed: $($_.Exception.Message)"
                 }
 
@@ -5981,49 +7548,44 @@ function Start-DriveBenchmark {
                 $state["IsCompleted"] = $true
                 $state["Progress"] = 100
 
-                if ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                if ($state["Cancel"] -and [string]::IsNullOrWhiteSpace([string]$state["Error"])) {
+                    $state["Status"] = "Benchmark stopped."
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
+                }
+                elseif ([string]::IsNullOrWhiteSpace([string]$state["Error"])) {
                     $state["Status"] = "Benchmark complete."
-                    $statusText.Foreground = $BrushSuccess
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
                 }
                 else {
                     $state["Status"] = "Benchmark failed: $($state["Error"])"
-                    $statusText.Foreground = $BrushError
+                    Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
                 }
 
                 & $refreshUi
-
                 foreach ($line in @($state["Lines"])) {
-                    if (-not [string]::IsNullOrWhiteSpace([string]$line)) {
-                        Write-GuiLog "[Storage Benchmark] $line"
-                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$line)) { Write-GuiLog "[Storage Benchmark] $line" }
                 }
 
                 & $setRunningUi $false
                 & $disposeWorker
+                & $cleanupTrackedBenchmarkFiles
             }
         }
         catch {
             $timer.Stop()
-
             $state["IsRunning"] = $false
             $state["IsCompleted"] = $true
             $state["Error"] = $_.Exception.Message
             $state["Status"] = "Benchmark UI failed."
             $state["Progress"] = 100
-
-            try {
-                [void]$state["Lines"].Add("")
-                [void]$state["Lines"].Add("TIMER ERROR: $($_.Exception.Message)")
-            }
-            catch {}
-
+            try { [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("TIMER ERROR: $($_.Exception.Message)") } catch {}
             $statusText.Text = "Benchmark UI failed: $($_.Exception.Message)"
-            $statusText.Foreground = $BrushError
+            Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
 
             & $refreshUi
             & $setRunningUi $false
             & $disposeWorker
-
+            & $cleanupTrackedBenchmarkFiles
             Write-GuiLog "[Storage Benchmark] Timer failed: $($_.Exception.Message)"
         }
     }.GetNewClosure()
@@ -6031,30 +7593,20 @@ function Start-DriveBenchmark {
     $timer.Add_Tick($timerTick)
 
     $startBenchmark = {
-        if ($state["IsRunning"]) {
-            return
-        }
+        if ($state["IsRunning"]) { return }
 
         & $disposeWorker
 
         $selectedDrive = "ALL"
-
         if ($cmbDrive.SelectedItem) {
             $driveKey = [string]$cmbDrive.SelectedItem
-
-            if ($driveValueMap.ContainsKey($driveKey)) {
-                $selectedDrive = [string]$driveValueMap[$driveKey]
-            }
+            if ($driveValueMap.ContainsKey($driveKey)) { $selectedDrive = [string]$driveValueMap[$driveKey] }
         }
 
-        $selectedSize = 64
-
+        $selectedSize = 1024
         if ($cmbSize.SelectedItem) {
             $sizeKey = [string]$cmbSize.SelectedItem
-
-            if ($sizeValueMap.ContainsKey($sizeKey)) {
-                $selectedSize = [int]$sizeValueMap[$sizeKey]
-            }
+            if ($sizeValueMap.ContainsKey($sizeKey)) { $selectedSize = [int]$sizeValueMap[$sizeKey] }
         }
 
         $state["Lines"].Clear()
@@ -6066,20 +7618,16 @@ function Start-DriveBenchmark {
         $state["Cancel"] = $false
         $state["TargetDrive"] = $selectedDrive
         $state["TargetSize"] = $selectedSize
+        try { $state["ActiveFiles"].Clear() } catch {}
 
-        $targetLabel = if ($selectedDrive -eq "ALL") {
-            "All Fixed Drives"
-        }
-        else {
-            "{0}:\" -f $selectedDrive
-        }
+        $targetLabel = if ($selectedDrive -eq "ALL") { "All Fixed Drives" } else { "{0}:\" -f $selectedDrive }
 
-        [void]$state["Lines"].Add("Quick drive benchmark results (.NET runspace, CDM-style):")
+        [void]$state["Lines"].Add("Storage Benchmark (Native Direct I/O)")
         [void]$state["Lines"].Add("Target: $targetLabel | Size: $selectedSize MB")
+        [void]$state["Lines"].Add("Note: Uses direct volume mappings to test physical capabilities.")
         [void]$state["Lines"].Add("")
 
-        $statusText.Foreground = $BrushWarn
-
+        Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
         & $setRunningUi $true
         & $refreshUi
 
@@ -6097,261 +7645,498 @@ function Start-DriveBenchmark {
 
                     $ErrorActionPreference = "Stop"
 
-                    function Add-Line {
-                        param([string]$Text)
-                        [void]$State["Lines"].Add($Text)
-                    }
-
-                    function Set-Status {
-                        param(
-                            [string]$Text,
-                            [int]$Progress
-                        )
-
+                    function Add-Line([string]$Text) { [void]$State["Lines"].Add($Text) }
+                    function Set-BenchmarkStatus([string]$Text, [int]$Progress) {
                         $State["Status"] = $Text
                         $State["Progress"] = [math]::Max(0, [math]::Min(100, $Progress))
                     }
+                    function Test-Cancelled { if ($State["Cancel"]) { throw "Benchmark cancelled." } }
 
-                    function Test-Cancelled {
-                        if ($State["Cancel"]) {
-                            throw "Benchmark cancelled."
+                    function Get-BenchmarkDriveHardwareMap {
+                        $map = @{}
+                        try {
+                            $partitionByDriveLetter = @{}
+                            $diskByNumber = @{}
+                            $cimDiskByIndex = @{}
+
+                            foreach ($p in @(Get-Partition -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $p.DriveLetter -and -not [string]::IsNullOrWhiteSpace([string]$p.DriveLetter)) {
+                                    $partitionByDriveLetter[[string]$p.DriveLetter] = $p
+                                }
+                            }
+                            foreach ($d in @(Get-Disk -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $d.Number) { $diskByNumber[[int]$d.Number] = $d }
+                            }
+                            foreach ($d in @(Get-CimInstance Win32_DiskDrive -Property Index, Model, InterfaceType -ErrorAction SilentlyContinue)) {
+                                if ($null -ne $d.Index) { $cimDiskByIndex[[int]$d.Index] = $d }
+                            }
+
+                            foreach ($driveLetter in @($partitionByDriveLetter.Keys)) {
+                                $partition = $partitionByDriveLetter[$driveLetter]
+                                $disk = $null; $cimDisk = $null
+
+                                if ($partition -and $null -ne $partition.DiskNumber) {
+                                    $diskNumber = [int]$partition.DiskNumber
+                                    if ($diskByNumber.ContainsKey($diskNumber)) { $disk = $diskByNumber[$diskNumber] }
+                                    if ($cimDiskByIndex.ContainsKey($diskNumber)) { $cimDisk = $cimDiskByIndex[$diskNumber] }
+                                }
+
+                                $model = $null
+                                if ($cimDisk -and -not [string]::IsNullOrWhiteSpace([string]$cimDisk.Model)) { $model = ([string]$cimDisk.Model).Trim() }
+                                elseif ($disk -and -not [string]::IsNullOrWhiteSpace([string]$disk.FriendlyName)) { $model = ([string]$disk.FriendlyName).Trim() }
+
+                                $parts = @()
+                                if (-not [string]::IsNullOrWhiteSpace($model)) { $parts += $model }
+                                if ($partition -and $null -ne $partition.DiskNumber) { $parts += ("Disk {0}" -f $partition.DiskNumber) }
+                                if ($disk -and $disk.BusType) { $parts += [string]$disk.BusType }
+                                elseif ($cimDisk -and -not [string]::IsNullOrWhiteSpace([string]$cimDisk.InterfaceType)) { $parts += [string]$cimDisk.InterfaceType }
+
+                                if ($parts.Count -gt 0) { $map[[string]$driveLetter] = ($parts -join " | ") }
+                            }
                         }
+                        catch {}
+                        return $map
                     }
 
-                    function Get-MBps {
-                        param(
-                            [int64]$Bytes,
-                            [double]$Seconds
-                        )
+                    function Initialize-NativeDiskBenchmark {
+                        if (([System.Management.Automation.PSTypeName]'Wmt.NativeDiskBenchmark').Type) { return }
 
-                        if ($Seconds -le 0) {
-                            return 0
-                        }
+                        Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
-                        return [math]::Round(($Bytes / 1MB) / $Seconds, 1)
+namespace Wmt {
+    public static class NativeDiskBenchmark {
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern SafeFileHandle CreateFile(string lpFileName, uint dwDesiredAccess, uint dwShareMode, IntPtr lpSecurityAttributes, uint dwCreationDisposition, uint dwFlagsAndAttributes, IntPtr hTemplateFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool ReadFile(SafeFileHandle hFile, IntPtr lpBuffer, uint nNumberOfBytesToRead, out uint lpNumberOfBytesRead, IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WriteFile(SafeFileHandle hFile, IntPtr lpBuffer, uint nNumberOfBytesToWrite, out uint lpNumberOfBytesWritten, IntPtr lpOverlapped);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetFilePointerEx(SafeFileHandle hFile, long liDistanceToMove, out long lpNewFilePointer, uint dwMoveMethod);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool FlushFileBuffers(SafeFileHandle hFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetEndOfFile(SafeFileHandle hFile);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool SetFileValidData(SafeFileHandle hFile, long ValidDataLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool CloseHandle(IntPtr hObject);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr CreateIoCompletionPort(SafeFileHandle FileHandle, IntPtr ExistingCompletionPort, UIntPtr CompletionKey, uint NumberOfConcurrentThreads);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool GetQueuedCompletionStatusEx(IntPtr CompletionPort, IntPtr lpCompletionPortEntries, uint ulCount, out uint ulNumEntriesRemoved, uint dwMilliseconds, [MarshalAs(UnmanagedType.Bool)] bool fAlertable);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr VirtualAlloc(IntPtr lpAddress, UIntPtr dwSize, uint flAllocationType, uint flProtect);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool VirtualFree(IntPtr lpAddress, UIntPtr dwSize, uint dwFreeType);
+
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool OpenProcessToken(IntPtr ProcessHandle, uint DesiredAccess, out IntPtr TokenHandle);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool LookupPrivilegeValue(string lpSystemName, string lpName, out long lpLuid);
+
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool AdjustTokenPrivileges(IntPtr TokenHandle, [MarshalAs(UnmanagedType.Bool)] bool DisableAllPrivileges, ref TokenPrivileges NewState, uint BufferLength, IntPtr PreviousState, IntPtr ReturnLength);
+
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        public static extern IntPtr GetCurrentProcess();
+
+        public const uint GENERIC_READ = 0x80000000;
+        public const uint GENERIC_WRITE = 0x40000000;
+        public const uint FILE_SHARE_READ = 0x00000001;
+        public const uint FILE_SHARE_WRITE = 0x00000002;
+        public const uint CREATE_ALWAYS = 2;
+        public const uint OPEN_EXISTING = 3;
+        public const uint FILE_ATTRIBUTE_NORMAL = 0x00000080;
+        public const uint FILE_FLAG_NO_BUFFERING = 0x20000000;
+        public const uint FILE_FLAG_OVERLAPPED = 0x40000000;
+        public const uint FILE_FLAG_WRITE_THROUGH = 0x80000000;
+        public const uint FILE_FLAG_RANDOM_ACCESS = 0x10000000;
+        public const uint MEM_COMMIT = 0x1000;
+        public const uint MEM_RESERVE = 0x2000;
+        public const uint MEM_RELEASE = 0x8000;
+        public const uint PAGE_READWRITE = 0x04;
+        public const uint FILE_BEGIN = 0;
+        public const int ERROR_IO_PENDING = 997;
+        public const uint INFINITE = 0xFFFFFFFF;
+        public const uint TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+        public const uint TOKEN_QUERY = 0x00000008;
+        public const uint SE_PRIVILEGE_ENABLED = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NativeOverlapped {
+            public IntPtr Internal;
+            public IntPtr InternalHigh;
+            public uint Offset;
+            public uint OffsetHigh;
+            public IntPtr hEvent;
+        }
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct TokenPrivileges {
+            public int PrivilegeCount;
+            public long Luid;
+            public uint Attributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct OverlappedEntry {
+            public UIntPtr CompletionKey;
+            public IntPtr Overlapped;
+            public UIntPtr Internal;
+            public uint NumberOfBytesTransferred;
+        }
+
+        private static readonly int OverlappedInternalOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "Internal");
+        private static readonly int OverlappedInternalHighOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "InternalHigh");
+        private static readonly int OverlappedOffsetOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "Offset");
+        private static readonly int OverlappedOffsetHighOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "OffsetHigh");
+        private static readonly int OverlappedEventOffset = (int)Marshal.OffsetOf(typeof(NativeOverlapped), "hEvent");
+        private static readonly int CompletionEntryOverlappedOffset = (int)Marshal.OffsetOf(typeof(OverlappedEntry), "Overlapped");
+        private static readonly int CompletionEntryBytesOffset = (int)Marshal.OffsetOf(typeof(OverlappedEntry), "NumberOfBytesTransferred");
+
+        public sealed class BenchmarkMeasure {
+            public long Bytes { get; set; }
+            public int Operations { get; set; }
+            public double Seconds { get; set; }
+            public double MBps {
+                get {
+                    if (Seconds <= 0) return 0;
+                    return Math.Round((Bytes / 1000000.0) / Seconds, 1);
+                }
+            }
+            public double Iops {
+                get {
+                    if (Seconds <= 0) return 0;
+                    return Math.Round(Operations / Seconds, 0);
+                }
+            }
+        }
+
+        private static Exception LastError(string action) {
+            return new Win32Exception(Marshal.GetLastWin32Error(), action + " failed");
+        }
+
+        private static long AlignBytes(long bytes, int blockSize) {
+            long blocks = bytes / blockSize;
+            if (blocks < 1) throw new ArgumentOutOfRangeException("bytes", "Benchmark size is smaller than the I/O block size.");
+            return blocks * blockSize;
+        }
+
+        private static SafeFileHandle OpenNativeFile(string path, uint access, uint creationDisposition, bool randomAccess, bool writeThrough, uint shareMode, bool overlapped) {
+            uint flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_NO_BUFFERING;
+            if (randomAccess) flags |= FILE_FLAG_RANDOM_ACCESS;
+            if (writeThrough) flags |= FILE_FLAG_WRITE_THROUGH;
+            if (overlapped) flags |= FILE_FLAG_OVERLAPPED;
+
+            SafeFileHandle handle = CreateFile(path, access, shareMode, IntPtr.Zero, creationDisposition, flags, IntPtr.Zero);
+            if (handle.IsInvalid) throw LastError("CreateFile " + path);
+            return handle;
+        }
+
+        private static void EnablePrivilege(string privilegeName) {
+            IntPtr token = IntPtr.Zero;
+            try {
+                if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, out token)) return;
+                long luid;
+                if (!LookupPrivilegeValue(null, privilegeName, out luid)) return;
+
+                TokenPrivileges privileges = new TokenPrivileges {
+                    PrivilegeCount = 1,
+                    Luid = luid,
+                    Attributes = SE_PRIVILEGE_ENABLED
+                };
+                AdjustTokenPrivileges(token, false, ref privileges, 0, IntPtr.Zero, IntPtr.Zero);
+            }
+            finally {
+                if (token != IntPtr.Zero) CloseHandle(token);
+            }
+        }
+
+        public static void PrepareFile(string path, long bytes) {
+            EnablePrivilege("SeManageVolumePrivilege");
+            SafeFileHandle handle = null;
+            bool validDataReady = false;
+
+            try {
+                handle = OpenNativeFile(path, GENERIC_READ | GENERIC_WRITE, CREATE_ALWAYS, false, false, FILE_SHARE_READ | FILE_SHARE_WRITE, false);
+                long ignored;
+                SetFilePointerEx(handle, bytes, out ignored, FILE_BEGIN);
+                SetEndOfFile(handle);
+                validDataReady = SetFileValidData(handle, bytes);
+                FlushFileBuffers(handle);
+            }
+            finally {
+                if (handle != null) handle.Dispose();
+            }
+
+            if (!validDataReady) {
+                // Modified fallback: Using standard FileStream buffering for non-admins to prevent setup thrashing.
+                byte[] buffer = new byte[1048576];
+                new Random(Environment.TickCount).NextBytes(buffer);
+                using (System.IO.FileStream fs = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.Write, System.IO.FileShare.None, 1048576, System.IO.FileOptions.SequentialScan)) {
+                    long p = 0;
+                    while (p < bytes) {
+                        int toWrite = (int)Math.Min(buffer.Length, bytes - p);
+                        fs.Write(buffer, 0, toWrite);
+                        p += toWrite;
                     }
+                    fs.Flush(true);
+                }
+            }
+        }
 
-                    function Get-Iops {
-                        param(
-                            [int]$Operations,
-                            [double]$Seconds
-                        )
+        private sealed class NativeIoSlot : IDisposable {
+            public IntPtr Buffer = IntPtr.Zero;
+            public IntPtr Overlapped = IntPtr.Zero;
 
-                        if ($Seconds -le 0) {
-                            return 0
+            public NativeIoSlot(int blockSize, int seed) {
+                Buffer = VirtualAlloc(IntPtr.Zero, new UIntPtr((ulong)blockSize), MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+                byte[] managed = new byte[blockSize];
+                new Random(seed).NextBytes(managed);
+                Marshal.Copy(managed, 0, Buffer, blockSize);
+                Overlapped = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(NativeOverlapped)));
+            }
+
+            public void Dispose() {
+                if (Overlapped != IntPtr.Zero) { Marshal.FreeHGlobal(Overlapped); Overlapped = IntPtr.Zero; }
+                if (Buffer != IntPtr.Zero) { VirtualFree(Buffer, UIntPtr.Zero, MEM_RELEASE); Buffer = IntPtr.Zero; }
+            }
+        }
+
+        public static BenchmarkMeasure MeasureQueued(string path, long totalBytes, int blockSize, int queueDepth, double durationSeconds, bool isWrite, bool isRandom) {
+            totalBytes = AlignBytes(totalBytes, blockSize);
+            long blockCount = totalBytes / blockSize;
+            bool timedRun = durationSeconds > 0;
+            int operationLimit = timedRun ? int.MaxValue : (int)blockCount;
+            queueDepth = Math.Max(1, Math.Min(queueDepth, operationLimit));
+
+            NativeIoSlot[] slots = new NativeIoSlot[queueDepth];
+            SafeFileHandle handle = null;
+            IntPtr completionPort = IntPtr.Zero;
+
+            try {
+                for (int i = 0; i < queueDepth; i++) {
+                    slots[i] = new NativeIoSlot(blockSize, Environment.TickCount + i);
+                }
+
+                uint access = isWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
+                uint share = isWrite ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
+                
+                // --- THE BUG FIX IS HERE ---
+                // We pass 'false' for writeThrough so the SSD can use its DRAM/SLC hardware caches normally.
+                handle = OpenNativeFile(path, access, OPEN_EXISTING, isRandom, false, share, true);
+                
+                completionPort = CreateIoCompletionPort(handle, IntPtr.Zero, UIntPtr.Zero, 1);
+
+                Random random = isRandom ? new Random(Environment.TickCount) : null;
+                int completed = 0;
+                int issued = 0;
+                long nextSequentialBlock = 0;
+                System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot> slotByOverlapped = new System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot>(queueDepth);
+                
+                Stopwatch stopwatch = new Stopwatch();
+                stopwatch.Start();
+
+                for (int i = 0; i < queueDepth && issued < operationLimit && (!timedRun || stopwatch.Elapsed.TotalSeconds < durationSeconds); i++) {
+                    long blockIndex = isRandom ? random.Next((int)blockCount) : (nextSequentialBlock++ % blockCount);
+                    long offset = blockIndex * blockSize;
+                    
+                    Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedInternalOffset, IntPtr.Zero);
+                    Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedInternalHighOffset, IntPtr.Zero);
+                    Marshal.WriteInt32(slots[i].Overlapped, OverlappedOffsetOffset, unchecked((int)(offset & 0xFFFFFFFFL)));
+                    Marshal.WriteInt32(slots[i].Overlapped, OverlappedOffsetHighOffset, unchecked((int)((offset >> 32) & 0xFFFFFFFFL)));
+                    Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedEventOffset, IntPtr.Zero);
+
+                    uint ignored;
+                    bool ok = isWrite ? WriteFile(handle, slots[i].Buffer, (uint)blockSize, out ignored, slots[i].Overlapped) 
+                                      : ReadFile(handle, slots[i].Buffer, (uint)blockSize, out ignored, slots[i].Overlapped);
+                    
+                    int code = Marshal.GetLastWin32Error();
+                    if (!ok && code != ERROR_IO_PENDING) throw new Win32Exception(code, "IO Error");
+
+                    slotByOverlapped[slots[i].Overlapped] = slots[i];
+                    issued++;
+                }
+
+                int completionEntrySize = Marshal.SizeOf(typeof(OverlappedEntry));
+                IntPtr completionEntries = Marshal.AllocHGlobal(completionEntrySize * queueDepth);
+
+                try {
+                    while (completed < issued || (issued < operationLimit && (!timedRun || stopwatch.Elapsed.TotalSeconds < durationSeconds))) {
+                        uint removed;
+                        if (!GetQueuedCompletionStatusEx(completionPort, completionEntries, (uint)queueDepth, out removed, INFINITE, false)) {
+                            throw LastError("GetQueuedCompletionStatusEx");
                         }
 
-                        return [math]::Round($Operations / $Seconds, 0)
+                        for (int i = 0; i < removed; i++) {
+                            IntPtr entryPointer = IntPtr.Add(completionEntries, i * completionEntrySize);
+                            IntPtr completedOverlapped = Marshal.ReadIntPtr(entryPointer, CompletionEntryOverlappedOffset);
+                            NativeIoSlot slot = slotByOverlapped[completedOverlapped];
+                            completed++;
+
+                            if (issued < operationLimit && (!timedRun || stopwatch.Elapsed.TotalSeconds < durationSeconds)) {
+                                long blockIndex = isRandom ? random.Next((int)blockCount) : (nextSequentialBlock++ % blockCount);
+                                long offset = blockIndex * blockSize;
+
+                                Marshal.WriteIntPtr(slot.Overlapped, OverlappedInternalOffset, IntPtr.Zero);
+                                Marshal.WriteIntPtr(slot.Overlapped, OverlappedInternalHighOffset, IntPtr.Zero);
+                                Marshal.WriteInt32(slot.Overlapped, OverlappedOffsetOffset, unchecked((int)(offset & 0xFFFFFFFFL)));
+                                Marshal.WriteInt32(slot.Overlapped, OverlappedOffsetHighOffset, unchecked((int)((offset >> 32) & 0xFFFFFFFFL)));
+
+                                uint ignored;
+                                bool ok = isWrite ? WriteFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped) 
+                                                  : ReadFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped);
+                                
+                                int code = Marshal.GetLastWin32Error();
+                                if (!ok && code != ERROR_IO_PENDING) throw new Win32Exception(code, "IO Error");
+                                issued++;
+                            }
+                        }
+                    }
+                }
+                finally {
+                    if (completionEntries != IntPtr.Zero) Marshal.FreeHGlobal(completionEntries);
+                }
+
+                stopwatch.Stop();
+                return new BenchmarkMeasure { Bytes = (long)completed * blockSize, Operations = completed, Seconds = stopwatch.Elapsed.TotalSeconds };
+            }
+            finally {
+                if (completionPort != IntPtr.Zero) CloseHandle(completionPort);
+                if (handle != null) handle.Dispose();
+                for (int i = 0; i < slots.Length; i++) { if (slots[i] != null) slots[i].Dispose(); }
+            }
+        }
+    }
+}
+'@
                     }
 
                     function Measure-Drive {
-                        param(
-                            [string]$DriveLetter,
-                            [int]$FileSizeMb,
-                            [int]$RandomOps,
-                            [int]$BaseProgress,
-                            [int]$StepWeight
-                        )
+                        param([string]$DriveLetter, [int]$FileSizeMb, [int]$BaseProgress, [int]$StepWeight)
 
                         $root = "{0}:\" -f $DriveLetter
-                        $folder = [System.IO.Path]::Combine($root, "WMT_Benchmark_Temp")
-                        $file = [System.IO.Path]::Combine($folder, "wmt_benchmark_{0}.tmp" -f ([guid]::NewGuid().ToString("N")))
+                        $folder = [System.IO.Path]::Combine($root, "WMT_Benchmark_Data")
+                        $file = [System.IO.Path]::Combine($folder, "wmt_io_test_{0}.dat" -f ([guid]::NewGuid().ToString("N")))
 
-                        $seqBufferSize = 1MB
-                        $randomBlockSize = 4096
+                        $seqBufferSize = 2MB  
+                        $randomBlockSize = 4KB
                         $targetBytes = [int64]$FileSizeMb * 1MB
 
-                        $seqBuffer = New-Object byte[] $seqBufferSize
-                        $readBuffer = New-Object byte[] $seqBufferSize
-                        $randomBuffer = New-Object byte[] $randomBlockSize
-                        $rng = [System.Random]::new()
-
-                        $rng.NextBytes($seqBuffer)
-                        $rng.NextBytes($randomBuffer)
-
-                        $fs = $null
+                        $seqPeakQueueDepth = 8
+                        $randomPeakQueueDepth = 32
+                        $measureSeconds = 5.0
+                        $useTimedMode = $FileSizeMb -lt 512
+                        $activeMeasureSeconds = if ($useTimedMode) { $measureSeconds } else { 0.0 }
 
                         try {
+                            try { if ($State["ActiveFiles"]) { [void]$State["ActiveFiles"].Add($file) } } catch {}
+                            Initialize-NativeDiskBenchmark
                             Test-Cancelled
 
-                            if (-not [System.IO.Directory]::Exists($folder)) {
-                                [void][System.IO.Directory]::CreateDirectory($folder)
-                            }
+                            if (-not [System.IO.Directory]::Exists($folder)) { [void][System.IO.Directory]::CreateDirectory($folder) }
 
                             try {
-                                foreach ($oldFile in [System.IO.Directory]::GetFiles($folder, "wmt_benchmark_*.tmp")) {
-                                    try {
-                                        [System.IO.File]::Delete($oldFile)
-                                    }
-                                    catch {}
+                                foreach ($oldFile in [System.IO.Directory]::EnumerateFiles($folder, "wmt_io_test_*.dat")) {
+                                    try { [System.IO.File]::Delete($oldFile) } catch {}
                                 }
                             }
                             catch {}
 
-                            Set-Status "Testing $DriveLetter`: sequential write..." $BaseProgress
+                            Add-Line ("  Test file: {0}" -f $file)
+                            
+                            Set-BenchmarkStatus "Allocating test file on $DriveLetter`..." $BaseProgress
+                            [Wmt.NativeDiskBenchmark]::PrepareFile($file, $targetBytes)
 
-                            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                            if ($useTimedMode) { Add-Line ("  Mode: {0:N0}s measured loop per result (decimal MB/s)" -f $measureSeconds) }
+                            else { Add-Line "  Mode: one full selected-size pass per result, no timer (decimal MB/s)" }
 
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Create,
-                                [System.IO.FileAccess]::ReadWrite,
-                                [System.IO.FileShare]::None,
-                                $seqBufferSize,
-                                [System.IO.FileOptions]::SequentialScan
-                            )
-
-                            $written = [int64]0
-
-                            while ($written -lt $targetBytes) {
+                            $runMeasure = {
+                                param([string]$Label, [int]$Progress, [scriptblock]$Measure)
+                                Set-BenchmarkStatus "Testing $DriveLetter`: $Label..." $Progress
                                 Test-Cancelled
+                                return & $Measure
+                            }.GetNewClosure()
 
-                                $remaining = $targetBytes - $written
-
-                                $toWrite = if ($remaining -lt $seqBuffer.Length) {
-                                    [int]$remaining
-                                }
-                                else {
-                                    $seqBuffer.Length
-                                }
-
-                                $fs.Write($seqBuffer, 0, $toWrite)
-                                $written += $toWrite
+                            $seqQ8Write = & $runMeasure "SEQ2M Q8T1 write" $BaseProgress {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $seqBufferSize, $seqPeakQueueDepth, $activeMeasureSeconds, $true, $false)
                             }
 
-                            $fs.Flush()
-                            $sw.Stop()
+                            $seqQ8Read = & $runMeasure "SEQ2M Q8T1 read" ($BaseProgress + $StepWeight) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $seqBufferSize, $seqPeakQueueDepth, $activeMeasureSeconds, $false, $false)
+                            }
+                            Add-Line ("  SEQ2M Q8T1 Read  {0} MB/s | Write {1} MB/s" -f $seqQ8Read.MBps, $seqQ8Write.MBps)
 
-                            $seqWrite = Get-MBps -Bytes $written -Seconds $sw.Elapsed.TotalSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  SEQ1M Write {0} MB/s" -f $seqWrite)
-                            Set-Status "Testing $DriveLetter`: sequential read..." ($BaseProgress + $StepWeight)
-
-                            Test-Cancelled
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::Read,
-                                [System.IO.FileShare]::ReadWrite,
-                                $seqBufferSize,
-                                [System.IO.FileOptions]::SequentialScan
-                            )
-
-                            $readBytes = [int64]0
-
-                            do {
-                                Test-Cancelled
-
-                                $readNow = $fs.Read($readBuffer, 0, $readBuffer.Length)
-                                $readBytes += $readNow
-                            } while ($readNow -gt 0)
-
-                            $sw.Stop()
-
-                            $seqRead = Get-MBps -Bytes $readBytes -Seconds $sw.Elapsed.TotalSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  SEQ1M Read  {0} MB/s" -f $seqRead)
-                            Set-Status "Testing $DriveLetter`: random read..." ($BaseProgress + ($StepWeight * 2))
-
-                            Test-Cancelled
-
-                            $blockCount = [math]::Max(1, [int]($targetBytes / $randomBlockSize))
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::Read,
-                                [System.IO.FileShare]::ReadWrite,
-                                $randomBlockSize,
-                                [System.IO.FileOptions]::RandomAccess
-                            )
-
-                            for ($i = 0; $i -lt $RandomOps; $i++) {
-                                Test-Cancelled
-
-                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
-                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                                [void]$fs.Read($randomBuffer, 0, $randomBlockSize)
+                            $seqQ1Write = & $runMeasure "SEQ2M Q1T1 write" ($BaseProgress + ($StepWeight * 2)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $seqBufferSize, 1, $activeMeasureSeconds, $true, $false)
                             }
 
-                            $sw.Stop()
+                            $seqQ1Read = & $runMeasure "SEQ2M Q1T1 read" ($BaseProgress + ($StepWeight * 3)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $seqBufferSize, 1, $activeMeasureSeconds, $false, $false)
+                            }
+                            Add-Line ("  SEQ2M Q1T1 Read  {0} MB/s | Write {1} MB/s" -f $seqQ1Read.MBps, $seqQ1Write.MBps)
 
-                            $rndReadSeconds = $sw.Elapsed.TotalSeconds
-                            $rndReadBytes = [int64]$RandomOps * $randomBlockSize
-                            $rndRead = Get-MBps -Bytes $rndReadBytes -Seconds $rndReadSeconds
-                            $rndReadIops = Get-Iops -Operations $RandomOps -Seconds $rndReadSeconds
-
-                            $fs.Dispose()
-                            $fs = $null
-
-                            Add-Line ("  RND4K Read  {0} MB/s ({1} IOPS)" -f $rndRead, $rndReadIops)
-                            Set-Status "Testing $DriveLetter`: random write..." ($BaseProgress + ($StepWeight * 3))
-
-                            Test-Cancelled
-
-                            $sw.Restart()
-
-                            $fs = [System.IO.FileStream]::new(
-                                $file,
-                                [System.IO.FileMode]::Open,
-                                [System.IO.FileAccess]::ReadWrite,
-                                [System.IO.FileShare]::None,
-                                $randomBlockSize,
-                                [System.IO.FileOptions]::RandomAccess
-                            )
-
-                            for ($i = 0; $i -lt $RandomOps; $i++) {
-                                Test-Cancelled
-
-                                $offset = [int64]$rng.Next(0, $blockCount) * $randomBlockSize
-                                [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
-                                $fs.Write($randomBuffer, 0, $randomBlockSize)
+                            $rndQ32Write = & $runMeasure "RND4K Q32T1 write" ($BaseProgress + ($StepWeight * 4)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $randomBlockSize, $randomPeakQueueDepth, $activeMeasureSeconds, $true, $true)
                             }
 
-                            $fs.Flush()
-                            $sw.Stop()
+                            $rndQ32Read = & $runMeasure "RND4K Q32T1 read" ($BaseProgress + ($StepWeight * 5)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $randomBlockSize, $randomPeakQueueDepth, $activeMeasureSeconds, $false, $true)
+                            }
+                            Add-Line ("  RND4K Q32T1 Read  {0} MB/s ({1} IOPS) | Write {2} MB/s ({3} IOPS)" -f $rndQ32Read.MBps, $rndQ32Read.Iops, $rndQ32Write.MBps, $rndQ32Write.Iops)
 
-                            $rndWriteSeconds = $sw.Elapsed.TotalSeconds
-                            $rndWriteBytes = [int64]$RandomOps * $randomBlockSize
-                            $rndWrite = Get-MBps -Bytes $rndWriteBytes -Seconds $rndWriteSeconds
-                            $rndWriteIops = Get-Iops -Operations $RandomOps -Seconds $rndWriteSeconds
+                            $rndQ1Write = & $runMeasure "RND4K Q1T1 write" ($BaseProgress + ($StepWeight * 6)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $randomBlockSize, 1, $activeMeasureSeconds, $true, $true)
+                            }
 
-                            Add-Line ("  RND4K Write {0} MB/s ({1} IOPS)" -f $rndWrite, $rndWriteIops)
-                            Set-Status "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 4))
+                            $rndQ1Read = & $runMeasure "RND4K Q1T1 read" ($BaseProgress + ($StepWeight * 7)) {
+                                [Wmt.NativeDiskBenchmark]::MeasureQueued($file, $targetBytes, $randomBlockSize, 1, $activeMeasureSeconds, $false, $true)
+                            }
+                            Add-Line ("  RND4K Q1T1 Read  {0} MB/s ({1} IOPS) | Write {2} MB/s ({3} IOPS)" -f $rndQ1Read.MBps, $rndQ1Read.Iops, $rndQ1Write.MBps, $rndQ1Write.Iops)
+
+                            Set-BenchmarkStatus "Completed $DriveLetter`." ($BaseProgress + ($StepWeight * 8))
                         }
                         finally {
-                            if ($fs) {
-                                try {
-                                    $fs.Dispose()
-                                }
-                                catch {}
-                            }
-
-                            try {
-                                if ([System.IO.File]::Exists($file)) {
-                                    [System.IO.File]::Delete($file)
-                                }
-                            }
-                            catch {}
-
+                            try { if ([System.IO.File]::Exists($file)) { [System.IO.File]::Delete($file) } } catch {}
+                            try { if ($State["ActiveFiles"]) { [void]$State["ActiveFiles"].Remove($file) } } catch {}
                             try {
                                 if ([System.IO.Directory]::Exists($folder)) {
-                                    $entries = [System.IO.Directory]::GetFileSystemEntries($folder)
-
-                                    if (-not $entries -or $entries.Count -eq 0) {
-                                        [System.IO.Directory]::Delete($folder, $false)
+                                    $hasEntries = $false
+                                    foreach ($entry in [System.IO.Directory]::EnumerateFileSystemEntries($folder)) {
+                                        $hasEntries = $true
+                                        break
                                     }
+                                    if (-not $hasEntries) { [System.IO.Directory]::Delete($folder, $false) }
                                 }
                             }
                             catch {}
@@ -6362,94 +8147,64 @@ function Start-DriveBenchmark {
                         $targetDrive = [string]$State["TargetDrive"]
                         $targetSize = [int]$State["TargetSize"]
 
-                        Set-Status "Finding fixed drives..." 0
-
-                        $drives = @(
-                            [System.IO.DriveInfo]::GetDrives() |
-                            Where-Object {
-                                $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady
-                            }
-                        )
-
+                        Set-BenchmarkStatus "Finding fixed drives..." 0
+                        $drives = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq [System.IO.DriveType]::Fixed -and $_.IsReady })
                         if ($targetDrive -ne "ALL") {
-                            $drives = @(
-                                $drives |
-                                Where-Object {
-                                    $_.Name.Substring(0, 1).ToUpperInvariant() -eq $targetDrive.ToUpperInvariant()
-                                }
-                            )
+                            $drives = @($drives | Where-Object { $_.Name.Substring(0, 1).ToUpperInvariant() -eq $targetDrive.ToUpperInvariant() })
                         }
+                        if (-not $drives -or $drives.Count -eq 0) { throw "No suitable fixed drives were found." }
 
-                        if (-not $drives -or $drives.Count -eq 0) {
-                            throw "No suitable fixed drives were found."
-                        }
-
+                        $driveHardwareMap = Get-BenchmarkDriveHardwareMap
                         $requiredBytes = ([int64]$targetSize * 1MB) + 96MB
+                        $testableDrives = @($drives | Where-Object { [int64]$_.AvailableFreeSpace -ge $requiredBytes })
 
-                        $testableDrives = @(
-                            $drives |
-                            Where-Object {
-                                [int64]$_.AvailableFreeSpace -ge $requiredBytes
-                            }
-                        )
+                        if (-not $testableDrives -or $testableDrives.Count -eq 0) { throw "Selected drive(s) do not have enough free space for a $targetSize MB benchmark." }
 
-                        if (-not $testableDrives -or $testableDrives.Count -eq 0) {
-                            throw "Selected drive(s) do not have enough free space for a $targetSize MB benchmark."
-                        }
-
-                        $totalSteps = [math]::Max(1, $testableDrives.Count * 4)
+                        $totalSteps = [math]::Max(1, $testableDrives.Count * 8)
                         $stepWeight = [math]::Max(1, [int](100 / $totalSteps))
                         $stepIndex = 0
 
                         foreach ($driveInfo in $drives) {
                             Test-Cancelled
-
                             $driveLetter = $driveInfo.Name.Substring(0, 1)
-
-                            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) {
-                                "(No label)"
-                            }
-                            else {
-                                $driveInfo.VolumeLabel
-                            }
+                            $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) { "(No label)" } else { $driveInfo.VolumeLabel }
+                            
+                            $driveHardware = $null
+                            if ($driveHardwareMap.ContainsKey($driveLetter)) { $driveHardware = [string]$driveHardwareMap[$driveLetter] }
+                            $driveDisplayName = if ([string]::IsNullOrWhiteSpace($driveHardware)) { "{0}: {1}" -f $driveLetter, $driveLabel } else { "{0}: {1} - {2}" -f $driveLetter, $driveLabel, $driveHardware }
 
                             if ([int64]$driveInfo.AvailableFreeSpace -lt $requiredBytes) {
-                                Add-Line ("{0}: {1} - skipped, not enough free space for a {2} MB test." -f $driveLetter, $driveLabel, $targetSize)
+                                Add-Line ("{0} - skipped, not enough free space for a {1} MB test." -f $driveDisplayName, $targetSize)
                                 continue
                             }
 
                             Add-Line ""
-                            Add-Line ("{0}: {1} ({2} MiB test file)" -f $driveLetter, $driveLabel, $targetSize)
+                            Add-Line ("{0} ({1} MiB test file)" -f $driveDisplayName, $targetSize)
 
                             $baseProgress = $stepIndex * $stepWeight
-
-                            try {
-                                Measure-Drive `
-                                    -DriveLetter $driveLetter `
-                                    -FileSizeMb $targetSize `
-                                    -RandomOps 1024 `
-                                    -BaseProgress $baseProgress `
-                                    -StepWeight $stepWeight
-                            }
+                            try { Measure-Drive -DriveLetter $driveLetter -FileSizeMb $targetSize -BaseProgress $baseProgress -StepWeight $stepWeight }
                             catch {
-                                Add-Line ("{0}: {1} - benchmark failed: {2}" -f $driveLetter, $driveLabel, $_.Exception.Message)
+                                if ($State["Cancel"]) { throw }
+                                Add-Line ("{0} - benchmark failed: {1}" -f $driveDisplayName, $_.Exception.Message)
                             }
-
-                            $stepIndex += 4
+                            $stepIndex += 8
                         }
 
                         Add-Line ""
                         Add-Line ("Completed: {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"))
-
-                        Set-Status "Benchmark complete." 100
+                        Set-BenchmarkStatus "Benchmark complete." 100
                     }
                     catch {
-                        $State["Error"] = $_.Exception.Message
-
-                        Add-Line ""
-                        Add-Line ("ERROR: {0}" -f $_.Exception.Message)
-
-                        Set-Status "Benchmark failed." 100
+                        if ($State["Cancel"]) {
+                            $State["Error"] = ""
+                            Add-Line ""; Add-Line "Benchmark stopped by user."
+                            Set-BenchmarkStatus "Benchmark stopped." 100
+                        }
+                        else {
+                            $State["Error"] = $_.Exception.Message
+                            Add-Line ""; Add-Line ("ERROR: {0}" -f $_.Exception.Message)
+                            Set-BenchmarkStatus "Benchmark failed." 100
+                        }
                     }
                     finally {
                         $State["IsRunning"] = $false
@@ -6461,7 +8216,6 @@ function Start-DriveBenchmark {
             $worker["PowerShell"] = $ps
             $worker["StartedAt"] = Get-Date
             $worker["Async"] = $ps.BeginInvoke()
-
             $timer.Start()
         }
         catch {
@@ -6470,81 +8224,67 @@ function Start-DriveBenchmark {
             $state["Error"] = $_.Exception.Message
             $state["Status"] = "Failed to start benchmark."
             $state["Progress"] = 100
-
-            [void]$state["Lines"].Add("")
-            [void]$state["Lines"].Add("START ERROR: $($_.Exception.Message)")
-
-            $statusText.Foreground = $BrushError
+            [void]$state["Lines"].Add(""); [void]$state["Lines"].Add("START ERROR: $($_.Exception.Message)")
+            Set-WmtThemedBrush -Object $statusText -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Danger"
 
             & $refreshUi
             & $setRunningUi $false
             & $disposeWorker
-
+            & $cleanupTrackedBenchmarkFiles
             Write-GuiLog "[Storage Benchmark] Start failed: $($_.Exception.Message)"
         }
     }.GetNewClosure()
 
     $btnRun.Add_Click({
-            & $startBenchmark
-        }.GetNewClosure())
-
-    $didAutoStart = $false
-
-    $benchWindow.Add_Loaded({
-            if ($didAutoStart) {
-                return
-            }
-
-            $didAutoStart = $true
-
-            $benchWindow.Dispatcher.BeginInvoke(
-                [Action] {
-                    & $startBenchmark
-                },
-                [System.Windows.Threading.DispatcherPriority]::ApplicationIdle
-            ) | Out-Null
+            if ($state["IsRunning"]) { & $stopBenchmark } else { & $startBenchmark }
         }.GetNewClosure())
 
     $windowCleanup = {
         $state["Cancel"] = $true
-
-        try {
-            $timer.Stop()
-        }
-        catch {}
-
-        try {
-            if ($worker["PowerShell"] -and $state["IsRunning"]) {
-                $worker["PowerShell"].Stop()
-            }
-        }
-        catch {}
-
+        try { $timer.Stop() } catch {}
+        try { if ($worker["PowerShell"] -and $state["IsRunning"]) { $worker["PowerShell"].Stop() } } catch {}
         & $disposeWorker
+        & $cleanupTrackedBenchmarkFiles
         & $releaseWindowState
     }.GetNewClosure()
 
-    $benchWindow.Add_Closing({
-            & $windowCleanup
-        }.GetNewClosure())
-
-    $benchWindow.Add_Closed({
-            & $releaseWindowState
-        }.GetNewClosure())
-
+    $benchWindow.Add_Closing({ & $windowCleanup }.GetNewClosure())
+    $benchWindow.Add_Closed({ & $releaseWindowState }.GetNewClosure())
     $benchWindow.Show() | Out-Null
 }
+
+function Expand-ShortcutTarget {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return "" }
+    $trimmed = $Target.Trim().Trim('"')
+    try { return [System.Environment]::ExpandEnvironmentVariables($trimmed) }
+    catch { return $trimmed }
+}
+
+function Test-ShortcutTargetIsSpecial {
+    param([string]$Target)
+    if ([string]::IsNullOrWhiteSpace($Target)) { return $true }
+    $trimmed = $Target.Trim().Trim('"')
+    if ($trimmed -match '^shell:' -or $trimmed -match '^\s*::{') { return $true }
+    if ($trimmed -match '^[a-zA-Z][a-zA-Z0-9+.-]+:' -and $trimmed -notmatch '^[a-zA-Z]:[\\/]') { return $true }
+    try {
+        if ($trimmed.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return $true }
+    }
+    catch { return $true }
+    return $false
+}
+
 function Show-BrokenShortcuts {
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Broken Shortcut Manager"
-    $f.Size = "1100, 650"
+    $f.Size = New-Object System.Drawing.Size(1220, 720)
+    $f.MinimumSize = New-Object System.Drawing.Size(1100, 620)
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $f.ForeColor = "White"
 
-    # 1. SETUP GRID
     $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"; $dg.Height = 480
+    $dg.Dock = "Fill"
     $dg.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $dg.ForeColor = "Black"
     $dg.AutoSizeColumnsMode = "Fill"
@@ -6554,7 +8294,6 @@ function Show-BrokenShortcuts {
     $dg.RowHeadersVisible = $false
     $dg.AllowUserToAddRows = $false
     $dg.BorderStyle = "None"
-    
     $dg.EnableHeadersVisualStyles = $false
     $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 50)
     $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
@@ -6564,309 +8303,1046 @@ function Show-BrokenShortcuts {
     $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
     $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
     $dg.DefaultCellStyle.SelectionForeColor = "White"
+    Set-WmtDoubleBuffered -Control $dg
 
-    $f.Controls.Add($dg)
+    $statusPanel = New-Object System.Windows.Forms.Panel
+    $statusPanel.Dock = "Bottom"
+    $statusPanel.Height = 38
+    $statusPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
 
-    # 2. STATUS
+    $progress = New-Object System.Windows.Forms.ProgressBar
+    $progress.Location = New-Object System.Drawing.Point(18, 10)
+    $progress.Size = New-Object System.Drawing.Size(145, 16)
+    $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
+    $progress.MarqueeAnimationSpeed = 25
+    $progress.Visible = $false
+    $statusPanel.Controls.Add($progress)
+
     $lblStatus = New-Object System.Windows.Forms.Label
-    $lblStatus.Text = "Initializing..."
-    $lblStatus.AutoSize = $true
+    $lblStatus.Text = "Ready."
     $lblStatus.ForeColor = "Yellow"
-    $lblStatus.Location = "20, 490"
-    $f.Controls.Add($lblStatus)
+    $lblStatus.AutoSize = $false
+    $lblStatus.Location = New-Object System.Drawing.Point(178, 9)
+    $lblStatus.Size = New-Object System.Drawing.Size(980, 20)
+    $lblStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+    $statusPanel.Controls.Add($lblStatus)
 
-    # 3. BUTTONS
     $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"; $pnl.Height = 80
+    $pnl.Dock = "Bottom"
+    $pnl.Height = 82
     $pnl.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $f.Controls.Add($pnl)
 
-    # --- CHANGED: Delete Button ---
     $btnDelete = New-Object System.Windows.Forms.Button
-    $btnDelete.Text = "Delete Selected"
-    $btnDelete.Location = "20, 20"; $btnDelete.Width = 150; $btnDelete.Height = 35
-    $btnDelete.BackColor = "IndianRed"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
+    $btnDelete.Text = "Delete Now"
+    $btnDelete.Location = New-Object System.Drawing.Point(18, 20)
+    $btnDelete.Size = New-Object System.Drawing.Size(110, 35)
+    $btnDelete.BackColor = "Firebrick"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
     $pnl.Controls.Add($btnDelete)
 
+    $btnRescan = New-Object System.Windows.Forms.Button
+    $btnRescan.Text = "Rescan"
+    $btnRescan.Location = New-Object System.Drawing.Point(148, 20)
+    $btnRescan.Size = New-Object System.Drawing.Size(90, 35)
+    $btnRescan.BackColor = "DimGray"; $btnRescan.ForeColor = "White"; $btnRescan.FlatStyle = "Flat"
+    $pnl.Controls.Add($btnRescan)
+
+    $btnStop = New-Object System.Windows.Forms.Button
+    $btnStop.Text = "Stop"
+    $btnStop.Location = New-Object System.Drawing.Point(248, 20)
+    $btnStop.Size = New-Object System.Drawing.Size(80, 35)
+    $btnStop.BackColor = "DimGray"; $btnStop.ForeColor = "White"; $btnStop.FlatStyle = "Flat"
+    $btnStop.Enabled = $false
+    $pnl.Controls.Add($btnStop)
+
+    $lblInfo = New-Object System.Windows.Forms.Label
+    $lblInfo.Text = "Right-click rows for Browse, Deep Search, copy, or open location."
+    $lblInfo.AutoSize = $false
+    $lblInfo.ForeColor = "Gray"
+    $lblInfo.Location = New-Object System.Drawing.Point(346, 27)
+    $lblInfo.Size = New-Object System.Drawing.Size(420, 20)
+    $pnl.Controls.Add($lblInfo)
+
     $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Apply Fixes" # Renamed slightly to be clearer
-    $btnApply.Location = "780, 20"; $btnApply.Width = 150; $btnApply.Height = 35
+    $btnApply.Text = "Apply Fixes"
+    $btnApply.Size = New-Object System.Drawing.Size(130, 35)
     $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"
     $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $pnl.Controls.Add($btnApply)
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Close"
-    $btnCancel.Location = "950, 20"; $btnCancel.Width = 100; $btnCancel.Height = 35
+    $btnCancel.Size = New-Object System.Drawing.Size(90, 35)
     $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
     $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $pnl.Controls.Add($btnCancel)
-    
-    $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Right-click for Deep Search or Manual Browse."
-    $lblInfo.AutoSize = $true; $lblInfo.ForeColor = "Gray"
-    $lblInfo.Location = "200, 30"
-    $pnl.Controls.Add($lblInfo)
 
-    # 4. CONTEXT MENU
-    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
-    
-    # --- Manual Browse ---
-    $itemBrowse = $ctx.Items.Add("Browse for target...")
-    $itemBrowse.Add_Click({
-            if ($dg.SelectedRows.Count -eq 1) {
-                $row = $dg.SelectedRows[0]
-                $obj = $row.DataBoundItem
-                $dlg = New-Object System.Windows.Forms.OpenFileDialog
-                $dlg.Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
-                if ($dlg.ShowDialog() -eq "OK") {
-                    $obj.Action = "Fix"
-                    $obj.NewTarget = $dlg.FileName
-                    $obj.Details = "Manual fix: $($dlg.FileName)"
-                    $dg.Refresh()
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
-                }
-            }
+    $layoutButtons = {
+        $btnCancel.Left = [Math]::Max(980, $pnl.ClientSize.Width - 108)
+        $btnCancel.Top = 20
+        $btnApply.Left = $btnCancel.Left - 142
+        $btnApply.Top = 20
+        $lblInfo.Width = [Math]::Max(120, $btnApply.Left - $lblInfo.Left - 16)
+    }.GetNewClosure()
+    $pnl.Add_Resize($layoutButtons)
+
+    $f.Controls.Add($dg)
+    $f.Controls.Add($statusPanel)
+    $f.Controls.Add($pnl)
+    $f.AcceptButton = $btnApply
+    $f.CancelButton = $btnCancel
+
+    $newShortcutTable = {
+        $dt = New-Object System.Data.DataTable
+        foreach ($col in @("Shortcut", "Location", "Action", "Details", "BrokenTarget", "NewTarget", "FullPath")) {
+            [void]$dt.Columns.Add($col)
+        }
+        return $dt
+    }.GetNewClosure()
+
+    $configureGridColumns = {
+        if (-not $dg.Columns -or $dg.Columns.Count -eq 0) { return }
+        if ($dg.Columns["FullPath"]) { $dg.Columns["FullPath"].Visible = $false }
+        if ($dg.Columns["Location"]) { $dg.Columns["Location"].HeaderText = "Location"; $dg.Columns["Location"].FillWeight = 18 }
+        if ($dg.Columns["Shortcut"]) { $dg.Columns["Shortcut"].FillWeight = 13 }
+        if ($dg.Columns["Action"]) { $dg.Columns["Action"].FillWeight = 7 }
+        if ($dg.Columns["Details"]) { $dg.Columns["Details"].FillWeight = 17 }
+        if ($dg.Columns["BrokenTarget"]) { $dg.Columns["BrokenTarget"].HeaderText = "Broken Target"; $dg.Columns["BrokenTarget"].FillWeight = 24 }
+        if ($dg.Columns["NewTarget"]) { $dg.Columns["NewTarget"].HeaderText = "New Target"; $dg.Columns["NewTarget"].FillWeight = 24 }
+    }.GetNewClosure()
+
+    $colorGridRow = {
+        param($GridRow)
+        if (-not $GridRow -or $GridRow.IsNewRow) { return }
+        $action = [string]$GridRow.Cells["Action"].Value
+        if ($action -eq "Fix") {
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Success"
+        }
+        elseif ($action -eq "None") {
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Warning"
+        }
+        else {
+            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "TextPrimary"
+        }
+    }.GetNewClosure()
+
+    $setGridRowAction = {
+        param($GridRow, [string]$Action, [string]$Details, [string]$NewTarget)
+        if (-not $GridRow -or $GridRow.IsNewRow) { return }
+        $GridRow.Cells["Action"].Value = $Action
+        $GridRow.Cells["Details"].Value = $Details
+        $GridRow.Cells["NewTarget"].Value = if ($null -eq $NewTarget) { "" } else { $NewTarget }
+        & $colorGridRow $GridRow
+    }.GetNewClosure()
+
+    $getSelectedGridRows = {
+        return @($dg.SelectedRows | Where-Object { $_ -and -not $_.IsNewRow })
+    }.GetNewClosure()
+
+    $scanState = [hashtable]::Synchronized(@{
+            Results     = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+            Status      = "Ready."
+            Current     = ""
+            Root        = ""
+            Scanned     = 0
+            Found       = 0
+            Skipped     = 0
+            Roots       = 0
+            IsRunning   = $false
+            IsCompleted = $false
+            Error       = ""
+            Cancel      = $false
         })
+    $scanWorker = @{ PowerShell = $null; Runspace = $null; Async = $null }
+    $scanTimer = New-Object System.Windows.Forms.Timer
+    $scanTimer.Interval = 180
 
-    # --- Deep Search ---
-    $itemDeep = $ctx.Items.Add("Deep Search (Slow - Scan All Drives)")
-    $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $itemDeep.ForeColor = [System.Drawing.Color]::DarkBlue
-    
-    $itemDeep.Add_Click({
-            if ($dg.SelectedRows.Count -ne 1) { return }
-            $row = $dg.SelectedRows[0]
-            $obj = $row.DataBoundItem
-        
-            $searchName = $null
-            $shell = New-Object -ComObject WScript.Shell
-            try {
-                $sc = $shell.CreateShortcut($obj.FullPath)
-                if ($sc.TargetPath) {
-                    $searchName = Split-Path $sc.TargetPath -Leaf
-                }
+    $searchState = [hashtable]::Synchronized(@{
+            Status      = "Ready."
+            Current     = ""
+            FoundPath   = ""
+            IsRunning   = $false
+            IsCompleted = $false
+            Error       = ""
+            Cancel      = $false
+        })
+    $searchWorker = @{ PowerShell = $null; Runspace = $null; Async = $null; Row = $null; SearchName = "" }
+    $searchTimer = New-Object System.Windows.Forms.Timer
+    $searchTimer.Interval = 180
+
+    $isBusy = { return ([bool]$scanState["IsRunning"] -or [bool]$searchState["IsRunning"]) }.GetNewClosure()
+
+    $refreshButtons = {
+        $busy = & $isBusy
+        $hasRows = ($dg.Rows.Count -gt 0)
+        $hasSelection = ((& $getSelectedGridRows).Count -gt 0)
+        $hasAction = $false
+        if ($hasRows) {
+            foreach ($row in $dg.Rows) {
+                if (-not $row -or $row.IsNewRow) { continue }
+                $action = [string]$row.Cells["Action"].Value
+                if ($action -eq "Fix") { $hasAction = $true; break }
             }
-            catch {}
+        }
+        $btnApply.Enabled = (-not $busy -and $hasAction)
+        $btnDelete.Enabled = (-not $busy -and $hasSelection)
+        $btnRescan.Enabled = -not $busy
+        $btnStop.Enabled = $busy
+        $progress.Visible = $busy
+        if ($busy) { [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor }
+        else { [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default }
+    }.GetNewClosure()
 
-            if (-not $searchName) {
-                $base = [System.IO.Path]::GetFileNameWithoutExtension($obj.Shortcut)
-                $searchName = "$base.exe"
-            }
+    $bindScanResults = {
+        $dt = & $newShortcutTable
+        foreach ($item in @($scanState["Results"])) {
+            if (-not $item) { continue }
+            $row = $dt.NewRow()
+            $row["Shortcut"] = [string]$item.Shortcut
+            $row["Location"] = [string]$item.Location
+            $row["Action"] = [string]$item.Action
+            $row["Details"] = [string]$item.Details
+            $row["BrokenTarget"] = [string]$item.BrokenTarget
+            $row["NewTarget"] = [string]$item.NewTarget
+            $row["FullPath"] = [string]$item.FullPath
+            [void]$dt.Rows.Add($row)
+        }
+        $dg.DataSource = $dt
+        & $configureGridColumns
+        $dg.ClearSelection()
+        for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
+            $row = $dg.Rows[$i]
+            & $colorGridRow $row
+            if ([string]$row.Cells["Action"].Value -eq "Fix") { $row.Selected = $true }
+        }
+        & $refreshButtons
+    }.GetNewClosure()
 
-            $warnMsg = "This will scan ALL local hard drives for:`n`n'$searchName'`n`nDepending on your drive size, this can take 5-10+ minutes.`nDuring this time, the application may appear frozen.`n`nDo you want to continue?"
-            $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search Warning", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        
-            if ($res -eq "Yes") {
-                [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-                $lblStatus.Text = "Deep Searching for '$searchName'..."
-                $f.Update()
+    $disposeScanWorker = {
+        try { if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Dispose() } } catch {}
+        try { if ($scanWorker.Runspace) { $scanWorker.Runspace.Close(); $scanWorker.Runspace.Dispose() } } catch {}
+        $scanWorker.PowerShell = $null
+        $scanWorker.Runspace = $null
+        $scanWorker.Async = $null
+    }.GetNewClosure()
 
-                $foundPath = $null
-                $drives = [System.IO.DriveInfo]::GetDrives() | Where-Object { $_.DriveType -eq 'Fixed' }
-            
-                foreach ($d in $drives) {
-                    if ($foundPath) { break }
-                    $root = $d.RootDirectory.FullName
-                    $lblStatus.Text = "Scanning drive $root for '$searchName'..."
-                    $f.Update()
-                    try {
-                        $match = Get-ChildItem -Path $root -Filter $searchName -Recurse -ErrorAction SilentlyContinue -Force | Select-Object -First 1
-                        if ($match) { $foundPath = $match.FullName }
+    $disposeSearchWorker = {
+        try { if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Dispose() } } catch {}
+        try { if ($searchWorker.Runspace) { $searchWorker.Runspace.Close(); $searchWorker.Runspace.Dispose() } } catch {}
+        $searchWorker.PowerShell = $null
+        $searchWorker.Runspace = $null
+        $searchWorker.Async = $null
+        $searchWorker.Row = $null
+        $searchWorker.SearchName = ""
+    }.GetNewClosure()
+
+    $stopActiveWork = {
+        if ($scanState["IsRunning"]) {
+            $scanState["Cancel"] = $true
+            $scanState["Status"] = "Stopping shortcut scan..."
+            try { if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Stop() } } catch {}
+        }
+        if ($searchState["IsRunning"]) {
+            $searchState["Cancel"] = $true
+            $searchState["Status"] = "Stopping deep search..."
+            try { if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Stop() } } catch {}
+        }
+        & $refreshButtons
+    }.GetNewClosure()
+
+    $startScan = {
+        if (& $isBusy) { return }
+
+        & $disposeScanWorker
+        $scanState["Results"].Clear()
+        $scanState["Status"] = "Preparing shortcut scan..."
+        $scanState["Current"] = ""
+        $scanState["Root"] = ""
+        $scanState["Scanned"] = 0
+        $scanState["Found"] = 0
+        $scanState["Skipped"] = 0
+        $scanState["Roots"] = 0
+        $scanState["IsRunning"] = $true
+        $scanState["IsCompleted"] = $false
+        $scanState["Error"] = ""
+        $scanState["Cancel"] = $false
+
+        $dg.DataSource = & $newShortcutTable
+        & $configureGridColumns
+        $lblStatus.Text = "Scanning shortcuts..."
+        $f.Text = "Broken Shortcut Manager - Scanning..."
+        & $refreshButtons
+
+        try {
+            $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Expand-ShortcutTarget", ${function:Expand-ShortcutTarget}.ToString()))
+            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Test-ShortcutTargetIsSpecial", ${function:Test-ShortcutTargetIsSpecial}.ToString()))
+            $runspace = [runspacefactory]::CreateRunspace($iss)
+            $runspace.ApartmentState = "STA"
+            $runspace.ThreadOptions = "ReuseThread"
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+            [void]$ps.AddScript({
+                    param($State)
+                    $ErrorActionPreference = "SilentlyContinue"
+
+                    function Set-ScanStatus {
+                        param([string]$Text)
+                        $State["Status"] = $Text
                     }
-                    catch {}
-                }
 
-                if ($foundPath) {
-                    $obj.Action = "Fix"
-                    $obj.NewTarget = $foundPath
-                    $obj.Details = "Deep Search: $foundPath"
-                    $dg.Refresh()
-                    $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen
-                    $lblStatus.Text = "Found: $foundPath"
-                    [System.Windows.Forms.MessageBox]::Show("File found!`n`n$foundPath", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-                }
-                else {
-                    $lblStatus.Text = "Deep Search failed."
-                    [System.Windows.Forms.MessageBox]::Show("Could not find '$searchName' on any local drive.", "Not Found", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
-                }
-                [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
-            }
-        })
+                    function Test-ScanCancelled {
+                        return [bool]$State["Cancel"]
+                    }
 
-    $ctx.Items.Add( (New-Object System.Windows.Forms.ToolStripSeparator) )
-
-    # --- Unmark ---
-    $itemUnmark = $ctx.Items.Add("Unmark / Cancel Action")
-    $itemUnmark.Add_Click({
-            foreach ($row in $dg.SelectedRows) {
-                $obj = $row.DataBoundItem
-                $obj.Action = "None"
-                $obj.Details = "Review Needed"
-                $dg.Refresh()
-                $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange
-            }
-        })
-    $dg.ContextMenuStrip = $ctx
-
-    # --- CHANGED: DELETE BUTTON LOGIC ---
-    $btnDelete.Add_Click({
-            $count = $dg.SelectedRows.Count
-            if ($count -eq 0) { return }
-
-            $res = [System.Windows.Forms.MessageBox]::Show("Permanently delete $count selected shortcut(s)?`n`nThis action is immediate.", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        
-            if ($res -eq "Yes") {
-                $rows = @($dg.SelectedRows) # Copy collection to avoid modification errors
-                $deletedCount = 0
-            
-                foreach ($row in $rows) {
-                    try {
-                        # Get FullPath from the hidden column we added
-                        $path = $row.Cells["FullPath"].Value
-                    
-                        if ($path -and (Test-Path $path)) {
-                            Remove-Item -Path $path -Force -ErrorAction Stop
+                    function Add-ShortcutRoot {
+                        param($Roots, $Seen, [string]$Path)
+                        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+                        try {
+                            $expanded = [System.Environment]::ExpandEnvironmentVariables($Path)
+                            if (-not [System.IO.Directory]::Exists($expanded)) { return }
+                            $full = ([System.IO.DirectoryInfo]::new($expanded)).FullName.TrimEnd("\")
+                            $key = $full.ToUpperInvariant()
+                            if (-not $Seen.ContainsKey($key)) {
+                                $Seen[$key] = $true
+                                [void]$Roots.Add($full)
+                            }
                         }
-                    
-                        # Remove from UI
-                        $dg.Rows.Remove($row)
-                        $deletedCount++
+                        catch {}
                     }
-                    catch {
-                        [System.Windows.Forms.MessageBox]::Show("Could not delete: $path`n$($_.Exception.Message)", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+
+                    function Get-ShortcutScanRoots {
+                        $roots = [System.Collections.ArrayList]::new()
+                        $seen = @{}
+
+                        foreach ($name in @("CommonStartMenu", "StartMenu", "CommonPrograms", "Programs", "CommonDesktopDirectory", "DesktopDirectory", "Desktop")) {
+                            try {
+                                $folder = [System.Enum]::Parse([System.Environment+SpecialFolder], $name)
+                                Add-ShortcutRoot -Roots $roots -Seen $seen -Path ([System.Environment]::GetFolderPath($folder))
+                            }
+                            catch {}
+                        }
+
+                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:ProgramData\Microsoft\Windows\Start Menu"
+                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:APPDATA\Microsoft\Windows\Start Menu"
+                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:USERPROFILE\Desktop"
+                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:PUBLIC\Desktop"
+                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "C:\Users\Public\Desktop"
+
+                        foreach ($oneDriveRoot in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
+                            if (-not [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
+                                Add-ShortcutRoot -Roots $roots -Seen $seen -Path (Join-Path $oneDriveRoot "Desktop")
+                            }
+                        }
+
+                        $filtered = [System.Collections.ArrayList]::new()
+                        foreach ($root in @($roots | Sort-Object { $_.Length })) {
+                            $isNested = $false
+                            foreach ($parent in @($filtered)) {
+                                $parentPrefix = $parent.TrimEnd("\") + "\"
+                                if ($root.Length -gt $parent.Length -and $root.StartsWith($parentPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    $isNested = $true
+                                    break
+                                }
+                            }
+                            if (-not $isNested) { [void]$filtered.Add($root) }
+                        }
+
+                        return @($filtered)
                     }
-                }
-                $lblStatus.Text = "Deleted $deletedCount shortcuts."
-            }
-        })
 
-    $script:ScanResults = @()
+                    function Get-EnumeratedShortcutFiles {
+                        param(
+                            [string]$Path,
+                            [string]$Filter = "*.lnk",
+                            [switch]$Recurse
+                        )
+                        if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
 
-    # 5. SCAN LOGIC
-    $f.Add_Shown({
-            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-            $lblStatus.Text = "Scanning shortcuts... Please wait."
-            $f.Text = "Broken Shortcut Manager - Scanning..."
-            [System.Windows.Forms.Application]::DoEvents()
+                        if (-not $Recurse) {
+                            try {
+                                foreach ($file in [System.IO.Directory]::EnumerateFiles($Path, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                    if (Test-ScanCancelled) { return }
+                                    $file
+                                }
+                            }
+                            catch {}
+                            return
+                        }
 
-            $paths = @(
-                "C:\ProgramData\Microsoft\Windows\Start Menu", 
-                "$env:APPDATA\Microsoft\Windows\Start Menu",
-                "$env:USERPROFILE\Desktop",
-                "C:\Users\Public\Desktop",
-                "$env:USERPROFILE\OneDrive\Desktop"
-            ) | Select-Object -Unique | Where-Object { $_ -and (Test-Path $_) }
+                        $pending = [System.Collections.Generic.Stack[string]]::new()
+                        $pending.Push($Path)
+                        while ($pending.Count -gt 0) {
+                            if (Test-ScanCancelled) { return }
+                            $dir = $pending.Pop()
+                            $State["Current"] = $dir
 
-            $knownFixes = @{
-                "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
-                "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
-                "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
-                "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
-                "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
-            }
+                            try {
+                                foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                    if (Test-ScanCancelled) { return }
+                                    $file
+                                }
+                            }
+                            catch {}
 
-            $shell = New-Object -ComObject WScript.Shell
-        
-            $tempList = @()
-        
-            foreach ($path in $paths) {
-                Get-ChildItem -Path $path -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-                    $lnkPath = $_.FullName
+                            try {
+                                foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                    if (Test-ScanCancelled) { return }
+                                    $pending.Push($child)
+                                }
+                            }
+                            catch {}
+                        }
+                    }
+
+                    function Test-ShortcutTargetExists {
+                        param([string]$Target)
+                        $expanded = Expand-ShortcutTarget $Target
+                        if ([string]::IsNullOrWhiteSpace($expanded)) { return $false }
+                        try { return ([System.IO.File]::Exists($expanded) -or [System.IO.Directory]::Exists($expanded)) }
+                        catch { return $false }
+                    }
+
+                    function Get-ShortcutGuessName {
+                        param([string]$Target, [string]$BaseName)
+                        try {
+                            $expanded = Expand-ShortcutTarget $Target
+                            if (-not [string]::IsNullOrWhiteSpace($expanded)) {
+                                $leaf = [System.IO.Path]::GetFileName($expanded)
+                                if (-not [string]::IsNullOrWhiteSpace($leaf)) { return $leaf }
+                            }
+                        }
+                        catch {}
+                        return "$BaseName.exe"
+                    }
+
+                    function Find-AppPathTarget {
+                        param([string]$FileName)
+                        if ([string]::IsNullOrWhiteSpace($FileName) -or $FileName -notmatch '\.exe$') { return $null }
+                        $views = @([Microsoft.Win32.RegistryView]::Default, [Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)
+                        $hives = @([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryHive]::LocalMachine)
+
+                        foreach ($hive in $hives) {
+                            foreach ($view in $views) {
+                                $baseKey = $null; $appKey = $null
+                                try {
+                                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
+                                    $appKey = $baseKey.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$FileName")
+                                    if ($appKey) {
+                                        $value = [string]$appKey.GetValue("")
+                                        $expanded = Expand-ShortcutTarget $value
+                                        if (-not [string]::IsNullOrWhiteSpace($expanded) -and [System.IO.File]::Exists($expanded)) {
+                                            return $expanded
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    try { if ($appKey) { $appKey.Close() } } catch {}
+                                    try { if ($baseKey) { $baseKey.Close() } } catch {}
+                                }
+                            }
+                        }
+                        return $null
+                    }
+
+                    function Find-PathTarget {
+                        param([string]$FileName)
+                        if ([string]::IsNullOrWhiteSpace($FileName) -or $FileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $null }
+                        foreach ($dir in @(([string]$env:Path).Split(";"))) {
+                            if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+                            try {
+                                $candidate = Join-Path ([System.Environment]::ExpandEnvironmentVariables($dir.Trim())) $FileName
+                                if ([System.IO.File]::Exists($candidate)) { return $candidate }
+                            }
+                            catch {}
+                        }
+                        return $null
+                    }
+
+                    $knownFixes = @{
+                        "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+                        "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+                        "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
+                        "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
+                        "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
+                    }
+
+                    $peerTargetCache = @{}
+                    $shell = $null
+
+                    function Get-PeerShortcutTargets {
+                        param([string]$Directory)
+                        if ([string]::IsNullOrWhiteSpace($Directory) -or -not [System.IO.Directory]::Exists($Directory)) { return @() }
+                        $key = $Directory.ToUpperInvariant()
+                        if ($peerTargetCache.ContainsKey($key)) { return @($peerTargetCache[$key]) }
+
+                        $targets = [System.Collections.ArrayList]::new()
+                        foreach ($peerPath in Get-EnumeratedShortcutFiles -Path $Directory -Filter "*.lnk") {
+                            if (Test-ScanCancelled) { break }
+                            try {
+                                $peerShortcut = $shell.CreateShortcut($peerPath)
+                                $peerTarget = [string]$peerShortcut.TargetPath
+                                if (Test-ShortcutTargetIsSpecial $peerTarget) { continue }
+                                $expanded = Expand-ShortcutTarget $peerTarget
+                                if (Test-ShortcutTargetExists $expanded) {
+                                    $parent = [System.IO.Path]::GetDirectoryName($expanded)
+                                    if (-not [string]::IsNullOrWhiteSpace($parent)) {
+                                        [void]$targets.Add([PSCustomObject]@{ Target = $expanded; Parent = $parent })
+                                    }
+                                }
+                            }
+                            catch {}
+                        }
+
+                        $peerTargetCache[$key] = @($targets)
+                        return @($targets)
+                    }
+
                     try {
-                        $sc = $shell.CreateShortcut($lnkPath)
-                        $target = $sc.TargetPath
-                    }
-                    catch { return }
+                        Set-ScanStatus "Finding shortcut folders..."
+                        $roots = @(Get-ShortcutScanRoots)
+                        $State["Roots"] = $roots.Count
+                        if ($roots.Count -eq 0) {
+                            Set-ScanStatus "No shortcut folders were found."
+                            return
+                        }
 
-                    if ($target -match '^shell:' -or $target -match '^\s*::{') { return }
-                    if ($target -match '^\s*$' -or $target.IndexOfAny([System.IO.Path]::GetInvalidPathChars()) -ge 0) { return }
+                        $shell = New-Object -ComObject WScript.Shell
 
-                    if (-not (Test-Path $target)) {
-                        $action = "None"; $details = "Review Needed"; $newT = $null
-                        $baseName = $_.BaseName
+                        foreach ($root in $roots) {
+                            if (Test-ScanCancelled) { break }
+                            $State["Root"] = $root
+                            Set-ScanStatus "Scanning $root"
 
-                        if ($knownFixes.ContainsKey($baseName)) {
-                            $action = "Fix"; $details = "Restore System Path"; $newT = $knownFixes[$baseName]
+                            foreach ($lnkPath in Get-EnumeratedShortcutFiles -Path $root -Filter "*.lnk" -Recurse) {
+                                if (Test-ScanCancelled) { break }
+                                $State["Current"] = $lnkPath
+                                $State["Scanned"] = [int]$State["Scanned"] + 1
+
+                                try { $shortcutFile = [System.IO.FileInfo]::new($lnkPath) } catch { $State["Skipped"] = [int]$State["Skipped"] + 1; continue }
+
+                                try {
+                                    $sc = $shell.CreateShortcut($lnkPath)
+                                    $target = [string]$sc.TargetPath
+                                }
+                                catch {
+                                    $State["Skipped"] = [int]$State["Skipped"] + 1
+                                    continue
+                                }
+
+                                if (Test-ShortcutTargetIsSpecial $target) {
+                                    $State["Skipped"] = [int]$State["Skipped"] + 1
+                                    continue
+                                }
+
+                                if (Test-ShortcutTargetExists $target) { continue }
+
+                                $action = "None"
+                                $details = "Review Needed"
+                                $newTarget = ""
+                                $baseName = $shortcutFile.BaseName
+                                $guessName = Get-ShortcutGuessName -Target $target -BaseName $baseName
+
+                                if ($knownFixes.ContainsKey($baseName)) {
+                                    $action = "Fix"
+                                    $details = "Restore System Path"
+                                    $newTarget = $knownFixes[$baseName]
+                                }
+                                else {
+                                    $appPath = Find-AppPathTarget -FileName $guessName
+                                    if ($appPath) {
+                                        $action = "Fix"
+                                        $details = "App Paths: $([System.IO.Path]::GetDirectoryName($appPath))"
+                                        $newTarget = $appPath
+                                    }
+
+                                    if (-not $newTarget) {
+                                        foreach ($peer in Get-PeerShortcutTargets -Directory $shortcutFile.DirectoryName) {
+                                            try {
+                                                $candidate = Join-Path $peer.Parent $guessName
+                                                if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                                    $action = "Fix"
+                                                    $details = "Nearby shortcut: $($peer.Parent)"
+                                                    $newTarget = $candidate
+                                                    break
+                                                }
+                                            }
+                                            catch {}
+                                        }
+                                    }
+
+                                    if (-not $newTarget) {
+                                        $pathTarget = Find-PathTarget -FileName $guessName
+                                        if ($pathTarget) {
+                                            $action = "Fix"
+                                            $details = "PATH: $([System.IO.Path]::GetDirectoryName($pathTarget))"
+                                            $newTarget = $pathTarget
+                                        }
+                                    }
+                                }
+
+                                [void]$State["Results"].Add([PSCustomObject]@{
+                                        Shortcut     = $shortcutFile.Name
+                                        Location     = $shortcutFile.DirectoryName
+                                        Action       = $action
+                                        Details      = $details
+                                        BrokenTarget = $target
+                                        NewTarget    = $newTarget
+                                        FullPath     = $lnkPath
+                                    })
+                                $State["Found"] = [int]$State["Results"].Count
+                            }
+                        }
+
+                        if (Test-ScanCancelled) {
+                            Set-ScanStatus "Scan stopped. Found $($State["Found"]) broken shortcut(s)."
                         }
                         else {
-                            $guessName = if ($target) { Split-Path $target -Leaf } else { ($baseName + ".exe") }
-                            $peers = Get-ChildItem $_.DirectoryName -Filter *.lnk -ErrorAction SilentlyContinue | Where-Object { $_.FullName -ne $lnkPath }
-                            foreach ($p in $peers) {
+                            Set-ScanStatus "Scan complete. Found $($State["Found"]) broken shortcut(s)."
+                        }
+                    }
+                    catch {
+                        $State["Error"] = $_.Exception.Message
+                        Set-ScanStatus "Scan failed: $($_.Exception.Message)"
+                    }
+                    finally {
+                        try { if ($shell) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {}
+                        $State["IsRunning"] = $false
+                        $State["IsCompleted"] = $true
+                    }
+                }).AddArgument($scanState)
+
+            $scanWorker.PowerShell = $ps
+            $scanWorker.Runspace = $runspace
+            $scanWorker.Async = $ps.BeginInvoke()
+            $scanTimer.Start()
+        }
+        catch {
+            $scanState["IsRunning"] = $false
+            $scanState["IsCompleted"] = $true
+            $scanState["Error"] = $_.Exception.Message
+            $scanState["Status"] = "Failed to start scan: $($_.Exception.Message)"
+            $lblStatus.Text = [string]$scanState["Status"]
+            & $disposeScanWorker
+            & $refreshButtons
+        }
+    }.GetNewClosure()
+
+    $scanTimer.Add_Tick({
+            $lblStatus.Text = "{0}  Scanned: {1}  Found: {2}  Skipped: {3}" -f $scanState["Status"], $scanState["Scanned"], $scanState["Found"], $scanState["Skipped"]
+            if (-not $scanWorker.Async -or -not $scanWorker.Async.IsCompleted) { return }
+
+            $scanTimer.Stop()
+            try {
+                [void]$scanWorker.PowerShell.EndInvoke($scanWorker.Async)
+            }
+            catch {
+                if (-not $scanState["Cancel"]) {
+                    $scanState["Error"] = $_.Exception.Message
+                    $scanState["Status"] = "Scan failed: $($_.Exception.Message)"
+                }
+            }
+            $scanState["IsRunning"] = $false
+            $scanState["IsCompleted"] = $true
+            if ($scanState["Cancel"] -and [string]$scanState["Status"] -eq "Stopping shortcut scan...") {
+                $scanState["Status"] = "Scan stopped. Found $($scanState["Found"]) broken shortcut(s)."
+            }
+
+            $f.Text = "Broken Shortcut Manager"
+            $lblStatus.Text = [string]$scanState["Status"]
+            & $bindScanResults
+            & $disposeScanWorker
+            & $refreshButtons
+
+            if (-not $scanState["Cancel"] -and -not $scanState["Error"] -and [int]$scanState["Found"] -eq 0) {
+                [System.Windows.Forms.MessageBox]::Show("Scan complete. No broken shortcuts found.", "All Clean", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            }
+            elseif ($scanState["Error"]) {
+                [System.Windows.Forms.MessageBox]::Show("Shortcut scan failed:`n$($scanState["Error"])", "Scan Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            }
+        }.GetNewClosure())
+
+    $startDeepSearch = {
+        param($GridRow)
+        if (& $isBusy) { return }
+        if (-not $GridRow -or $GridRow.IsNewRow) { return }
+
+        $brokenTarget = [string]$GridRow.Cells["BrokenTarget"].Value
+        $shortcutName = [string]$GridRow.Cells["Shortcut"].Value
+        $searchName = ""
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($brokenTarget)) {
+                $searchName = [System.IO.Path]::GetFileName([System.Environment]::ExpandEnvironmentVariables($brokenTarget))
+            }
+        }
+        catch {}
+        if ([string]::IsNullOrWhiteSpace($searchName)) {
+            $searchName = [System.IO.Path]::GetFileNameWithoutExtension($shortcutName) + ".exe"
+        }
+        try {
+            if ($searchName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw "Invalid file name." }
+        }
+        catch {
+            [System.Windows.Forms.MessageBox]::Show("Could not derive a safe file name to search for from this shortcut.", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+            return
+        }
+
+        $warnMsg = "This will scan all fixed local drives for:`n`n'$searchName'`n`nThe search runs in the background and can be stopped with the Stop button.`n`nDo you want to continue?"
+        $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($res -ne "Yes") { return }
+
+        & $disposeSearchWorker
+        $searchState["Status"] = "Preparing deep search for '$searchName'..."
+        $searchState["Current"] = ""
+        $searchState["FoundPath"] = ""
+        $searchState["Error"] = ""
+        $searchState["Cancel"] = $false
+        $searchState["IsRunning"] = $true
+        $searchState["IsCompleted"] = $false
+        $searchWorker.Row = $GridRow
+        $searchWorker.SearchName = $searchName
+        $lblStatus.Text = [string]$searchState["Status"]
+        & $refreshButtons
+
+        try {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = "MTA"
+            $runspace.ThreadOptions = "ReuseThread"
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+            [void]$ps.AddScript({
+                    param($State, [string]$SearchName)
+                    $ErrorActionPreference = "SilentlyContinue"
+
+                    function Test-SearchCancelled { return [bool]$State["Cancel"] }
+
+                    function Get-SearchFiles {
+                        param([string]$Path, [string]$Filter)
+                        if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+                        $pending = [System.Collections.Generic.Stack[string]]::new()
+                        $pending.Push($Path)
+                        while ($pending.Count -gt 0) {
+                            if (Test-SearchCancelled) { return }
+                            $dir = $pending.Pop()
+                            $State["Current"] = $dir
+                            try {
+                                foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                    if (Test-SearchCancelled) { return }
+                                    $file
+                                }
+                            }
+                            catch {}
+                            try {
+                                foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                    if (Test-SearchCancelled) { return }
+                                    $pending.Push($child)
+                                }
+                            }
+                            catch {}
+                        }
+                    }
+
+                    try {
+                        $State["Status"] = "Deep searching for '$SearchName'..."
+                        foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+                            if (Test-SearchCancelled) { break }
+                            if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $drive.IsReady) { continue }
+                            $State["Status"] = "Searching $($drive.RootDirectory.FullName) for '$SearchName'..."
+                            foreach ($candidate in Get-SearchFiles -Path $drive.RootDirectory.FullName -Filter $SearchName) {
+                                if (Test-SearchCancelled) { break }
                                 try {
-                                    $pt = $shell.CreateShortcut($p.FullName).TargetPath
-                                    if ($pt -and (Test-Path $pt)) {
-                                        $parent = Split-Path $pt -Parent; $candidate = Join-Path $parent $guessName
-                                        if (Test-Path $candidate) { $action = "Fix"; $details = "Auto-Found: $parent"; $newT = $candidate; break }
+                                    if ([System.String]::Equals([System.IO.Path]::GetFileName($candidate), $SearchName, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                        $State["FoundPath"] = $candidate
+                                        break
                                     }
                                 }
                                 catch {}
                             }
+                            if ($State["FoundPath"]) { break }
                         }
 
-                        $tempList += [PSCustomObject]@{
-                            Shortcut  = $_.Name
-                            Folder    = (Split-Path $_.DirectoryName -Leaf)
-                            Action    = $action
-                            Details   = $details
-                            NewTarget = $newT
-                            FullPath  = $lnkPath
+                        if (Test-SearchCancelled) {
+                            $State["Status"] = "Deep search stopped."
+                        }
+                        elseif ($State["FoundPath"]) {
+                            $State["Status"] = "Found: $($State["FoundPath"])"
+                        }
+                        else {
+                            $State["Status"] = "Deep search finished. No matching file found."
                         }
                     }
+                    catch {
+                        $State["Error"] = $_.Exception.Message
+                        $State["Status"] = "Deep search failed: $($_.Exception.Message)"
+                    }
+                    finally {
+                        $State["IsRunning"] = $false
+                        $State["IsCompleted"] = $true
+                    }
+                }).AddArgument($searchState).AddArgument($searchName)
+
+            $searchWorker.PowerShell = $ps
+            $searchWorker.Runspace = $runspace
+            $searchWorker.Async = $ps.BeginInvoke()
+            $searchTimer.Start()
+        }
+        catch {
+            $searchState["IsRunning"] = $false
+            $searchState["IsCompleted"] = $true
+            $searchState["Error"] = $_.Exception.Message
+            $searchState["Status"] = "Failed to start deep search: $($_.Exception.Message)"
+            $lblStatus.Text = [string]$searchState["Status"]
+            & $disposeSearchWorker
+            & $refreshButtons
+        }
+    }.GetNewClosure()
+
+    $searchTimer.Add_Tick({
+            $lblStatus.Text = [string]$searchState["Status"]
+            if ($searchState["Current"]) {
+                $lblStatus.Text = "{0}  Current: {1}" -f $searchState["Status"], $searchState["Current"]
+            }
+            if (-not $searchWorker.Async -or -not $searchWorker.Async.IsCompleted) { return }
+
+            $searchTimer.Stop()
+            try {
+                [void]$searchWorker.PowerShell.EndInvoke($searchWorker.Async)
+            }
+            catch {
+                if (-not $searchState["Cancel"]) {
+                    $searchState["Error"] = $_.Exception.Message
+                    $searchState["Status"] = "Deep search failed: $($_.Exception.Message)"
                 }
             }
-
-            # 6. BIND
-            $dt = New-Object System.Data.DataTable
-            # Added 'FullPath' column to the DataTable so we can access it for deletion
-            $dt.Columns.Add("Shortcut"); $dt.Columns.Add("Folder"); $dt.Columns.Add("Action"); $dt.Columns.Add("Details"); $dt.Columns.Add("NewTarget"); $dt.Columns.Add("FullPath")
-        
-            foreach ($item in $tempList) {
-                $row = $dt.NewRow()
-                $row["Shortcut"] = $item.Shortcut
-                $row["Folder"] = $item.Folder
-                $row["Action"] = $item.Action
-                $row["Details"] = $item.Details
-                $row["NewTarget"] = $item.NewTarget
-                $row["FullPath"] = $item.FullPath
-                $dt.Rows.Add($row)
+            $searchState["IsRunning"] = $false
+            $searchState["IsCompleted"] = $true
+            if ($searchState["Cancel"] -and [string]$searchState["Status"] -eq "Stopping deep search...") {
+                $searchState["Status"] = "Deep search stopped."
             }
-            $dg.DataSource = $dt
-            $dg.ClearSelection()
-        
-            # Hide FullPath from view
-            if ($dg.Columns["FullPath"]) { $dg.Columns["FullPath"].Visible = $false }
 
-            # 7. COLORS
-            for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
-                $row = $dg.Rows[$i]
-                $act = $row.Cells["Action"].Value
-                if ($act -eq "Fix") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::LightGreen; $row.Selected = $true }
-                elseif ($act -eq "None") { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Orange }
-                else { $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::Gray }
+            $targetRow = $searchWorker.Row
+            if (-not $searchState["Cancel"] -and -not $searchState["Error"] -and $searchState["FoundPath"] -and $targetRow -and -not $targetRow.IsNewRow) {
+                & $setGridRowAction $targetRow "Fix" "Deep Search: $($searchState["FoundPath"])" ([string]$searchState["FoundPath"])
+                $targetRow.Selected = $true
+                [System.Windows.Forms.MessageBox]::Show("File found!`n`n$($searchState["FoundPath"])", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
             }
-        
-            $lblStatus.Text = "Scan Complete. Found $($tempList.Count) broken shortcuts."
-            $f.Text = "Broken Shortcut Manager"
-            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
-
-            if ($tempList.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Scan complete. No broken shortcuts found.", "All Clean", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            elseif (-not $searchState["Cancel"] -and -not $searchState["Error"]) {
+                [System.Windows.Forms.MessageBox]::Show("Could not find '$($searchWorker.SearchName)' on any fixed local drive.", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
             }
-        })
+            elseif ($searchState["Error"]) {
+                [System.Windows.Forms.MessageBox]::Show("Deep search failed:`n$($searchState["Error"])", "Deep Search Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            }
 
-    # Return Logic: Rebuild list from whatever is left in the grid to avoid processing deleted items
-    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { 
+            $lblStatus.Text = [string]$searchState["Status"]
+            & $disposeSearchWorker
+            & $refreshButtons
+        }.GetNewClosure())
+
+    $deleteSelectedNow = {
+        $rows = & $getSelectedGridRows
+        $count = $rows.Count
+        if ($count -eq 0) { return }
+
+        $res = [System.Windows.Forms.MessageBox]::Show("Permanently delete $count selected shortcut(s)?`n`nThis action is immediate.", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+        if ($res -ne "Yes") { return }
+
+        $deletedCount = 0
+        $failedCount = 0
+        $dataRowsToRemove = @()
+
+        foreach ($row in $rows) {
+            $path = [string]$row.Cells["FullPath"].Value
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($path) -and [System.IO.File]::Exists($path)) {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
+                }
+                if ($row.DataBoundItem -and $row.DataBoundItem.Row) { $dataRowsToRemove += $row.DataBoundItem.Row }
+                else { $dg.Rows.Remove($row) }
+                $deletedCount++
+            }
+            catch {
+                $failedCount++
+                [System.Windows.Forms.MessageBox]::Show("Could not delete: $path`n$($_.Exception.Message)", "Delete Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            }
+        }
+
+        foreach ($dataRow in $dataRowsToRemove) {
+            try { $dataRow.Delete() } catch {}
+        }
+        try {
+            if ($dg.DataSource -is [System.Data.DataTable]) { $dg.DataSource.AcceptChanges() }
+        }
+        catch {}
+
+        if ($failedCount -eq 0) { $lblStatus.Text = "Deleted $deletedCount shortcut(s)." }
+        else { $lblStatus.Text = "Deleted $deletedCount shortcut(s); $failedCount failed." }
+        & $refreshButtons
+    }.GetNewClosure()
+
+    $browseSelectedTarget = {
+        $rows = & $getSelectedGridRows
+        if ($rows.Count -ne 1) { return }
+        $row = $rows[0]
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
+        try {
+            $brokenTarget = [System.Environment]::ExpandEnvironmentVariables([string]$row.Cells["BrokenTarget"].Value)
+            $parent = [System.IO.Path]::GetDirectoryName($brokenTarget)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and [System.IO.Directory]::Exists($parent)) { $dlg.InitialDirectory = $parent }
+        }
+        catch {}
+
+        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            & $setGridRowAction $row "Fix" "Manual fix: $($dlg.FileName)" $dlg.FileName
+            $lblStatus.Text = "Manual fix selected for $($row.Cells["Shortcut"].Value)."
+        }
+        try { $dlg.Dispose() } catch {}
+        & $refreshButtons
+    }.GetNewClosure()
+
+    $copyCellText = {
+        param([string]$ColumnName)
+        $rows = & $getSelectedGridRows
+        if ($rows.Count -lt 1 -or -not $dg.Columns[$ColumnName]) { return }
+        $values = @()
+        foreach ($row in $rows) {
+            $value = [string]$row.Cells[$ColumnName].Value
+            if (-not [string]::IsNullOrWhiteSpace($value)) { $values += $value }
+        }
+        if ($values.Count -gt 0) {
+            try {
+                [System.Windows.Forms.Clipboard]::SetText(($values -join [Environment]::NewLine))
+                $lblStatus.Text = "Copied $($values.Count) value(s)."
+            }
+            catch {
+                [System.Windows.Forms.MessageBox]::Show("Could not copy to clipboard:`n$($_.Exception.Message)", "Clipboard", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            }
+        }
+    }.GetNewClosure()
+
+    $openSelectedLocation = {
+        $rows = & $getSelectedGridRows
+        if ($rows.Count -ne 1) { return }
+        $path = [string]$rows[0].Cells["FullPath"].Value
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+        try {
+            if ([System.IO.File]::Exists($path)) {
+                Start-Process -FilePath explorer.exe -ArgumentList "/select,`"$path`""
+            }
+            else {
+                $parent = [System.IO.Path]::GetDirectoryName($path)
+                if ([System.IO.Directory]::Exists($parent)) { Start-Process -FilePath explorer.exe -ArgumentList "`"$parent`"" }
+            }
+        }
+        catch {
+            [System.Windows.Forms.MessageBox]::Show("Could not open shortcut location:`n$($_.Exception.Message)", "Open Location", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        }
+    }.GetNewClosure()
+
+    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
+    $itemBrowse = $ctx.Items.Add("Browse for target...")
+    $itemBrowse.Add_Click({ & $browseSelectedTarget }.GetNewClosure())
+
+    $itemDeep = $ctx.Items.Add("Deep Search (all fixed drives)")
+    $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
+    $itemDeep.Add_Click({
+            $rows = & $getSelectedGridRows
+            if ($rows.Count -eq 1) { & $startDeepSearch $rows[0] }
+        }.GetNewClosure())
+
+    [void]$ctx.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+
+    $itemUnmark = $ctx.Items.Add("Unmark / Cancel Action")
+    $itemUnmark.Add_Click({
+            foreach ($row in (& $getSelectedGridRows)) {
+                & $setGridRowAction $row "None" "Review Needed" ""
+            }
+            $lblStatus.Text = "Cleared selected action(s)."
+            & $refreshButtons
+        }.GetNewClosure())
+
+    [void]$ctx.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+
+    $itemOpenLocation = $ctx.Items.Add("Open shortcut location")
+    $itemOpenLocation.Add_Click({ & $openSelectedLocation }.GetNewClosure())
+
+    $itemCopyShortcut = $ctx.Items.Add("Copy shortcut path")
+    $itemCopyShortcut.Add_Click({ & $copyCellText "FullPath" }.GetNewClosure())
+
+    $itemCopyBroken = $ctx.Items.Add("Copy broken target")
+    $itemCopyBroken.Add_Click({ & $copyCellText "BrokenTarget" }.GetNewClosure())
+
+    $itemCopyNew = $ctx.Items.Add("Copy new target")
+    $itemCopyNew.Add_Click({ & $copyCellText "NewTarget" }.GetNewClosure())
+
+    $ctx.Add_Opening({
+            $rows = & $getSelectedGridRows
+            $single = ($rows.Count -eq 1)
+            $any = ($rows.Count -gt 0)
+            $busy = & $isBusy
+            $itemBrowse.Enabled = ($single -and -not $busy)
+            $itemDeep.Enabled = ($single -and -not $busy)
+            $itemUnmark.Enabled = ($any -and -not $busy)
+            $itemOpenLocation.Enabled = ($single -and -not $busy)
+            $itemCopyShortcut.Enabled = $any
+            $itemCopyBroken.Enabled = $any
+            $itemCopyNew.Enabled = $any
+        }.GetNewClosure())
+    $dg.ContextMenuStrip = $ctx
+
+    $btnDelete.Add_Click({ & $deleteSelectedNow }.GetNewClosure())
+    $btnRescan.Add_Click({ & $startScan }.GetNewClosure())
+    $btnStop.Add_Click({ & $stopActiveWork }.GetNewClosure())
+    $dg.Add_SelectionChanged({ & $refreshButtons }.GetNewClosure())
+
+    $f.Add_Shown({
+            & $layoutButtons
+            & $startScan
+        }.GetNewClosure())
+
+    $cleanupWorkers = {
+        try { $scanTimer.Stop() } catch {}
+        try { $searchTimer.Stop() } catch {}
+        try { $scanState["Cancel"] = $true; if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Stop() } } catch {}
+        try { $searchState["Cancel"] = $true; if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Stop() } } catch {}
+        & $disposeScanWorker
+        & $disposeSearchWorker
+        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+    }.GetNewClosure()
+    $f.Add_FormClosed({ & $cleanupWorkers }.GetNewClosure())
+
+    $dg.DataSource = & $newShortcutTable
+    & $configureGridColumns
+    & $refreshButtons
+
+    Set-WmtWinFormsTheme -Control $f
+    $lblStatus.ForeColor = Get-WmtThemeColor "Warning"
+    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
+    Set-WmtWinFormsButtonTheme -Button $btnDelete -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnRescan -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnStop -Role Warning
+    Set-WmtWinFormsButtonTheme -Button $btnApply -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
+    Set-WmtWinFormsContextMenuTheme -Menu $ctx
+    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
+    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $finalList = @()
         foreach ($row in $dg.Rows) {
-            # Map DataRowView back to object
+            if (-not $row -or $row.IsNewRow) { continue }
             $finalList += [PSCustomObject]@{
-                Shortcut  = $row.Cells["Shortcut"].Value
-                Folder    = $row.Cells["Folder"].Value
-                Action    = $row.Cells["Action"].Value
-                Details   = $row.Cells["Details"].Value
-                NewTarget = $row.Cells["NewTarget"].Value
-                FullPath  = $row.Cells["FullPath"].Value
+                Shortcut     = [string]$row.Cells["Shortcut"].Value
+                Folder       = [string]$row.Cells["Location"].Value
+                Location     = [string]$row.Cells["Location"].Value
+                Action       = [string]$row.Cells["Action"].Value
+                Details      = [string]$row.Cells["Details"].Value
+                BrokenTarget = [string]$row.Cells["BrokenTarget"].Value
+                NewTarget    = [string]$row.Cells["NewTarget"].Value
+                FullPath     = [string]$row.Cells["FullPath"].Value
             }
         }
         return $finalList
@@ -6877,53 +9353,57 @@ function Invoke-ShortcutFix {
     $items = Show-BrokenShortcuts
     if (-not $items -or $items.Count -eq 0) { return }
 
-    # 1. ANALYZE PLANNED ACTIONS
-    $toFix = $items | Where-Object { $_.Action -eq "Fix" }
-    $toDel = $items | Where-Object { $_.Action -eq "Delete" }
+    $toFix = @($items | Where-Object { $_.Action -eq "Fix" -and -not [string]::IsNullOrWhiteSpace([string]$_.FullPath) -and -not [string]::IsNullOrWhiteSpace([string]$_.NewTarget) })
 
-    if ($toFix.Count -eq 0 -and $toDel.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No actions were selected.`n`n(Tip: Select rows and click 'Mark for Delete' or Browse to fix them.)", "No Action", [System.Windows.Forms.MessageBoxButton]::OK, [System.Windows.Forms.MessageBoxImage]::Information)
+    if ($toFix.Count -eq 0) {
+        [System.Windows.Forms.MessageBox]::Show("No fixes were selected.`n`n(Tip: right-click a row to Browse or Deep Search. Use Delete Now to remove shortcuts immediately.)", "No Action", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
         return
     }
 
-    # 2. CONFIRMATION PROMPT
-    $msg = "You are about to apply the following actions:`n`n"
-    if ($toFix.Count -gt 0) { $msg += "Fix: $($toFix.Count) shortcut(s)`n" }
-    if ($toDel.Count -gt 0) { $msg += "Delete: $($toDel.Count) shortcut(s)`n" }
+    $msg = "You are about to fix $($toFix.Count) shortcut(s)."
     $msg += "`nAre you sure you want to continue?"
 
-    $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButton]::YesNo, [System.Windows.Forms.MessageBoxImage]::Warning)
+    $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
     
     if ($confirm -ne "Yes") { return }
 
-    # 3. EXECUTE
     Invoke-UiCommand {
-        param($toFix, $toDel)
-        $shell = New-Object -ComObject WScript.Shell
-        
-        # Apply Fixes
-        foreach ($item in $toFix) {
-            try {
-                $sc = $shell.CreateShortcut($item.FullPath)
-                $sc.TargetPath = $item.NewTarget
-                $sc.Save()
-                Write-Output "Fixed: $($item.Shortcut)"
+        param($toFix)
+        $shell = $null
+
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+
+            foreach ($item in $toFix) {
+                try {
+                    if (-not [System.IO.File]::Exists([string]$item.FullPath)) { throw "Shortcut file no longer exists." }
+                    $newTarget = [string]$item.NewTarget
+                    $sc = $shell.CreateShortcut([string]$item.FullPath)
+                    $sc.TargetPath = $newTarget
+
+                    if (-not (Test-ShortcutTargetIsSpecial $newTarget)) {
+                        $expandedTarget = Expand-ShortcutTarget $newTarget
+                        if ([System.IO.File]::Exists($expandedTarget)) {
+                            $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
+                            if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) {
+                                $sc.WorkingDirectory = $targetDir
+                            }
+                        }
+                    }
+
+                    $sc.Save()
+                    Write-Output "Fixed: $($item.Shortcut) -> $newTarget"
+                }
+                catch { Write-Output "Failed to fix $($item.Shortcut): $($_.Exception.Message)" }
             }
-            catch { Write-Output "Failed to fix $($item.Shortcut): $($_.Exception.Message)" }
+
+            Write-Output "Shortcut operation complete."
+        }
+        finally {
+            try { if ($shell) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {}
         }
 
-        # Apply Deletes
-        foreach ($item in $toDel) {
-            try {
-                Remove-Item $item.FullPath -Force -ErrorAction Stop
-                Write-Output "Deleted: $($item.Shortcut)"
-            }
-            catch { Write-Output "Failed to delete $($item.Shortcut): $($_.Exception.Message)" }
-        }
-
-        Write-Output "Operation complete."
-
-    } "Applying shortcut fixes..." -ArgumentList $toFix, $toDel
+    } "Applying shortcut fixes..." -ArgumentList $toFix
 }
 
 # --- FIREWALL TOOLS ---
@@ -6979,6 +9459,16 @@ Write-Host "Initializing Driver Export Tool GUI..." -ForegroundColor Cyan
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+function Set-LocalDoubleBuffered {
+    param([System.Windows.Forms.Control]$Control)
+    if (-not $Control) { return }
+    try {
+        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if ($prop) { $prop.SetValue($Control, $true, $null) }
+    }
+    catch {}
+}
 
 # ============================================================
 # FAST NATIVE SCAN
@@ -7041,6 +9531,7 @@ $tree.Location = "10,40"
 $tree.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
 $tree.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
 $tree.BorderStyle = "FixedSingle"
+Set-LocalDoubleBuffered $tree
 $form.Controls.Add($tree)
 
 $list = New-Object System.Windows.Forms.ListView
@@ -7052,6 +9543,7 @@ $list.FullRowSelect = $true
 $list.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
 $list.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
 $list.BorderStyle = "FixedSingle"
+Set-LocalDoubleBuffered $list
 
 $list.Columns.Add("Driver", 250)
 $list.Columns.Add("Provider", 150)
@@ -7077,23 +9569,29 @@ foreach ($g in $groups) {
 $root.Expand()
 
 function Update-List {
-    $list.Items.Clear()
-    $filter = $tree.SelectedNode.Tag
-    $search = $txtSearch.Text.ToLower()
+    $list.BeginUpdate()
+    try {
+        $list.Items.Clear()
+        $filter = $tree.SelectedNode.Tag
+        $search = $txtSearch.Text.ToLower()
 
-    $filtered = $drivers
-    if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
-    if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
+        $filtered = $drivers
+        if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
+        if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
 
-    foreach ($d in $filtered) {
-        $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
-        $cleanName = Split-Path $rawName -Leaf
-        
-        $item = $list.Items.Add($cleanName)
-        $item.SubItems.Add($d.Provider)
-        $item.SubItems.Add($d.Version)
-        $item.SubItems.Add($d.Date)
-        $item.Tag = $d
+        foreach ($d in $filtered) {
+            $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
+            $cleanName = Split-Path $rawName -Leaf
+
+            $item = $list.Items.Add($cleanName)
+            $item.SubItems.Add($d.Provider)
+            $item.SubItems.Add($d.Version)
+            $item.SubItems.Add($d.Date)
+            $item.Tag = $d
+        }
+    }
+    finally {
+        $list.EndUpdate()
     }
 }
 
@@ -7278,6 +9776,7 @@ function Show-GhostDevicesDialog {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     $f.Controls.Add($dg)
 
     $pnl = New-Object System.Windows.Forms.Panel
@@ -7349,6 +9848,11 @@ function Show-GhostDevicesDialog {
         })
     $btnClose.Add_Click({ $f.Close() })
 
+    Set-WmtWinFormsTheme -Control $f
+    Set-WmtWinFormsButtonTheme -Button $btnRefresh -Role Primary
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveAll -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
     & $Load
     $f.ShowDialog() | Out-Null
 }
@@ -7494,7 +9998,7 @@ function Show-DriverCleanupDialog {
     # Draw a subtle top border on the panel
     $pnl.Add_Paint({
             param($s, $e) # Renamed from $sender to $s
-            $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(60, 60, 60), 1)
+            $pen = New-Object System.Drawing.Pen((Get-WmtThemeColor "BorderBrush"), 1)
             $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
         })
     $f.Controls.Add($pnl)
@@ -7528,6 +10032,7 @@ function Show-DriverCleanupDialog {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     
     $f.Controls.Add($dg)
     $dg.BringToFront() # Ensures grid fills the remaining space above the panel
@@ -7637,6 +10142,11 @@ function Show-DriverCleanupDialog {
         $bCancel.BackColor = "DimGray"; $bCancel.ForeColor = "White"; $bCancel.FlatStyle = "Flat"
         $cf.Controls.Add($bCancel)
 
+        Set-WmtWinFormsTheme -Control $cf
+        $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+        Set-WmtWinFormsButtonTheme -Button $bBackup -Role Success
+        Set-WmtWinFormsButtonTheme -Button $bNoBackup -Role Danger
+        Set-WmtWinFormsButtonTheme -Button $bCancel -Role Standard
         $result = $cf.ShowDialog()
         
         if ($result -eq "Cancel") { return }
@@ -7737,6 +10247,10 @@ function Show-DriverCleanupDialog {
         })
     $btnClose.Add_Click({ $f.Close() })
 
+    Set-WmtWinFormsTheme -Control $f
+    Set-WmtWinFormsButtonTheme -Button $btnBackupClean -Role Success
+    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
+    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
     $LoadGrid.Invoke()
     $f.ShowDialog() | Out-Null
 }
@@ -7746,7 +10260,7 @@ function Invoke-RestoreDrivers {
     $dataPath = Get-DataPath
     $backups = @()
     try {
-        $backups = Get-ChildItem -Path $dataPath -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^DriverBackup_' -or $_.Name -match '^Drivers_Backup_' }
+        $backups = @([System.IO.Directory]::EnumerateDirectories($dataPath) | ForEach-Object { [System.IO.DirectoryInfo]::new($_) } | Where-Object { $_.Name -match '^DriverBackup_' -or $_.Name -match '^Drivers_Backup_' })
     }
     catch {}
 
@@ -7766,6 +10280,7 @@ function Invoke-RestoreDrivers {
         $lst.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
         $lst.ForeColor = "White"
         $lst.BorderStyle = "FixedSingle"
+        Set-WmtDoubleBuffered -Control $lst
         $items = @()
         foreach ($b in $backups) {
             $items += [PSCustomObject]@{
@@ -7851,8 +10366,8 @@ function Invoke-RestoreDrivers {
             return
         }
 
-        $infFiles = Get-ChildItem -Path $Path -Filter *.inf -Recurse -ErrorAction SilentlyContinue
-        if (-not $infFiles -or $infFiles.Count -eq 0) {
+        $firstInf = Find-WmtFirstEnumeratedFile -Path $Path -Filter "*.inf"
+        if (-not $firstInf) {
             Write-Output "Restore aborted: no INF files found in $Path"
             [System.Windows.MessageBox]::Show("No INF files found in:`n$Path", "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
             return
@@ -8265,22 +10780,46 @@ $dismRestoreCode = $LASTEXITCODE
 
 Write-Host ""
 Write-Host "[4/4] Cleaning temporary files..." -ForegroundColor Yellow
+function Get-TempFilesStreamed {
+    param([string]$Root)
+    if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+    $pending = [System.Collections.Generic.Stack[string]]::new()
+    $pending.Push($Root)
+    while ($pending.Count -gt 0) {
+        $dir = $pending.Pop()
+        try {
+            foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $file }
+        } catch {}
+        try {
+            foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $pending.Push($child) }
+        } catch {}
+    }
+}
+function Remove-EmptyTempDirs {
+    param([string]$Root)
+    if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+    try {
+        foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Root, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            Remove-EmptyTempDirs $dir
+            try { [System.IO.Directory]::Delete($dir, $false) } catch {}
+        }
+    } catch {}
+}
 $targets = @($env:TEMP, "$env:SystemRoot\Temp")
 $deletedCount = 0
 $deletedBytes = 0
 foreach ($path in $targets) {
-    if (-not $path -or -not (Test-Path -LiteralPath $path)) { continue }
-    try {
-        Get-ChildItem -LiteralPath $path -Force -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            try {
-                if (-not $_.PSIsContainer) {
-                    $deletedBytes += $_.Length
-                    $deletedCount++
-                }
-                Remove-Item -LiteralPath $_.FullName -Force -Recurse -ErrorAction SilentlyContinue
-            } catch {}
-        }
-    } catch {}
+    if (-not $path -or -not [System.IO.Directory]::Exists($path)) { continue }
+    foreach ($file in Get-TempFilesStreamed $path) {
+        try {
+            $info = [System.IO.FileInfo]::new($file)
+            $deletedBytes += $info.Length
+            try { [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal) } catch {}
+            [System.IO.File]::Delete($file)
+            $deletedCount++
+        } catch {}
+    }
+    Remove-EmptyTempDirs $path
 }
 $tempMb = [math]::Round(($deletedBytes / 1MB), 2)
 Write-Host ("Temp cleanup done: {0} item(s), ~{1} MB reclaimed." -f $deletedCount, $tempMb) -ForegroundColor Gray
@@ -8344,6 +10883,7 @@ function Show-SystemRestoreManager {
     $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
     $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
     $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
+    Set-WmtDoubleBuffered -Control $dg
     $f.Controls.Add($dg)
 
     $pnl = New-Object System.Windows.Forms.Panel
@@ -8737,6 +11277,7 @@ function Show-StartupManager {
         $dg.RowHeadersVisible = $false
         $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#202329")
         $dg.GridColor = $clrLine
+        Set-WmtDoubleBuffered -Control $dg
         
         $dg.Add_MouseDown($RowSelectOnRightClick)
 
@@ -8912,7 +11453,8 @@ function Show-StartupManager {
         $items = @()
         if (-not (Test-Path $Path)) { return $items }
         
-        foreach ($file in (Get-ChildItem -Path $Path -File -ErrorAction SilentlyContinue)) {
+        foreach ($filePath in Get-WmtEnumeratedFiles -Path $Path) {
+            $file = [System.IO.FileInfo]::new($filePath)
             $isEnabled = Get-StartupApprovedState -Type "StartupFolder" -RootPath $Path -ValueName $file.Name
             
             $items += [PSCustomObject]@{
@@ -9374,6 +11916,259 @@ function Set-Hags {
     }
 }
 
+function Get-WmtRegValue {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Default = $null
+    )
+
+    try {
+        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+        return $item.$Name
+    }
+    catch {
+        return $Default
+    }
+}
+
+function Set-WmtRegDword {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [int]$Value
+    )
+
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type DWord -Force
+}
+
+function Set-WmtRegString {
+    param(
+        [string]$Path,
+        [string]$Name,
+        [string]$Value
+    )
+
+    if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+    Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type String -Force
+}
+
+function Remove-WmtRegValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    if (Test-Path $Path) {
+        Remove-ItemProperty -Path $Path -Name $Name -ErrorAction SilentlyContinue
+    }
+}
+
+function Restart-WmtExplorer {
+    try { Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue } catch {}
+}
+
+function Invoke-WmtUserSettingRefresh {
+    try {
+        Start-Process -FilePath "$env:SystemRoot\System32\RUNDLL32.EXE" -ArgumentList "USER32.DLL,UpdatePerUserSystemParameters" -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
+    }
+    catch {}
+}
+
+function Test-WmtExplorerSingleClick {
+    $shellState = Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShellState"
+    return ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+}
+
+function Set-WmtExplorerClickMode {
+    param([bool]$SingleClick)
+
+    $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+    if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+
+    $shellState = Get-WmtRegValue $path "ShellState"
+    if (-not $shellState -or $shellState.Length -lt 5) {
+        $shellState = [byte[]](0x24, 0x00, 0x00, 0x00, 0x3E, 0x28, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
+    }
+
+    $shellState[4] = if ($SingleClick) { [byte]0x1E } else { [byte]0x3E }
+    Set-ItemProperty -Path $path -Name "ShellState" -Value $shellState -Type Binary -Force
+    Set-WmtRegDword $path "IconUnderline" $(if ($SingleClick) { 2 } else { 3 })
+    Restart-WmtExplorer
+}
+
+function Set-WmtMouseSpeed {
+    param([int]$Speed)
+
+    $speed = [math]::Max(1, [math]::Min(20, $Speed))
+    $path = "HKCU:\Control Panel\Mouse"
+    Set-WmtRegString $path "MouseSensitivity" ([string]$speed)
+    Invoke-WmtUserSettingRefresh
+}
+
+function Set-WmtMouseAcceleration {
+    param([bool]$Enable)
+
+    $path = "HKCU:\Control Panel\Mouse"
+    if ($Enable) {
+        Set-WmtRegString $path "MouseSpeed" "1"
+        Set-WmtRegString $path "MouseThreshold1" "6"
+        Set-WmtRegString $path "MouseThreshold2" "10"
+    }
+    else {
+        Set-WmtRegString $path "MouseSpeed" "0"
+        Set-WmtRegString $path "MouseThreshold1" "0"
+        Set-WmtRegString $path "MouseThreshold2" "0"
+    }
+    Invoke-WmtUserSettingRefresh
+}
+
+function Set-WmtContentDeliveryValues {
+    param(
+        [string[]]$Names,
+        [int]$Value
+    )
+
+    $path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+    foreach ($name in $Names) {
+        Set-WmtRegDword $path $name $Value
+    }
+}
+
+function Set-WmtClassicContextMenu {
+    param([bool]$Enable)
+
+    $clsid = "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}"
+    $inproc = Join-Path $clsid "InprocServer32"
+    if ($Enable) {
+        if (-not (Test-Path $inproc)) { New-Item -Path $inproc -Force | Out-Null }
+        Set-Item -Path $inproc -Value "" -Force
+    }
+    else {
+        if (Test-Path $clsid) { Remove-Item -Path $clsid -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    Restart-WmtExplorer
+}
+
+function Set-WmtTakeOwnershipMenu {
+    param([bool]$Enable)
+
+    $targets = @(
+        @{Path = "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /a && icacls ""%1"" /grant *S-1-5-32-544:F /c && pause''"' },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /r /d y /a && icacls ""%1"" /grant *S-1-5-32-544:F /t /c && pause''"' },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Drive\shell\WMT_TakeOwnership"; Command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "Start-Process cmd.exe -Verb RunAs -ArgumentList ''/c takeown /f ""%1"" /r /d y /a && icacls ""%1"" /grant *S-1-5-32-544:F /t /c && pause''"' }
+    )
+
+    foreach ($target in $targets) {
+        $path = $target.Path
+        if ($Enable) {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+            Set-Item -Path $path -Value "Take Ownership" -Force
+            New-ItemProperty -Path $path -Name "HasLUAShield" -Value "" -PropertyType String -Force | Out-Null
+            $cmdPath = Join-Path $path "command"
+            if (-not (Test-Path $cmdPath)) { New-Item -Path $cmdPath -Force | Out-Null }
+            Set-Item -Path $cmdPath -Value $target.Command -Force
+        }
+        else {
+            if (Test-Path $path) { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function Set-WmtPowerShellHereMenu {
+    param([bool]$Enable)
+
+    $targets = @(
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"; Location = "%V" },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_OpenPowerShell"; Location = "%1" },
+        @{Path = "Registry::HKEY_CLASSES_ROOT\Drive\shell\WMT_OpenPowerShell"; Location = "%1" }
+    )
+
+    foreach ($target in $targets) {
+        $path = $target.Path
+        if ($Enable) {
+            if (-not (Test-Path $path)) { New-Item -Path $path -Force | Out-Null }
+            Set-Item -Path $path -Value "Open PowerShell Here" -Force
+            Set-ItemProperty -Path $path -Name "Icon" -Value "powershell.exe" -Type String -Force
+            $cmdPath = Join-Path $path "command"
+            if (-not (Test-Path $cmdPath)) { New-Item -Path $cmdPath -Force | Out-Null }
+            Set-Item -Path $cmdPath -Value "powershell.exe -NoExit -NoProfile -ExecutionPolicy Bypass -Command `"Set-Location -LiteralPath '$($target.Location)'`"" -Force
+        }
+        else {
+            if (Test-Path $path) { Remove-Item -Path $path -Recurse -Force -ErrorAction SilentlyContinue }
+        }
+    }
+}
+
+function Set-WmtVisualPreset {
+    param([ValidateSet("Appearance", "Performance", "Snappy")] [string]$Mode)
+
+    $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+    $desktopPath = "HKCU:\Control Panel\Desktop"
+    $advancedPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+    $dwmPath = "HKCU:\Software\Microsoft\Windows\DWM"
+    $personalizePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+
+    switch ($Mode) {
+        "Appearance" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 1
+            Set-WmtRegString $desktopPath "MinAnimate" "1"
+            Set-WmtRegDword $advancedPath "TaskbarAnimations" 1
+            Set-WmtRegDword $dwmPath "EnableAeroPeek" 1
+            Set-WmtRegDword $personalizePath "EnableTransparency" 1
+        }
+        "Performance" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 2
+        }
+        "Snappy" {
+            Set-WmtRegDword $visualPath "VisualFXSetting" 3
+            Set-WmtRegString $desktopPath "MinAnimate" "0"
+            Set-WmtRegDword $advancedPath "TaskbarAnimations" 0
+            Set-WmtRegDword $dwmPath "EnableAeroPeek" 0
+            Set-WmtRegDword $personalizePath "EnableTransparency" 0
+        }
+    }
+
+    Restart-WmtExplorer
+}
+
+function Get-WmtPowerSettingIndex {
+    param(
+        [string]$SubGroup,
+        [string]$Setting,
+        [ValidateSet("AC", "DC")] [string]$Mode = "AC"
+    )
+
+    try {
+        $output = powercfg /query SCHEME_CURRENT $SubGroup $Setting 2>$null
+        $label = if ($Mode -eq "DC") { "Current DC Power Setting Index" } else { "Current AC Power Setting Index" }
+        $pattern = [regex]::Escape($label) + "\s*:\s*0x([0-9a-fA-F]+)"
+        foreach ($line in $output) {
+            if ($line -match $pattern) { return [Convert]::ToInt32($matches[1], 16) }
+        }
+        $output = powercfg /qh SCHEME_CURRENT $SubGroup $Setting 2>$null
+        foreach ($line in $output) {
+            if ($line -match $pattern) { return [Convert]::ToInt32($matches[1], 16) }
+        }
+    }
+    catch {}
+    return $null
+}
+
+function Set-WmtPowerSettingIndex {
+    param(
+        [string]$SubGroup,
+        [string]$Setting,
+        [int]$Value,
+        [switch]$DCOnly
+    )
+
+    if (-not $DCOnly) { powercfg /setacvalueindex SCHEME_CURRENT $SubGroup $Setting $Value | Out-Null }
+    powercfg /setdcvalueindex SCHEME_CURRENT $SubGroup $Setting $Value | Out-Null
+    powercfg /S SCHEME_CURRENT | Out-Null
+}
+
 # ==========================================
 # 3. XAML GUI
 # ==========================================
@@ -9381,7 +12176,7 @@ function Set-Hags {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Windows Maintenance Tool v$AppVersion" Height="820" Width="1280" MinHeight="620" MinWidth="960"
-        WindowStartupLocation="CenterScreen" Background="#0D1117" Foreground="#E6EDF3"
+        WindowStartupLocation="CenterScreen" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13"
         TextOptions.TextFormattingMode="Display"
         TextOptions.TextRenderingMode="ClearType"
@@ -9406,16 +12201,22 @@ function Set-Hags {
         <SolidColorBrush x:Key="Danger" Color="#DA3633"/>
         <SolidColorBrush x:Key="DangerHover" Color="#F85149"/>
         <SolidColorBrush x:Key="Warning" Color="#D29922"/>
+        <SolidColorBrush x:Key="WarningHover" Color="#E3B341"/>
         <SolidColorBrush x:Key="Info" Color="#1F6FEB"/>
+        <SolidColorBrush x:Key="AccentText" Color="#0D1117"/>
+        <SolidColorBrush x:Key="SuccessText" Color="#F6FFFA"/>
+        <SolidColorBrush x:Key="DangerText" Color="#FFF5F5"/>
+        <SolidColorBrush x:Key="WarningText" Color="#0D1117"/>
+        <SolidColorBrush x:Key="InfoText" Color="#F0F6FC"/>
 
         <!-- Subtle Shadow Effects (reduced for clarity) -->
         <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
 
         <!-- Modern TextBox (crisp text) -->
         <Style TargetType="TextBox">
-            <Setter Property="Background" Value="#0D1117"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="10,6"/>
             <Setter Property="FontSize" Value="13"/>
@@ -9425,7 +12226,7 @@ function Set-Hags {
             <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Style.Triggers>
                 <Trigger Property="IsFocused" Value="True">
-                    <Setter Property="BorderBrush" Value="#58A6FF"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource BorderAccent}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -9433,7 +12234,7 @@ function Set-Hags {
         <!-- Modern Navigation Button (crisp text) -->
         <Style TargetType="Button" x:Key="NavBtn">
             <Setter Property="Background" Value="Transparent"/>
-            <Setter Property="Foreground" Value="#8B949E"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Height" Value="38"/>
             <Setter Property="Margin" Value="2"/>
@@ -9452,13 +12253,13 @@ function Set-Hags {
                                 <ContentPresenter VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
                             </Border>
                             <!-- Active Indicator Bar (left side) -->
-                            <Border Name="Indicator" Width="3" Background="#58A6FF" HorizontalAlignment="Left" 
+                            <Border Name="Indicator" Width="3" Background="{DynamicResource Accent}" HorizontalAlignment="Left" 
                                     CornerRadius="2,0,0,2" Visibility="{TemplateBinding Tag}" UseLayoutRounding="True"/>
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#21262D"/>
-                                <Setter Property="Foreground" Value="#E6EDF3"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgElevated}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -9468,8 +12269,9 @@ function Set-Hags {
 
         <!-- Modern Action Button (clean, no blur) -->
         <Style TargetType="Button" x:Key="ActionBtn">
-            <Setter Property="Background" Value="#21262D"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="Height" Value="32"/>
             <Setter Property="Margin" Value="4"/>
             <Setter Property="FontSize" Value="12"/>
@@ -9482,87 +12284,86 @@ function Set-Hags {
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Border Name="Bd" Background="{TemplateBinding Background}" CornerRadius="4" 
-                                BorderBrush="#30363D" BorderThickness="1">
+                                BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16,0"/>
                         </Border>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#30363D"/>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="#8B949E"/>
-                            </Trigger>
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Bd" Property="Background" Value="#161B22"/>
-                                <Setter TargetName="Bd" Property="Opacity" Value="0.5"/>
-                                <Setter Property="Foreground" Value="#6E7681"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource BgHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource TextSecondary}"/>
+                </Trigger>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+                    <Setter Property="Opacity" Value="0.55"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <!-- Success/Green Button -->
         <Style TargetType="Button" x:Key="PositiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#238636"/>
-            <Setter Property="BorderBrush" Value="#2EA043"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Success}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource SuccessHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource SuccessText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#2EA043"/>
-                    <Setter Property="BorderBrush" Value="#3FB950"/>
+                    <Setter Property="Background" Value="{DynamicResource SuccessHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource SuccessHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Danger/Red Button -->
         <Style TargetType="Button" x:Key="DestructiveBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#DA3633"/>
-            <Setter Property="BorderBrush" Value="#F85149"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Danger}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource DangerHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource DangerText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#F85149"/>
-                    <Setter Property="BorderBrush" Value="#FF7B72"/>
+                    <Setter Property="Background" Value="{DynamicResource DangerHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource DangerHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Warning/Yellow Button -->
         <Style TargetType="Button" x:Key="WarningBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#D29922"/>
-            <Setter Property="BorderBrush" Value="#E3B341"/>
-            <Setter Property="Foreground" Value="#0D1117"/>
+            <Setter Property="Background" Value="{DynamicResource Warning}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource WarningHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource WarningText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#E3B341"/>
+                    <Setter Property="Background" Value="{DynamicResource WarningHover}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource WarningHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Info/Blue Button -->
         <Style TargetType="Button" x:Key="UtilityBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#1F6FEB"/>
-            <Setter Property="BorderBrush" Value="#58A6FF"/>
-            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Setter Property="Background" Value="{DynamicResource Info}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
+            <Setter Property="Foreground" Value="{DynamicResource InfoText}"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#58A6FF"/>
+                    <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                    <Setter Property="BorderBrush" Value="{DynamicResource AccentHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Accent Button -->
         <Style TargetType="Button" x:Key="AccentBtn" BasedOn="{StaticResource ActionBtn}">
-            <Setter Property="Background" Value="#58A6FF"/>
-            <Setter Property="BorderBrush" Value="#79C0FF"/>
-            <Setter Property="Foreground" Value="#0D1117"/>
+            <Setter Property="Background" Value="{DynamicResource Accent}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentHover}"/>
+            <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
             <Setter Property="FontWeight" Value="Bold"/>
             <Style.Triggers>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#79C0FF"/>
+                    <Setter Property="Background" Value="{DynamicResource AccentHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
@@ -9579,26 +12380,26 @@ function Set-Hags {
             <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
             <Style.Triggers>
                 <Trigger Property="ItemsControl.AlternationIndex" Value="0">
-                    <Setter Property="Background" Value="#161B22"/>
+                    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
                 </Trigger>
                 <Trigger Property="ItemsControl.AlternationIndex" Value="1">
-                    <Setter Property="Background" Value="#0D1117"/>
+                    <Setter Property="Background" Value="{DynamicResource BgDark}"/>
                 </Trigger>
                 <Trigger Property="IsSelected" Value="True">
-                    <Setter Property="Background" Value="#1F6FEB"/>
-                    <Setter Property="Foreground" Value="#FFFFFF"/>
+                    <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
                     <Setter Property="FontWeight" Value="Medium"/>
                 </Trigger>
                 <Trigger Property="IsMouseOver" Value="True">
-                    <Setter Property="Background" Value="#30363D"/>
+                    <Setter Property="Background" Value="{DynamicResource BgHover}"/>
                 </Trigger>
             </Style.Triggers>
         </Style>
 
         <!-- Card Style Border (clean, crisp) -->
         <Style x:Key="CardStyle" TargetType="Border">
-            <Setter Property="Background" Value="#161B22"/>
-            <Setter Property="BorderBrush" Value="#30363D"/>
+            <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="CornerRadius" Value="4"/>
             <Setter Property="Margin" Value="6"/>
@@ -9611,7 +12412,7 @@ function Set-Hags {
         <Style x:Key="SectionHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="26"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
-            <Setter Property="Foreground" Value="#E6EDF3"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="Margin" Value="0,0,0,16"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
@@ -9622,7 +12423,7 @@ function Set-Hags {
         <Style x:Key="SubHeader" TargetType="TextBlock">
             <Setter Property="FontSize" Value="11"/>
             <Setter Property="FontWeight" Value="Bold"/>
-            <Setter Property="Foreground" Value="#8B949E"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
             <Setter Property="Margin" Value="0,0,0,10"/>
             <Setter Property="FontFamily" Value="Segoe UI, Arial"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
@@ -9637,7 +12438,7 @@ function Set-Hags {
         </Grid.ColumnDefinitions>
 
         <!-- Sidebar -->
-        <Border Grid.Column="0" Background="{StaticResource BgPanel}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,1,0">
+        <Border Grid.Column="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,1,0">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/> 
@@ -9648,12 +12449,12 @@ function Set-Hags {
                 </Grid.RowDefinitions>
 
                 <!-- Header/Search -->
-                <Border Name="bdQuickFind" Grid.Row="0" Background="{StaticResource BgDark}" Margin="16,20,16,12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Cursor="IBeam">
+                <Border Name="bdQuickFind" Grid.Row="0" Background="{DynamicResource BgDark}" Margin="16,20,16,12" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Cursor="IBeam">
                     <StackPanel Margin="12">
-                        <TextBlock Text="Quick Find" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                        <TextBlock Text="Quick Find" FontSize="11" Foreground="{DynamicResource TextMuted}" FontWeight="SemiBold" Margin="0,0,0,8"/>
                         <TextBox Name="txtGlobalSearch" Height="36" ToolTip="Search any function..." VerticalContentAlignment="Center"
-                                 Background="{StaticResource BgPanel}" Foreground="{StaticResource TextPrimary}"
-                                 BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" Padding="10,0"/>
+                                 Background="{DynamicResource BgPanel}" Foreground="{DynamicResource TextPrimary}"
+                                 BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Padding="10,0"/>
                     </StackPanel>
                 </Border>
 
@@ -9672,7 +12473,7 @@ function Set-Hags {
                         <Button Name="btnTabMyDevice" Style="{StaticResource NavBtn}" Tag="pnlMyDevice">
                             <StackPanel Orientation="Horizontal">
                                 <Path Data="M21 2H3c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h7v2H8v2h8v-2h-2v-2h7c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H3V4h18v12z" 
-                                      Fill="White" 
+                                      Fill="{DynamicResource TextSecondary}" 
                                       Width="16" Height="16" Stretch="Uniform" Margin="0,0,10,0" VerticalAlignment="Center"/>
                                 <TextBlock Text="My Device" VerticalAlignment="Center"/>
                             </StackPanel>
@@ -9682,21 +12483,21 @@ function Set-Hags {
                     </StackPanel>
                 </StackPanel>
                 
-                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{StaticResource BgDark}" BorderThickness="0" Foreground="{StaticResource Accent}" Visibility="Collapsed" Margin="8" MaxHeight="220"/>
+                <ListBox Name="lstSearchResults" Grid.Row="2" Background="{DynamicResource BgDark}" BorderThickness="0" Foreground="{DynamicResource Accent}" Visibility="Collapsed" Margin="8" MaxHeight="220"/>
 
                 <GridSplitter Grid.Row="3" Height="8" Margin="12,0" HorizontalAlignment="Stretch" VerticalAlignment="Center"
                               Background="Transparent" Cursor="SizeNS" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"
                               ShowsPreview="True"/>
 
                 <!-- Log Panel -->
-                <Border Grid.Row="4" Background="{StaticResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" MinHeight="140" VerticalAlignment="Stretch">
+                <Border Grid.Row="4" Background="{DynamicResource BgDark}" Margin="12" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" MinHeight="140" VerticalAlignment="Stretch">
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto"/>
                             <RowDefinition Height="*"/>
                         </Grid.RowDefinitions>
-                        <Border Grid.Row="0" Background="{StaticResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
-                            <TextBlock Text="Activity Log" FontSize="11" Foreground="{StaticResource TextMuted}" FontWeight="SemiBold"/>
+                        <Border Grid.Row="0" Background="{DynamicResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,8">
+                            <TextBlock Text="Activity Log" FontSize="11" Foreground="{DynamicResource TextMuted}" FontWeight="SemiBold"/>
                         </Border>
                         <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True" VerticalAlignment="Stretch">
                             <TextBox Name="LogBox" IsReadOnly="True" TextWrapping="Wrap" FontFamily="Consolas, monospace" FontSize="12" 
@@ -9709,7 +12510,7 @@ function Set-Hags {
             </Grid>
         </Border>
 
-        <Border Grid.Column="1" Background="{StaticResource BgDark}">
+        <Border Grid.Column="1" Background="{DynamicResource BgDark}">
             <Grid Margin="20">
                 
                 <!-- UPDATES PANEL -->
@@ -9733,9 +12534,9 @@ function Set-Hags {
                                     <TextBlock Name="lblWingetStatus" Text="Ready to scan" Foreground="#D29922" FontSize="13" Visibility="Visible"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,8,0,0" VerticalAlignment="Center">
                                         <ProgressBar Name="pbWingetProgress" Width="260" Height="8" Minimum="0" Maximum="100" Value="0" Visibility="Collapsed"/>
-                                        <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
+                                        <TextBlock Name="lblWingetProgress" Text="" Margin="10,0,0,0" Foreground="{DynamicResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                     </StackPanel>
-                                    <TextBlock Name="lblWingetLastResult" Text="" Margin="0,6,0,0" Foreground="{StaticResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
+                                    <TextBlock Name="lblWingetLastResult" Text="" Margin="0,6,0,0" Foreground="{DynamicResource TextMuted}" FontSize="12" Visibility="Collapsed"/>
                                 </StackPanel>
                             </StackPanel>
                             <Grid Grid.Column="1">
@@ -9751,7 +12552,7 @@ function Set-Hags {
 
                     <!-- List Card -->
                     <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstWinget" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                        <ListView Name="lstWinget" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
@@ -9772,6 +12573,7 @@ function Set-Hags {
                             <Button Name="btnShowCatalog" Content="Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
                             <Button Name="btnWingetScan" Content="Refresh All" Style="{StaticResource AccentBtn}"/>
                             <Button Name="btnWingetUpdateSel" Content="Update Selected" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnWingetUpdateAll" Content="Update All" Style="{StaticResource PositiveBtn}"/>
                             <Button Name="btnWingetInstall" Content="Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
                             <Button Name="btnWingetUninstall" Content="Uninstall" Style="{StaticResource DestructiveBtn}"/>
                             <Button Name="btnWingetIgnore" Content="Ignore" Style="{StaticResource WarningBtn}"/>
@@ -9798,7 +12600,7 @@ function Set-Hags {
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                <TextBlock Text="Curated selection of popular applications" Foreground="{StaticResource TextSecondary}" FontSize="13"/>
+                                <TextBlock Text="Curated selection of popular applications" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
                             </StackPanel>
                             <Grid Grid.Column="1">
                                 <Grid.ColumnDefinitions>
@@ -9824,7 +12626,7 @@ function Set-Hags {
 
                     <!-- Catalog List -->
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstCatalog" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" 
+                        <ListView Name="lstCatalog" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
@@ -9876,8 +12678,8 @@ function Set-Hags {
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
-                        <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
-                        <ListView Name="lstAppxPackages" Height="200" Background="{StaticResource BgDark}" Foreground="{StaticResource TextPrimary}" BorderBrush="{StaticResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
+                        <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
+                        <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
@@ -9923,7 +12725,7 @@ function Set-Hags {
                 <Border Style="{StaticResource CardStyle}">
                     <StackPanel>
                         <TextBlock Text="SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
-                        <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{StaticResource TextSecondary}" Margin="0,0,0,8"/>
+                        <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
                         <WrapPanel>
                             <Button Name="btnTasksDisableTelemetry" Content="Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
                             <Button Name="btnTasksRestore" Content="Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
@@ -9961,6 +12763,185 @@ function Set-Hags {
                             <Button Name="btnNeverCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Shows app labels and stops identical app windows from grouping into one button."/>
                             <Button Name="btnAlwaysCombine" Content="Always Combine" Style="{StaticResource ActionBtn}" ToolTip="Hides app labels and groups windows (Windows 11 Default)."/>
                             </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="EXPLORER &amp; FILES" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnExpShowExt" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show known file extensions in File Explorer."/>
+                            <Button Name="btnExpHideExt" Content="Hide Extensions" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows default behavior for known file extensions."/>
+                            <Button Name="btnExpShowHidden" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show hidden files and folders in File Explorer."/>
+                            <Button Name="btnExpHideHidden" Content="Hide Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Hide hidden files and folders."/>
+                            <Button Name="btnExpFullPathOn" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show the full folder path in File Explorer title bars."/>
+                            <Button Name="btnExpFullPathOff" Content="Full Path Off" Style="{StaticResource ActionBtn}" ToolTip="Hide the full folder path in File Explorer title bars."/>
+                            <Button Name="btnExpLaunchThisPc" Content="Open This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC."/>
+                            <Button Name="btnExpLaunchQuickAccess" Content="Open Quick Access" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to Quick Access/Home."/>
+                            <Button Name="btnExpHideRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide recent and frequent items from Quick Access/Home."/>
+                            <Button Name="btnExpShowRecents" Content="Show Recents" Style="{StaticResource ActionBtn}" ToolTip="Restore recent and frequent items in Quick Access/Home."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="MOUSE &amp; FOLDER OPENING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnMouseSpeedSlow" Content="Cursor Slow" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 6."/>
+                            <Button Name="btnMouseSpeedDefault" Content="Cursor Default" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to the Windows default of 10."/>
+                            <Button Name="btnMouseSpeedFast" Content="Cursor Fast" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 15."/>
+                            <Button Name="btnMouseAccelOn" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable enhanced pointer precision / mouse acceleration."/>
+                            <Button Name="btnMouseAccelOff" Content="Acceleration Off" Style="{StaticResource ActionBtn}" ToolTip="Disable enhanced pointer precision / mouse acceleration."/>
+                            <Button Name="btnMouseSingleClick" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click in File Explorer."/>
+                            <Button Name="btnMouseDoubleClick" Content="Double-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Restore double-click to open files and folders."/>
+                            <Button Name="btnMouseSettings" Content="Mouse Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows mouse settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="CONTEXT MENU" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnCtxClassic" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu on Windows 11."/>
+                            <Button Name="btnCtxModern" Content="Modern Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Restore the default Windows 11 context menu."/>
+                            <Button Name="btnCtxTakeOwnAdd" Content="Add Take Ownership" Style="{StaticResource WarningBtn}" ToolTip="Add an elevated Take Ownership action to file, folder, and drive context menus."/>
+                            <Button Name="btnCtxTakeOwnRemove" Content="Remove Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Remove the Take Ownership context menu action."/>
+                            <Button Name="btnCtxPsHereAdd" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add Open PowerShell Here to folder and background context menus."/>
+                            <Button Name="btnCtxPsHereRemove" Content="Remove PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Remove the Open PowerShell Here context menu action."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="PRIVACY" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnPrivacyAdsOff" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable the per-user Windows advertising ID."/>
+                            <Button Name="btnPrivacyAdsOn" Content="Ad ID On" Style="{StaticResource ActionBtn}" ToolTip="Re-enable the per-user Windows advertising ID."/>
+                            <Button Name="btnPrivacySuggestedOff" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable suggested apps, settings suggestions, and consumer content prompts."/>
+                            <Button Name="btnPrivacySuggestedOn" Content="Suggestions On" Style="{StaticResource ActionBtn}" ToolTip="Restore suggested content defaults."/>
+                            <Button Name="btnPrivacyTailoredOff" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable tailored experiences based on diagnostic data."/>
+                            <Button Name="btnPrivacyTailoredOn" Content="Tailored On" Style="{StaticResource ActionBtn}" ToolTip="Restore tailored experiences."/>
+                            <Button Name="btnPrivacyActivityOff" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows activity history publishing and upload policies."/>
+                            <Button Name="btnPrivacyActivityOn" Content="Activity History On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows activity history policy defaults."/>
+                            <Button Name="btnPrivacyAppLaunchOff" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Stop Windows from tracking app launches to personalize Start and Search."/>
+                            <Button Name="btnPrivacyAppLaunchOn" Content="Launch Tracking On" Style="{StaticResource ActionBtn}" ToolTip="Restore app launch tracking."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="SEARCH &amp; INDEXING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnSearchWebOff" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Bing/web results in Windows Start search."/>
+                            <Button Name="btnSearchWebOn" Content="Web Search On" Style="{StaticResource ActionBtn}" ToolTip="Restore web results in Windows Start search."/>
+                            <Button Name="btnSearchIndexReduced" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Set Windows Search indexing service to Manual and stop it."/>
+                            <Button Name="btnSearchIndexDefault" Content="Default Indexing" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Search indexing service to Automatic."/>
+                            <Button Name="btnSearchIndexRebuild" Content="Rebuild Index" Style="{StaticResource WarningBtn}" ToolTip="Delete the Windows search index database so Windows rebuilds it."/>
+                            <Button Name="btnSearchIndexOptions" Content="Index Options" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Indexing Options."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="GAMING" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnGameModeOn" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Game Mode."/>
+                            <Button Name="btnGameModeOff" Content="Game Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Game Mode."/>
+                            <Button Name="btnGameBarOff" Content="Game Bar Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Xbox Game Bar and Game DVR toggles."/>
+                            <Button Name="btnGameBarOn" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Restore Xbox Game Bar and Game DVR toggles."/>
+                            <Button Name="btnGameCaptureOff" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable background gameplay capture."/>
+                            <Button Name="btnGameCaptureOn" Content="Capture On" Style="{StaticResource ActionBtn}" ToolTip="Restore background gameplay capture."/>
+                            <Button Name="btnGameFsoOff" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Apply common registry values to disable fullscreen optimizations globally."/>
+                            <Button Name="btnGameFsoDefault" Content="Default FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Restore default fullscreen optimization registry values."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="VISUAL EFFECTS" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnVisualBestAppearance" Content="Best Appearance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best appearance."/>
+                            <Button Name="btnVisualBestPerformance" Content="Best Performance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best performance."/>
+                            <Button Name="btnVisualSnappy" Content="Snappy Desktop" Style="{StaticResource PositiveBtn}" ToolTip="Disable taskbar animations, window minimize animations, Aero Peek, and transparency."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="NOTIFICATIONS &amp; LOCK SCREEN" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnNotifyFocusSettings" Content="Focus Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Focus Assist / Do Not Disturb settings."/>
+                            <Button Name="btnNotifyTipsOff" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows tips, welcome experience, and suggestion notifications."/>
+                            <Button Name="btnNotifyTipsOn" Content="Tips On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows tips and suggestion notifications."/>
+                            <Button Name="btnNotifySetupOff" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable finish setting up this device prompts."/>
+                            <Button Name="btnNotifySetupOn" Content="Setup Prompts On" Style="{StaticResource ActionBtn}" ToolTip="Restore finish setting up this device prompts."/>
+                            <Button Name="btnLockFactsOff" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable fun facts, tips, and overlays on the lock screen."/>
+                            <Button Name="btnLockFactsOn" Content="Lock Facts On" Style="{StaticResource ActionBtn}" ToolTip="Restore lock screen fun facts and overlays."/>
+                            <Button Name="btnLockSpotlightOff" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Spotlight on the lock screen."/>
+                            <Button Name="btnLockSpotlightOn" Content="Spotlight On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Spotlight on the lock screen."/>
+                            <Button Name="btnLockPlain" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Disable lock screen Spotlight and overlay content together."/>
+                            <Button Name="btnLockDefault" Content="Default Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Restore default lock screen content settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="STARTUP BEHAVIOR" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnStartupFastOff" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Fast Startup."/>
+                            <Button Name="btnStartupFastOn" Content="Fast Startup On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Fast Startup."/>
+                            <Button Name="btnStartupRestoreFoldersOn" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore previous folder windows at logon."/>
+                            <Button Name="btnStartupRestoreFoldersOff" Content="Restore Folders Off" Style="{StaticResource ActionBtn}" ToolTip="Do not restore previous folder windows at logon."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="SECURITY SHORTCUTS" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnSecurityUacOpen" Content="UAC Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open User Account Control settings."/>
+                            <Button Name="btnSecurityUacStatus" Content="UAC Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current UAC registry status."/>
+                            <Button Name="btnSecuritySmartScreenOpen" Content="SmartScreen Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows App and Browser Control settings."/>
+                            <Button Name="btnSecuritySmartScreenStatus" Content="SmartScreen Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current SmartScreen status."/>
+                            <Button Name="btnSecurityCfaOpen" Content="Controlled Folders" Style="{StaticResource UtilityBtn}" ToolTip="Open Controlled Folder Access / ransomware protection settings."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="POWER &amp; BATTERY" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnPowerBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 0 percent."/>
+                            <Button Name="btnPowerBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 20 percent."/>
+                            <Button Name="btnPowerBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 50 percent."/>
+                            <Button Name="btnPowerUsbSuspendOn" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable USB selective suspend for the active power plan."/>
+                            <Button Name="btnPowerUsbSuspendOff" Content="USB Suspend Off" Style="{StaticResource ActionBtn}" ToolTip="Disable USB selective suspend for the active power plan."/>
+                            <Button Name="btnPowerPcieModerate" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings."/>
+                            <Button Name="btnPowerPcieOff" Content="PCIe Savings Off" Style="{StaticResource ActionBtn}" ToolTip="Turn off PCI Express link state power management."/>
+                        </WrapPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource CardStyle}">
+                    <StackPanel>
+                        <TextBlock Text="DEVELOPER" Style="{StaticResource SubHeader}"/>
+                        <WrapPanel>
+                            <Button Name="btnDevLongPathsOn" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable Win32 long path support."/>
+                            <Button Name="btnDevLongPathsOff" Content="Long Paths Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Win32 long path support."/>
+                            <Button Name="btnDevModeOn" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Developer Mode policies."/>
+                            <Button Name="btnDevModeOff" Content="Developer Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Developer Mode policies."/>
+                            <Button Name="btnDevSettings" Content="Developer Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Developer Settings."/>
+                        </WrapPanel>
                     </StackPanel>
                 </Border>
             </StackPanel>
@@ -10018,14 +12999,15 @@ function Set-Hags {
                                 <Button Name="btnDnsGoogle" Content="Google DNS" Style="{StaticResource ActionBtn}" ToolTip="8.8.8.8 / 8.8.4.4"/>
                                 <Button Name="btnDnsCloudflare" Content="Cloudflare" Style="{StaticResource ActionBtn}" ToolTip="1.1.1.1 / 1.0.0.1"/>
                                 <Button Name="btnDnsQuad9" Content="Quad9" Style="{StaticResource ActionBtn}" ToolTip="9.9.9.9"/>
+                                <Button Name="btnDnsAdGuard" Content="AdGuard" Style="{StaticResource ActionBtn}" ToolTip="94.140.14.14 / 94.140.15.15"/>
                                 <Button Name="btnDnsAuto" Content="Auto (DHCP)" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}"/>
+                                <Button Name="btnDnsCustom" Content="Custom..." Style="{StaticResource UtilityBtn}" ToolTip="Set custom DNS servers and optional DoH template"/>
                             </WrapPanel>
                             
                             <TextBlock Text="DNS OVER HTTPS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDohAuto" Content="Enable DoH" Style="{StaticResource PositiveBtn}" ToolTip="Enable DNS encryption for all providers"/>
-                                <Button Name="btnDohDisable" Content="Disable DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Disable DNS encryption"/>
+                                <Button Name="btnDohAuto" Content="Register DoH" Style="{StaticResource PositiveBtn}" ToolTip="Register Windows DoH templates for bundled DNS providers"/>
+                                <Button Name="btnDohDisable" Content="Remove DoH" Style="{StaticResource DestructiveBtn}" ToolTip="Remove bundled Windows DoH templates"/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -10048,27 +13030,36 @@ function Set-Hags {
                                 <ScrollViewer Name="pnlMyDevice" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
                                     <StackPanel>
                                         <WrapPanel Name="pnlMyDeviceCards" Margin="20" ItemWidth="350">
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
-                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M0 3.4l10-1.4v9H0V3.4zm11-1.5L23 0v11H11V1.9zM0 12h10v8.6l-10-1.4V12zm11 0h12v10l-12-1.9V12z"/>
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="{DynamicResource Accent}" Stretch="Uniform" Width="22" Height="22" Data="M0 3.4l10-1.4v9H0V3.4zm11-1.5L23 0v11H11V1.9zM0 12h10v8.6l-10-1.4V12zm11 0h12v10l-12-1.9V12z"/>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceWinUpdate" Content="Windows Update" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="130"/>
+                                                            <TextBlock Text="Operating System" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceOS" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceWinUpdate" Content="Update" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Open Windows Update settings"/>
+                                                                <Button Name="btnMyDeviceQuickFix" Content="Quick Fix" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Run the guided SFC, DISM, and temp cleanup flow"/>
+                                                                <Button Name="btnMyDeviceWinRE" Content="WinRE" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Check Windows Recovery Environment status"/>
+                                                                <Button Name="btnMyDeviceSysReport" Content="Report" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Generate a detailed system report"/>
+                                                                <Button Name="btnMyDeviceRestoreMgr" Content="Restore" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Manage System Restore points"/>
+                                                                <Button Name="btnMyDeviceStartupMgr" Content="Startup" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Manage startup apps, tasks, context menu entries, and services"/>
+                                                                <Button Name="btnMyDeviceUpdateRepair" Content="WU Fix" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Reset Windows Update components"/>
+                                                                <Button Name="btnMyDeviceUpdateServices" Content="WU Svcs" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restart Windows Update related services"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
                                                             <ColumnDefinition Width="*"/>
                                                         </Grid.ColumnDefinitions>
                                                         <!-- Network icon (stylised globe + network lines) -->
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
     <Viewbox Width="28" Height="28">
         <Canvas Width="400" Height="400">
             <!-- Gradients converted to XAML Resources -->
@@ -10099,52 +13090,62 @@ function Set-Hags {
     </Viewbox>
 </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Network Info" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceNetwork" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <StackPanel Name="pnlDeviceNetworkList" Margin="0,6,0,0"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceNetInfo" Content="IP Config" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Display full IP configuration"/>
+                                                                <Button Name="btnMyDeviceFlushDNS" Content="Flush DNS" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Clear the DNS resolver cache"/>
+                                                                <Button Name="btnMyDeviceResetWifi" Content="Wi-Fi" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restart active Wi-Fi adapters"/>
+                                                                <Button Name="btnMyDeviceNetRepair" Content="Repair" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Run the full network repair flow"/>
+                                                                <Button Name="btnMyDeviceDnsCustom" Content="DNS" Style="{StaticResource UtilityBtn}" Width="112" ToolTip="Set custom DNS servers"/>
+                                                                <Button Name="btnMyDeviceHostsEdit" Content="Hosts" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Open the Hosts file editor"/>
+                                                                <Button Name="btnMyDeviceHostsAdBlock" Content="AdBlock" Style="{StaticResource PositiveBtn}" Width="112" ToolTip="Download and merge ad-blocking hosts"/>
+                                                                <Button Name="btnMyDeviceRouteView" Content="Routes" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Display the routing table"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
                                                             <ColumnDefinition Width="*"/>
                                                         </Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
-                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="0" Width="32.771" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="0" Width="32.761" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="0" Width="32.761" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="0" Width="32.77" Height="71.683" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="440.326" Width="32.771" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="440.326" Width="32.77" Height="71.674" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="#0078D7"/>
-                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="#0078D7"/>
-                                                                    <Path Fill="#0078D7" Data="M255.246,252.209c6.171,0,9.862-3.586,9.862-9.06c0-5.485-3.69-9.176-9.862-9.176h-11.16c-0.4,0-0.6,0.21-0.6,0.61v17.025c0,0.4,0.2,0.601,0.6,0.601H255.246z"/>
-                                                                    <Path Fill="#0078D7" Data="M92.165,419.84h327.67V92.17H92.165V419.84z M367.359,130.568c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,137.434,358.88,130.568,367.359,130.568z M367.359,353.287c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,360.154,358.88,353.287,367.359,353.287z M290.821,222.318c0-0.591,0.4-0.991,1.001-0.991h12.648c0.6,0,1.001,0.4,1.001,0.991v42.242c0,8.069,4.483,12.648,11.35,12.648c6.772,0,11.264-4.578,11.264-12.648v-42.242c0-0.591,0.4-0.991,0.992-0.991h12.646c0.601,0,0.992,0.4,0.992,0.991v41.851c0,16.825-10.749,25.99-25.895,25.99c-15.232,0-25.999-9.165-25.999-25.99V222.318z M228.846,222.318c0-0.591,0.4-0.991,1.001-0.991h26.295c14.745,0,23.605,8.87,23.605,21.822c0,12.741-8.966,21.707-23.605,21.707h-12.056c-0.4,0-0.6,0.2-0.6,0.6v22.614c0,0.591-0.391,0.991-0.991,0.991h-12.648c-0.601,0-1.001-0.4-1.001-0.991V222.318z M167.673,236.872c3.586-11.063,12.256-16.633,24.112-16.633c11.454,0,19.819,5.57,23.605,15.03c0.295,0.496,0.095,0.992-0.496,1.202l-10.863,4.874c-0.592,0.296-1.097,0.104-1.393-0.486c-1.889-4.387-5.084-7.678-10.759-7.678c-5.274,0-8.66,2.795-10.157,7.468c-0.801,2.499-1.097,4.883-1.097,14.554c0,9.652,0.296,12.046,1.097,14.535c1.497,4.673,4.883,7.468,10.157,7.468c5.675,0,8.87-3.291,10.759-7.669c0.296-0.6,0.801-0.791,1.393-0.496l10.863,4.874c0.591,0.21,0.791,0.706,0.496,1.202c-3.786,9.461-12.152,15.04-23.605,15.04c-11.856,0-20.525-5.58-24.112-16.643c-1.487-4.368-1.888-7.859-1.888-18.312C165.785,244.732,166.186,241.26,167.673,236.872z M144.64,130.568c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.876-15.355-15.355C129.285,137.444,136.152,130.568,144.64,130.568z M144.64,353.287c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.877-15.355-15.355C129.285,360.163,136.152,353.287,144.64,353.287z"/>
+                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="0" Width="32.771" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="0" Width="32.761" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="0" Width="32.761" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="0" Width="32.77" Height="71.683" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="141.312" Canvas.Top="440.326" Width="32.771" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="206.853" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="272.385" Canvas.Top="440.326" Width="32.761" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="337.917" Canvas.Top="440.326" Width="32.77" Height="71.674" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="440.321" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="141.307" Width="71.674" Height="32.771" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="206.849" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="272.39" Width="71.674" Height="32.761" Fill="{DynamicResource Accent}"/>
+                                                                    <Rectangle Canvas.Left="0.005" Canvas.Top="337.922" Width="71.674" Height="32.77" Fill="{DynamicResource Accent}"/>
+                                                                    <Path Fill="{DynamicResource Accent}" Data="M255.246,252.209c6.171,0,9.862-3.586,9.862-9.06c0-5.485-3.69-9.176-9.862-9.176h-11.16c-0.4,0-0.6,0.21-0.6,0.61v17.025c0,0.4,0.2,0.601,0.6,0.601H255.246z"/>
+                                                                    <Path Fill="{DynamicResource Accent}" Data="M92.165,419.84h327.67V92.17H92.165V419.84z M367.359,130.568c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,137.434,358.88,130.568,367.359,130.568z M367.359,353.287c8.479,0,15.356,6.867,15.356,15.356c0,8.488-6.876,15.355-15.356,15.355c-8.479,0-15.356-6.867-15.356-15.355C352.004,360.154,358.88,353.287,367.359,353.287z M290.821,222.318c0-0.591,0.4-0.991,1.001-0.991h12.648c0.6,0,1.001,0.4,1.001,0.991v42.242c0,8.069,4.483,12.648,11.35,12.648c6.772,0,11.264-4.578,11.264-12.648v-42.242c0-0.591,0.4-0.991,0.992-0.991h12.646c0.601,0,0.992,0.4,0.992,0.991v41.851c0,16.825-10.749,25.99-25.895,25.99c-15.232,0-25.999-9.165-25.999-25.99V222.318z M228.846,222.318c0-0.591,0.4-0.991,1.001-0.991h26.295c14.745,0,23.605,8.87,23.605,21.822c0,12.741-8.966,21.707-23.605,21.707h-12.056c-0.4,0-0.6,0.2-0.6,0.6v22.614c0,0.591-0.391,0.991-0.991,0.991h-12.648c-0.601,0-1.001-0.4-1.001-0.991V222.318z M167.673,236.872c3.586-11.063,12.256-16.633,24.112-16.633c11.454,0,19.819,5.57,23.605,15.03c0.295,0.496,0.095,0.992-0.496,1.202l-10.863,4.874c-0.592,0.296-1.097,0.104-1.393-0.486c-1.889-4.387-5.084-7.678-10.759-7.678c-5.274,0-8.66,2.795-10.157,7.468c-0.801,2.499-1.097,4.883-1.097,14.554c0,9.652,0.296,12.046,1.097,14.535c1.497,4.673,4.883,7.468,10.157,7.468c5.675,0,8.87-3.291,10.759-7.669c0.296-0.6,0.801-0.791,1.393-0.496l10.863,4.874c0.591,0.21,0.791,0.706,0.496,1.202c-3.786,9.461-12.152,15.04-23.605,15.04c-11.856,0-20.525-5.58-24.112-16.643c-1.487-4.368-1.888-7.859-1.888-18.312C165.785,244.732,166.186,241.26,167.673,236.872z M144.64,130.568c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.876-15.355-15.355C129.285,137.444,136.152,130.568,144.64,130.568z M144.64,353.287c8.489,0,15.365,6.876,15.365,15.356c0,8.478-6.876,15.355-15.365,15.355c-8.488,0-15.355-6.877-15.355-15.355C129.285,360.163,136.152,353.287,144.64,353.287z"/>
                                                                 </Canvas>
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Processor (CPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceCPU" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Processor (CPU)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceCPU" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
                                                 <!-- Battery / Power Card -->
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid>
                                                         <Grid.ColumnDefinitions>
                                                             <ColumnDefinition Width="Auto"/>
@@ -10152,7 +13153,7 @@ function Set-Hags {
                                                         </Grid.ColumnDefinitions>
 
                                                         <!-- Battery Icon -->
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="26" Height="26">
                                                                 <Canvas Width="94" Height="236">
                                                                     <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="7" 
@@ -10179,37 +13180,54 @@ function Set-Hags {
                                                         </Border>
 
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="#58A6FF" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
-                                                            <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
-                                                            <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
+                                                        <TextBlock Text="Battery / Power" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                        <TextBlock x:Name="txtBatteryHealth" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,6,0,0" LineHeight="18" Text="Health: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryCharge" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Charge: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryStatus" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Status: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerPlan" FontSize="13" Foreground="{DynamicResource Accent}" TextDecorations="Underline" Cursor="Hand" ToolTip="Open Windows power settings. Shows the Control Panel base plan and Settings power mode." TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power: Loading..."/>
+                                                        <TextBlock x:Name="txtBatteryTime" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Time Remaining: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerDraw" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Power Draw: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
+                                                        <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
+                                                            <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceHibernateOn" Grid.Column="0" Content="Hibernate On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Re-enable hibernation"/>
+                                                                <Button Name="btnMyDeviceHibernateOff" Grid.Column="1" Content="Hibernate Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable hibernation and free hiberfil.sys disk space"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
                                                 
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
-                                                            <Path Fill="#0078D7" Stretch="Uniform" Width="22" Height="22" Data="M223.125 24.938L205.062 43l-5.875-5.875-6.625-6.594-6.593 6.595-132.314 132.28L47.03 176l6.626 6.594 5.907 5.906-18.032 18.063-2.75 2.718v38.97h18.69V217l15.31-15.28 35.657 35.624-18.062 18.062-2.72 2.75v38.939h18.69v-31.22l15.31-15.312 35.157 35.157-18.062 18.06-2.75 2.72v38.969h18.688v-31.19l15.343-15.342 36.657 36.656-18.062 18.062-2.75 2.72v38.968h18.688v-31.25l15.312-15.313 35.656 35.658-18.06 18.062-2.72 2.75v38.938h18.688v-31.22l15.312-15.312 35.156 35.156-18.062 18.063-2.75 2.72v38.966h18.687v-31.187l15.345-15.344 5.78 5.783 6.595 6.625 6.594-6.625 132.312-132.25 6.625-6.625-6.624-6.594-5.812-5.813 18.062-18.06-13.22-13.19-18.06 18.033-35.126-35.125 18.03-18.063-13.217-13.22L401 238.938l-35.625-35.625 18.063-18.062-13.22-13.22-18.062 18.064-36.656-36.656 18.063-18.063-13.22-13.188-18.03 18.063-35.188-35.188 18.063-18.03-13.22-13.22-18.03 18.063L218.28 56.22l18.064-18.064-13.22-13.218zm-29.22 67l209.376 209.718-73.5 73.5L120.376 165.75l73.53-73.813zm-32.5 64.968l-13.186 13.25 173.968 172.72 6.562 6.53 6.594-6.53 34.5-34.25-13.156-13.282-27.938 27.75-167.344-166.188zM102.5 174.312L320.938 392.75v30.688L74 176.53l28.5-2.218zm319.688 134.875l25.875 3.25.5.5-108.938 108.938V391.78l82.563-82.592z"/>
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                            <Path Fill="{DynamicResource Accent}" Stretch="Uniform" Width="22" Height="22" Data="M223.125 24.938L205.062 43l-5.875-5.875-6.625-6.594-6.593 6.595-132.314 132.28L47.03 176l6.626 6.594 5.907 5.906-18.032 18.063-2.75 2.718v38.97h18.69V217l15.31-15.28 35.657 35.624-18.062 18.062-2.72 2.75v38.939h18.69v-31.22l15.31-15.312 35.157 35.157-18.062 18.06-2.75 2.72v38.969h18.688v-31.19l15.343-15.342 36.657 36.656-18.062 18.062-2.75 2.72v38.968h18.688v-31.25l15.312-15.313 35.656 35.658-18.06 18.062-2.72 2.75v38.938h18.688v-31.22l15.312-15.312 35.156 35.156-18.062 18.063-2.75 2.72v38.966h18.687v-31.187l15.345-15.344 5.78 5.783 6.595 6.625 6.594-6.625 132.312-132.25 6.625-6.625-6.624-6.594-5.812-5.813 18.062-18.06-13.22-13.19-18.06 18.033-35.126-35.125 18.03-18.063-13.217-13.22L401 238.938l-35.625-35.625 18.063-18.062-13.22-13.22-18.062 18.064-36.656-36.656 18.063-18.063-13.22-13.188-18.03 18.063-35.188-35.188 18.063-18.03-13.22-13.22-18.03 18.063L218.28 56.22l18.064-18.064-13.22-13.218zm-29.22 67l209.376 209.718-73.5 73.5L120.376 165.75l73.53-73.813zm-32.5 64.968l-13.186 13.25 173.968 172.72 6.562 6.53 6.594-6.53 34.5-34.25-13.156-13.282-27.938 27.75-167.344-166.188zM102.5 174.312L320.938 392.75v30.688L74 176.53l28.5-2.218zm319.688 134.875l25.875 3.25.5.5-108.938 108.938V391.78l82.563-82.592z"/>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
-                                                            <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="100"/>
+                                                        <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                        <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceMemCompressOn" Grid.Column="0" Content="MC On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Windows memory compression"/>
+                                                                <Button Name="btnMyDeviceMemCompressOff" Grid.Column="1" Content="MC Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Windows memory compression"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Name="bdMyDeviceGPU" Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15" ToolTip="Click a GPU entry to open that GPU vendor's control panel.">
+                                                <Border Name="bdMyDeviceGPU" Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15" ToolTip="Click a GPU entry to open that GPU vendor's control panel.">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                    <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="59" Height="59">
                                                                     <Rectangle Canvas.Left="4" Canvas.Top="12.5" Width="55" Height="32" Fill="#38454F"/>
@@ -10221,7 +13239,7 @@ function Set-Hags {
                                                                     <Path Fill="#F3CC6D" Data="M3,26.5H1c-0.553,0-1-0.447-1-1s0.447-1,1-1h2c0.553,0,1,0.447,1,1S3.553,26.5,3,26.5z"/>
                                                                     <Path Fill="#F3CC6D" Data="M3,43.5H1c-0.553,0-1-0.447-1-1s0.447-1,1-1h2c0.553,0,1,0.447,1,1S3.553,43.5,3,43.5z"/>
                                                                     <Rectangle Canvas.Left="0" Canvas.Top="15.5" Width="3" Height="4" Fill="#839594"/>
-                                                                    <Rectangle Canvas.Left="12" Canvas.Top="44.5" Width="24" Height="4" Fill="#0078D7"/>
+                                                                    <Rectangle Canvas.Left="12" Canvas.Top="44.5" Width="24" Height="4" Fill="{DynamicResource Accent}"/>
                                                                     <Path Fill="#6C797A" Data="M24.389,38.655c-1.76-2.032-2.974-4.996-3.295-8.376c-0.003-0.025-0.005-0.05-0.008-0.075C21.035,29.645,21,29.079,21,28.5s0.035-1.145,0.086-1.704c0.003-0.025,0.005-0.05,0.008-0.075c0.321-3.38,1.535-6.344,3.295-8.376c0.781-1.046,1.67-2.005,2.667-2.845H17c-4.971,0-9,5.82-9,13s4.029,13,9,13h10.057C26.059,40.66,25.171,39.7,24.389,38.655z"/>
                                                                     <Path Fill="#283238" Data="M34.846,41.5C29.534,39.394,26,34.23,26,28.5s3.534-10.894,8.846-13h10.309C50.466,17.606,54,22.77,54,28.5s-3.534,10.894-8.846,13H34.846z"/>
                                                                     <Ellipse Canvas.Left="37" Canvas.Top="25.5" Width="6" Height="6" Fill="#CBD4D8"/>
@@ -10243,17 +13261,25 @@ function Set-Hags {
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
+                                                        <TextBlock Text="Graphics (GPU)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
                                                             <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
-                                                            <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="#6E6E73" TextWrapping="Wrap" Margin="0,8,0,0"/>
-                                                            <Button Name="btnMyDeviceGPUDriver" Content="Check Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="120"/>
+                                                        <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                                                            <Button Name="btnMyDeviceGPUDriver" Content="Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Open GPU vendor driver download pages"/>
+                                                            <Grid Margin="0,4,0,0">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                    <ColumnDefinition Width="*"/>
+                                                                </Grid.ColumnDefinitions>
+                                                                <Button Name="btnMyDeviceHagsOn" Grid.Column="0" Content="HAGS On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Hardware-Accelerated GPU Scheduling"/>
+                                                                <Button Name="btnMyDeviceHagsOff" Grid.Column="1" Content="HAGS Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Hardware-Accelerated GPU Scheduling"/>
+                                                            </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="512" Height="512">
                                                                     <Canvas.RenderTransform>
@@ -10304,30 +13330,38 @@ function Set-Hags {
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Motherboard" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceMotherboard" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <WrapPanel Margin="0,10,0,0">
+                                                                <Button Name="btnMyDeviceDriverReport" Content="Drv Log" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Generate an installed driver report"/>
+                                                                <Button Name="btnMyDeviceDriverBackup" Content="Backup" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Export installed drivers"/>
+                                                                <Button Name="btnMyDeviceGhostDrivers" Content="Ghosts" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Remove disconnected ghost devices"/>
+                                                                <Button Name="btnMyDeviceDriverClean" Content="Clean" Style="{StaticResource WarningBtn}" Width="112" ToolTip="Clean old driver versions"/>
+                                                                <Button Name="btnMyDeviceDriverRestore" Content="Restore" Style="{StaticResource ActionBtn}" Width="112" ToolTip="Restore drivers from backup"/>
+                                                            </WrapPanel>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
 
-                                                <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                                                <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                                                     <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                        <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                                                        <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                                             <Viewbox Width="22" Height="22">
                                                                 <Canvas Width="24" Height="24">
-                                                                    <Rectangle Canvas.Left="4.36" Canvas.Top="16.77" Width="15.27" Height="5.73" RadiusX="1.91" RadiusY="1.91" Stroke="#0078D7" StrokeThickness="1.91" Fill="Transparent"/>
-                                                                    <Path Stroke="#0078D7" StrokeThickness="1.91" Fill="Transparent" Data="M19.64,18.68V3.41A1.91,1.91,0,0,0,17.73,1.5H6.27A1.91,1.91,0,0,0,4.36,3.41V18.68"/>
-                                                                    <Line X1="13.91" Y1="19.64" X2="17.73" Y2="19.64" Stroke="#0078D7" StrokeThickness="1.91"/>
-                                                                    <Ellipse Canvas.Left="6.28" Canvas.Top="18.69" Width="1.9" Height="1.9" Fill="#0078D7"/>
+                                                                    <Rectangle Canvas.Left="4.36" Canvas.Top="16.77" Width="15.27" Height="5.73" RadiusX="1.91" RadiusY="1.91" Stroke="{DynamicResource Accent}" StrokeThickness="1.91" Fill="Transparent"/>
+                                                                    <Path Stroke="{DynamicResource Accent}" StrokeThickness="1.91" Fill="Transparent" Data="M19.64,18.68V3.41A1.91,1.91,0,0,0,17.73,1.5H6.27A1.91,1.91,0,0,0,4.36,3.41V18.68"/>
+                                                                    <Line X1="13.91" Y1="19.64" X2="17.73" Y2="19.64" Stroke="{DynamicResource Accent}" StrokeThickness="1.91"/>
+                                                                    <Ellipse Canvas.Left="6.28" Canvas.Top="18.69" Width="1.9" Height="1.9" Fill="{DynamicResource Accent}"/>
                                                                 </Canvas>
                                                             </Viewbox>
                                                         </Border>
                                                         <StackPanel Grid.Column="1">
-                                                            <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                                            <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                                            <TextBlock Text="Storage Drives" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                                            <TextBlock x:Name="txtDeviceStorage" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <StackPanel x:Name="pnlDeviceStorageList" Margin="0,0,0,0"/>
                                                             <Grid Margin="0,10,0,0">
                                                                 <Grid.RowDefinitions>
+                                                                    <RowDefinition Height="Auto"/>
                                                                     <RowDefinition Height="Auto"/>
                                                                     <RowDefinition Height="Auto"/>
                                                                 </Grid.RowDefinitions>
@@ -10337,13 +13371,16 @@ function Set-Hags {
                                                                 </Grid.ColumnDefinitions>
                                                                 <Button Name="btnMyDeviceDiskpart" Grid.Row="0" Grid.Column="0" Content="Disk Mgmt" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
                                                                 <Button Name="btnMyDeviceDriveBenchmark" Grid.Row="0" Grid.Column="1" Content="Benchmark" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
-                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="2" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceTrim" Grid.Row="1" Grid.Column="0" Content="Trim / Defrag" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
+                                                                <Button Name="btnMyDeviceChkdsk" Grid.Row="1" Grid.Column="1" Content="CHKDSK" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Check all drives for filesystem errors"/>
+                                                                <Button Name="btnMyDeviceDiskCleanup" Grid.Row="2" Grid.Column="0" Content="Disk Cleanup" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Open Windows Disk Cleanup"/>
+                                                                <Button Name="btnMyDeviceTempCleanup" Grid.Row="2" Grid.Column="1" Content="Temp Files" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Clean temporary files"/>
                                                             </Grid>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
                                         </WrapPanel>
-                                        <Border Margin="20,0,20,24" BorderBrush="#2C2C2E" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
+                                         <Border Margin="20,0,20,24" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="10,12,10,0" HorizontalAlignment="Stretch">
                                             <Button Name="btnMyDeviceExport" Content="Export" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch"/>
                                         </Border>
                                     </StackPanel>
@@ -10374,7 +13411,7 @@ function Set-Hags {
                     
                     <!-- Rules List Card -->
                     <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
-                        <ListView Name="lstFirewall" Background="Transparent" Foreground="{StaticResource TextPrimary}" BorderThickness="0" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                        <ListView Name="lstFirewall" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="Rule Name" Width="360" DisplayMemberBinding="{Binding Name}"/>
@@ -10385,7 +13422,7 @@ function Set-Hags {
                                                 <TextBlock Text="{Binding Action}" FontWeight="Bold">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
-                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Action}" Value="Allow"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
                                                                 <DataTrigger Binding="{Binding Action}" Value="Block"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
@@ -10402,7 +13439,7 @@ function Set-Hags {
                                                 <TextBlock Text="{Binding Enabled}" FontWeight="Bold">
                                                     <TextBlock.Style>
                                                         <Style TargetType="TextBlock">
-                                                            <Setter Property="Foreground" Value="{StaticResource TextSecondary}"/>
+                                                            <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
                                                             <Style.Triggers>
                                                                 <DataTrigger Binding="{Binding Enabled}" Value="True"><Setter Property="Foreground" Value="#3FB950"/></DataTrigger>
                                                                 <DataTrigger Binding="{Binding Enabled}" Value="False"><Setter Property="Foreground" Value="#F85149"/></DataTrigger>
@@ -10481,18 +13518,18 @@ function Set-Hags {
                         </StackPanel>
                     </Border>
                     
-                    <Border Background="#1C1C1E" CornerRadius="12" BorderBrush="#2C2C2E" BorderThickness="1" Margin="10" Padding="15">
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
                         <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                            <Border Width="48" Height="48" CornerRadius="10" Background="#1A0078D7" VerticalAlignment="Top" Margin="0,0,15,0">
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
                                 <Viewbox Width="24" Height="24">
                                     <Canvas Width="24" Height="24">
-                                        <Path Fill="#0078D7" Data="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/>
                                     </Canvas>
                                 </Viewbox>
                             </Border>
                             <StackPanel Grid.Column="1">
-                                <TextBlock Text="OneDrive" FontSize="16" FontWeight="SemiBold" Foreground="#EBEBF5"/>
-                                <TextBlock Text="Set all OneDrive files to 'Online Only' to immediately free up local disk space." FontSize="13" Foreground="#98989D" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
+                                <TextBlock Text="OneDrive" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Set all OneDrive files to 'Online Only' to immediately free up local disk space." FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                 <Button Name="btnCleanupOneDrive" Content="Free Up Space" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Left" Width="130"/>
                             </StackPanel>
                         </Grid>
@@ -10540,12 +13577,17 @@ function Set-Hags {
                 <StackPanel Name="pnlSupport" Visibility="Collapsed">
                     <!-- Header Card -->
                     <Border Style="{StaticResource CardStyle}">
-                        <StackPanel>
-                            <StackPanel Margin="0,0,0,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="0" Margin="0,0,16,0">
                                 <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{StaticResource TextSecondary}" FontWeight="SemiBold"/>
+                                <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold"/>
                             </StackPanel>
-                        </StackPanel>
+                            <Button Name="btnToggleTheme" Grid.Column="1" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" HorizontalAlignment="Right" VerticalAlignment="Top" ToolTip="Switch between dark and light theme"/>
+                        </Grid>
                     </Border>
 
                     <!-- Credits Card -->
@@ -10554,15 +13596,15 @@ function Set-Hags {
                             <TextBlock Text="CONTRIBUTORS" Style="{StaticResource SubHeader}"/>
                             <StackPanel Margin="0,8,0,0">
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="Author: " Foreground="{StaticResource TextSecondary}" Width="120"/>
-                                    <Button Name="btnCreditLilBattiCLI" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                    <TextBlock Text="Author: " Foreground="{DynamicResource TextSecondary}" Width="120"/>
+                                    <Button Name="btnCreditLilBatti" Content="Lil_Batti" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                                 <StackPanel Orientation="Horizontal" Margin="0,4">
-                                    <TextBlock Text="GUI &amp; Features: " Foreground="{StaticResource TextSecondary}" Width="120"/>
-                                    <Button Name="btnCreditChaythonGUI" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
+                                    <TextBlock Text="GUI &amp; Features: " Foreground="{DynamicResource TextSecondary}" Width="120"/>
+                                    <Button Name="btnCreditChaython" Content="Chaython" Style="{StaticResource ActionBtn}" Height="26" Padding="8,2"/>
                                 </StackPanel>
                             </StackPanel>
-                            <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{StaticResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
+                            <TextBlock Text="MIT License - Copyright (c) 2026" Foreground="{DynamicResource TextMuted}" FontSize="11" Margin="0,16,0,0"/>
                         </StackPanel>
                     </Border>
 
@@ -10573,7 +13615,6 @@ function Set-Hags {
                             <WrapPanel>
                                 <Button Name="btnSupportDiscord" Content="Join Discord" Style="{StaticResource UtilityBtn}" ToolTip="Community support server"/>
                                 <Button Name="btnSupportIssue" Content="Report Issue" Style="{StaticResource ActionBtn}" ToolTip="Submit bug reports on GitHub"/>
-                                <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" ToolTip="Switch between dark and light theme"/>
                                 <Button Name="btnDonateIos12" Content="Sponsor Lil_Batti" Style="{StaticResource PositiveBtn}"/>
                                 <Button Name="btnDonate" Content="Sponsor Chaython" Style="{StaticResource PositiveBtn}"/>
                             </WrapPanel>
@@ -10616,7 +13657,13 @@ $script:ThemePalettes = @{
         Danger        = "#DA3633"
         DangerHover   = "#F85149"
         Warning       = "#D29922"
+        WarningHover  = "#E3B341"
         Info          = "#1F6FEB"
+        AccentText    = "#0D1117"
+        SuccessText   = "#F6FFFA"
+        DangerText    = "#FFF5F5"
+        WarningText   = "#0D1117"
+        InfoText      = "#F0F6FC"
         LogText       = "#3FB950"
     }
     light = @{
@@ -10636,7 +13683,13 @@ $script:ThemePalettes = @{
         Danger        = "#B91C1C"
         DangerHover   = "#DC2626"
         Warning       = "#B45309"
+        WarningHover  = "#D97706"
         Info          = "#1D4ED8"
+        AccentText    = "#FFFFFF"
+        SuccessText   = "#FFFFFF"
+        DangerText    = "#FFFFFF"
+        WarningText   = "#FFFFFF"
+        InfoText      = "#FFFFFF"
         LogText       = "#166534"
     }
 }
@@ -10646,16 +13699,24 @@ function Set-WmtTheme {
     if (-not $script:ThemePalettes.ContainsKey($Theme)) { $Theme = "dark" }
     $palette = $script:ThemePalettes[$Theme]
 
-    foreach ($key in $palette.Keys) {
-        if ($key -eq "LogText") { continue }
-        $brush = $window.Resources[$key]
-        if ($brush -is [System.Windows.Media.SolidColorBrush]) {
-            $brush.Color = [System.Windows.Media.ColorConverter]::ConvertFromString($palette[$key])
-        }
-    }
+    Set-WmtThemeResources -Element $window -Palette $palette
 
     $window.Background = $window.Resources["BgDark"]
     $window.Foreground = $window.Resources["TextPrimary"]
+
+    if ($script:WmtThemedElements) {
+        foreach ($element in @($script:WmtThemedElements)) {
+            try {
+                if (-not $element -or [object]::ReferenceEquals($element, $window)) { continue }
+                Set-WmtThemeResources -Element $element -Palette $palette
+                if ($element -is [System.Windows.Window]) {
+                    $element.Background = $element.Resources["BgDark"]
+                    $element.Foreground = $element.Resources["TextPrimary"]
+                }
+            }
+            catch {}
+        }
+    }
 
     $logBoxCtrl = Get-Ctrl "LogBox"
     if ($logBoxCtrl) { $logBoxCtrl.Foreground = $palette.LogText }
@@ -10668,6 +13729,21 @@ function Set-WmtTheme {
     $toggleBtn = Get-Ctrl "btnToggleTheme"
     if ($toggleBtn) {
         $toggleBtn.Content = if ($Theme -eq "dark") { "Light Mode" } else { "Dark Mode" }
+    }
+
+    if ($TabButtons) {
+        foreach ($btnName in $TabButtons) {
+            $btn = Get-Ctrl $btnName
+            if (-not $btn) { continue }
+            if ($btn.Tag -eq "Visible") {
+                $btn.Background = $window.Resources["BgElevated"]
+                $btn.Foreground = $window.Resources["TextPrimary"]
+            }
+            else {
+                $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
+                $btn.Foreground = $window.Resources["TextSecondary"]
+            }
+        }
     }
 
     $script:CurrentTheme = $Theme
@@ -10802,15 +13878,25 @@ function Invoke-MyDeviceExport {
 }
 
 function Set-ButtonIcon {
-    param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = "White")
+    param($BtnName, $PathData, $Text, $Tooltip = "", $Scale = 16, $Color = $null)
     $btn = Get-Ctrl $BtnName
     if (-not $btn) { return }
+
+    if ($Scale -is [string] -and $Scale -match '^#') {
+        $Color = $Scale
+        $Scale = 16
+    }
     
     # Visuals
     $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = "Horizontal"
     $path = New-Object System.Windows.Shapes.Path
     $path.Data = [System.Windows.Media.Geometry]::Parse($PathData)
-    $path.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+    if ([string]::IsNullOrWhiteSpace([string]$Color)) {
+        $path.SetResourceReference([System.Windows.Shapes.Path]::FillProperty, "TextSecondary")
+    }
+    else {
+        $path.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+    }
     $path.Stretch = "Uniform"; $path.Height = $Scale; $path.Width = $Scale; $path.Margin = "0,0,10,0"
     $txt = New-Object System.Windows.Controls.TextBlock; $txt.Text = $Text; $txt.VerticalAlignment = "Center"
     [void]$sp.Children.Add($path); [void]$sp.Children.Add($txt)
@@ -10892,6 +13978,7 @@ Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H
 Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
+Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
 Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
 Set-ButtonIcon "btnSupportDiscord" "M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09c-.01-.02-.04-.03-.07-.03c-1.5.26-2.93.71-4.27 1.33c-.01 0-.02.01-.03.02c-2.72 4.07-3.47 8.03-3.1 11.95c0 .02.01.04.03.05c1.8 1.32 3.53 2.12 5.2 2.65c.03.01.06 0 .07-.02c.4-.55.76-1.13 1.07-1.74c.02-.04 0-.08-.04-.09c-.57-.22-1.11-.48-1.64-.78c-.04-.02-.04-.08.01-.11c.11-.08.22-.17.33-.25c.02-.02.05-.02.07-.01c3.44 1.57 7.15 1.57 10.55 0c.02-.01.05-.01.07.01c.11.09.22.17.33.26c.04.03.04.09-.01.11c-.52.31-1.07.56-1.64.78c-.04.01-.05.06-.04.09c.32.61.68 1.19 1.07 1.74c.03.01.06.02.09.01c1.67-.53 3.4-1.33 5.2-2.65c.02-.01.03-.03.03-.05c.44-4.53-.73-8.46-3.1-11.95c-.01-.01-.02-.02-.04-.02z" "Join Discord" "Opens the community support Discord server"
@@ -10902,14 +13989,15 @@ Set-ButtonIcon "btnDonate" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,
 Set-ButtonIcon "btnDnsGoogle" "M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" "Google" "Sets DNS to 8.8.8.8 & 8.8.4.4"
 Set-ButtonIcon "btnDnsCloudflare" "M19.35,10.04C18.67,6.59 15.64,4 12,4C9.11,4 6.6,5.64 5.35,8.04C2.34,8.36 0,10.91 0,14A6,6 0 0,0 6,20H19A5,5 0 0,0 24,15C24,12.36 21.95,10.22 19.35,10.04Z" "Cloudflare" "Sets DNS to 1.1.1.1 & 1.0.0.1"
 Set-ButtonIcon "btnDnsQuad9" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Quad9" "Sets DNS to 9.9.9.9 (Malware Blocking)"
+Set-ButtonIcon "btnDnsAdGuard" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "AdGuard" "Sets DNS to 94.140.14.14 & 94.140.15.15 (Ad/tracker blocking)" 16 "#00FF99"
 Set-ButtonIcon "btnDnsAuto" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Auto (DHCP)" "Resets DNS settings to DHCP (Automatic)"
-Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses across active adapters"
+Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses and optional DoH template"
 Set-ButtonIcon "btnHostsUpdate" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Download AdBlock" "Updates Hosts file with AdBlocking list"
 Set-ButtonIcon "btnHostsEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Edit Hosts" "Opens the Hosts File Editor"
 Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to the data folder"
 Set-ButtonIcon "btnHostsRestore" "M13,3A9,9 0 0,0 4,12H1L4.89,15.89L4.96,16.03L9,12H6A7,7 0 0,1 13,5A7,7 0 0,1 20,12A7,7 0 0,1 13,19C11.07,19 9.32,18.21 8.06,16.94L6.64,18.36C8.27,20 10.5,21 13,21A9,9 0 0,0 22,12A9,9 0 0,0 13,3Z" "Restore Hosts" "Restores a previous hosts file backup"
-Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable DoH (All)" "Enables DNS over HTTPS for all supported providers" "#00FFFF"
-Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable DoH" "Disables DNS over HTTPS" "#FF5555"
+Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Register DoH" "Registers Windows DoH templates for bundled DNS providers; choose a DNS preset separately" "#00FFFF"
+Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Remove DoH" "Removes bundled Windows DoH templates" "#FF5555"
 Set-ButtonIcon "btnFwRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Refreshes the firewall rule list"
 Set-ButtonIcon "btnFwAdd" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Add Rule" "Create a new firewall rule"
 Set-ButtonIcon "btnFwEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Modify" "Edit the selected firewall rule"
@@ -10962,12 +14050,6 @@ $lblWingetTitle = Get-Ctrl "lblWingetTitle"
 $pbWingetProgress = Get-Ctrl "pbWingetProgress"
 $lblWingetProgress = Get-Ctrl "lblWingetProgress"
 $lblWingetLastResult = Get-Ctrl "lblWingetLastResult"
-$cmbPackageManager = Get-Ctrl "cmbPackageManager"
-if ($cmbPackageManager) {
-    $cmbPackageManager.Add_SelectionChanged({ 
-            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-        })
-}
 
 $btnSFC = Get-Ctrl "btnSFC"
 $btnDISMCheck = Get-Ctrl "btnDISMCheck"
@@ -11020,6 +14102,7 @@ $btnRouteView = Get-Ctrl "btnRouteView"
 $btnDnsGoogle = Get-Ctrl "btnDnsGoogle"
 $btnDnsCloudflare = Get-Ctrl "btnDnsCloudflare"
 $btnDnsQuad9 = Get-Ctrl "btnDnsQuad9"
+$btnDnsAdGuard = Get-Ctrl "btnDnsAdGuard"
 $btnDnsAuto = Get-Ctrl "btnDnsAuto"
 $btnDnsCustom = Get-Ctrl "btnDnsCustom"
 $btnDohAuto = Get-Ctrl "btnDohAuto"
@@ -11299,11 +14382,8 @@ $btnToggleTheme = Get-Ctrl "btnToggleTheme"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
 $btnDonateIos12 = Get-Ctrl "btnDonateIos12"
 $btnDonate = Get-Ctrl "btnDonate"
-$btnCreditLilBattiCLI = Get-Ctrl "btnCreditLilBattiCLI"
-$btnCreditChaythonCLI = Get-Ctrl "btnCreditChaythonCLI"
-$btnCreditChaythonGUI = Get-Ctrl "btnCreditChaythonGUI"
-$btnCreditChaythonFeatures = Get-Ctrl "btnCreditChaythonFeatures"
-$btnCreditIos12checker = Get-Ctrl "btnCreditIos12checker"
+$btnCreditLilBatti = Get-Ctrl "btnCreditLilBatti"
+$btnCreditChaython = Get-Ctrl "btnCreditChaython"
 
 $bdQuickFind = Get-Ctrl "bdQuickFind"
 $txtGlobalSearch = Get-Ctrl "txtGlobalSearch"
@@ -11311,6 +14391,9 @@ $lstSearchResults = Get-Ctrl "lstSearchResults"
 $pnlNavButtons = Get-Ctrl "pnlNavButtons"
 $svLog = Get-Ctrl "svLog"
 $LogBox = Get-Ctrl "LogBox"
+foreach ($itemsControl in @($lstWinget, $lstAppxPackages, $lstFw, $lstCatalog, $lstSearchResults)) {
+    Enable-WmtWpfItemsVirtualization -Control $itemsControl
+}
 if ($LogBox) {
     $LogBox.Add_TextChanged({
             param($s, $e)
@@ -11350,7 +14433,7 @@ foreach ($btnName in $TabButtons) {
             foreach ($b in $TabButtons) { 
                 $btn = Get-Ctrl $b
                 $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
-                $btn.Foreground = "#8B949E"
+                $btn.Foreground = $window.Resources["TextSecondary"]
                 $btn.FontWeight = "Normal"
                 $btn.Tag = "Collapsed"  # Hide indicator
             }
@@ -11360,11 +14443,11 @@ foreach ($btnName in $TabButtons) {
             $target = (Get-Ctrl $panelName)
             $target.Visibility = "Visible"
             # Set active state on clicked button
-            $s.Background = "#21262D"
-            $s.Foreground = "#E6EDF3"
+            $s.Background = $window.Resources["BgElevated"]
+            $s.Foreground = $window.Resources["TextPrimary"]
             $s.FontWeight = "SemiBold"
             $s.Tag = "Visible"  # Show indicator
-            if ($s.Name -eq "btnTabFirewall") { $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+            if ($s.Name -eq "btnTabFirewall") { Start-FirewallRuleLoad }
             if ($s.Name -eq "btnTabUpdates") {
                 if ($lstWinget.Items.Count -eq 0) { 
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
@@ -11388,6 +14471,7 @@ function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b = Get-Ctrl
 # 1. Updates (Winget)
 Add-SearchIndexEntry "btnWingetScan"        "Check for Updates (Winget)"      "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
@@ -11411,12 +14495,13 @@ Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "b
 Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
+Add-SearchIndexEntry "btnDnsAdGuard"        "Set DNS: AdGuard (Ad Blocking)"  "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
 Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
 
 # DNS Encryption & Hosts
-Add-SearchIndexEntry "btnDohAuto"           "Enable DoH (DNS over HTTPS)"     "btnTabNetwork"
-Add-SearchIndexEntry "btnDohDisable"        "Disable DoH"                     "btnTabNetwork"
+Add-SearchIndexEntry "btnDohAuto"           "Register DoH Templates"          "btnTabNetwork"
+Add-SearchIndexEntry "btnDohDisable"        "Remove DoH Templates"            "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
 Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
@@ -11488,6 +14573,27 @@ Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
 Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
 Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
 Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpShowExt" "Show File Extensions" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpShowHidden" "Show Hidden Files" "btnTabTweaks"
+Add-SearchIndexEntry "btnExpLaunchThisPc" "Open File Explorer to This PC" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseSpeedDefault" "Set Mouse Cursor Speed" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseAccelOff" "Disable Mouse Acceleration" "btnTabTweaks"
+Add-SearchIndexEntry "btnMouseSingleClick" "Single Click to Open Folders" "btnTabTweaks"
+Add-SearchIndexEntry "btnCtxClassic" "Classic Windows 11 Context Menu" "btnTabTweaks"
+Add-SearchIndexEntry "btnCtxTakeOwnAdd" "Add Take Ownership Context Menu" "btnTabTweaks"
+Add-SearchIndexEntry "btnPrivacySuggestedOff" "Disable Suggested Content" "btnTabTweaks"
+Add-SearchIndexEntry "btnSearchWebOff" "Disable Start Menu Web Search" "btnTabTweaks"
+Add-SearchIndexEntry "btnSearchIndexRebuild" "Rebuild Windows Search Index" "btnTabTweaks"
+Add-SearchIndexEntry "btnGameModeOn" "Enable Game Mode" "btnTabTweaks"
+Add-SearchIndexEntry "btnGameBarOff" "Disable Xbox Game Bar" "btnTabTweaks"
+Add-SearchIndexEntry "btnVisualSnappy" "Snappy Desktop Visual Effects" "btnTabTweaks"
+Add-SearchIndexEntry "btnNotifyTipsOff" "Disable Windows Tips" "btnTabTweaks"
+Add-SearchIndexEntry "btnLockPlain" "Plain Lock Screen" "btnTabTweaks"
+Add-SearchIndexEntry "btnStartupFastOff" "Disable Fast Startup" "btnTabTweaks"
+Add-SearchIndexEntry "btnSecuritySmartScreenOpen" "Open SmartScreen Settings" "btnTabTweaks"
+Add-SearchIndexEntry "btnPowerUsbSuspendOff" "Disable USB Selective Suspend" "btnTabTweaks"
+Add-SearchIndexEntry "btnDevLongPathsOn" "Enable Long Paths" "btnTabTweaks"
+Add-SearchIndexEntry "btnDevModeOn" "Enable Developer Mode" "btnTabTweaks"
 
 $txtGlobalSearch.Add_TextChanged({
         $q = $txtGlobalSearch.Text
@@ -11525,6 +14631,13 @@ $lstSearchResults.Add_SelectionChanged({
 # WINGET CONTEXT MENU (Right-Click)
 $ctxMenu = New-Object System.Windows.Controls.ContextMenu
 
+if ($lstWinget) {
+    $lstWinget.Add_PreviewMouseRightButtonDown({
+            param($s, $e)
+            Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource
+        })
+}
+
 # 1. Update Selected
 $miUpdate = New-Object System.Windows.Controls.MenuItem
 $miUpdate.Header = "Update Selected"
@@ -11534,7 +14647,17 @@ $miUpdate.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miUpdate)
 
-# 2. Uninstall Selected
+# 2. Update All
+$miUpdateAll = New-Object System.Windows.Controls.MenuItem
+$miUpdateAll.Header = "Update All"
+$miUpdateAll.Add_Click({
+        if ($btnWingetUpdateAll) {
+            $btnWingetUpdateAll.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        }
+    })
+[void]$ctxMenu.Items.Add($miUpdateAll)
+
+# 3. Uninstall Selected
 $miUninstall = New-Object System.Windows.Controls.MenuItem
 $miUninstall.Header = "Uninstall Selected"
 $miUninstall.Add_Click({ 
@@ -11542,10 +14665,29 @@ $miUninstall.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miUninstall)
 
+# 4. View Manifest
+$miManifest = New-Object System.Windows.Controls.MenuItem
+$miManifest.Header = "View App Manifest"
+$miManifest.ToolTip = "Show the winget manifest details for the selected package"
+$miManifest.Add_Click({
+        $selected = @($lstWinget.SelectedItems)
+        if ($selected.Count -ne 1) {
+            [System.Windows.MessageBox]::Show(
+                "Select one winget or Microsoft Store package to view its manifest.",
+                "Select One Package",
+                [System.Windows.MessageBoxButton]::OK,
+                [System.Windows.MessageBoxImage]::Information
+            ) | Out-Null
+            return
+        }
+        Show-WingetPackageManifest -Item $selected[0]
+    })
+[void]$ctxMenu.Items.Add($miManifest)
+
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 3. Ignore Selected
+# 5. Ignore Selected
 $miIgnore = New-Object System.Windows.Controls.MenuItem
 $miIgnore.Header = "Ignore Selected"
 $miIgnore.Add_Click({ 
@@ -11553,7 +14695,7 @@ $miIgnore.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miIgnore)
 
-# 4. Manage Ignored
+# 6. Manage Ignored
 $miManage = New-Object System.Windows.Controls.MenuItem
 $miManage.Header = "Manage Ignored List..."
 $miManage.Add_Click({ 
@@ -11564,7 +14706,7 @@ $miManage.Add_Click({
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
-# 5. Refresh Updates
+# 7. Refresh Updates
 $miRefresh = New-Object System.Windows.Controls.MenuItem
 $miRefresh.Header = "Refresh Updates"
 $miRefresh.Add_Click({ 
@@ -11572,7 +14714,20 @@ $miRefresh.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miRefresh)
 
-# 6. Attach to List
+$ctxMenu.Add_Opened({
+        $selected = @($lstWinget.SelectedItems)
+        $canShowManifest = ($selected.Count -eq 1 -and (Test-WingetManifestSupportedItem $selected[0]))
+        $miUpdateAll.IsEnabled = ($btnWingetUpdateAll -and $btnWingetUpdateAll.Visibility -eq [System.Windows.Visibility]::Visible)
+        $miManifest.IsEnabled = $canShowManifest
+        if ($canShowManifest) {
+            $miManifest.ToolTip = "Show the winget manifest details for the selected package"
+        }
+        else {
+            $miManifest.ToolTip = "Select one winget or Microsoft Store package to view its manifest"
+        }
+    })
+
+# 8. Attach to List
 $lstWinget.ContextMenu = $ctxMenu
 
 # --- WINGET ---
@@ -11602,6 +14757,7 @@ $Script:StartWingetAction = {
     # UI Updates
     $btnWingetScan.IsEnabled = $false
     $btnWingetUpdateSel.IsEnabled = $false
+    if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $false }
     if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $false }
     if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $false }
     $lblWingetStatus.Text = "$ActionName in progress..."
@@ -12218,6 +15374,7 @@ timeout /t 5
 
                 $btnWingetScan.IsEnabled = $true
                 $btnWingetUpdateSel.IsEnabled = $true
+                if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                 if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
                 if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
 
@@ -12248,30 +15405,38 @@ function Show-ProviderManager {
     $enabled = $settings.EnabledProviders
 
     # 2. Define UI
-    [xml]$pXaml = @"
+[xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize" Background="#252526">
+        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
-        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="#DDD"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
-        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="White"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
+        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="Button">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,0"/>
+        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         
         <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
-        <TextBlock Text="Select which package managers to scan." Foreground="#AAA" Margin="0,25,0,0" Grid.Row="0"/>
+        <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
 
         <StackPanel Grid.Row="1" Margin="0,15,0,0">
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
                 <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Windows Package Manager" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Windows Package Manager" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkMsStore" Grid.Column="0"/>
                 <TextBlock Text="MS Store" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Microsoft Store Apps" Foreground="#888" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Microsoft Store Apps" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -12319,13 +15484,14 @@ function Show-ProviderManager {
         </StackPanel>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Name="btnSave" Content="Save &amp; Close" Background="#007ACC" Width="120" Height="30" Foreground="White"/>
+            <Button Name="btnSave" Content="Save &amp; Close" Background="{DynamicResource Accent}" Width="120" Height="30" Foreground="{DynamicResource AccentText}"/>
         </StackPanel>
     </Grid>
 </Window>
 "@
     $reader = (New-Object System.Xml.XmlNodeReader $pXaml)
     $win = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $win
 
     function Get-WinCtrl($name) { $win.FindName($name) }
     
@@ -12349,24 +15515,25 @@ function Show-ProviderManager {
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
 
     # Helper for status check
-    function Set-Status($cmd, $lbl) {
+    function Set-ProviderStatus($cmd, $lbl) {
+        $labelCtrl = Get-WinCtrl $lbl
         if (Get-Command $cmd -ErrorAction SilentlyContinue) {
-            (Get-WinCtrl $lbl).Text = "Installed"
-            (Get-WinCtrl $lbl).Foreground = "LightGreen"
+            $labelCtrl.Text = "Installed"
+            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
         }
         else {
-            (Get-WinCtrl $lbl).Text = "Not Found"
-            (Get-WinCtrl $lbl).Foreground = "Orange"
+            $labelCtrl.Text = "Not Found"
+            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
         }
     }
 
-    Set-Status "pip" "lblPipStatus"
-    Set-Status "npm" "lblNpmStatus"
-    Set-Status "pnpm" "lblPnpmStatus"
-    Set-Status "choco" "lblChocoStatus"
-    Set-Status "scoop" "lblScoopStatus"
-    Set-Status "gem" "lblGemStatus"
-    Set-Status "cargo" "lblCargoStatus"
+    Set-ProviderStatus "pip" "lblPipStatus"
+    Set-ProviderStatus "npm" "lblNpmStatus"
+    Set-ProviderStatus "pnpm" "lblPnpmStatus"
+    Set-ProviderStatus "choco" "lblChocoStatus"
+    Set-ProviderStatus "scoop" "lblScoopStatus"
+    Set-ProviderStatus "gem" "lblGemStatus"
+    Set-ProviderStatus "cargo" "lblCargoStatus"
 
     # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
@@ -12603,6 +15770,7 @@ $btnWingetScan.Add_Click({
         $btnWingetUpdateSel.IsEnabled = $false
         $btnWingetInstall.Visibility = "Collapsed"
         $btnWingetUpdateSel.Visibility = "Visible"
+        if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
@@ -13102,6 +16270,7 @@ $btnWingetUnignore.Add_Click({
         $lb.ForeColor = "White"
         $lb.BorderStyle = "FixedSingle"
         $lb.SelectionMode = "MultiExtended"
+        Set-WmtDoubleBuffered -Control $lb
     
         # Manual Add (Fail-safe)
         $lb.BeginUpdate()
@@ -13307,7 +16476,9 @@ $btnWingetFind.Add_Click({
         $query = $txtWingetSearch.Text
         $lblWingetTitle.Text = "Search Results: $query"
         $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
-        $btnWingetUpdateSel.Visibility = "Collapsed"; $btnWingetInstall.Visibility = "Visible"
+        $btnWingetUpdateSel.Visibility = "Collapsed"
+        if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Collapsed" }
+        $btnWingetInstall.Visibility = "Visible"
         $lstWinget.Items.Clear()
         $btnWingetFind.IsEnabled = $false 
     
@@ -13375,9 +16546,14 @@ $btnWingetFind.Add_Click({
 
                             # Split by 2 OR MORE spaces (\s{2,}). 
                             # This perfectly separates columns without breaking names that have 1 space!
-                            $parts = $line -split '\s{2,}'
+                            $parts = @($line -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
+                            $headerTokens = @("name", "id", "version", "match", "source")
+                            $nonDividerParts = @($parts | Where-Object { $_ -notmatch "^-+$" })
+                            if ($nonDividerParts.Count -eq 0) { continue }
+                            if (@($nonDividerParts | Where-Object { $headerTokens -notcontains $_.ToLowerInvariant() }).Count -eq 0) { continue }
+
                             $len = $parts.Count
-                        
+
                             $n = $null; $i = $null; $v = $null; $s = "winget"
 
                             if ($len -ge 5) {
@@ -13403,9 +16579,13 @@ $btnWingetFind.Add_Click({
 
                             if ($n -and $i -and $i.Length -gt 2) {
                                 # Final header checks just in case
-                                if ($n -eq "Name" -and $i -eq "Id") { continue }
-                                if ($i -eq "Version" -or $v -eq "Source") { continue }
-                            
+                                $nText = ([string]$n).Trim()
+                                $iText = ([string]$i).Trim()
+                                $vText = ([string]$v).Trim()
+                                if ($nText -eq "-" -or $nText.ToLowerInvariant() -eq "name") { continue }
+                                if ($iText -eq "-" -or $headerTokens -contains $iText.ToLowerInvariant()) { continue }
+                                if ($vText -eq "-" -or $headerTokens -contains $vText.ToLowerInvariant()) { continue }
+
                                 if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
                                 if ($v -eq "Unknown") { $v = "?" }
                             
@@ -13500,6 +16680,35 @@ $btnWingetUpdateSel.Add_Click({
         }
         & $Script:StartWingetAction -ListItems $selected -ActionName "Update"
     })
+
+function Get-WingetListedUpdateItems {
+    if (-not $lstWinget) { return @() }
+    return @($lstWinget.Items | Where-Object {
+            $id = [string]$_.Id
+            $source = [string]$_.Source
+            $name = [string]$_.Name
+            -not [string]::IsNullOrWhiteSpace($id) -and
+            -not [string]::IsNullOrWhiteSpace($source) -and
+            $name -notin @("No results found", "No updates available")
+        })
+}
+
+if ($btnWingetUpdateAll) {
+    $btnWingetUpdateAll.Add_Click({
+            $items = @(Get-WingetListedUpdateItems)
+            if ($items.Count -eq 0) { return }
+
+            $msg = "Update all $($items.Count) listed package(s)?"
+            $res = [System.Windows.MessageBox]::Show($msg, "Update All", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+            if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+            if (-not (Show-WingetRestartRiskWarning -Items $items -Action "Update")) {
+                Write-GuiLog "[Update All] Cancelled by user after restart warning."
+                return
+            }
+            & $Script:StartWingetAction -ListItems $items -ActionName "Update"
+        })
+}
 
 # 2. Install Selected (Removed CmdTemplate so it includes --accept-agreements)
 $btnWingetInstall.Add_Click({ 
@@ -13630,35 +16839,22 @@ $btnRouteView.Add_Click({
     })
 
 $btnDnsGoogle.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Google (8.8.8.8 / 8.8.4.4) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("8.8.8.8", "8.8.4.4") -Label "Google DNS"
+        Invoke-DnsPreset -ProviderKey "Google"
     })
 $btnDnsCloudflare.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Cloudflare (1.1.1.1 / 1.0.0.1) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("1.1.1.1", "1.0.0.1") -Label "Cloudflare DNS"
+        Invoke-DnsPreset -ProviderKey "Cloudflare"
     })
 $btnDnsQuad9.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Set DNS to Quad9 (9.9.9.9 / 149.112.112.112) on all active adapters?", "DNS Preset", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Set-DnsAddresses -Addresses @("9.9.9.9", "149.112.112.112") -Label "Quad9 DNS"
+        Invoke-DnsPreset -ProviderKey "Quad9"
+    })
+$btnDnsAdGuard.Add_Click({
+        Invoke-DnsPreset -ProviderKey "AdGuard"
     })
 $btnDnsAuto.Add_Click({
-        Invoke-UiCommand {
-            Get-ActiveAdapters | Select-Object -ExpandProperty Name | ForEach-Object { Set-DnsClientServerAddress -InterfaceAlias $_ -ResetServerAddresses }
-            Write-Output "DNS reset to automatic (DHCP)."
-            [System.Windows.MessageBox]::Show("DNS reset to automatic (DHCP).", "DNS Reset", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        } "Resetting DNS..."
+        Reset-DnsAddressesToAutomatic
     })
 $btnDnsCustom.Add_Click({
-        $dnsInput = [Microsoft.VisualBasic.Interaction]::InputBox("Enter DNS addresses (comma separated)", "Custom DNS", "1.1.1.1,8.8.8.8")
-        if (-not $dnsInput) { return }
-        $addresses = $dnsInput.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries) | ForEach-Object { $_.Trim() } | Where-Object { $_ }
-        $valid = @()
-        foreach ($addr in $addresses) { if (Test-Connection -ComputerName $addr -Count 1 -Quiet -ErrorAction SilentlyContinue) { $valid += $addr } else { Write-GuiLog "Unreachable DNS skipped: $addr" } }
-        if (-not $valid) { [System.Windows.MessageBox]::Show("No reachable DNS addresses were provided.", "Custom DNS", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning); return }
-        Set-DnsAddresses -Addresses $valid -Label "Custom DNS"
+        Invoke-CustomDnsSettings
     })
 
 $btnDohAuto.Add_Click({ Enable-AllDoh })
@@ -13684,6 +16880,7 @@ $btnHostsRestore.Add_Click({
 $lstFw.Add_MouseDoubleClick({
         $rule = $lstFw.SelectedItem
         if ($null -eq $rule) { return }
+        Initialize-FirewallRuleDetails -Rule $rule -Synchronous
 
         # 1. Open existing dialog with the selected rule
         $result = Show-RuleDialog "Edit Firewall Rule" $rule
@@ -13729,6 +16926,7 @@ $mniCopyPort = New-Object System.Windows.Controls.MenuItem
 $mniCopyPort.Header = "Copy Port/Protocol"
 $mniCopyPort.Add_Click({
         if ($lstFw.SelectedItem) {
+            Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous
             $info = "$($lstFw.SelectedItem.Protocol) : $($lstFw.SelectedItem.LocalPort)"
             try {
                 [System.Windows.Forms.Clipboard]::SetText($info)
@@ -13742,6 +16940,7 @@ $mniCopyAll = New-Object System.Windows.Controls.MenuItem
 $mniCopyAll.Header = "Copy Full Details"
 $mniCopyAll.Add_Click({
         if ($lstFw.SelectedItem) {
+            Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous
             # Create a nice string representation of the rule
             $rule = $lstFw.SelectedItem
             $text = "Name: $($rule.Name)`nEnabled: $($rule.Enabled)`nAction: $($rule.Action)`nDirection: $($rule.Direction)`nProtocol: $($rule.Protocol)`nPort: $($rule.LocalPort)"
@@ -13760,13 +16959,387 @@ $mniCopyAll.Add_Click({
 
 # Attach to the ListView
 $lstFw.ContextMenu = $fwCtxMenu
-$AllFw = @()
-$btnFwRefresh.Add_Click({
-        $lblFwStatus.Visibility = "Visible"; $lstFw.Items.Clear(); [System.Windows.Forms.Application]::DoEvents()
-        $AllFw = Get-NetFirewallRule | Select-Object Name, DisplayName, @{N = 'Enabled'; E = { $_.Enabled.ToString() } }, Direction, @{N = 'Action'; E = { $_.Action.ToString() } }, @{N = 'Protocol'; E = { ($_.GetNetworkProtocols().Protocol) } }, @{N = 'LocalPort'; E = { ($_.GetNetworkProtocols().LocalPort) } }
-        $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        $lblFwStatus.Visibility = "Collapsed"
-    })
+$script:AllFw = @()
+$script:FirewallRulesLoaded = $false
+$script:FirewallLoadInProgress = $false
+$script:FirewallLoadRunspace = $null
+$script:FirewallLoadAsyncResult = $null
+$script:FirewallLoadTimer = $null
+$script:FirewallDetailCache = @{}
+$script:FirewallDetailJob = $null
+$script:FirewallDetailTimer = $null
+$script:FirewallDetailToken = 0
+
+function Test-FirewallSearchIsBlank {
+    param([string]$Text)
+    return ([string]::IsNullOrWhiteSpace($Text) -or $Text -in @("Search Rules...", "Search rules..."))
+}
+
+function Set-FirewallStatus {
+    param(
+        [string]$Text,
+        [bool]$Visible = $true
+    )
+    if (-not $lblFwStatus) { return }
+    if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "Ready" }
+    $lblFwStatus.Text = $Text
+    $lblFwStatus.Visibility = if ($Visible) { "Visible" } else { "Collapsed" }
+}
+
+function Set-FirewallRuleProperty {
+    param($Rule, [string]$Name, $Value)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace($Name)) { return }
+    $prop = $Rule.PSObject.Properties[$Name]
+    if ($prop) {
+        $prop.Value = $Value
+    }
+    else {
+        $Rule | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force
+    }
+}
+
+function Format-FirewallFilterValue {
+    param([object[]]$Values)
+    $clean = @(
+        $Values | ForEach-Object {
+            if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
+            else { [string]$_ }
+        } | Select-Object -Unique
+    )
+    if ($clean.Count -eq 0) { return "Any" }
+    return ($clean -join ", ")
+}
+
+function Get-FirewallRuleDetails {
+    param([string]$Name)
+    try {
+        $rule = Get-NetFirewallRule -Name $Name -ErrorAction Stop
+        $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+        if ($filters.Count -eq 0) {
+            return [PSCustomObject]@{ Success = $true; Name = $Name; Protocol = "Any"; LocalPort = "Any"; Error = "" }
+        }
+
+        $protocol = Format-FirewallFilterValue -Values @($filters | ForEach-Object { $_.Protocol })
+        $localPort = Format-FirewallFilterValue -Values @($filters | ForEach-Object { $_.LocalPort })
+        return [PSCustomObject]@{ Success = $true; Name = $Name; Protocol = $protocol; LocalPort = $localPort; Error = "" }
+    }
+    catch {
+        return [PSCustomObject]@{ Success = $false; Name = $Name; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message }
+    }
+}
+
+function Set-FirewallRuleDetails {
+    param($Rule, $Details)
+    if (-not $Rule -or -not $Details) { return }
+    if ($Details.Success) {
+        Set-FirewallRuleProperty -Rule $Rule -Name "Protocol" -Value $Details.Protocol
+        Set-FirewallRuleProperty -Rule $Rule -Name "LocalPort" -Value $Details.LocalPort
+        Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoaded" -Value $true
+    }
+    Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $false
+}
+
+function Test-FirewallRuleMatchesQuery {
+    param($Rule, [string]$Query)
+    if (-not $Rule) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Query)) { return $true }
+
+    $fields = @(
+        $Rule.Name,
+        $Rule.DisplayName,
+        $Rule.Direction,
+        $Rule.Action,
+        $Rule.Enabled,
+        $Rule.Protocol,
+        $Rule.LocalPort
+    )
+    foreach ($field in $fields) {
+        if ($null -ne $field -and ([string]$field).IndexOf($Query, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Update-FirewallListView {
+    if (-not $lstFw) { return }
+    $selectedName = if ($lstFw.SelectedItem) { [string]$lstFw.SelectedItem.Name } else { $null }
+    $query = if ($txtFwSearch) { [string]$txtFwSearch.Text } else { "" }
+    $rules = @($script:AllFw)
+
+    if (-not (Test-FirewallSearchIsBlank $query)) {
+        $rules = @($rules | Where-Object { Test-FirewallRuleMatchesQuery -Rule $_ -Query $query.Trim() })
+    }
+
+    $lstFw.Items.Clear()
+    foreach ($rule in $rules) { [void]$lstFw.Items.Add($rule) }
+    if ($script:FirewallSortChain -and $script:FirewallSortChain.Count -gt 0) {
+        Set-ListViewSort -ListView $lstFw -Chain $script:FirewallSortChain
+    }
+    if ($selectedName) {
+        foreach ($item in $lstFw.Items) {
+            if ($item.Name -eq $selectedName) {
+                $lstFw.SelectedItem = $item
+                break
+            }
+        }
+    }
+}
+
+function Stop-FirewallDetailLoad {
+    if ($script:FirewallDetailTimer) {
+        try { $script:FirewallDetailTimer.Stop() } catch {}
+        $script:FirewallDetailTimer = $null
+    }
+    if ($script:FirewallDetailJob) {
+        try { $script:FirewallDetailJob.PowerShell.Stop() } catch {}
+        try { $script:FirewallDetailJob.PowerShell.Dispose() } catch {}
+        $script:FirewallDetailJob = $null
+    }
+}
+
+function Stop-FirewallRuleLoad {
+    if ($script:FirewallLoadTimer) {
+        try { $script:FirewallLoadTimer.Stop() } catch {}
+        $script:FirewallLoadTimer = $null
+    }
+    if ($script:FirewallLoadRunspace) {
+        try { $script:FirewallLoadRunspace.Stop() } catch {}
+        try { $script:FirewallLoadRunspace.Dispose() } catch {}
+        $script:FirewallLoadRunspace = $null
+    }
+    $script:FirewallLoadAsyncResult = $null
+    $script:FirewallLoadInProgress = $false
+    if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
+}
+
+function Start-FirewallRuleDetailLoad {
+    param($Rule)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
+    if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
+
+    $name = [string]$Rule.Name
+    if ($script:FirewallDetailCache.ContainsKey($name)) {
+        Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        return
+    }
+
+    if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Name -eq $name) { return }
+    Stop-FirewallDetailLoad
+
+    Set-FirewallRuleProperty -Rule $Rule -Name "Protocol" -Value "..."
+    Set-FirewallRuleProperty -Rule $Rule -Name "LocalPort" -Value "..."
+    Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $true
+    if ($lstFw) { $lstFw.Items.Refresh() }
+
+    $script:FirewallDetailToken++
+    $token = $script:FirewallDetailToken
+    Set-FirewallStatus "Loading selected rule details..." -Visible $true
+
+    $ps = [PowerShell]::Create().AddScript({
+            param([string]$RuleName)
+            function Format-RuleValue {
+                param([object[]]$Values)
+                $clean = @(
+                    $Values | ForEach-Object {
+                        if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
+                        else { [string]$_ }
+                    } | Select-Object -Unique
+                )
+                if ($clean.Count -eq 0) { return "Any" }
+                return ($clean -join ", ")
+            }
+
+            try {
+                $rule = Get-NetFirewallRule -Name $RuleName -ErrorAction Stop
+                $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+                if ($filters.Count -eq 0) {
+                    return [PSCustomObject]@{ Success = $true; Name = $RuleName; Protocol = "Any"; LocalPort = "Any"; Error = "" }
+                }
+
+                $protocol = Format-RuleValue -Values @($filters | ForEach-Object { $_.Protocol })
+                $localPort = Format-RuleValue -Values @($filters | ForEach-Object { $_.LocalPort })
+                return [PSCustomObject]@{ Success = $true; Name = $RuleName; Protocol = $protocol; LocalPort = $localPort; Error = "" }
+            }
+            catch {
+                return [PSCustomObject]@{ Success = $false; Name = $RuleName; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message }
+            }
+        }).AddArgument($name)
+
+    $async = $ps.BeginInvoke()
+    $script:FirewallDetailJob = [PSCustomObject]@{ Name = $name; PowerShell = $ps; Async = $async; Token = $token }
+    $script:FirewallDetailTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:FirewallDetailTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:FirewallDetailTimer.Add_Tick({
+            if (-not $script:FirewallDetailJob -or -not $script:FirewallDetailJob.Async.IsCompleted) { return }
+
+            $job = $script:FirewallDetailJob
+            $script:FirewallDetailTimer.Stop()
+            try {
+                $result = $job.PowerShell.EndInvoke($job.Async)
+                if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+                $target = @($script:AllFw | Where-Object { $_.Name -eq $job.Name } | Select-Object -First 1)
+                if ($result -and $result.Success) {
+                    $script:FirewallDetailCache[$result.Name] = $result
+                    if ($target.Count -gt 0) { Set-FirewallRuleDetails -Rule $target[0] -Details $result }
+                }
+                else {
+                    if ($target.Count -gt 0) {
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "Protocol" -Value ""
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "LocalPort" -Value ""
+                        Set-FirewallRuleProperty -Rule $target[0] -Name "DetailsLoading" -Value $false
+                    }
+                    if ($result -and $result.Error) { Write-GuiLog "[Firewall] Failed to load selected rule details: $($result.Error)" }
+                }
+
+                if ($txtFwSearch -and -not (Test-FirewallSearchIsBlank $txtFwSearch.Text)) {
+                    Update-FirewallListView
+                }
+                elseif ($lstFw) {
+                    $lstFw.Items.Refresh()
+                }
+            }
+            catch {
+                Write-GuiLog "[Firewall] Failed to load selected rule details: $($_.Exception.Message)"
+            }
+            finally {
+                try { $job.PowerShell.Dispose() } catch {}
+                if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Token -eq $job.Token) { $script:FirewallDetailJob = $null }
+                $script:FirewallDetailTimer = $null
+                Set-FirewallStatus "" -Visible $false
+            }
+        })
+    $script:FirewallDetailTimer.Start()
+}
+
+function Initialize-FirewallRuleDetails {
+    param($Rule, [switch]$Synchronous)
+    if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
+    if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
+
+    $name = [string]$Rule.Name
+    if ($script:FirewallDetailCache.ContainsKey($name)) {
+        Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        return
+    }
+
+    if ($Synchronous) {
+        Stop-FirewallDetailLoad
+        Set-FirewallStatus "Loading selected rule details..." -Visible $true
+        $details = Get-FirewallRuleDetails -Name $name
+        if ($details.Success) {
+            $script:FirewallDetailCache[$name] = $details
+            Set-FirewallRuleDetails -Rule $Rule -Details $details
+        }
+        else {
+            Set-FirewallRuleProperty -Rule $Rule -Name "DetailsLoading" -Value $false
+            Write-GuiLog "[Firewall] Failed to load selected rule details: $($details.Error)"
+        }
+        if ($lstFw) { $lstFw.Items.Refresh() }
+        Set-FirewallStatus "" -Visible $false
+        return
+    }
+
+    Start-FirewallRuleDetailLoad -Rule $Rule
+}
+
+function Start-FirewallRuleLoad {
+    param([switch]$Force)
+    if ($script:FirewallLoadInProgress) {
+        if (-not $Force) { return }
+        Stop-FirewallRuleLoad
+    }
+    if ($script:FirewallRulesLoaded -and -not $Force) {
+        Update-FirewallListView
+        return
+    }
+
+    Stop-FirewallDetailLoad
+    $script:FirewallLoadInProgress = $true
+    $script:FirewallRulesLoaded = $false
+    $script:FirewallDetailCache = @{}
+    if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $false }
+    if ($lstFw) { $lstFw.Items.Clear() }
+    Set-FirewallStatus "Loading firewall rules..." -Visible $true
+    Write-GuiLog "[Firewall] Loading base rule list..."
+
+    $script:FirewallLoadRunspace = [PowerShell]::Create().AddScript({
+            try {
+                $rules = @(Get-NetFirewallRule -ErrorAction Stop | ForEach-Object {
+                        $displayName = if ([string]::IsNullOrWhiteSpace([string]$_.DisplayName)) { $_.Name } else { $_.DisplayName }
+                        [PSCustomObject]@{
+                            Name           = [string]$_.Name
+                            DisplayName    = [string]$displayName
+                            Enabled        = $_.Enabled.ToString()
+                            Direction      = $_.Direction.ToString()
+                            Action         = $_.Action.ToString()
+                            Protocol       = ""
+                            LocalPort      = ""
+                            DetailsLoaded  = $false
+                            DetailsLoading = $false
+                        }
+                    })
+                return [PSCustomObject]@{ Success = $true; Rules = $rules; Error = "" }
+            }
+            catch {
+                return [PSCustomObject]@{ Success = $false; Rules = @(); Error = $_.Exception.Message }
+            }
+        })
+    $script:FirewallLoadAsyncResult = $script:FirewallLoadRunspace.BeginInvoke()
+
+    $script:FirewallLoadTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:FirewallLoadTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+    $script:FirewallLoadTimer.Add_Tick({
+            if (-not $script:FirewallLoadAsyncResult -or -not $script:FirewallLoadAsyncResult.IsCompleted) { return }
+
+            $script:FirewallLoadTimer.Stop()
+            try {
+                $result = $script:FirewallLoadRunspace.EndInvoke($script:FirewallLoadAsyncResult)
+                if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+                if ($result -and $result.Success) {
+                    $script:AllFw = @($result.Rules | Where-Object { $null -ne $_ })
+                    $script:FirewallRulesLoaded = $true
+                    Update-FirewallListView
+                    Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
+                    Set-FirewallStatus "" -Visible $false
+                }
+                else {
+                    $script:AllFw = @()
+                    $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
+                    Set-FirewallStatus "Firewall load failed" -Visible $true
+                    Write-GuiLog "[Firewall] Load failed: $err"
+                }
+            }
+            catch {
+                $script:AllFw = @()
+                Set-FirewallStatus "Firewall load failed" -Visible $true
+                Write-GuiLog "[Firewall] Load failed: $($_.Exception.Message)"
+            }
+            finally {
+                try { $script:FirewallLoadRunspace.Dispose() } catch {}
+                $script:FirewallLoadRunspace = $null
+                $script:FirewallLoadAsyncResult = $null
+                $script:FirewallLoadInProgress = $false
+                $script:FirewallLoadTimer = $null
+                if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
+            }
+        })
+    $script:FirewallLoadTimer.Start()
+}
+
+$btnFwRefresh.Add_Click({ Start-FirewallRuleLoad -Force })
+
+if ($lstFw) {
+    $lstFw.Add_SelectionChanged({
+            if ($lstFw.SelectedItem) {
+                Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem
+            }
+        })
+}
 
 # --- FIREWALL LISTVIEW SORTING LOGIC ---
 $script:FirewallSortChain = New-Object System.Collections.ArrayList
@@ -13800,22 +17373,13 @@ if ($lstFw) {
     $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler)
 }
 
-$txtFwSearch.Add_TextChanged({
-        $q = $txtFwSearch.Text
-        $lstFw.Items.Clear()
-        if ($q -and $q -notin @("Search Rules...", "Search rules...")) {
-            $AllFw | Where-Object { $_.DisplayName -match $q -or $_.LocalPort -match $q } | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        }
-        else {
-            $AllFw | ForEach-Object { [void]$lstFw.Items.Add($_) }
-        }
-    })
+$txtFwSearch.Add_TextChanged({ Update-FirewallListView })
 $txtFwSearch.Add_GotFocus({
         $t = $txtFwSearch
         if ($t.Text -in @("Search Rules...", "Search rules...")) { $t.Text = "" }
     })
 $btnFwAdd.Add_Click({ $d = Show-RuleDialog "Add Rule"; if ($d) { try { New-NetFirewallRule -DisplayName $d.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port -ErrorAction Stop; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } })
-$btnFwEdit.Add_Click({ if ($lstFw.SelectedItem) { $d = Show-RuleDialog "Edit" $lstFw.SelectedItem; if ($d) { try { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } } })
+$btnFwEdit.Add_Click({ if ($lstFw.SelectedItem) { Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous; $d = Show-RuleDialog "Edit" $lstFw.SelectedItem; if ($d) { try { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Direction $d.Direction -Action $d.Action -Protocol $d.Protocol -LocalPort $d.Port; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }catch { [System.Windows.MessageBox]::Show("Err: $_") } } } })
 $btnFwEnable.Add_Click({ if ($lstFw.SelectedItem) { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Enabled True; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 $btnFwDisable.Add_Click({ if ($lstFw.SelectedItem) { Set-NetFirewallRule -Name $lstFw.SelectedItem.Name -Enabled False; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 $btnFwDelete.Add_Click({ if ($lstFw.SelectedItem) { Remove-NetFirewallRule -Name $lstFw.SelectedItem.Name; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
@@ -13868,10 +17432,11 @@ $btnCleanReg.Add_Click({
             $btn.Add_Click({ param($s, $e) $form.Tag = $s.Tag; $form.Close() })
             $form.Controls.Add($btn); $y += 40
         }
+        Set-WmtWinFormsTheme -Control $form
         $form.ShowDialog() | Out-Null
         if ($form.Tag) { Invoke-RegistryTask -Action $form.Tag }
     })
-$# --- OneDrive Cleanup ---
+# --- OneDrive Cleanup ---
 $btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
 if ($btnCleanupOneDrive) {
     # Check if OneDrive is actually present on the system before enabling the button
@@ -13955,11 +17520,8 @@ $btnCtxBuilder.Add_Click({ Show-ContextMenuBuilder })
 if ($btnSupportDiscord) { $btnSupportDiscord.Add_Click({ Start-Process "https://discord.gg/bCQqKHGxja" }) }
 if ($btnSupportIssue) { $btnSupportIssue.Add_Click({ Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/issues/new/choose" }) }
 if ($btnDonateIos12) { $btnDonateIos12.Add_Click({ Start-Process "https://github.com/sponsors/ios12checker" }) }
-if ($btnCreditLilBattiCLI) { $btnCreditLilBattiCLI.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
-if ($btnCreditChaythonFeatures) { $btnCreditChaythonFeatures.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditChaythonCLI) { $btnCreditChaythonCLI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditChaythonGUI) { $btnCreditChaythonGUI.Add_Click({ Start-Process "https://github.com/Chaython" }) }
-if ($btnCreditIos12checker) { $btnCreditIos12checker.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnCreditLilBatti) { $btnCreditLilBatti.Add_Click({ Start-Process "https://github.com/ios12checker" }) }
+if ($btnCreditChaython) { $btnCreditChaython.Add_Click({ Start-Process "https://github.com/Chaython" }) }
 if ($btnToggleTheme) {
     $btnToggleTheme.Add_Click({
             $nextTheme = if ($script:CurrentTheme -eq "dark") { "light" } else { "dark" }
@@ -14443,6 +18005,405 @@ if ($btnAlwaysCombine) {
         })
 }
 
+function Register-WmtTweakButton {
+    param(
+        [string]$Name,
+        [scriptblock]$Action
+    )
+
+    $button = Get-Ctrl $Name
+    if (-not $button) { return }
+    $button.Add_Click({
+            & $Action
+            Update-TweakButtonStates
+        }.GetNewClosure())
+}
+
+$script:WmtSuggestionContentNames = @(
+    "ContentDeliveryAllowed",
+    "FeatureManagementEnabled",
+    "OemPreInstalledAppsEnabled",
+    "PreInstalledAppsEnabled",
+    "PreInstalledAppsEverEnabled",
+    "SilentInstalledAppsEnabled",
+    "SoftLandingEnabled",
+    "SubscribedContent-310093Enabled",
+    "SubscribedContent-338388Enabled",
+    "SubscribedContent-338389Enabled",
+    "SubscribedContent-338393Enabled",
+    "SubscribedContent-353694Enabled",
+    "SubscribedContent-353696Enabled",
+    "SystemPaneSuggestionsEnabled"
+)
+
+Register-WmtTweakButton "btnExpShowExt" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 0
+        Restart-WmtExplorer
+        Write-GuiLog "File extensions are now visible."
+    } "Showing file extensions..."
+}
+Register-WmtTweakButton "btnExpHideExt" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Known file extensions are now hidden."
+    } "Hiding file extensions..."
+}
+Register-WmtTweakButton "btnExpShowHidden" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Hidden files and folders are now visible."
+    } "Showing hidden files..."
+}
+Register-WmtTweakButton "btnExpHideHidden" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 2
+        Restart-WmtExplorer
+        Write-GuiLog "Hidden files and folders are now hidden."
+    } "Hiding hidden files..."
+}
+Register-WmtTweakButton "btnExpFullPathOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Explorer title bars now show full paths."
+    } "Enabling Explorer full path titles..."
+}
+Register-WmtTweakButton "btnExpFullPathOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Explorer title bars now use default path display."
+    } "Disabling Explorer full path titles..."
+}
+Register-WmtTweakButton "btnExpLaunchThisPc" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 1
+        Write-GuiLog "File Explorer now opens to This PC."
+    } "Setting Explorer to open This PC..."
+}
+Register-WmtTweakButton "btnExpLaunchQuickAccess" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 2
+        Write-GuiLog "File Explorer now opens to Quick Access/Home."
+    } "Setting Explorer to open Quick Access..."
+}
+Register-WmtTweakButton "btnExpHideRecents" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Recent and frequent Quick Access items are hidden."
+    } "Hiding Explorer recent items..."
+}
+Register-WmtTweakButton "btnExpShowRecents" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Recent and frequent Quick Access items are visible."
+    } "Showing Explorer recent items..."
+}
+
+Register-WmtTweakButton "btnMouseSpeedSlow" { Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseSpeedDefault" { Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseSpeedFast" { Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15." } "Setting mouse pointer speed..." }
+Register-WmtTweakButton "btnMouseAccelOn" { Invoke-UiCommand { Set-WmtMouseAcceleration $true; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..." }
+Register-WmtTweakButton "btnMouseAccelOff" { Invoke-UiCommand { Set-WmtMouseAcceleration $false; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..." }
+Register-WmtTweakButton "btnMouseSingleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click folder opening..." }
+Register-WmtTweakButton "btnMouseDoubleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click folder opening..." }
+Register-WmtTweakButton "btnMouseSettings" { Start-Process "ms-settings:mousetouchpad" }
+
+Register-WmtTweakButton "btnCtxClassic" { Invoke-UiCommand { Set-WmtClassicContextMenu $true; Write-GuiLog "Classic Windows 11 context menu enabled." } "Enabling classic context menu..." }
+Register-WmtTweakButton "btnCtxModern" { Invoke-UiCommand { Set-WmtClassicContextMenu $false; Write-GuiLog "Modern Windows 11 context menu restored." } "Restoring modern context menu..." }
+Register-WmtTweakButton "btnCtxTakeOwnAdd" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $true; Write-GuiLog "Take Ownership context menu installed." } "Adding Take Ownership context menu..." }
+Register-WmtTweakButton "btnCtxTakeOwnRemove" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $false; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership context menu..." }
+Register-WmtTweakButton "btnCtxPsHereAdd" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $true; Write-GuiLog "Open PowerShell Here context menu installed." } "Adding PowerShell context menu..." }
+Register-WmtTweakButton "btnCtxPsHereRemove" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $false; Write-GuiLog "Open PowerShell Here context menu removed." } "Removing PowerShell context menu..." }
+
+Register-WmtTweakButton "btnPrivacyAdsOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..." }
+Register-WmtTweakButton "btnPrivacyAdsOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..." }
+Register-WmtTweakButton "btnPrivacySuggestedOff" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures" 1
+        Write-GuiLog "Suggested content disabled."
+    } "Disabling suggested content..."
+}
+Register-WmtTweakButton "btnPrivacySuggestedOn" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures"
+        Write-GuiLog "Suggested content restored."
+    } "Restoring suggested content..."
+}
+Register-WmtTweakButton "btnPrivacyTailoredOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 1
+        Write-GuiLog "Tailored experiences disabled."
+    } "Disabling tailored experiences..."
+}
+Register-WmtTweakButton "btnPrivacyTailoredOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1
+        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData"
+        Write-GuiLog "Tailored experiences restored."
+    } "Restoring tailored experiences..."
+}
+Register-WmtTweakButton "btnPrivacyActivityOff" {
+    Invoke-UiCommand {
+        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        Set-WmtRegDword $path "EnableActivityFeed" 0
+        Set-WmtRegDword $path "PublishUserActivities" 0
+        Set-WmtRegDword $path "UploadUserActivities" 0
+        Write-GuiLog "Activity history policies disabled."
+    } "Disabling activity history..."
+}
+Register-WmtTweakButton "btnPrivacyActivityOn" {
+    Invoke-UiCommand {
+        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        Remove-WmtRegValue $path "EnableActivityFeed"
+        Remove-WmtRegValue $path "PublishUserActivities"
+        Remove-WmtRegValue $path "UploadUserActivities"
+        Write-GuiLog "Activity history policy defaults restored."
+    } "Restoring activity history policies..."
+}
+Register-WmtTweakButton "btnPrivacyAppLaunchOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0; Write-GuiLog "App launch tracking disabled." } "Disabling app launch tracking..." }
+Register-WmtTweakButton "btnPrivacyAppLaunchOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 1; Write-GuiLog "App launch tracking restored." } "Restoring app launch tracking..." }
+
+Register-WmtTweakButton "btnSearchWebOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 0
+        Restart-WmtExplorer
+        Write-GuiLog "Web results in Start search disabled."
+    } "Disabling web search results..."
+}
+Register-WmtTweakButton "btnSearchWebOn" {
+    Invoke-UiCommand {
+        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions"
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 1
+        Restart-WmtExplorer
+        Write-GuiLog "Web results in Start search restored."
+    } "Restoring web search results..."
+}
+Register-WmtTweakButton "btnSearchIndexReduced" {
+    Invoke-UiCommand {
+        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+        Set-Service -Name WSearch -StartupType Manual -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Search indexing reduced."
+    } "Reducing search indexing..."
+}
+Register-WmtTweakButton "btnSearchIndexDefault" {
+    Invoke-UiCommand {
+        Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue
+        Start-Service -Name WSearch -ErrorAction SilentlyContinue
+        Write-GuiLog "Windows Search indexing restored."
+    } "Restoring search indexing..."
+}
+Register-WmtTweakButton "btnSearchIndexRebuild" {
+    if ([System.Windows.Forms.MessageBox]::Show("Rebuild the Windows Search index? Search results may be incomplete while it rebuilds.", "Rebuild Search Index", "YesNo", "Warning") -eq "Yes") {
+        Invoke-UiCommand {
+            Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
+            $db = Join-Path $env:ProgramData "Microsoft\Search\Data\Applications\Windows\Windows.edb"
+            if (Test-Path -LiteralPath $db) {
+                Remove-Item -LiteralPath $db -Force -ErrorAction Stop
+                Write-GuiLog "Deleted Windows.edb; Windows will rebuild the index."
+            }
+            else {
+                Write-GuiLog "Search index database was not found."
+            }
+            Start-Service -Name WSearch -ErrorAction SilentlyContinue
+        } "Rebuilding search index..."
+    }
+}
+Register-WmtTweakButton "btnSearchIndexOptions" { Start-Process "control.exe" "srchadmin.dll" }
+
+Register-WmtTweakButton "btnGameModeOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1
+        Write-GuiLog "Game Mode enabled."
+    } "Enabling Game Mode..."
+}
+Register-WmtTweakButton "btnGameModeOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 0
+        Write-GuiLog "Game Mode disabled."
+    } "Disabling Game Mode..."
+}
+Register-WmtTweakButton "btnGameBarOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
+        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0
+        Write-GuiLog "Xbox Game Bar disabled."
+    } "Disabling Xbox Game Bar..."
+}
+Register-WmtTweakButton "btnGameBarOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1
+        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 1
+        Write-GuiLog "Xbox Game Bar restored."
+    } "Restoring Xbox Game Bar..."
+}
+Register-WmtTweakButton "btnGameCaptureOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 0; Write-GuiLog "Background capture disabled." } "Disabling background capture..." }
+Register-WmtTweakButton "btnGameCaptureOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 1; Write-GuiLog "Background capture restored." } "Restoring background capture..." }
+Register-WmtTweakButton "btnGameFsoOff" {
+    Invoke-UiCommand {
+        $path = "HKCU:\System\GameConfigStore"
+        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 2
+        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 1
+        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 1
+        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+        Write-GuiLog "Fullscreen optimizations disabled globally."
+    } "Disabling fullscreen optimizations..."
+}
+Register-WmtTweakButton "btnGameFsoDefault" {
+    Invoke-UiCommand {
+        $path = "HKCU:\System\GameConfigStore"
+        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 0
+        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 0
+        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 0
+        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+        Write-GuiLog "Fullscreen optimization defaults restored."
+    } "Restoring fullscreen optimizations..."
+}
+
+Register-WmtTweakButton "btnVisualBestAppearance" { Invoke-UiCommand { Set-WmtVisualPreset "Appearance"; Write-GuiLog "Visual effects set to best appearance." } "Applying best appearance..." }
+Register-WmtTweakButton "btnVisualBestPerformance" { Invoke-UiCommand { Set-WmtVisualPreset "Performance"; Write-GuiLog "Visual effects set to best performance." } "Applying best performance..." }
+Register-WmtTweakButton "btnVisualSnappy" { Invoke-UiCommand { Set-WmtVisualPreset "Snappy"; Write-GuiLog "Snappy desktop visual preset applied." } "Applying snappy desktop preset..." }
+
+Register-WmtTweakButton "btnNotifyFocusSettings" { Start-Process "ms-settings:notifications" }
+Register-WmtTweakButton "btnNotifyTipsOff" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0
+        Write-GuiLog "Windows tips and suggestions disabled."
+    } "Disabling notification tips..."
+}
+Register-WmtTweakButton "btnNotifyTipsOn" {
+    Invoke-UiCommand {
+        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1
+        Write-GuiLog "Windows tips and suggestions restored."
+    } "Restoring notification tips..."
+}
+Register-WmtTweakButton "btnNotifySetupOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0; Write-GuiLog "Finish setup prompts disabled." } "Disabling setup prompts..." }
+Register-WmtTweakButton "btnNotifySetupOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1; Write-GuiLog "Finish setup prompts restored." } "Restoring setup prompts..." }
+Register-WmtTweakButton "btnLockFactsOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+        Write-GuiLog "Lock screen fun facts disabled."
+    } "Disabling lock screen fun facts..."
+}
+Register-WmtTweakButton "btnLockFactsOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+        Write-GuiLog "Lock screen fun facts restored."
+    } "Restoring lock screen fun facts..."
+}
+Register-WmtTweakButton "btnLockSpotlightOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+        Write-GuiLog "Lock screen Spotlight disabled."
+    } "Disabling lock screen Spotlight..."
+}
+Register-WmtTweakButton "btnLockSpotlightOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+        Write-GuiLog "Lock screen Spotlight restored."
+    } "Restoring lock screen Spotlight..."
+}
+Register-WmtTweakButton "btnLockPlain" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+        Write-GuiLog "Plain lock screen preset applied."
+    } "Applying plain lock screen..."
+}
+Register-WmtTweakButton "btnLockDefault" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+        Write-GuiLog "Default lock screen content restored."
+    } "Restoring lock screen defaults..."
+}
+
+Register-WmtTweakButton "btnStartupFastOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 0; Write-GuiLog "Fast Startup disabled." } "Disabling Fast Startup..." }
+Register-WmtTweakButton "btnStartupFastOn" {
+    Invoke-UiCommand {
+        powercfg /hibernate on
+        Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1
+        Write-GuiLog "Fast Startup enabled. Hibernation was enabled because Fast Startup depends on it."
+    } "Enabling Fast Startup..."
+}
+Register-WmtTweakButton "btnStartupRestoreFoldersOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 1; Write-GuiLog "Previous folder windows will restore at logon." } "Enabling folder restore at logon..." }
+Register-WmtTweakButton "btnStartupRestoreFoldersOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 0; Write-GuiLog "Previous folder windows will not restore at logon." } "Disabling folder restore at logon..." }
+
+Register-WmtTweakButton "btnSecurityUacOpen" { Start-Process "UserAccountControlSettings.exe" }
+Register-WmtTweakButton "btnSecurityUacStatus" {
+    $systemPolicy = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+    Write-GuiLog "UAC EnableLUA: $(Get-WmtRegValue $systemPolicy "EnableLUA" "Unknown")"
+    Write-GuiLog "UAC ConsentPromptBehaviorAdmin: $(Get-WmtRegValue $systemPolicy "ConsentPromptBehaviorAdmin" "Unknown")"
+    Write-GuiLog "UAC PromptOnSecureDesktop: $(Get-WmtRegValue $systemPolicy "PromptOnSecureDesktop" "Unknown")"
+}
+Register-WmtTweakButton "btnSecuritySmartScreenOpen" {
+    try { Start-Process "windowsdefender://AppAndBrowser" } catch { Start-Process "ms-settings:windowsdefender" }
+}
+Register-WmtTweakButton "btnSecuritySmartScreenStatus" {
+    Write-GuiLog "Explorer SmartScreen: $(Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" "SmartScreenEnabled" "Unknown")"
+    Write-GuiLog "AppHost Web Content Evaluation: $(Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppHost" "EnableWebContentEvaluation" "Unknown")"
+    if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) {
+        $mp = Get-MpPreference -ErrorAction SilentlyContinue
+        if ($mp) { Write-GuiLog "Defender PUA protection: $($mp.PUAProtection)" }
+    }
+}
+Register-WmtTweakButton "btnSecurityCfaOpen" {
+    try { Start-Process "windowsdefender://RansomwareProtection" } catch { Start-Process "ms-settings:windowsdefender" }
+}
+
+Register-WmtTweakButton "btnPowerBatterySaverOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 0 -DCOnly; Write-GuiLog "Battery saver threshold set to 0%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerBatterySaver20" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 20 -DCOnly; Write-GuiLog "Battery saver threshold set to 20%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerBatterySaver50" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 50 -DCOnly; Write-GuiLog "Battery saver threshold set to 50%." } "Setting battery saver threshold..." }
+Register-WmtTweakButton "btnPowerUsbSuspendOn" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 1; Write-GuiLog "USB selective suspend enabled." } "Enabling USB selective suspend..." }
+Register-WmtTweakButton "btnPowerUsbSuspendOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 0; Write-GuiLog "USB selective suspend disabled." } "Disabling USB selective suspend..." }
+Register-WmtTweakButton "btnPowerPcieModerate" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 1; Write-GuiLog "PCI Express link state set to moderate savings." } "Setting PCIe link state savings..." }
+Register-WmtTweakButton "btnPowerPcieOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 0; Write-GuiLog "PCI Express link state savings disabled." } "Disabling PCIe link state savings..." }
+
+Register-WmtTweakButton "btnDevLongPathsOn" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 1; Write-GuiLog "Win32 long paths enabled." } "Enabling long paths..." }
+Register-WmtTweakButton "btnDevLongPathsOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0; Write-GuiLog "Win32 long paths disabled." } "Disabling long paths..." }
+Register-WmtTweakButton "btnDevModeOn" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 1
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 1
+        Write-GuiLog "Developer Mode policies enabled."
+    } "Enabling Developer Mode..."
+}
+Register-WmtTweakButton "btnDevModeOff" {
+    Invoke-UiCommand {
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0
+        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 0
+        Write-GuiLog "Developer Mode policies disabled."
+    } "Disabling Developer Mode..."
+}
+Register-WmtTweakButton "btnDevSettings" { Start-Process "ms-settings:developers" }
+
 # --- SOFTWARE CATALOG ---
 $script:SoftwareCatalog = @(
     [PSCustomObject]@{Category = "Browsers"; Name = "Google Chrome"; Description = "Fast, secure web browser"; Source = "winget"; Id = "Google.Chrome" },
@@ -14534,6 +18495,65 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
     $btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
 }
 
+# My Device shortcuts point at the original page buttons so all confirmations, logging, and state checks stay in one place.
+function Connect-WmtMyDeviceShortcut {
+    param(
+        [string]$ShortcutButtonName,
+        [string]$TargetButtonName
+    )
+
+    $shortcutButton = Get-Ctrl $ShortcutButtonName
+    $targetButton = Get-Ctrl $TargetButtonName
+    if (-not $shortcutButton -or -not $targetButton) { return }
+
+    try {
+        $enabledBinding = [System.Windows.Data.Binding]::new("IsEnabled")
+        $enabledBinding.Source = $targetButton
+        [void][System.Windows.Data.BindingOperations]::SetBinding($shortcutButton, [System.Windows.Controls.Button]::IsEnabledProperty, $enabledBinding)
+    }
+    catch {}
+
+    $shortcutButton.Add_Click({
+            if (-not $targetButton.IsEnabled) { return }
+            $targetButton.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+        }.GetNewClosure())
+}
+
+@{
+    btnMyDeviceQuickFix       = "btnQuickFix"
+    btnMyDeviceWinRE          = "btnUtilWinRE"
+    btnMyDeviceSysReport      = "btnUtilSysInfo"
+    btnMyDeviceRestoreMgr     = "btnUtilRestoreMgr"
+    btnMyDeviceStartupMgr     = "btnUtilStartupMgr"
+    btnMyDeviceUpdateRepair   = "btnUpdateRepair"
+    btnMyDeviceUpdateServices = "btnUpdateServices"
+    btnMyDeviceNetInfo        = "btnNetInfo"
+    btnMyDeviceFlushDNS       = "btnFlushDNS"
+    btnMyDeviceResetWifi      = "btnResetWifi"
+    btnMyDeviceNetRepair      = "btnNetRepair"
+    btnMyDeviceDnsCustom      = "btnDnsCustom"
+    btnMyDeviceHostsEdit      = "btnHostsEdit"
+    btnMyDeviceHostsAdBlock   = "btnHostsUpdate"
+    btnMyDeviceRouteView      = "btnRouteView"
+    btnMyDeviceUltimatePower  = "btnPerfUltimatePower"
+    btnMyDeviceHibernateOff   = "btnPerfDisableHibernate"
+    btnMyDeviceHibernateOn    = "btnPerfEnableHibernate"
+    btnMyDeviceMemCompressOff = "btnPerfDisableMemCompress"
+    btnMyDeviceMemCompressOn  = "btnPerfEnableMemCompress"
+    btnMyDeviceHagsOn         = "btnPerfEnableHags"
+    btnMyDeviceHagsOff        = "btnPerfDisableHags"
+    btnMyDeviceDriverReport   = "btnDrvReport"
+    btnMyDeviceDriverBackup   = "btnDrvBackup"
+    btnMyDeviceGhostDrivers   = "btnDrvGhost"
+    btnMyDeviceDriverClean    = "btnDrvClean"
+    btnMyDeviceDriverRestore  = "btnDrvRestore"
+    btnMyDeviceChkdsk         = "btnCHKDSK"
+    btnMyDeviceDiskCleanup    = "btnCleanDisk"
+    btnMyDeviceTempCleanup    = "btnCleanTemp"
+}.GetEnumerator() | ForEach-Object {
+    Connect-WmtMyDeviceShortcut -ShortcutButtonName $_.Key -TargetButtonName $_.Value
+}
+
 # --- LAUNCH ---
 $window.Add_ContentRendered({
         $settings = Get-WmtSettings
@@ -14595,7 +18615,10 @@ $window.Add_Closing({
             try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
             try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
         }
+        Stop-FirewallRuleLoad
+        Stop-FirewallDetailLoad
         Stop-MyDeviceSectionJobs
+        Stop-WmtDnsRunspaces
         if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
         if ($script:BitLockerStatusRunspace) {
             try { $script:BitLockerStatusRunspace.Stop() } catch {}
