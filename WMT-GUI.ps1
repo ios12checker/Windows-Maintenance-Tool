@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.8"
+$AppVersion = "5.9"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -6198,6 +6198,126 @@ function Test-PathExists {
     return $false
 }
 
+function Convert-WmtRegistryPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    $normalized = $Path.Trim()
+    $normalized = $normalized -replace "^Registry::", ""
+    $normalized = $normalized -replace "^HKEY_LOCAL_MACHINE\\", "HKLM:\"
+    $normalized = $normalized -replace "^HKEY_CURRENT_USER\\", "HKCU:\"
+    $normalized = $normalized -replace "^HKEY_CLASSES_ROOT\\", "HKCR:\"
+
+    if ($normalized -notmatch '^(?<Hive>HKLM|HKCU|HKCR):\\(?<SubPath>.*)$') { return $null }
+
+    $hive = switch ($Matches.Hive) {
+        "HKLM" { [Microsoft.Win32.RegistryHive]::LocalMachine }
+        "HKCU" { [Microsoft.Win32.RegistryHive]::CurrentUser }
+        "HKCR" { [Microsoft.Win32.RegistryHive]::ClassesRoot }
+    }
+
+    [PSCustomObject]@{
+        Hive    = $hive
+        Root    = $Matches.Hive
+        SubPath = $Matches.SubPath
+    }
+}
+
+function Convert-WmtRegistryPathToRegExePath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    $normalized = $Path.Trim()
+    $normalized = $normalized -replace "^Registry::", ""
+    $normalized = $normalized -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\"
+    $normalized = $normalized -replace "^HKCU:?\\", "HKEY_CURRENT_USER\"
+    $normalized = $normalized -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\"
+    return $normalized
+}
+
+function Test-WmtRegistryValueExists {
+    param(
+        [string]$Path,
+        [string]$ValueName
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $ValueName) { return $false }
+
+    $parts = Convert-WmtRegistryPath -Path $Path
+    if (-not $parts) { return $false }
+
+    $views = @([Microsoft.Win32.RegistryView]::Default)
+    foreach ($view in $views) {
+        $baseKey = $null
+        $key = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, $view)
+            $key = $baseKey.OpenSubKey($parts.SubPath, $false)
+            if ($key) {
+                return ($key.GetValueNames() -contains $ValueName)
+            }
+        }
+        catch {}
+        finally {
+            if ($key) { $key.Close() }
+            if ($baseKey) { $baseKey.Close() }
+        }
+    }
+
+    return $false
+}
+
+function Remove-WmtRegistryValueNative {
+    param(
+        [string]$Path,
+        [string]$ValueName
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $ValueName) { return $false }
+
+    $parts = Convert-WmtRegistryPath -Path $Path
+    if (-not $parts) { return $false }
+
+    $views = @([Microsoft.Win32.RegistryView]::Default)
+    foreach ($view in $views) {
+        $baseKey = $null
+        $key = $null
+        try {
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, $view)
+            $key = $baseKey.OpenSubKey($parts.SubPath, $true)
+            if ($key) {
+                $key.DeleteValue($ValueName, $false)
+                $key.Close(); $key = $null
+                if (-not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName)) { return $true }
+            }
+        }
+        catch {}
+        finally {
+            if ($key) { $key.Close() }
+            if ($baseKey) { $baseKey.Close() }
+        }
+    }
+
+    return $false
+}
+
+function Remove-WmtRegistryValueRegExe {
+    param(
+        [string]$Path,
+        [string]$ValueName
+    )
+    if ([string]::IsNullOrWhiteSpace($Path) -or $null -eq $ValueName) { return $false }
+
+    $regPath = Convert-WmtRegistryPathToRegExePath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($regPath)) { return $false }
+
+    try {
+        & reg.exe delete $regPath /v $ValueName /f 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0 -or -not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName)) { return $true }
+    }
+    catch {}
+
+    return (-not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName))
+}
+
 function Remove-RegKeyForced {
     param($Path, $IsKey, $ValName)
     if ($Path -match "^HKEY_CLASSES_ROOT") { $Path = $Path -replace "^HKEY_CLASSES_ROOT", "HKCR:" }
@@ -6215,10 +6335,21 @@ function Remove-RegKeyForced {
     if ($realPaths.Count -eq 0) { $realPaths += $Path }
 
     $globalSuccess = $true
+    $literalValueName = if ($null -ne $ValName) { [System.Management.Automation.WildcardPattern]::Escape([string]$ValName) } else { $ValName }
     foreach ($targetPath in $realPaths) {
         try {
-            if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
-            else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
+            if ($IsKey) {
+                Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
+            }
+            else {
+                [void](Remove-WmtRegistryValueNative -Path $targetPath -ValueName $ValName)
+                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                    try { Remove-ItemProperty -LiteralPath $targetPath -Name $literalValueName -ErrorAction Stop } catch {}
+                }
+                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                    throw "Registry value still exists after native removal."
+                }
+            }
             continue
         }
         catch {}
@@ -6234,10 +6365,21 @@ function Remove-RegKeyForced {
                 }
                 catch {} 
             }
-            if ($IsKey) { $children = Get-ChildItem -Path $targetPath -Recurse -ErrorAction SilentlyContinue; foreach ($c in $children) { & $UnlockItem -p $c.PSPath } }
+            if ($IsKey) { $children = Get-ChildItem -LiteralPath $targetPath -Recurse -ErrorAction SilentlyContinue; foreach ($c in $children) { & $UnlockItem -p $c.PSPath } }
             & $UnlockItem -p $targetPath
-            if ($IsKey) { Remove-Item -Path $targetPath -Recurse -Force -ErrorAction Stop }
-            else { Remove-ItemProperty -Path $targetPath -Name $ValName -ErrorAction Stop }
+            if ($IsKey) { Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop }
+            else {
+                [void](Remove-WmtRegistryValueNative -Path $targetPath -ValueName $ValName)
+                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                    try { Remove-ItemProperty -LiteralPath $targetPath -Name $literalValueName -ErrorAction Stop } catch {}
+                }
+                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                    [void](Remove-WmtRegistryValueRegExe -Path $targetPath -ValueName $ValName)
+                }
+                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                    throw "Registry value still exists after forced removal."
+                }
+            }
         }
         catch { $globalSuccess = $false }
     }
@@ -6251,7 +6393,25 @@ function Backup-RegKey {
     $regKeyPath = $path -replace "^HKLM:?\\", "HKEY_LOCAL_MACHINE\" -replace "^HKCU:?\\", "HKEY_CURRENT_USER\" -replace "^HKCR:?\\", "HKEY_CLASSES_ROOT\"
     $sb = [System.Text.StringBuilder]::new(); [void]$sb.AppendLine("[$regKeyPath]")
     try {
-        if ($type -eq "Value") {
+        if ($type -eq "Key") {
+            $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT_RegBackup_{0}.reg" -f ([guid]::NewGuid().ToString("N")))
+            try {
+                & reg.exe export $regKeyPath $tmpFile /y | Out-Null
+                if (Test-Path -LiteralPath $tmpFile) {
+                    $content = Get-Content -LiteralPath $tmpFile -Raw -Encoding Unicode
+                    $content = $content -replace "^\uFEFF?Windows Registry Editor Version 5\.00\r?\n\r?\n", ""
+                    if (-not [string]::IsNullOrWhiteSpace($content)) {
+                        Add-Content -Path $FilePath -Value $content -Encoding Unicode
+                        return
+                    }
+                }
+            }
+            catch {}
+            finally {
+                Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        elseif ($type -eq "Value") {
             $val = Get-ItemProperty -Path $path -Name $targetValue -ErrorAction SilentlyContinue
             if ($val) { 
                 $vData = $val.$targetValue
@@ -6419,6 +6579,44 @@ function Invoke-RegistryTask {
                         }
                     }
                     return $clean
+                }
+
+                function Test-IsRegistryFlagEnabled {
+                    param($Value)
+                    if ($null -eq $Value) { return $false }
+                    try { return ([int]$Value -eq 1) }
+                    catch { return ([string]$Value -eq "1") }
+                }
+
+                function Test-IsWindowsInstallerCommand {
+                    param($RawString)
+                    if ([string]::IsNullOrWhiteSpace($RawString)) { return $false }
+                    $expanded = [Environment]::ExpandEnvironmentVariables($RawString.Trim())
+                    return ($expanded -match '(?i)(^|[\\/"\s])msiexec(\.exe)?(?=$|[\s/"])')
+                }
+
+                function Get-UninstallExecutablePath {
+                    param($RawString)
+                    if ([string]::IsNullOrWhiteSpace($RawString)) { return $null }
+                    $cmd = [Environment]::ExpandEnvironmentVariables($RawString.Trim())
+                    if ([string]::IsNullOrWhiteSpace($cmd) -or (Test-IsWindowsInstallerCommand $cmd)) { return $null }
+
+                    $candidate = $null
+                    if ($cmd -match '^\s*"([^"]+)"') {
+                        $candidate = $matches[1].Trim()
+                    }
+                    elseif ($cmd -match '^\s*(?<Path>[a-zA-Z]:\\.+?\.(?:exe|msi|cmd|bat|com))(?=$|\s)') {
+                        $candidate = $matches.Path.Trim()
+                    }
+                    elseif ($cmd -match '^\s*(?<Path>[a-zA-Z]:\\[^\s]+)') {
+                        $candidate = $matches.Path.Trim()
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($candidate)) { return $null }
+                    $candidate = [Environment]::ExpandEnvironmentVariables($candidate)
+                    if ($candidate -notmatch '^[a-zA-Z]:\\') { return $null }
+                    if ($candidate -match '%.*%' -or $candidate -match '\$\(.*\)') { return $null }
+                    return $candidate
                 }
 
                 try {
@@ -6613,13 +6811,15 @@ function Invoke-RegistryTask {
                                             $i++; & $Tick "Scanning Uninstaller: $subName" $i $total
                                             $sub = $rk.OpenSubKey($subName)
                                             $uString = $sub.GetValue("UninstallString")
-                                            if ($uString -and $uString -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $uString)) {
-                                                if ($uString -notmatch "(?i)MsiExec.exe") {
-                                                    $clean = Get-RealExePath $uString
-                                                    if (-not (Test-PathExists $clean)) {
-                                                        $rootName = if ($h.Name -match "LocalMachine") { "HKLM" } else { "HKCU" }
-                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Uninstaller"; Data = $clean; DisplayKey = $subName; RegPath = "$rootName`:\$p\$subName"; ValueName = $null; Type = "Key" })
-                                                    }
+                                            $displayName = [string]$sub.GetValue("DisplayName")
+                                            $isWindowsInstaller = (Test-IsRegistryFlagEnabled $sub.GetValue("WindowsInstaller")) -or (Test-IsWindowsInstallerCommand $uString)
+                                            $isSystemComponent = Test-IsRegistryFlagEnabled $sub.GetValue("SystemComponent")
+                                            $isNoRemove = Test-IsRegistryFlagEnabled $sub.GetValue("NoRemove")
+                                            if ($uString -and -not ([string]::IsNullOrWhiteSpace($displayName)) -and -not $isWindowsInstaller -and -not $isSystemComponent -and -not $isNoRemove) {
+                                                $clean = Get-UninstallExecutablePath $uString
+                                                if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
+                                                    $rootName = if ($h.Name -match "HKEY_LOCAL_MACHINE") { "HKLM" } else { "HKCU" }
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Uninstaller"; Data = $clean; DisplayKey = $displayName; RegPath = "$rootName`:\$p\$subName"; ValueName = $null; Type = "Key" })
                                                 }
                                             }
                                             $sub.Close()
@@ -6892,11 +7092,18 @@ function Invoke-RegistryTask {
                             $isKey = ($item.Type -eq "Key")
                             $success = Remove-RegKeyForced -Path $item.RegPath -IsKey $isKey -ValName $item.ValueName
                         
-                            if ($success) { $fixed++ } else { $skipped++ }
+                            if ($success) {
+                                $fixed++
+                                Write-GuiLog "Removed: $($item.RegPath)"
+                            }
+                            else {
+                                $skipped++
+                                Write-GuiLog "Failed to remove: $($item.RegPath)"
+                            }
                         }
                     
                         $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
-                        if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (System Protected)" }
+                        if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (see log for paths that could not be removed)" }
                         $finalMsg += "`n`nBackup: $bkFile"
                         [System.Windows.Forms.MessageBox]::Show($finalMsg, "Result", "OK", "Information") | Out-Null
                     
@@ -13722,9 +13929,7 @@ function Set-WmtTheme {
     if ($logBoxCtrl) { $logBoxCtrl.Foreground = $palette.LogText }
 
     $quickFindCtrl = Get-Ctrl "txtGlobalSearch"
-    if ($quickFindCtrl -and $quickFindCtrl.Text -eq $script:QuickFindPlaceholder) {
-        $quickFindCtrl.Foreground = $window.Resources["TextMuted"]
-    }
+    if ($quickFindCtrl) { Set-WmtQuickFindForeground -TextBox $quickFindCtrl }
 
     $toggleBtn = Get-Ctrl "btnToggleTheme"
     if ($toggleBtn) {
@@ -13747,6 +13952,31 @@ function Set-WmtTheme {
     }
 
     $script:CurrentTheme = $Theme
+}
+
+function Set-WmtQuickFindForeground {
+    param([System.Windows.Controls.TextBox]$TextBox)
+
+    if (-not $TextBox) { return }
+    $resourceKey = if ($TextBox.Text -eq $script:QuickFindPlaceholder) { "TextMuted" } else { "TextPrimary" }
+    $TextBox.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, $resourceKey)
+}
+
+function Set-WmtThemePreference {
+    param([string]$Theme = "dark")
+
+    if (-not $script:ThemePalettes.ContainsKey($Theme)) { $Theme = "dark" }
+    Set-WmtTheme -Theme $Theme
+
+    try {
+        $settings = Get-WmtSettings
+        $settings.Theme = $Theme
+        Save-WmtSettings -Settings $settings
+    }
+    catch {}
+
+    $themeLabel = if ($Theme -eq "light") { "Light" } else { "Dark" }
+    Write-GuiLog "$themeLabel mode enabled."
 }
 
 function Update-MyDeviceResponsiveLayout {
@@ -14405,17 +14635,17 @@ if ($LogBox) {
 $script:QuickFindPlaceholder = "Search tools..."
 if ($txtGlobalSearch) {
     $txtGlobalSearch.Text = $script:QuickFindPlaceholder
-    $txtGlobalSearch.Foreground = $window.Resources["TextMuted"]
+    Set-WmtQuickFindForeground -TextBox $txtGlobalSearch
     $txtGlobalSearch.Add_GotFocus({
             if ($txtGlobalSearch.Text -eq $script:QuickFindPlaceholder) {
                 $txtGlobalSearch.Text = ""
-                $txtGlobalSearch.Foreground = $window.Resources["TextPrimary"]
+                Set-WmtQuickFindForeground -TextBox $txtGlobalSearch
             }
         })
     $txtGlobalSearch.Add_LostFocus({
             if ([string]::IsNullOrWhiteSpace($txtGlobalSearch.Text)) {
                 $txtGlobalSearch.Text = $script:QuickFindPlaceholder
-                $txtGlobalSearch.Foreground = $window.Resources["TextMuted"]
+                Set-WmtQuickFindForeground -TextBox $txtGlobalSearch
             }
         })
 }
@@ -14465,7 +14695,8 @@ foreach ($btnName in $TabButtons) {
 
 # --- GLOBAL SEARCH ---
 $SearchIndex = @{}
-function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b = Get-Ctrl $BtnName; if ($b) { $SearchIndex[$Desc] = @{Button = $b; Tab = $ParentTab } } }
+function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b = Get-Ctrl $BtnName; if ($b) { $SearchIndex[$Desc] = @{Button = $b; Tab = $ParentTab; Action = $null } } }
+function Add-SearchIndexAction { param($Desc, [scriptblock]$Action, $ParentTab) if ($Action) { $SearchIndex[$Desc] = @{Button = $null; Tab = $ParentTab; Action = $Action } } }
 # --- GLOBAL SEARCH INDEX ---
 
 # 1. Updates (Winget)
@@ -14553,6 +14784,9 @@ Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
 # 8. Support
 Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
 Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
+Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
+Add-SearchIndexAction "Light Mode"          { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
+Add-SearchIndexAction "Dark Mode"           { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
 
 # 9. My Device
 Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
@@ -14601,7 +14835,10 @@ $txtGlobalSearch.Add_TextChanged({
             $pnlNavButtons.Visibility = "Collapsed"
             $lstSearchResults.Visibility = "Visible"
             $lstSearchResults.Items.Clear()
-            $SearchIndex.GetEnumerator() | Where-Object { $_.Key -match "$q" } | ForEach-Object { [void]$lstSearchResults.Items.Add($_.Key) }
+            $SearchIndex.GetEnumerator() |
+                Where-Object { ([string]$_.Key).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+                Sort-Object Key |
+                ForEach-Object { [void]$lstSearchResults.Items.Add($_.Key) }
         }
         else { $pnlNavButtons.Visibility = "Visible"; $lstSearchResults.Visibility = "Collapsed" }
     })
@@ -14618,12 +14855,16 @@ $lstSearchResults.Add_SelectionChanged({
             }
         
             # 2. Fire the actual button's click event to launch the target function
-            if ($match.Button) {
+            if ($match.ContainsKey("Action") -and $match.Action -is [scriptblock]) {
+                & $match.Action
+            }
+            elseif ($match.Button) {
                 $match.Button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
             }
         
             # Clear the search box after executing
             $txtGlobalSearch.Text = ""
+            Set-WmtQuickFindForeground -TextBox $txtGlobalSearch
         }
     })
 
@@ -14773,6 +15014,7 @@ $Script:StartWingetAction = {
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
     $script:WingetCompletedIndexes = @{}
+    $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
     if ($pbWingetProgress) {
         $pbWingetProgress.Minimum = 0
         $pbWingetProgress.Maximum = [Math]::Max(1, $totalItems)
@@ -15010,12 +15252,440 @@ $Script:StartWingetAction = {
             return $proc
         }
 
-        function Invoke-VisibleCmd ($command, $title) {
+        function Invoke-VisibleCmd ($command, $title, [int]$HoldSeconds = 0) {
             if ([string]::IsNullOrWhiteSpace($title)) { $title = "WMT Package Update" }
-            $safeTitle = ($title -replace '"', '') -replace '[\r\n]', ' '
-            $cmdLine = "/c title $safeTitle && $command"
+            $safeTitle = ((($title -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
+            if ($HoldSeconds -gt 0) {
+                $cmdLine = "/v:on /c title $safeTitle && $command & set WMT_EXIT=!ERRORLEVEL! & echo. & echo Exit code: !WMT_EXIT! & timeout /t $HoldSeconds /nobreak >nul & exit /b !WMT_EXIT!"
+            }
+            else {
+                $cmdLine = "/c title $safeTitle && $command"
+            }
             $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle Normal
             return $proc
+        }
+
+        function Invoke-StoreCliInteractive {
+            param(
+                [string]$Arguments,
+                [string]$PackageName,
+                [string]$TempPath,
+                [string]$ActionLabel = "Update"
+            )
+
+            $rand = [Guid]::NewGuid().ToString("N")
+            $batPath = Join-Path $TempPath "WMT_StoreCLI_$rand.cmd"
+            $resultPath = Join-Path $TempPath "WMT_StoreCLI_$rand.exit"
+            $statusPath = Join-Path $TempPath "WMT_StoreCLI_$rand.status"
+            $sendKeysPath = Join-Path $TempPath "WMT_StoreCLI_$rand.ps1"
+            $safeTitle = (((($PackageName -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ')).Trim()
+            if ([string]::IsNullOrWhiteSpace($safeTitle)) { $safeTitle = "Microsoft Store App" }
+            $windowTitle = "WMT Store CLI - $safeTitle"
+            $displayAction = if ($ActionLabel -eq "Install") { "Installing" } else { "Updating" }
+
+            $sendKeysContent = @'
+param(
+    [int]$TargetPid,
+    [string]$PackageName,
+    [string]$StatusPath
+)
+
+Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Runtime.InteropServices;
+
+public static class WmtConsoleInput {
+    private const int STD_INPUT_HANDLE = -10;
+    private const int STD_OUTPUT_HANDLE = -11;
+    private const ushort KEY_EVENT = 0x0001;
+    private const ushort VK_DOWN = 0x28;
+    private const ushort VK_RETURN = 0x0D;
+    private const ushort VK_Y = 0x59;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool FreeConsole();
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool AttachConsole(uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GetStdHandle(int nStdHandle);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool WriteConsoleInput(IntPtr hConsoleInput, INPUT_RECORD[] lpBuffer, uint nLength, out uint lpNumberOfEventsWritten);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GetConsoleScreenBufferInfo(IntPtr hConsoleOutput, out CONSOLE_SCREEN_BUFFER_INFO lpConsoleScreenBufferInfo);
+
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    private static extern bool ReadConsoleOutputCharacter(IntPtr hConsoleOutput, StringBuilder lpCharacter, uint nLength, COORD dwReadCoord, out uint lpNumberOfCharsRead);
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct COORD {
+        public short X;
+        public short Y;
+        public COORD(short x, short y) { X = x; Y = y; }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SMALL_RECT {
+        public short Left;
+        public short Top;
+        public short Right;
+        public short Bottom;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct CONSOLE_SCREEN_BUFFER_INFO {
+        public COORD dwSize;
+        public COORD dwCursorPosition;
+        public ushort wAttributes;
+        public SMALL_RECT srWindow;
+        public COORD dwMaximumWindowSize;
+    }
+
+    [StructLayout(LayoutKind.Explicit, CharSet = CharSet.Unicode)]
+    private struct INPUT_RECORD {
+        [FieldOffset(0)] public ushort EventType;
+        [FieldOffset(4)] public KEY_EVENT_RECORD KeyEvent;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct KEY_EVENT_RECORD {
+        [MarshalAs(UnmanagedType.Bool)] public bool bKeyDown;
+        public ushort wRepeatCount;
+        public ushort wVirtualKeyCode;
+        public ushort wVirtualScanCode;
+        public char UnicodeChar;
+        public uint dwControlKeyState;
+    }
+
+    private static INPUT_RECORD Key(char ch, ushort vk, bool down) {
+        INPUT_RECORD record = new INPUT_RECORD();
+        record.EventType = KEY_EVENT;
+        record.KeyEvent.bKeyDown = down;
+        record.KeyEvent.wRepeatCount = 1;
+        record.KeyEvent.wVirtualKeyCode = vk;
+        record.KeyEvent.wVirtualScanCode = 0;
+        record.KeyEvent.UnicodeChar = ch;
+        record.KeyEvent.dwControlKeyState = 0;
+        return record;
+    }
+
+    private static bool Attach(uint pid) {
+        FreeConsole();
+        return AttachConsole(pid);
+    }
+
+    private static bool WriteInput(uint pid, INPUT_RECORD[] records) {
+        if (!Attach(pid)) { return false; }
+        IntPtr input = GetStdHandle(STD_INPUT_HANDLE);
+        if (input == IntPtr.Zero || input == new IntPtr(-1)) { return false; }
+        uint written = 0;
+        return WriteConsoleInput(input, records, (uint)records.Length, out written);
+    }
+
+    public static bool SendYes(uint pid) {
+        INPUT_RECORD[] records = new INPUT_RECORD[] {
+            Key('y', VK_Y, true),
+            Key('y', VK_Y, false),
+            Key('\r', VK_RETURN, true),
+            Key('\r', VK_RETURN, false)
+        };
+        return WriteInput(pid, records);
+    }
+
+    public static bool SendMenuSelection(uint pid, int downCount) {
+        if (downCount < 0) { downCount = 0; }
+        List<INPUT_RECORD> records = new List<INPUT_RECORD>();
+        for (int i = 0; i < downCount; i++) {
+            records.Add(Key('\0', VK_DOWN, true));
+            records.Add(Key('\0', VK_DOWN, false));
+        }
+        records.Add(Key('\r', VK_RETURN, true));
+        records.Add(Key('\r', VK_RETURN, false));
+        return WriteInput(pid, records.ToArray());
+    }
+
+    public static string ReadScreen(uint pid) {
+        if (!Attach(pid)) { return ""; }
+        IntPtr output = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (output == IntPtr.Zero || output == new IntPtr(-1)) { return ""; }
+
+        CONSOLE_SCREEN_BUFFER_INFO info;
+        if (!GetConsoleScreenBufferInfo(output, out info)) { return ""; }
+
+        int width = Math.Max(1, (int)info.dwSize.X);
+        int height = Math.Max(1, (int)info.dwSize.Y);
+        int length = Math.Min(width * height, 200000);
+        StringBuilder raw = new StringBuilder(new string(' ', length));
+        uint read = 0;
+        if (!ReadConsoleOutputCharacter(output, raw, (uint)length, new COORD(0, 0), out read)) { return ""; }
+
+        string text = raw.ToString();
+        StringBuilder lines = new StringBuilder(text.Length + height);
+        for (int i = 0; i < text.Length; i += width) {
+            int count = Math.Min(width, text.Length - i);
+            lines.AppendLine(text.Substring(i, count).TrimEnd());
+        }
+        return lines.ToString();
+    }
+}
+"@
+
+function Get-WmtStoreCliNameKey {
+    param([string]$Value)
+
+    $text = ([string]$Value).ToLowerInvariant().Trim()
+    $text = $text -replace '^\s*(microsoft|xbox)\s+', ''
+    $text = $text -replace '\s*\((microsoft\s+store\s+edition|store\s+edition)\)\s*$', ''
+    return ($text -replace '[^a-z0-9]+', '')
+}
+
+function Get-WmtStoreCliMenuOptions {
+    param([string]$ScreenText)
+
+    $clean = ([string]$ScreenText) -replace "`0", ""
+    $lines = $clean -split "`r?`n"
+    $start = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ($lines[$i] -match '(?i)select a product') { $start = $i }
+    }
+    if ($start -lt 0) { return @() }
+
+    $options = New-Object System.Collections.Generic.List[object]
+    for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+        $line = ([string]$lines[$i]).TrimEnd()
+        if ($line -match '(?i)would you like|ready to|download|install|update available') { break }
+        if ($line -notmatch '^\s*>?\s*(.+?)\s*$') { continue }
+
+        $candidate = $matches[1].Trim()
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($candidate -match '(?i)^(publisher:|do not select|select a product|skip$)') { continue }
+
+        $next = if (($i + 1) -lt $lines.Count) { ([string]$lines[$i + 1]).Trim() } else { "" }
+        if ($next -notmatch '(?i)^publisher:\s*') { continue }
+
+        [void]$options.Add([PSCustomObject]@{
+                Index     = $options.Count
+                Name      = $candidate
+                Publisher = ($next -replace '(?i)^publisher:\s*', '').Trim()
+            })
+    }
+
+    return $options.ToArray()
+}
+
+$targetKey = Get-WmtStoreCliNameKey $PackageName
+$menuSelected = $false
+$yesSent = $false
+$deadline = (Get-Date).AddSeconds(90)
+
+function Set-WmtStoreCliStatus {
+    param(
+        [string]$Status,
+        [string]$Detail = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($StatusPath)) { return }
+    try {
+        $line = "$Status|$Detail|$((Get-Date).ToString('o'))"
+        Set-Content -Path $StatusPath -Value $line -Encoding Ascii -Force
+    }
+    catch {}
+}
+
+while ((Get-Date) -lt $deadline) {
+    if (-not (Get-Process -Id $TargetPid -ErrorAction SilentlyContinue)) { break }
+
+    $screen = ""
+    try { $screen = [WmtConsoleInput]::ReadScreen([uint32]$TargetPid) } catch {}
+    $cleanScreen = ([string]$screen) -replace "`0", ""
+
+    if (-not $menuSelected -and $cleanScreen -match '(?i)select a product') {
+        $options = @(Get-WmtStoreCliMenuOptions -ScreenText $cleanScreen)
+        $matches = @($options | Where-Object { (Get-WmtStoreCliNameKey $_.Name) -eq $targetKey })
+        if ($matches.Count -gt 1) {
+            $preferred = @($matches | Where-Object { [string]$_.Publisher -match '(?i)\bMicrosoft\b|\bXbox\b' })
+            if ($preferred.Count -eq 1) { $matches = $preferred }
+        }
+        if ($matches.Count -eq 1) {
+            try { [void][WmtConsoleInput]::SendMenuSelection([uint32]$TargetPid, [int]$matches[0].Index) } catch {}
+            $menuSelected = $true
+            Set-WmtStoreCliStatus "MENU_SELECTED" $matches[0].Name
+            Start-Sleep -Milliseconds 700
+            continue
+        }
+        elseif ($matches.Count -gt 1) {
+            Set-WmtStoreCliStatus "MENU_AMBIGUOUS" $PackageName
+        }
+        elseif ($options.Count -gt 0) {
+            Set-WmtStoreCliStatus "MENU_NO_MATCH" $PackageName
+        }
+    }
+
+    if (-not $yesSent -and $cleanScreen -match '(?i)(would you like to apply|would you like to install|would you like to update|\[y/n\]|\(y\):)') {
+        try { [void][WmtConsoleInput]::SendYes([uint32]$TargetPid) } catch {}
+        $yesSent = $true
+        Set-WmtStoreCliStatus "ACCEPTED" $PackageName
+    }
+
+    if ($cleanScreen -match '(?i)ready\s+to\s+download' -and $cleanScreen -match '\b0\s*%') {
+        Set-WmtStoreCliStatus "READY0" $PackageName
+    }
+    elseif ($cleanScreen -match '(\d{1,3})\s*%') {
+        $pct = [Math]::Min(100, [Math]::Max(0, [int]$matches[1]))
+        Set-WmtStoreCliStatus "PROGRESS" ([string]$pct)
+    }
+
+    Start-Sleep -Milliseconds 700
+}
+'@
+
+            $batContent = @"
+@echo off
+title $windowTitle
+echo WMT-GUI: $displayAction $safeTitle with Microsoft Store CLI...
+echo Auto-selecting matching Store CLI prompts and accepting updates without taking focus...
+echo.
+store $Arguments
+set "WMT_EXIT=%ERRORLEVEL%"
+echo.
+echo Store CLI exit code: %WMT_EXIT%
+> "$resultPath" echo %WMT_EXIT%
+timeout /t 3 /nobreak >nul
+(goto) 2>nul & del "%~f0"
+"@
+
+            try {
+                Set-Content -Path $sendKeysPath -Value $sendKeysContent -Encoding Ascii -Force
+                Set-Content -Path $batPath -Value $batContent -Encoding Ascii -Force
+                Write-Output "LOG:[Store CLI] Launching minimized interactive $($ActionLabel.ToLowerInvariant()) window for: $PackageName"
+                $cmdProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -PassThru -WindowStyle Minimized
+                $safePackageArg = ([string]$PackageName).Replace('"', '')
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$sendKeysPath`" -TargetPid $($cmdProc.Id) -PackageName `"$safePackageArg`" -StatusPath `"$statusPath`"" -WindowStyle Hidden
+                Write-Output "LOG:  [store] Progress: 5%"
+
+                $deadline = (Get-Date).AddMinutes(3)
+                $lastBeat = Get-Date
+                $storeProgress = 5
+                $lastStatusLine = ""
+                $readyZeroSince = $null
+                while ((Get-Date) -lt $deadline) {
+                    if (Test-Path $resultPath) {
+                        $exitText = (Get-Content -Path $resultPath -Raw -ErrorAction SilentlyContinue).Trim()
+                        try { Remove-Item -Path $resultPath -Force -ErrorAction SilentlyContinue } catch {}
+                        try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
+                        try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                        $exitCode = 1
+                        if ([int]::TryParse($exitText, [ref]$exitCode)) {
+                            return [PSCustomObject]@{ ExitCode = $exitCode }
+                        }
+                        return [PSCustomObject]@{ ExitCode = 1 }
+                    }
+
+                    $now = Get-Date
+                    if (Test-Path $statusPath) {
+                        $statusLine = (Get-Content -Path $statusPath -Raw -ErrorAction SilentlyContinue).Trim()
+                        if ($statusLine -and $statusLine -ne $lastStatusLine) {
+                            $lastStatusLine = $statusLine
+                            $parts = @($statusLine -split '\|', 3)
+                            $status = if ($parts.Count -gt 0) { $parts[0] } else { "" }
+                            $detail = if ($parts.Count -gt 1) { $parts[1] } else { "" }
+
+                            switch ($status) {
+                                "MENU_SELECTED" {
+                                    Write-Output "LOG:[Store CLI] Selected matching product: $detail"
+                                    break
+                                }
+                                "MENU_AMBIGUOUS" {
+                                    Write-Output "LOG:[Store CLI] Product picker had multiple exact matches for '$detail'."
+                                    break
+                                }
+                                "MENU_NO_MATCH" {
+                                    Write-Output "LOG:[Store CLI] Product picker had no exact match for '$detail'."
+                                    break
+                                }
+                                "ACCEPTED" {
+                                    Write-Output "LOG:[Store CLI] Accepted Store CLI confirmation prompt."
+                                    break
+                                }
+                                "READY0" {
+                                    if (-not $readyZeroSince) {
+                                        $readyZeroSince = $now
+                                        Write-Output "LOG:[Store CLI] Store download broker is at Ready to Download 0%; watching for progress..."
+                                    }
+                                    break
+                                }
+                                "PROGRESS" {
+                                    $readyZeroSince = $null
+                                    $pct = 0
+                                    if ([int]::TryParse($detail, [ref]$pct) -and $pct -ne $storeProgress) {
+                                        $storeProgress = $pct
+                                        Write-Output "LOG:  [store] Progress: $storeProgress%"
+                                    }
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    if ($readyZeroSince -and (New-TimeSpan -Start $readyZeroSince -End $now).TotalSeconds -ge 60) {
+                        Write-Output "LOG:[Store CLI] Store CLI remained at Ready to Download 0% for 60 seconds; stopping the stalled update."
+                        try {
+                            if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
+                        }
+                        catch {}
+                        try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
+                        try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                        return [PSCustomObject]@{ ExitCode = -2; StalledReadyToDownload = $true }
+                    }
+
+                    if ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 15) {
+                        Write-Output "LOG:[Store CLI] Waiting for interactive $($ActionLabel.ToLowerInvariant()) to finish (3-minute Store CLI timeout)..."
+                        $storeProgress = [Math]::Min(90, $storeProgress + 10)
+                        Write-Output "LOG:  [store] Progress: $storeProgress%"
+                        $lastBeat = $now
+                    }
+                    Start-Sleep -Milliseconds 500
+                }
+
+                Write-Output "LOG:[Store CLI] Timed out waiting for the interactive $($ActionLabel.ToLowerInvariant()) window."
+                try {
+                    if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
+                }
+                catch {}
+                try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
+                try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                return [PSCustomObject]@{ ExitCode = -1 }
+            }
+            catch {
+                Write-Output "LOG:[Store CLI] Interactive launch failed: $($_.Exception.Message)"
+                try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                return [PSCustomObject]@{ ExitCode = 1 }
+            }
+        }
+
+        function Get-StoreCliProductId {
+            param([string]$Value)
+
+            $text = ([string]$Value).Trim()
+            if ([string]::IsNullOrWhiteSpace($text)) { return "" }
+
+            $matchPatterns = @(
+                '(?i)(?:product\s*id|productid|product-id)\s*[:=]\s*((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))',
+                '(?i)(?:/detail/|productid=)((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))',
+                '(?i)\b((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))\b'
+            )
+
+            foreach ($pattern in $matchPatterns) {
+                $match = [regex]::Match($text, $pattern)
+                if ($match.Success) { return $match.Groups[1].Value.ToUpperInvariant() }
+            }
+
+            return ""
         }
 
         $total = @($items).Count
@@ -15028,6 +15698,8 @@ $Script:StartWingetAction = {
             $cmd = ""
             $userCmd = "" 
             $wingetArgs = $null
+            $storeCliArgs = $null
+            $skipReason = $null
             Write-Output "PROGRESS:${index}/${total}:$name"
 
             # --- COMMAND GENERATION ---
@@ -15036,13 +15708,47 @@ $Script:StartWingetAction = {
                 $userCmd = $cmd -replace "--disable-interactivity", "" 
             }
             else {
-                # --- WINGET / MSSTORE ---
-                if ($src -eq "winget" -or $src -eq "msstore") {
+                # --- WINGET ---
+                if ($src -eq "winget") {
                     $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
                     $userFlags = "--accept-source-agreements --accept-package-agreements"
                     if ($act -eq "Install") { $wingetArgs = "install --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget install --id `"$id`" $userFlags" }
                     if ($act -eq "Update") { $wingetArgs = "upgrade --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`" $userFlags" }
                     if ($act -eq "Uninstall") { $wingetArgs = "uninstall --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
+                }
+                # --- MICROSOFT STORE ---
+                elseif ($src -eq "msstore") {
+                    $safeStoreId = Get-StoreCliProductId $id
+                    if ($act -eq "Install" -or $act -eq "Update") {
+                        if ($safeStoreId) {
+                            $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
+                            $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
+                            $storeCliArgs = "$storeVerb `"$safeStoreId`"$storeApplyFlag"
+                        }
+                        else {
+                            $storeTarget = ([string]$name).Replace('"', '').Trim()
+                            if ([string]::IsNullOrWhiteSpace($storeTarget)) {
+                                $rawStoreId = ([string]$id).Trim()
+                                if ([string]::IsNullOrWhiteSpace($rawStoreId)) { $rawStoreId = "(blank)" }
+                                $skipReason = "Store CLI needs a product ID or package name, but this row has ID '$rawStoreId' and no usable name."
+                            }
+                            else {
+                                $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
+                                $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
+                                $storeCliArgs = "$storeVerb `"$storeTarget`"$storeApplyFlag"
+                                Write-Output "LOG:[Store CLI] Product ID unavailable for '$name'; using Store CLI's product picker with automatic exact-match selection."
+                            }
+                        }
+                        $cmd = "store $storeCliArgs"
+                        $userCmd = $cmd
+                    }
+                    if ($act -eq "Uninstall") {
+                        $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
+                        $userFlags = "--accept-source-agreements --accept-package-agreements"
+                        $wingetArgs = "uninstall --id `"$id`" --source msstore $flags"
+                        $cmd = "winget $wingetArgs"
+                        $userCmd = "winget uninstall --id `"$id`" --source msstore $userFlags"
+                    }
                 }
                 # --- SCOOP (Likely requires User Mode) ---
                 elseif ($src -eq "scoop") {
@@ -15106,17 +15812,23 @@ $Script:StartWingetAction = {
                 }
             }
 
+            if ($skipReason) {
+                Write-Output "LOG:[$act][$index/$total] SKIPPED: $name - $skipReason"
+                Write-Output "RESULT:${index}:SKIPPED:$name"
+                continue
+            }
+
             if ($cmd) {
                 Write-Output "LOG:[$act][$index/$total] Starting: $name ($src)..."
                 Write-Output "LOG:[$act] Command: $userCmd"
 
                 # 1. RUN COMMAND (First Attempt - Admin)
-                # UX: all package updates run one-by-one in visible windows (auto-close when done),
+                # UX: most package updates run one-by-one in visible windows (auto-close when done),
                 # so end-users can follow each update without relying on Activity Log only.
                 $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
                 $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
                 $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
-                $useVisibleWindow = ($act -eq "Update")
+                $useVisibleWindow = ($act -eq "Update" -and -not ($src -eq "msstore" -and $storeCliArgs))
 
                 if ($useVisibleWindow) {
                     $windowTag = switch -Regex ($src) {
@@ -15136,22 +15848,39 @@ $Script:StartWingetAction = {
                     elseif ($isPythonUpdate) { $windowTag = "Python" }
                     Write-Output "LOG:[$act] Launching visible $windowTag window for: $name"
                     try {
-                        $p = Invoke-VisibleCmd $cmd "WMT $windowTag Update - $name"
+                        $holdSeconds = if ($src -eq "msstore") { 5 } else { 0 }
+                        $p = Invoke-VisibleCmd $cmd "WMT $windowTag Update - $name" -HoldSeconds $holdSeconds
                         
                         # Check if the process crashed or the user manually closed the frozen window
                         if ($null -eq $p -or $null -eq $p.ExitCode -or $p.ExitCode -ne 0) {
-                            Write-Output "LOG:[$act] Window was forcefully closed or exited with a non-zero code. Assuming success due to known installer hang behavior."
-                            $p = [PSCustomObject]@{ ExitCode = 0 } # Force a fake success code to prevent WMT from crashing
+                            if ($src -eq "msstore") {
+                                Write-Output "LOG:[$act] Store update window exited with a non-zero code."
+                                $exitCode = if ($p -and $null -ne $p.ExitCode) { $p.ExitCode } else { 1 }
+                                $p = [PSCustomObject]@{ ExitCode = $exitCode }
+                            }
+                            else {
+                                Write-Output "LOG:[$act] Window was forcefully closed or exited with a non-zero code. Assuming success due to known installer hang behavior."
+                                $p = [PSCustomObject]@{ ExitCode = 0 } # Force a fake success code to prevent WMT from crashing
+                            }
                         }
                     }
                     catch {
-                        Write-Output "LOG:[$act] Visible window forcefully closed or interrupted."
-                        $p = [PSCustomObject]@{ ExitCode = 0 } # Assume success here as well
+                        if ($src -eq "msstore") {
+                            Write-Output "LOG:[$act] Store update window was interrupted."
+                            $p = [PSCustomObject]@{ ExitCode = 1 }
+                        }
+                        else {
+                            Write-Output "LOG:[$act] Visible window forcefully closed or interrupted."
+                            $p = [PSCustomObject]@{ ExitCode = 0 } # Assume success here as well
+                        }
                     }
                 }
-                elseif ($wingetArgs -and ($src -eq "winget" -or $src -eq "msstore")) {
+                elseif ($wingetArgs) {
                     Write-Output "LOG:[$act] Running winget with live output..."
                     $p = Invoke-WingetLive $wingetArgs
+                }
+                elseif ($storeCliArgs) {
+                    $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act
                 }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
@@ -15162,12 +15891,12 @@ $Script:StartWingetAction = {
                 $hex = "0x{0:x}" -f $p.ExitCode
                 
                 # --- AUTO-FIX: SOURCE CORRUPTION ---
-                if ($hex -eq "0x8a150003") {
+                if ($wingetArgs -and $hex -eq "0x8a150003") {
                     Write-Output "LOG:[$act] WARNING: Detected Winget Source Corruption. Auto-fixing..."
                     $fixP = Invoke-WingetCmd "winget source reset --force"
                     if ($fixP.ExitCode -eq 0) {
                         Write-Output "LOG:[$act][$index/$total] Sources reset. Retrying $name..."
-                        if ($wingetArgs -and ($src -eq "winget" -or $src -eq "msstore")) {
+                        if ($wingetArgs) {
                             if ($useVisibleWindow) {
                                 $retryCmd = "winget $wingetArgs"
                                 $p = Invoke-VisibleCmd $retryCmd "WMT Winget Retry - $name"
@@ -15218,6 +15947,16 @@ $Script:StartWingetAction = {
 
                     if ($useVisibleWindow) {
                         Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (see visible window output)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+                    if ($storeCliArgs) {
+                        if ($p.PSObject.Properties["StalledReadyToDownload"] -and $p.StalledReadyToDownload) {
+                            Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI stalled at Ready to Download 0%; Microsoft Store download broker did not start the transfer)"
+                        }
+                        else {
+                            Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI action failed)"
+                        }
                         Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
@@ -15306,7 +16045,7 @@ timeout /t 5
             }
             if ($line -match "^LOG:(.*)") {
                 $logMsg = $matches[1].Trim()
-                if ($logMsg -match "^\[winget\]\s+Progress:\s*(\d+)%$") {
+                if ($logMsg -match "^\[(?:winget|store)\]\s+Progress:\s*(\d+)%$") {
                     $script:WingetCurrentPercent = [int]$matches[1]
                     & $refreshWingetProgressUi
                 }
@@ -15361,11 +16100,25 @@ timeout /t 5
                     if ($script:WingetProgressDone -lt $script:WingetProgressTotal) {
                         $missing = $script:WingetProgressTotal - $script:WingetProgressDone
                         $script:WingetProgressDone = $script:WingetProgressTotal
-                        # We no longer aggressively increment Failed count since silent success is common
-                        Write-GuiLog "[$($script:WingetActiveAction)] Notice: $missing item(s) completed silently without a standard success flag."
+                        if ($script:WingetActionHasStoreCli) {
+                            $script:WingetProgressFailed += $missing
+                            $missingName = if ([string]::IsNullOrWhiteSpace($script:WingetCurrentItemName)) { "Microsoft Store item" } else { $script:WingetCurrentItemName }
+                            & $setWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
+                            Write-GuiLog "[$($script:WingetActiveAction)] FAILED: $missing Store CLI item(s) ended without a result. This usually means Store CLI was stopped after a stalled or cancelled update."
+                        }
+                        else {
+                            # Some non-Store installers close their consoles without a reliable exit event.
+                            Write-GuiLog "[$($script:WingetActiveAction)] Notice: $missing item(s) completed silently without a standard success flag."
+                        }
                     }
-                    $lblWingetStatus.Text = "$($script:WingetActiveAction) completed. $($script:WingetProgressDone)/$($script:WingetProgressTotal) done."
-                    Write-GuiLog "[$($script:WingetActiveAction)] Completed."
+                    if ($script:WingetProgressFailed -gt 0) {
+                        $lblWingetStatus.Text = "$($script:WingetActiveAction) completed with failures. $($script:WingetProgressDone)/$($script:WingetProgressTotal) done."
+                        Write-GuiLog "[$($script:WingetActiveAction)] Completed with $($script:WingetProgressFailed) failure(s)."
+                    }
+                    else {
+                        $lblWingetStatus.Text = "$($script:WingetActiveAction) completed. $($script:WingetProgressDone)/$($script:WingetProgressTotal) done."
+                        Write-GuiLog "[$($script:WingetActiveAction)] Completed."
+                    }
                 }
 
                 $script:WingetCurrentIndex = 0
@@ -15378,15 +16131,21 @@ timeout /t 5
                 if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
                 if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
 
+                $nonSuccessCount = $script:WingetProgressSkipped + $script:WingetProgressFailed
+                $shouldRefreshAfterAction = ($script:WingetProgressSuccess -gt 0 -or $nonSuccessCount -eq 0)
+
                 if ($script:WingetProgressSuccess -gt 0) {
                     Write-GuiLog "Action finished. $($script:WingetProgressSuccess) explicit success(es). Refreshing package list..."
+                }
+                elseif (-not $shouldRefreshAfterAction) {
+                    Write-GuiLog "Action finished with no applied updates. Package list was not refreshed."
                 }
                 else {
                     Write-GuiLog "Action finished. Refreshing package list to verify changes..."
                 }
                 
-                # Always force a refresh to catch silent installs
-                if ($btnWingetScan) {
+                # Refresh after successful or silent actions; skipped/failed-only actions keep the current list visible.
+                if ($shouldRefreshAfterAction -and $btnWingetScan) {
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
                 }
                 $script:WingetActiveAction = $null
@@ -15435,8 +16194,8 @@ function Show-ProviderManager {
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkMsStore" Grid.Column="0"/>
-                <TextBlock Text="MS Store" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Microsoft Store Apps" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Text="Store CLI" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Text="Microsoft Store Apps via store.exe" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -15774,9 +16533,8 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog " "
         Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
-        # Winget/MS Store source refresh is handled inside each provider worker now.
-        # That guarantees the provider scan starts only after its source refresh attempt finishes,
-        # while still keeping all winget work off the UI thread.
+        # Winget source refresh is handled before the provider worker starts.
+        # Store updates use the Microsoft Store CLI instead of the winget msstore source.
         # Do not kill winget here; source preflight may already be running.
         # Stuck winget processes are cleaned at app start and install/update actions handle their own cleanup.
     
@@ -15792,11 +16550,10 @@ $btnWingetScan.Add_Click({
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
 
-        # Gate the actual winget/msstore scan behind a completed source refresh.
+        # Gate the actual winget scan behind a completed source refresh.
         # This keeps startup clickable but ensures the first visible package results are collected after source prep.
         $wingetSourcesToPrep = @()
         if ("winget" -in $enabled) { $wingetSourcesToPrep += "winget" }
-        if ("msstore" -in $enabled) { $wingetSourcesToPrep += "msstore" }
 
         if ($wingetSourcesToPrep.Count -gt 0 -and -not $script:WingetSourcePreflightReadyForScan) {
             if (-not $script:WingetScanSourcePreflightInProgress) {
@@ -15837,7 +16594,7 @@ $btnWingetScan.Add_Click({
                     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                     $btnWingetUpdateSel.IsEnabled = $true
                     [System.Windows.MessageBox]::Show(
-                        "Scan timed out after 120 seconds.`n`nThis often happens with the Microsoft Store source.`nTry disabling 'MS Store' in Providers and scan again.",
+                        "Scan timed out after 120 seconds.`n`nOne of the enabled package providers did not respond.`nTry disabling slow providers and scan again.",
                         "Scan Timeout", "OK", "Warning"
                     ) | Out-Null
                 }
@@ -15847,8 +16604,8 @@ $btnWingetScan.Add_Click({
     
         # --- Provider Workers ---
     
-        # A. WINGET / MSSTORE (separate processes)
-        foreach ($wingetSource in @("winget", "msstore")) {
+        # A. WINGET
+        foreach ($wingetSource in @("winget")) {
             if ($wingetSource -notin $enabled) { continue }
     
             $ps = [PowerShell]::Create()
@@ -15863,8 +16620,8 @@ $btnWingetScan.Add_Click({
     
                     Write-Output "LOG:$SourceName source preflight already completed; starting scan..."
     
-                    # Timeout: 45 sec for msstore, 120 sec for winget
-                    $timeoutMs = if ($SourceName -eq "msstore") { 45000 } else { 120000 }
+                    # Winget source-backed scans can legitimately take a while.
+                    $timeoutMs = 120000
     
                     $wArgs = "list --upgrade-available --accept-source-agreements --disable-interactivity --source $SourceName"
                     try {
@@ -15944,6 +16701,188 @@ $btnWingetScan.Add_Click({
                     }
                 }).AddArgument($wingetSource).AddArgument($ignoreList)
     
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        if ("msstore" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+                    function Test-Ignored($n, $i) {
+                        if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
+                        return $false
+                    }
+
+                    function Get-StoreColumnIndex {
+                        param([string[]]$Headers, [string[]]$Patterns, [int]$DefaultIndex = -1)
+                        if ($Headers) {
+                            for ($idx = 0; $idx -lt $Headers.Count; $idx++) {
+                                foreach ($pattern in $Patterns) {
+                                    if ($Headers[$idx] -match $pattern) { return $idx }
+                                }
+                            }
+                        }
+                        return $DefaultIndex
+                    }
+
+                    function Get-StoreColumnValue {
+                        param([string[]]$Columns, [int]$Index, [string]$Fallback = "")
+                        if ($Index -ge 0 -and $Index -lt $Columns.Count) { return ([string]$Columns[$Index]).Trim() }
+                        return $Fallback
+                    }
+
+                    function Get-StoreCliProductId {
+                        param([string]$Value)
+
+                        $text = ([string]$Value).Trim()
+                        if ([string]::IsNullOrWhiteSpace($text)) { return "" }
+
+                        $matchPatterns = @(
+                            '(?i)(?:product\s*id|productid|product-id)\s*[:=]\s*((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))',
+                            '(?i)(?:/detail/|productid=)((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))',
+                            '(?i)\b((?:9[A-Z0-9]{9,19}|XP[A-Z0-9]{8,18}))\b'
+                        )
+
+                        foreach ($pattern in $matchPatterns) {
+                            $match = [regex]::Match($text, $pattern)
+                            if ($match.Success) { return $match.Groups[1].Value.ToUpperInvariant() }
+                        }
+
+                        return ""
+                    }
+
+                    function ConvertFrom-StoreUpdatesOutput {
+                        param([string]$OutputText)
+
+                        $items = New-Object System.Collections.Generic.List[object]
+                        if ([string]::IsNullOrWhiteSpace($OutputText)) { return $items.ToArray() }
+
+                        $cleanText = [regex]::Replace($OutputText, "`e\[[0-?]*[ -/]*[@-~]", "")
+                        $headers = $null
+                        $vertical = [string][char]0x2502
+                        $lines = $cleanText -split "`r?`n"
+
+                        foreach ($rawLine in $lines) {
+                            $line = ([string]$rawLine).Trim()
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                            if ($line -notmatch '[\p{L}\p{Nd}]') { continue }
+                            if ($line -match '(?i)^(checking|usage:|commands?:|options?:|examples?:)' -or $line -match '(?i)store cli') { continue }
+                            if ($line -match '(?i)^(no updates|all apps are up to date|your apps are up to date)') { continue }
+
+                            $cols = @()
+                            if ($line.Contains($vertical)) {
+                                $rawCols = $line -split [regex]::Escape($vertical)
+                                if ($rawCols.Count -gt 2) {
+                                    for ($ci = 1; $ci -lt ($rawCols.Count - 1); $ci++) {
+                                        $value = ([string]$rawCols[$ci]).Trim()
+                                        if ($value -ne "") { $cols += $value }
+                                    }
+                                }
+                            }
+                            elseif ($line -match '\s{2,}') {
+                                $cols = @($line -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
+                            }
+
+                            if ($cols.Count -lt 2) { continue }
+
+                            $lowerCols = @($cols | ForEach-Object { ([string]$_).ToLowerInvariant() })
+                            if ($lowerCols -contains "name" -or $lowerCols -contains "app" -or $lowerCols -contains "title") {
+                                $headers = [string[]]$cols
+                                continue
+                            }
+                            if ($headers -and ($headers[0] -match '(?i)^command$')) { continue }
+
+                            $nameIndex = Get-StoreColumnIndex -Headers $headers -Patterns @('(?i)^(name|app|title)$') -DefaultIndex 0
+                            $idIndex = Get-StoreColumnIndex -Headers $headers -Patterns @('(?i)product\s*id', '(?i)store\s*id', '(?i)catalog\s*id', '(?i)^id$') -DefaultIndex -1
+                            $versionIndex = Get-StoreColumnIndex -Headers $headers -Patterns @('(?i)installed', '(?i)current', '(?i)^version$') -DefaultIndex -1
+                            $availableIndex = Get-StoreColumnIndex -Headers $headers -Patterns @('(?i)available', '(?i)latest', '(?i)new\s+version', '(?i)update') -DefaultIndex -1
+
+                            if ($availableIndex -eq $versionIndex) { $availableIndex = -1 }
+
+                            $n = Get-StoreColumnValue -Columns $cols -Index $nameIndex
+                            if ([string]::IsNullOrWhiteSpace($n) -or $n -match '(?i)^(name|app|title)$') { continue }
+
+                            $i = Get-StoreCliProductId (Get-StoreColumnValue -Columns $cols -Index $idIndex -Fallback "")
+                            $detectedProductId = $null
+                            for ($colIndex = 0; $colIndex -lt $cols.Count; $colIndex++) {
+                                if ($colIndex -eq $nameIndex) { continue }
+                                $candidate = Get-StoreCliProductId $cols[$colIndex]
+                                if ($candidate) {
+                                    $detectedProductId = $candidate
+                                    break
+                                }
+                            }
+                            if ($detectedProductId -and [string]::IsNullOrWhiteSpace($i)) {
+                                $i = $detectedProductId
+                            }
+                            if ([string]::IsNullOrWhiteSpace($i)) { $i = "" }
+                            $v = Get-StoreColumnValue -Columns $cols -Index $versionIndex -Fallback "?"
+                            $a = Get-StoreColumnValue -Columns $cols -Index $availableIndex -Fallback "Update available"
+
+                            if (Test-Ignored $n $i) { continue }
+                            [void]$items.Add([PSCustomObject]@{Source = "msstore"; Name = $n; Id = $i; Version = $v; Available = $a })
+                        }
+
+                        return $items.ToArray()
+                    }
+
+                    Write-Output "LOG:Scanning Microsoft Store with Store CLI..."
+                    try {
+                        if (-not (Get-Command "store" -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:Store CLI was not found. Update Microsoft Store, then scan again."
+                            return
+                        }
+
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $pInfo.FileName = "store"
+                        $pInfo.Arguments = "updates"
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.RedirectStandardError = $true
+                        $pInfo.RedirectStandardInput = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        try {
+                            $p.StandardInput.WriteLine("n")
+                            $p.StandardInput.Close()
+                        }
+                        catch {}
+
+                        if (-not $p.WaitForExit(60000)) {
+                            Write-Output "LOG:Store CLI scan timed out after 60 seconds."
+                            try { $p.Kill() } catch {}
+                            return
+                        }
+
+                        $out = $p.StandardOutput.ReadToEnd()
+                        $err = $p.StandardError.ReadToEnd()
+                        $combined = "$out`n$err"
+
+                        if ($p.ExitCode -ne 0) {
+                            Write-Output "LOG:Store CLI scan exited with code $($p.ExitCode)."
+                            if (-not [string]::IsNullOrWhiteSpace($err)) {
+                                foreach ($errLine in ($err -split "`r?`n")) {
+                                    if (-not [string]::IsNullOrWhiteSpace($errLine)) { Write-Output "LOG:Store CLI: $errLine" }
+                                }
+                            }
+                        }
+
+                        $storeItems = @(ConvertFrom-StoreUpdatesOutput -OutputText $combined)
+                        if ($storeItems.Count -eq 0 -and $combined -match '(?i)(no updates|up to date)') {
+                            Write-Output "LOG:No Microsoft Store updates found by Store CLI."
+                        }
+                        foreach ($storeItem in $storeItems) { $storeItem }
+                    }
+                    catch {
+                        Write-Output "LOG:Store CLI check failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($ignoreList)
+
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
     
@@ -16514,6 +17453,7 @@ $btnWingetFind.Add_Click({
                 $sourceFlag = ""
                 if ("winget" -in $Enabled -and "msstore" -notin $Enabled) { $sourceFlag = "--source winget" }
                 elseif ("winget" -notin $Enabled -and "msstore" -in $Enabled) { $sourceFlag = "--source msstore" }
+                $defaultSource = if ("winget" -notin $Enabled -and "msstore" -in $Enabled) { "msstore" } else { "winget" }
             
                 $cleanQuery = $Query.Replace('"', '')
             
@@ -16554,7 +17494,7 @@ $btnWingetFind.Add_Click({
 
                             $len = $parts.Count
 
-                            $n = $null; $i = $null; $v = $null; $s = "winget"
+                            $n = $null; $i = $null; $v = $null; $s = $defaultSource
 
                             if ($len -ge 5) {
                                 # Layout: Name | Id | Version | Match | Source
@@ -17525,10 +18465,7 @@ if ($btnCreditChaython) { $btnCreditChaython.Add_Click({ Start-Process "https://
 if ($btnToggleTheme) {
     $btnToggleTheme.Add_Click({
             $nextTheme = if ($script:CurrentTheme -eq "dark") { "light" } else { "dark" }
-            Set-WmtTheme -Theme $nextTheme
-            $settings = Get-WmtSettings
-            $settings.Theme = $nextTheme
-            Save-WmtSettings -Settings $settings
+            Set-WmtThemePreference -Theme $nextTheme
         })
 }
 if ($btnDonate) { $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" }) }
