@@ -16926,6 +16926,40 @@ $Script:StartWingetAction = {
             $windowTitle = "WMT Store CLI - $safeTitle"
             $displayAction = if ($ActionLabel -eq "Install") { "Installing" } else { "Updating" }
 
+            function Get-WmtStoreCliExitResult {
+                param(
+                    [string]$ResultPath,
+                    [object]$Process
+                )
+
+                if ($ResultPath -and (Test-Path $ResultPath)) {
+                    $exitText = (Get-Content -Path $ResultPath -Raw -ErrorAction SilentlyContinue).Trim()
+                    $exitMatch = [regex]::Match($exitText, '-?\d+')
+                    $exitCode = 1
+                    if ($exitMatch.Success -and [int]::TryParse($exitMatch.Value, [ref]$exitCode)) {
+                        return [PSCustomObject]@{ Found = $true; ExitCode = $exitCode }
+                    }
+                    return [PSCustomObject]@{ Found = $true; ExitCode = 1 }
+                }
+
+                if ($Process -and $Process.HasExited) {
+                    $exitCode = 1
+                    try { $exitCode = [int]$Process.ExitCode } catch {}
+                    return [PSCustomObject]@{ Found = $true; ExitCode = $exitCode }
+                }
+
+                return [PSCustomObject]@{ Found = $false; ExitCode = 1 }
+            }
+
+            function Clear-WmtStoreCliTempFiles {
+                param([string[]]$Paths)
+
+                foreach ($path in $Paths) {
+                    if ([string]::IsNullOrWhiteSpace($path)) { continue }
+                    try { Remove-Item -Path $path -Force -ErrorAction SilentlyContinue } catch {}
+                }
+            }
+
             $sendKeysContent = @'
 param(
     [int]$TargetPid,
@@ -17199,7 +17233,7 @@ echo.
 echo Store CLI exit code: %WMT_EXIT%
 > "$resultPath" echo %WMT_EXIT%
 timeout /t 3 /nobreak >nul
-(goto) 2>nul & del "%~f0"
+exit /b %WMT_EXIT%
 "@
 
             try {
@@ -17218,16 +17252,13 @@ timeout /t 3 /nobreak >nul
                 $lastStatusLine = ""
                 $readyZeroSince = $null
                 while ((Get-Date) -lt $deadline) {
-                    if (Test-Path $resultPath) {
-                        $exitText = (Get-Content -Path $resultPath -Raw -ErrorAction SilentlyContinue).Trim()
-                        try { Remove-Item -Path $resultPath -Force -ErrorAction SilentlyContinue } catch {}
-                        try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
-                        try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
-                        $exitCode = 1
-                        if ([int]::TryParse($exitText, [ref]$exitCode)) {
-                            return [PSCustomObject]@{ ExitCode = $exitCode }
+                    $result = Get-WmtStoreCliExitResult -ResultPath $resultPath -Process $cmdProc
+                    if ($result.Found) {
+                        if ($cmdProc -and -not $cmdProc.HasExited) {
+                            try { [void]$cmdProc.WaitForExit(5000) } catch {}
                         }
-                        return [PSCustomObject]@{ ExitCode = 1 }
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
+                        return [PSCustomObject]@{ ExitCode = [int]$result.ExitCode }
                     }
 
                     $now = Get-Date
@@ -17282,8 +17313,7 @@ timeout /t 3 /nobreak >nul
                             if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                         }
                         catch {}
-                        try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
-                        try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
                         return [PSCustomObject]@{ ExitCode = -2; StalledReadyToDownload = $true }
                     }
 
@@ -17301,13 +17331,12 @@ timeout /t 3 /nobreak >nul
                     if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                 }
                 catch {}
-                try { Remove-Item -Path $statusPath -Force -ErrorAction SilentlyContinue } catch {}
-                try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = -1 }
             }
             catch {
                 Write-Output "LOG:[Store CLI] Interactive launch failed: $($_.Exception.Message)"
-                try { Remove-Item -Path $sendKeysPath -Force -ErrorAction SilentlyContinue } catch {}
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = 1 }
             }
         }
