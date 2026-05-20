@@ -5932,7 +5932,7 @@ function Show-RegScanSelection {
     # --- Form Setup ---
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Select Registry Scan Targets"
-    $f.Size = "600, 550"
+    $f.Size = "640, 550"
     $f.StartPosition = "CenterScreen"
     $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
     $f.ForeColor = "White"
@@ -5948,7 +5948,7 @@ function Show-RegScanSelection {
 
     # --- Scrollable Panel for Checkboxes ---
     $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Location = "20, 50"; $pnl.Size = "550, 380"; $pnl.AutoScroll = $true
+    $pnl.Location = "20, 50"; $pnl.Size = "590, 380"; $pnl.AutoScroll = $true
     Set-WmtDoubleBuffered -Control $pnl
     $f.Controls.Add($pnl)
 
@@ -6015,39 +6015,58 @@ function Show-RegScanSelection {
         $pnl.Controls.Add($chk); $chkBoxes += $chk; $count++
     }
 
+    $startDeepScan = {
+        $selected = @()
+        foreach ($c in $chkBoxes) {
+            if ($c.Checked) { $selected += $c.Tag }
+            $currentSettings.RegistryScan[$c.Tag] = $c.Checked
+        }
+        Save-WmtSettings -Settings $currentSettings
+
+        $f.Tag = $selected
+        $f.DialogResult = "OK"
+        $f.Close()
+    }
+
     # --- Buttons ---
+    $btnBackupHKLM = New-Object System.Windows.Forms.Button
+    $btnBackupHKLM.Text = "Export HKLM"
+    $btnBackupHKLM.Location = "135, 450"; $btnBackupHKLM.Width = 130; $btnBackupHKLM.Height = 40
+    $btnBackupHKLM.BackColor = "DimGray"; $btnBackupHKLM.ForeColor = "White"; $btnBackupHKLM.FlatStyle = "Flat"
+    $btnBackupHKLM.Add_Click({ Invoke-RegistryTask -Action "BackupHKLM" }.GetNewClosure())
+    $f.Controls.Add($btnBackupHKLM)
+
+    $btnRestore = New-Object System.Windows.Forms.Button
+    $btnRestore.Text = "Import Backup"
+    $btnRestore.Location = "275, 450"; $btnRestore.Width = 130; $btnRestore.Height = 40
+    $btnRestore.BackColor = "DimGray"; $btnRestore.ForeColor = "White"; $btnRestore.FlatStyle = "Flat"
+    $btnRestore.Add_Click({ Invoke-RegistryTask -Action "Restore" }.GetNewClosure())
+    $f.Controls.Add($btnRestore)
+
     $btnScan = New-Object System.Windows.Forms.Button
     $btnScan.Text = "Start Deep Scan"
-    $btnScan.Location = "340, 450"; $btnScan.Width = 200; $btnScan.Height = 40
+    $btnScan.Location = "450, 450"; $btnScan.Width = 160; $btnScan.Height = 40
     $btnScan.BackColor = "SeaGreen"; $btnScan.ForeColor = "White"; $btnScan.FlatStyle = "Flat"
-    $btnScan.DialogResult = "OK"
+    $btnScan.Add_Click({ & $startDeepScan }.GetNewClosure())
     $f.Controls.Add($btnScan)
 
     $btnCancel = New-Object System.Windows.Forms.Button
     $btnCancel.Text = "Cancel"
     $btnCancel.Location = "20, 450"; $btnCancel.Width = 100; $btnCancel.Height = 40
     $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
+    $btnCancel.DialogResult = "Cancel"
     $f.Controls.Add($btnCancel)
     
     $f.AcceptButton = $btnScan; $f.CancelButton = $btnCancel
 
     Set-WmtWinFormsTheme -Control $f
     $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
+    Set-WmtWinFormsButtonTheme -Button $btnBackupHKLM -Role Standard
+    Set-WmtWinFormsButtonTheme -Button $btnRestore -Role Standard
     Set-WmtWinFormsButtonTheme -Button $btnScan -Role Success
     Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
-    if ($f.ShowDialog() -eq "OK") {
-        $selected = @()
-        
-        # SAVE SETTINGS
-        foreach ($c in $chkBoxes) { 
-            if ($c.Checked) { $selected += $c.Tag }
-            $currentSettings.RegistryScan[$c.Tag] = $c.Checked
-        }
-        Save-WmtSettings -Settings $currentSettings
-
-        return $selected
-    }
-    return $null
+    [void]$f.ShowDialog()
+    return $f.Tag
 }
 # --- Registry Results UI ---
 function Show-RegistryCleaner {
@@ -6709,6 +6728,64 @@ function Invoke-RegistryTask {
     }
     catch {}
 
+    if ($Action -eq "BackupHKLM") {
+        Invoke-UiCommand {
+            param($BackupDirectory)
+
+            if (-not (Test-Path -LiteralPath $BackupDirectory)) {
+                New-Item -Path $BackupDirectory -ItemType Directory -Force | Out-Null
+            }
+
+            $bkFile = Join-Path $BackupDirectory ("HKLM_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+            Write-Output "Exporting HKLM to: $bkFile"
+            & reg.exe export "HKLM" $bkFile /y 2>&1 | ForEach-Object { Write-Output $_ }
+
+            if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $bkFile)) {
+                throw "HKLM backup failed. reg.exe exit code: $LASTEXITCODE"
+            }
+
+            [System.Windows.Forms.MessageBox]::Show("HKLM export saved to:`n$bkFile", "Registry Export", "OK", "Information") | Out-Null
+        } "Exporting HKLM hive..." -ArgumentList $bkDir
+        return
+    }
+
+    if ($Action -eq "Restore") {
+        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg.Title = "Select Registry Backup to Import"
+        $dlg.Filter = "Registry backup (*.reg)|*.reg|All files (*.*)|*.*"
+        if (Test-Path -LiteralPath $bkDir) {
+            try { $dlg.InitialDirectory = (Resolve-Path -LiteralPath $bkDir).Path } catch {}
+        }
+
+        if ($dlg.ShowDialog() -ne "OK") { return }
+        $restoreFile = $dlg.FileName
+
+        $confirm = [System.Windows.Forms.MessageBox]::Show(
+            "Import this registry backup?`n`n$restoreFile`n`nThis can overwrite current registry values.",
+            "Import Registry Backup",
+            [System.Windows.Forms.MessageBoxButtons]::YesNo,
+            [System.Windows.Forms.MessageBoxIcon]::Warning
+        )
+        if ($confirm -ne "Yes") { return }
+
+        Invoke-UiCommand {
+            param($BackupFile)
+
+            if (-not (Test-Path -LiteralPath $BackupFile)) {
+                throw "Backup file not found: $BackupFile"
+            }
+
+            Write-Output "Importing registry backup: $BackupFile"
+            & reg.exe import $BackupFile 2>&1 | ForEach-Object { Write-Output $_ }
+            if ($LASTEXITCODE -ne 0) {
+                throw "Registry restore failed. reg.exe exit code: $LASTEXITCODE"
+            }
+
+            [System.Windows.Forms.MessageBox]::Show("Registry backup imported from:`n$BackupFile", "Registry Import", "OK", "Information") | Out-Null
+        } "Importing registry backup..." -ArgumentList $restoreFile
+        return
+    }
+
     # --- MAIN SCAN LOGIC ---
     if ($Action -eq "DeepClean") {
         $selectedScans = Show-RegScanSelection
@@ -7084,22 +7161,88 @@ function Invoke-RegistryTask {
                     return $null
                 }
 
+                function Get-WmtRegistryViews {
+                    $views = New-Object System.Collections.Generic.List[object]
+
+                    if ([Environment]::Is64BitOperatingSystem) {
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)) {
+                            $probe = $null
+                            try {
+                                $probe = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                if ($probe) { [void]$views.Add($view) }
+                            }
+                            catch {}
+                            finally {
+                                if ($probe) { $probe.Close() }
+                            }
+                        }
+                    }
+
+                    if ($views.Count -eq 0) { [void]$views.Add([Microsoft.Win32.RegistryView]::Default) }
+                    return $views.ToArray()
+                }
+
+                function Get-WmtRegistryViewLabel {
+                    param($View)
+
+                    switch ([string]$View) {
+                        "Registry64" { return "64-bit" }
+                        "Registry32" { return "32-bit" }
+                        default { return "default" }
+                    }
+                }
+
+                function ConvertTo-WmtHklmViewPath {
+                    param(
+                        [string]$SubPath,
+                        $View
+                    )
+
+                    $effectivePath = ([string]$SubPath).TrimStart('\')
+                    if ([string]$View -eq "Registry32" -and $effectivePath -match '^(?i)SOFTWARE\\(?!WOW6432Node\\)(?<Rest>.+)$') {
+                        $effectivePath = "SOFTWARE\WOW6432Node\$($Matches.Rest)"
+                    }
+
+                    return "HKLM:\$effectivePath"
+                }
+
+                function ConvertTo-WmtClassesViewPath {
+                    param(
+                        [string]$SubPath,
+                        $View
+                    )
+
+                    $effectivePath = ([string]$SubPath).TrimStart('\')
+                    if ([string]$View -eq "Registry32" -and [Environment]::Is64BitOperatingSystem) {
+                        return "HKLM:\SOFTWARE\WOW6432Node\Classes\$effectivePath"
+                    }
+                    if ([string]$View -eq "Registry64") {
+                        return "HKLM:\SOFTWARE\Classes\$effectivePath"
+                    }
+
+                    return "HKCR:\$effectivePath"
+                }
+
                 function Test-WmtClsidExists {
                     param([string]$Clsid)
                     $normalized = ConvertTo-WmtClsid $Clsid
                     if (-not $normalized) { return $false }
 
-                    $root = $null; $key = $null
-                    try {
-                        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
-                        $key = $root.OpenSubKey("CLSID\$normalized", $false)
-                        return ($null -ne $key)
+                    foreach ($view in @(Get-WmtRegistryViews)) {
+                        $root = $null; $key = $null
+                        try {
+                            $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                            $key = $root.OpenSubKey("CLSID\$normalized", $false)
+                            if ($key) { return $true }
+                        }
+                        catch {}
+                        finally {
+                            if ($key) { $key.Close() }
+                            if ($root) { $root.Close() }
+                        }
                     }
-                    catch { return $false }
-                    finally {
-                        if ($key) { $key.Close() }
-                        if ($root) { $root.Close() }
-                    }
+
+                    return $false
                 }
 
                 function Test-WmtClsidExistsForTarget {
@@ -7141,40 +7284,53 @@ function Invoke-RegistryTask {
                 }
 
                 function Get-WmtClsidReferenceIssue {
-                    param([string]$Clsid)
+                    param(
+                        [string]$Clsid,
+                        $View = $null
+                    )
                     $normalized = ConvertTo-WmtClsid $Clsid
                     if (-not $normalized) { return $null }
 
-                    $root = $null; $clsidKey = $null
-                    try {
-                        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
-                        $clsidKey = $root.OpenSubKey("CLSID\$normalized", $false)
-                        if (-not $clsidKey) {
-                            return [PSCustomObject]@{ IsBroken = $true; Data = $normalized; Details = "Referenced CLSID $normalized does not exist under HKCR:\CLSID." }
-                        }
+                    $viewsToScan = if ($null -ne $View) { @($View) } else { @(Get-WmtRegistryViews) }
+                    $foundClsid = $false
 
-                        foreach ($serverName in @("InProcServer32", "LocalServer32")) {
-                            $serverKey = $null
-                            try {
-                                $serverKey = $clsidKey.OpenSubKey($serverName, $false)
-                                if ($serverKey) {
-                                    $rawServer = [string]$serverKey.GetValue($null)
-                                    $serverPath = Get-ServiceImageExecutablePath $rawServer
-                                    if ($serverPath -and -not (Test-IsWhitelisted $serverPath) -and -not (Test-PathExists $serverPath)) {
-                                        return [PSCustomObject]@{ IsBroken = $true; Data = $serverPath; Details = "Referenced CLSID $normalized points to missing COM server $serverPath." }
+                    foreach ($scanView in $viewsToScan) {
+                        $viewLabel = Get-WmtRegistryViewLabel $scanView
+                        $root = $null; $clsidKey = $null
+                        try {
+                            $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $scanView)
+                            $clsidKey = $root.OpenSubKey("CLSID\$normalized", $false)
+                            if (-not $clsidKey) { continue }
+
+                            $foundClsid = $true
+                            foreach ($serverName in @("InProcServer32", "LocalServer32")) {
+                                $serverKey = $null
+                                try {
+                                    $serverKey = $clsidKey.OpenSubKey($serverName, $false)
+                                    if ($serverKey) {
+                                        $rawServer = [string]$serverKey.GetValue($null)
+                                        $serverPath = Get-ServiceImageExecutablePath $rawServer
+                                        if ($serverPath -and -not (Test-IsWhitelisted $serverPath) -and -not (Test-PathExists $serverPath)) {
+                                            return [PSCustomObject]@{ IsBroken = $true; Data = $serverPath; Details = "Referenced CLSID $normalized ($viewLabel registry view) points to missing COM server $serverPath." }
+                                        }
                                     }
                                 }
-                            }
-                            catch {}
-                            finally {
-                                if ($serverKey) { $serverKey.Close() }
+                                catch {}
+                                finally {
+                                    if ($serverKey) { $serverKey.Close() }
+                                }
                             }
                         }
+                        catch {}
+                        finally {
+                            if ($clsidKey) { $clsidKey.Close() }
+                            if ($root) { $root.Close() }
+                        }
                     }
-                    catch {}
-                    finally {
-                        if ($clsidKey) { $clsidKey.Close() }
-                        if ($root) { $root.Close() }
+
+                    if (-not $foundClsid) {
+                        $viewText = if ($null -ne $View) { "$(Get-WmtRegistryViewLabel $View) registry view" } else { "available registry views" }
+                        return [PSCustomObject]@{ IsBroken = $true; Data = $normalized; Details = "Referenced CLSID $normalized does not exist under $viewText." }
                     }
 
                     return [PSCustomObject]@{ IsBroken = $false; Data = $normalized; Details = "" }
@@ -7452,23 +7608,34 @@ function Invoke-RegistryTask {
                     if ($SelectedScans -contains "AppPaths") {
                         $SyncHash.Status = "Scanning App Paths..."
                         $key = "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
-                        $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($key)
-                        if ($root) {
-                            $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
-                            foreach ($app in $names) {
-                                $i++; & $Tick "Scanning AppPath: $app" $i $total
-                                try {
-                                    $sub = $root.OpenSubKey($app)
-                                    $path = $sub.GetValue($null)
-                                    if ($path -and $path -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $path)) {
-                                        $clean = Get-RealExePath $path
-                                        if (-not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing App Path"; Data = $clean; DisplayKey = $app; RegPath = "HKLM:\$key\$app"; ValueName = $null; Type = "Key" }) }
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            $baseKey = $null; $root = $null
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                $root = $baseKey.OpenSubKey($key)
+                                if ($root) {
+                                    $viewLabel = Get-WmtRegistryViewLabel $view
+                                    $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                                    foreach ($app in $names) {
+                                        $i++; & $Tick "Scanning AppPath ($viewLabel): $app" $i $total
+                                        try {
+                                            $sub = $root.OpenSubKey($app)
+                                            $path = $sub.GetValue($null)
+                                            if ($path -and $path -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $path)) {
+                                                $clean = Get-RealExePath $path
+                                                if (-not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing App Path"; Data = $clean; DisplayKey = "$app ($viewLabel)"; RegPath = "$(ConvertTo-WmtHklmViewPath -SubPath $key -View $view)\$app"; ValueName = $null; Type = "Key"; Details = "App Paths target is missing in the $viewLabel registry view." }) }
+                                            }
+                                            $sub.Close()
+                                        }
+                                        catch {}
                                     }
-                                    $sub.Close()
                                 }
-                                catch {}
                             }
-                            $root.Close()
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                                if ($baseKey) { $baseKey.Close() }
+                            }
                         }
                         & $EndCategory
                     }
@@ -7525,17 +7692,31 @@ function Invoke-RegistryTask {
                     # 6. UNINSTALLERS
                     if ($SelectedScans -contains "Uninstall") {
                         $SyncHash.Status = "Scanning Uninstallers..."
-                        $paths = @("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")
-                        $hives = @([Microsoft.Win32.Registry]::LocalMachine, [Microsoft.Win32.Registry]::CurrentUser)
-                        $total = 500; $i = 0
-                        foreach ($h in $hives) {
-                            foreach ($p in $paths) {
-                                try {
-                                    $rk = $h.OpenSubKey($p)
-                                    if ($rk) {
-                                        foreach ($subName in $rk.GetSubKeyNames()) {
-                                            $i++; & $Tick "Scanning Uninstaller: $subName" $i $total
+                        $uninstallTargets = New-Object System.Collections.Generic.List[object]
+                        $uninstallPath = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = $baseKey; SubPath = $uninstallPath; RegPrefix = (ConvertTo-WmtHklmViewPath -SubPath $uninstallPath -View $view); Label = "HKLM $(Get-WmtRegistryViewLabel $view)"; OwnsBaseKey = $true })
+                            }
+                            catch {}
+                        }
+                        foreach ($target in @(New-PerUserRegistryTargets -SubPath "Software\Microsoft\Windows\CurrentVersion\Uninstall" -HkcuLabel "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
+                            [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = $target.BaseKey; SubPath = $target.SubPath; RegPrefix = $target.RegPrefix; Label = $target.Label; OwnsBaseKey = $false })
+                        }
+
+                        $total = [math]::Max($uninstallTargets.Count * 100, 1); $i = 0
+                        foreach ($target in $uninstallTargets) {
+                            $rk = $null
+                            try {
+                                $rk = $target.BaseKey.OpenSubKey($target.SubPath)
+                                if ($rk) {
+                                    foreach ($subName in $rk.GetSubKeyNames()) {
+                                        $i++; & $Tick "Scanning Uninstaller: $subName" $i $total
+                                        $sub = $null
+                                        try {
                                             $sub = $rk.OpenSubKey($subName)
+                                            if (-not $sub) { continue }
                                             $uString = $sub.GetValue("UninstallString")
                                             $displayName = [string]$sub.GetValue("DisplayName")
                                             $isWindowsInstaller = (Test-IsRegistryFlagEnabled $sub.GetValue("WindowsInstaller")) -or (Test-IsWindowsInstallerCommand $uString)
@@ -7544,16 +7725,21 @@ function Invoke-RegistryTask {
                                             if ($uString -and -not ([string]::IsNullOrWhiteSpace($displayName)) -and -not $isWindowsInstaller -and -not $isSystemComponent -and -not $isNoRemove) {
                                                 $clean = Get-UninstallExecutablePath $uString
                                                 if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
-                                                    $rootName = if ($h.Name -match "HKEY_LOCAL_MACHINE") { "HKLM" } else { "HKCU" }
-                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Uninstaller"; Data = $clean; DisplayKey = $displayName; RegPath = "$rootName`:\$p\$subName"; ValueName = $null; Type = "Key" })
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Uninstaller"; Data = $clean; DisplayKey = "$displayName ($($target.Label))"; RegPath = "$($target.RegPrefix)\$subName"; ValueName = $null; Type = "Key"; Details = "Uninstall command points to a missing executable." })
                                                 }
                                             }
-                                            $sub.Close()
                                         }
-                                        $rk.Close()
+                                        catch {}
+                                        finally {
+                                            if ($sub) { $sub.Close() }
+                                        }
                                     }
                                 }
-                                catch {}
+                            }
+                            catch {}
+                            finally {
+                                if ($rk) { $rk.Close() }
+                                if ($target.OwnsBaseKey -and $target.BaseKey) { $target.BaseKey.Close() }
                             }
                         }
                         & $EndCategory
@@ -7734,7 +7920,6 @@ function Invoke-RegistryTask {
                     # 12. SHELL EXTENSIONS
                     if ($SelectedScans -contains "ShellExtensions") {
                         $SyncHash.Status = "Scanning Shell Extensions..."
-                        $classesRoot = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
                         $handlerRoots = @(
                             "*\shellex\ContextMenuHandlers",
                             "*\shellex\PropertySheetHandlers",
@@ -7753,75 +7938,85 @@ function Invoke-RegistryTask {
                             "exefile\shellex\ContextMenuHandlers"
                         )
 
-                        $total = $handlerRoots.Count; $i = 0
-                        foreach ($handlerRootPath in $handlerRoots) {
-                            $i++; & $Tick "Scanning Shell Extensions: $handlerRootPath" $i $total
-                            $handlerRoot = $null
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $classesRoot = $null
                             try {
-                                $handlerRoot = $classesRoot.OpenSubKey($handlerRootPath, $false)
-                                if ($handlerRoot) {
-                                    foreach ($handlerName in $handlerRoot.GetSubKeyNames()) {
-                                        $handlerKey = $null
-                                        try {
-                                            $handlerKey = $handlerRoot.OpenSubKey($handlerName, $false)
-                                            if (-not $handlerKey) { continue }
+                                $classesRoot = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $total = $handlerRoots.Count; $i = 0
+                                foreach ($handlerRootPath in $handlerRoots) {
+                                    $i++; & $Tick "Scanning Shell Extensions ($viewLabel): $handlerRootPath" $i $total
+                                    $handlerRoot = $null
+                                    try {
+                                        $handlerRoot = $classesRoot.OpenSubKey($handlerRootPath, $false)
+                                        if ($handlerRoot) {
+                                            foreach ($handlerName in $handlerRoot.GetSubKeyNames()) {
+                                                $handlerKey = $null
+                                                try {
+                                                    $handlerKey = $handlerRoot.OpenSubKey($handlerName, $false)
+                                                    if (-not $handlerKey) { continue }
 
+                                                    $clsid = ConvertTo-WmtClsid ([string]$handlerKey.GetValue($null))
+                                                    if (-not $clsid) { $clsid = ConvertTo-WmtClsid $handlerName }
+                                                    if (-not $clsid) { continue }
+
+                                                    $issue = Get-WmtClsidReferenceIssue -Clsid $clsid -View $view
+                                                    if ($issue -and $issue.IsBroken) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                Problem    = "Invalid Shell Extension"
+                                                                Data       = $issue.Data
+                                                                DisplayKey = "$handlerRootPath\$handlerName ($viewLabel)"
+                                                                RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$handlerRootPath\$handlerName" -View $view)
+                                                                ValueName  = $null
+                                                                Type       = "Key"
+                                                                Details    = $issue.Details
+                                                            })
+                                                    }
+                                                }
+                                                catch {}
+                                                finally {
+                                                    if ($handlerKey) { $handlerKey.Close() }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($handlerRoot) { $handlerRoot.Close() }
+                                    }
+                                }
+
+                                foreach ($directHandlerPath in @("exefile\shellex\IconHandler", "lnkfile\shellex\IconHandler")) {
+                                    $handlerKey = $null
+                                    try {
+                                        $handlerKey = $classesRoot.OpenSubKey($directHandlerPath, $false)
+                                        if ($handlerKey) {
                                             $clsid = ConvertTo-WmtClsid ([string]$handlerKey.GetValue($null))
-                                            if (-not $clsid) { $clsid = ConvertTo-WmtClsid $handlerName }
-                                            if (-not $clsid) { continue }
-
-                                            $issue = Get-WmtClsidReferenceIssue $clsid
+                                            $issue = Get-WmtClsidReferenceIssue -Clsid $clsid -View $view
                                             if ($issue -and $issue.IsBroken) {
                                                 [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                         Problem    = "Invalid Shell Extension"
                                                         Data       = $issue.Data
-                                                        DisplayKey = "$handlerRootPath\$handlerName"
-                                                        RegPath    = "HKCR:\$handlerRootPath\$handlerName"
+                                                        DisplayKey = "$directHandlerPath ($viewLabel)"
+                                                        RegPath    = (ConvertTo-WmtClassesViewPath -SubPath $directHandlerPath -View $view)
                                                         ValueName  = $null
                                                         Type       = "Key"
                                                         Details    = $issue.Details
                                                     })
                                             }
                                         }
-                                        catch {}
-                                        finally {
-                                            if ($handlerKey) { $handlerKey.Close() }
-                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($handlerKey) { $handlerKey.Close() }
                                     }
                                 }
                             }
                             catch {}
                             finally {
-                                if ($handlerRoot) { $handlerRoot.Close() }
+                                if ($classesRoot) { $classesRoot.Close() }
                             }
                         }
-
-                        foreach ($directHandlerPath in @("exefile\shellex\IconHandler", "lnkfile\shellex\IconHandler")) {
-                            $handlerKey = $null
-                            try {
-                                $handlerKey = $classesRoot.OpenSubKey($directHandlerPath, $false)
-                                if ($handlerKey) {
-                                    $clsid = ConvertTo-WmtClsid ([string]$handlerKey.GetValue($null))
-                                    $issue = Get-WmtClsidReferenceIssue $clsid
-                                    if ($issue -and $issue.IsBroken) {
-                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                Problem    = "Invalid Shell Extension"
-                                                Data       = $issue.Data
-                                                DisplayKey = $directHandlerPath
-                                                RegPath    = "HKCR:\$directHandlerPath"
-                                                ValueName  = $null
-                                                Type       = "Key"
-                                                Details    = $issue.Details
-                                            })
-                                    }
-                                }
-                            }
-                            catch {}
-                            finally {
-                                if ($handlerKey) { $handlerKey.Close() }
-                            }
-                        }
-                        $classesRoot.Close()
                         & $EndCategory
                     }
 
@@ -7879,7 +8074,6 @@ function Invoke-RegistryTask {
                         }
                         & $EndCategory
                     }
-
                     # 14. FONT ENTRIES
                     if ($SelectedScans -contains "Fonts") {
                         $SyncHash.Status = "Scanning Font Registry Entries..."
@@ -8079,11 +8273,16 @@ function Invoke-RegistryTask {
                     if ($SelectedScans -contains "UninstallMetadata") {
                         $SyncHash.Status = "Scanning Uninstall Metadata..."
                         $uninstallTargets = New-Object System.Collections.Generic.List[object]
-                        foreach ($path in @("SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall")) {
-                            [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = [Microsoft.Win32.Registry]::LocalMachine; SubPath = $path; RegPrefix = "HKLM:\$path"; Label = "HKLM:\$path" })
+                        $uninstallPath = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = $baseKey; SubPath = $uninstallPath; RegPrefix = (ConvertTo-WmtHklmViewPath -SubPath $uninstallPath -View $view); Label = "HKLM $(Get-WmtRegistryViewLabel $view)"; OwnsBaseKey = $true })
+                            }
+                            catch {}
                         }
                         foreach ($target in @(New-PerUserRegistryTargets -SubPath "Software\Microsoft\Windows\CurrentVersion\Uninstall" -HkcuLabel "HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall")) {
-                            [void]$uninstallTargets.Add($target)
+                            [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = $target.BaseKey; SubPath = $target.SubPath; RegPrefix = $target.RegPrefix; Label = $target.Label; OwnsBaseKey = $false })
                         }
 
                         $metadataValues = @("DisplayIcon", "InstallLocation", "InstallSource", "ModifyPath", "Readme", "HelpLink", "URLInfoAbout")
@@ -8135,6 +8334,7 @@ function Invoke-RegistryTask {
                             catch {}
                             finally {
                                 if ($root) { $root.Close() }
+                                if ($target.OwnsBaseKey -and $target.BaseKey) { $target.BaseKey.Close() }
                             }
                         }
                         & $EndCategory
@@ -8314,29 +8514,39 @@ function Invoke-RegistryTask {
                     # 12. TYPE LIBRARIES
                     if ($SelectedScans -contains "TypeLib") {
                         $SyncHash.Status = "Scanning Type Libraries..."
-                        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
-                        $tlKey = $root.OpenSubKey("TypeLib", $false)
-                        if ($tlKey) {
-                            $names = $tlKey.GetSubKeyNames(); $total = $names.Count; $i = 0
-                            foreach ($guid in $names) {
-                                $i++; & $Tick "Scanning TypeLib: $guid" $i $total
-                                try {
-                                    $verKey = $tlKey.OpenSubKey($guid)
-                                    if ($verKey) {
-                                        foreach ($ver in $verKey.GetSubKeyNames()) {
-                                            $numKey = $verKey.OpenSubKey($ver)
-                                            $helpDir = $numKey.GetValue("HELPDIR")
-                                            if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-PathExists $helpDir)) {
-                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $helpDir; DisplayKey = "$guid"; RegPath = "HKCR:\TypeLib\$guid\$ver"; ValueName = "HELPDIR"; Type = "Value" }) 
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null; $tlKey = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $tlKey = $root.OpenSubKey("TypeLib", $false)
+                                if ($tlKey) {
+                                    $viewLabel = Get-WmtRegistryViewLabel $view
+                                    $names = $tlKey.GetSubKeyNames(); $total = $names.Count; $i = 0
+                                    foreach ($guid in $names) {
+                                        $i++; & $Tick "Scanning TypeLib ($viewLabel): $guid" $i $total
+                                        try {
+                                            $verKey = $tlKey.OpenSubKey($guid)
+                                            if ($verKey) {
+                                                foreach ($ver in $verKey.GetSubKeyNames()) {
+                                                    $numKey = $verKey.OpenSubKey($ver)
+                                                    $helpDir = $numKey.GetValue("HELPDIR")
+                                                    if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-PathExists $helpDir)) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $helpDir; DisplayKey = "$guid ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver" -View $view); ValueName = "HELPDIR"; Type = "Value"; Details = "Type library HELPDIR path is missing in the $viewLabel registry view." })
+                                                    }
+                                                    $numKey.Close()
+                                                }
+                                                $verKey.Close()
                                             }
-                                            $numKey.Close()
                                         }
-                                        $verKey.Close()
+                                        catch {}
                                     }
                                 }
-                                catch {}
                             }
-                            $tlKey.Close()
+                            catch {}
+                            finally {
+                                if ($tlKey) { $tlKey.Close() }
+                                if ($root) { $root.Close() }
+                            }
                         }
                         & $EndCategory
                     }
@@ -8344,24 +8554,34 @@ function Invoke-RegistryTask {
                     # 13. DEFAULT ICONS
                     if ($SelectedScans -contains "Icons") {
                         $SyncHash.Status = "Scanning Default Icons..."
-                        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
-                        $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
-                        foreach ($ext in $names) {
-                            $i++; & $Tick "Scanning Icon: $ext" $i $total
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
                             try {
-                                $iconKey = $root.OpenSubKey("$ext\DefaultIcon")
-                                if ($iconKey) {
-                                    $val = $iconKey.GetValue($null)
-                                    if ($val) {
-                                        $cleanPath = Get-RealExePath $val
-                                        if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
-                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid Default Icon"; Data = $cleanPath; DisplayKey = $ext; RegPath = "HKCR:\$ext\DefaultIcon"; ValueName = $null; Type = "Key" })
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $names = $root.GetSubKeyNames(); $total = $names.Count; $i = 0
+                                foreach ($ext in $names) {
+                                    $i++; & $Tick "Scanning Icon ($viewLabel): $ext" $i $total
+                                    try {
+                                        $iconKey = $root.OpenSubKey("$ext\DefaultIcon")
+                                        if ($iconKey) {
+                                            $val = $iconKey.GetValue($null)
+                                            if ($val) {
+                                                $cleanPath = Get-RealExePath $val
+                                                if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid Default Icon"; Data = $cleanPath; DisplayKey = "$ext ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "$ext\DefaultIcon" -View $view); ValueName = $null; Type = "Key"; Details = "DefaultIcon path is missing in the $viewLabel registry view." })
+                                                }
+                                            }
+                                            $iconKey.Close()
                                         }
                                     }
-                                    $iconKey.Close()
+                                    catch {}
                                 }
                             }
                             catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
                         }
                         & $EndCategory
                     }
@@ -8369,15 +8589,25 @@ function Invoke-RegistryTask {
                     # 14. SHARED DLLs
                     if ($SelectedScans -contains "SharedDLLs") { 
                         $SyncHash.Status = "Scanning Shared DLLs..."
-                        $keys = @("SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDlls", "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\SharedDlls")
-                        foreach ($k in $keys) {
-                            $rk = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($k)
-                            if ($rk) { 
-                                $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
-                                foreach ($val in $names) { 
-                                    $i++; & $Tick "Scanning DLL: $val" $i $total
-                                    if ($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Shared Ref"; Data = $val; DisplayKey = "SharedDlls"; RegPath = "HKLM:\$k"; ValueName = $val; Type = "Value" }) } 
-                                }; $rk.Close() 
+                        $key = "SOFTWARE\Microsoft\Windows\CurrentVersion\SharedDlls"
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            $baseKey = $null; $rk = $null
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                $rk = $baseKey.OpenSubKey($key)
+                                if ($rk) {
+                                    $viewLabel = Get-WmtRegistryViewLabel $view
+                                    $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
+                                    foreach ($val in $names) {
+                                        $i++; & $Tick "Scanning DLL ($viewLabel): $val" $i $total
+                                        if ($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Shared Ref"; Data = $val; DisplayKey = "SharedDlls ($viewLabel)"; RegPath = (ConvertTo-WmtHklmViewPath -SubPath $key -View $view); ValueName = $val; Type = "Value"; Details = "SharedDlls value points to a missing path in the $viewLabel registry view." }) }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($rk) { $rk.Close() }
+                                if ($baseKey) { $baseKey.Close() }
                             }
                         }
                         & $EndCategory
@@ -19805,26 +20035,7 @@ $btnDrvEnableMeta.Add_Click({
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
 $btnCleanTemp.Add_Click({ Invoke-TempCleanup })
 $btnCleanShortcuts.Add_Click({ Invoke-ShortcutFix })
-$btnCleanReg.Add_Click({
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = "Registry Cleanup"; $form.Size = "420,210"; $form.StartPosition = "CenterScreen"; $form.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 35); $form.ForeColor = "White"
-        $actions = [ordered]@{
-            "Deep Clean (Invalid Paths)"  = "DeepClean"
-            "Backup HKLM Hive"            = "BackupHKLM"
-            "Restore Registry Backup"     = "Restore"
-            "Run SFC/DISM Scan"           = "Scan"
-        }
-        $y = 10
-        foreach ($k in $actions.Keys) {
-            $btn = New-Object System.Windows.Forms.Button
-            $btn.Text = $k; $btn.Tag = $actions[$k]; $btn.Left = 20; $btn.Top = $y; $btn.Width = 360; $btn.Height = 35; $btn.BackColor = "DimGray"; $btn.ForeColor = "White"
-            $btn.Add_Click({ param($s, $e) $form.Tag = $s.Tag; $form.Close() })
-            $form.Controls.Add($btn); $y += 40
-        }
-        Set-WmtWinFormsTheme -Control $form
-        $form.ShowDialog() | Out-Null
-        if ($form.Tag) { Invoke-RegistryTask -Action $form.Tag }
-    })
+$btnCleanReg.Add_Click({ Invoke-RegistryTask -Action "DeepClean" })
 # --- OneDrive Cleanup ---
 $btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
 if ($btnCleanupOneDrive) {
