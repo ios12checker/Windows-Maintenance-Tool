@@ -254,7 +254,7 @@ function New-WmtVirtualRows {
     param([object[]]$Items)
     $rows = [System.Collections.ArrayList]::new()
     foreach ($item in @($Items)) { [void]$rows.Add($item) }
-    return ,$rows
+    return , $rows
 }
 
 function Get-WmtVirtualGridRows {
@@ -262,7 +262,7 @@ function Get-WmtVirtualGridRows {
     if (-not $Grid -or -not $Grid.Tag -or -not $Grid.Tag.PSObject.Properties["VirtualRows"]) {
         return $null
     }
-    return ,$Grid.Tag.VirtualRows
+    return , $Grid.Tag.VirtualRows
 }
 
 function Reset-WmtVirtualGridRowCount {
@@ -3109,17 +3109,17 @@ function Save-WmtSettings {
 
         # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
         $saveObj = [PSCustomObject]@{
-            TempCleanup      = $Settings.TempCleanup
-            RegistryScan     = $Settings.RegistryScan
-            WingetIgnore     = $Settings.WingetIgnore
-            LoadWinapp2      = [bool]$Settings.LoadWinapp2
-            EnabledProviders = $Settings.EnabledProviders
-            CustomDnsServers = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
+            TempCleanup       = $Settings.TempCleanup
+            RegistryScan      = $Settings.RegistryScan
+            WingetIgnore      = $Settings.WingetIgnore
+            LoadWinapp2       = [bool]$Settings.LoadWinapp2
+            EnabledProviders  = $Settings.EnabledProviders
+            CustomDnsServers  = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
             CustomDohTemplate = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
-            CustomDohEnabled = [bool]$Settings.CustomDohEnabled
-            Theme            = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
-            WindowState      = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
-            WindowBounds     = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
+            CustomDohEnabled  = [bool]$Settings.CustomDohEnabled
+            Theme             = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
+            WindowState       = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
+            WindowBounds      = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     }
@@ -3136,17 +3136,17 @@ function Get-WmtSettings {
     
     # Default Structure
     $defaults = @{
-        TempCleanup      = @{}
-        RegistryScan     = @{}
-        WingetIgnore     = @()
-        LoadWinapp2      = $false 
-        EnabledProviders = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
-        CustomDnsServers = @()
+        TempCleanup       = @{}
+        RegistryScan      = @{}
+        WingetIgnore      = @()
+        LoadWinapp2       = $false 
+        EnabledProviders  = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
+        CustomDnsServers  = @()
         CustomDohTemplate = ""
-        CustomDohEnabled = $false
-        Theme            = "dark"
-        WindowState      = "Normal"
-        WindowBounds     = @{
+        CustomDohEnabled  = $false
+        Theme             = "dark"
+        WindowState       = "Normal"
+        WindowBounds      = @{
             Top    = 0
             Left   = 0
             Width  = 1280
@@ -4263,7 +4263,8 @@ function Start-DohJob {
             finally {
                 try {
                     $dohRunspace.Dispose()
-                } catch {}
+                }
+                catch {}
                 if ([object]::ReferenceEquals($script:DohRunspace, $dohRunspace)) { $script:DohRunspace = $null }
                 if ([object]::ReferenceEquals($script:DohAsyncResult, $dohAsync)) { $script:DohAsyncResult = $null }
                 if ([object]::ReferenceEquals($script:DohTimer, $dohTimer)) { $script:DohTimer = $null }
@@ -4908,7 +4909,8 @@ function Get-Winapp2Rules {
             } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheMetaPath -Force
             $memoryKey = "{0}|{1}|{2}" -f $cacheVersion, [int64]$iniInfo.Length, $iniInfo.LastWriteTimeUtc.Ticks
         }
-    } catch {}
+    }
+    catch {}
 
     if ($memoryKey) { $script:Winapp2RulesMemoryCache[$memoryKey] = $finalList }
     
@@ -5243,7 +5245,7 @@ function Show-AdvancedCleanupSelection {
             $mainPanel.ResumeLayout($true)
             & $updateAdvancedCleanerScrollExtent
             if ($form.IsHandleCreated) {
-                $null = $form.BeginInvoke([System.Action]{ & $updateAdvancedCleanerScrollExtent })
+                $null = $form.BeginInvoke([System.Action] { & $updateAdvancedCleanerScrollExtent })
             }
             $mainPanel.Invalidate()
         }
@@ -5624,7 +5626,8 @@ function Invoke-TempCleanup {
                                 foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
                                     Invoke-RobustClean "$profilePath\cache2\entries" -RuleName $itemName
                                 }
-                            } catch {}
+                            }
+                            catch {}
                         }
                     }
                     "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
@@ -7133,8 +7136,6 @@ function Invoke-RegistryTask {
                         "ChangeTracker",
                         "Classes",
                         "Clients",
-                        "ESET",
-                        "ESET Security",
                         "Microsoft",
                         "ODBC",
                         "Policies",
@@ -16429,8 +16430,8 @@ Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
 Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
 Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
 Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
-Add-SearchIndexAction "Light Mode"          { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
-Add-SearchIndexAction "Dark Mode"           { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
+Add-SearchIndexAction "Light Mode" { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
+Add-SearchIndexAction "Dark Mode" { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
 
 # 9. My Device
 Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
@@ -16480,9 +16481,9 @@ $txtGlobalSearch.Add_TextChanged({
             $lstSearchResults.Visibility = "Visible"
             $lstSearchResults.Items.Clear()
             $SearchIndex.GetEnumerator() |
-                Where-Object { ([string]$_.Key).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
-                Sort-Object Key |
-                ForEach-Object { [void]$lstSearchResults.Items.Add($_.Key) }
+            Where-Object { ([string]$_.Key).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
+            Sort-Object Key |
+            ForEach-Object { [void]$lstSearchResults.Items.Add($_.Key) }
         }
         else { $pnlNavButtons.Visibility = "Visible"; $lstSearchResults.Visibility = "Collapsed" }
     })
@@ -17814,7 +17815,7 @@ function Show-ProviderManager {
     $enabled = $settings.EnabledProviders
 
     # 2. Define UI
-[xml]$pXaml = @"
+    [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
