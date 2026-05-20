@@ -7133,14 +7133,12 @@ function Invoke-RegistryTask {
                     if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
 
                     $excluded = @(
-                        "ChangeTracker",
                         "Classes",
                         "Clients",
                         "Microsoft",
                         "ODBC",
                         "Policies",
                         "RegisteredApplications",
-                        "Windows",
                         "WOW6432Node"
                     )
 
