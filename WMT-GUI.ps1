@@ -6995,38 +6995,6 @@ function Invoke-TempCleanup {
                     }
                 })
 
-            $menuDelete.Add_Click({
-                    if ($grid.SelectedRows.Count -gt 0) {
-                        $freedBytes = 0
-                        $rowsToRemove = New-Object System.Collections.ArrayList
-
-                        foreach ($row in @($grid.SelectedRows)) {
-                            if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
-                            $item = $previewRows[$row.Index]
-                            $path = $item.FilePath
-                            $bytes = [long]$item.Size
-                    
-                            try {
-                                if (Test-Path -LiteralPath $path) {
-                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                    $freedBytes += $bytes
-                                }
-                                $rowsToRemove.Add($row.Index) | Out-Null
-                            }
-                            catch {
-                                Write-GuiLog "Failed to delete from Context Menu: $path"
-                            }
-                        }
-                
-                        Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
-                    
-                        if ($freedBytes -gt 0) {
-                            $freedFormatted = Format-FileSize $freedBytes
-                            Write-GuiLog "Manually deleted items from Preview. Recovered: $freedFormatted"
-                        }
-                    }
-                })
-
             $grid.ContextMenuStrip = $ctxMenu
 
             $grid.Add_CellMouseDown({
@@ -7042,35 +7010,355 @@ function Invoke-TempCleanup {
             # --- 4. ACTION LOGIC (BUTTONS) ---
             $btnClose.Add_Click({ $gridForm.Close() })
 
-            $btnCleanSelected.Add_Click({
-                    if ($grid.SelectedRows.Count -eq 0) { return }
-                
-                    $cleanedCount = 0
-                    $freedBytes = 0
-                    $rowsToRemove = New-Object System.Collections.ArrayList
+            $invokePreviewDeletion = {
+                param(
+                    [object[]]$Targets,
+                    [string]$ActionTitle
+                )
 
-                    foreach ($row in @($grid.SelectedRows)) {
-                        if ($row.Index -lt 0 -or $row.Index -ge $previewRows.Count) { continue }
-                        $item = $previewRows[$row.Index]
-                        $path = $item.FilePath
-                        $bytes = [long]$item.Size
-                
-                        try {
-                            if (Test-Path -LiteralPath $path) {
-                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                $freedBytes += $bytes
-                                $cleanedCount++
-                            }
-                            $rowsToRemove.Add($row.Index) | Out-Null
-                        }
-                        catch {
-                            Write-GuiLog "Failed to delete from Analyze: $path"
+                $formatDeleteBytes = {
+                    param([int64]$Bytes)
+                    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+                    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+                    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+                    return "$Bytes B"
+                }.GetNewClosure()
+
+                $deleteTargets = [System.Collections.Generic.List[object]]::new()
+                $seenIndices = @{}
+
+                foreach ($target in @($Targets)) {
+                    if (-not $target) { continue }
+                    try { $idx = [int]$target.Index } catch { continue }
+                    if ($idx -lt 0 -or $idx -ge $previewRows.Count -or $seenIndices.ContainsKey($idx)) { continue }
+
+                    $item = $previewRows[$idx]
+                    [void]$deleteTargets.Add([PSCustomObject]@{
+                            Index    = $idx
+                            FilePath = [string]$item.FilePath
+                            Size     = [int64]$item.Size
+                        })
+                    $seenIndices[$idx] = $true
+                }
+
+                if ($deleteTargets.Count -eq 0) { return }
+
+                $targetArray = $deleteTargets.ToArray()
+                $completedIndices = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+                $failedPaths = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+                $deleteState = [hashtable]::Synchronized(@{
+                        Total            = $targetArray.Count
+                        Processed        = 0
+                        Deleted          = 0
+                        Missing          = 0
+                        Failed           = 0
+                        Bytes            = [int64]0
+                        Current          = ""
+                        Cancel           = $false
+                        IsCompleted      = $false
+                        Error            = ""
+                        CompletedIndices = $completedIndices
+                        FailedPaths      = $failedPaths
+                    })
+
+                $deleteForm = New-Object System.Windows.Forms.Form
+                $deleteForm.Text = $ActionTitle
+                $deleteForm.Size = "540,180"
+                $deleteForm.StartPosition = "CenterParent"
+                $deleteForm.ControlBox = $false
+                $deleteForm.FormBorderStyle = "FixedDialog"
+                $deleteForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
+                $deleteForm.ForeColor = "White"
+
+                $deleteLabel = New-Object System.Windows.Forms.Label
+                $deleteLabel.Location = "20,15"; $deleteLabel.Size = "490,20"
+                $deleteLabel.Text = "Preparing deletion..."
+                $deleteForm.Controls.Add($deleteLabel)
+
+                $deleteCurrent = New-Object System.Windows.Forms.Label
+                $deleteCurrent.Location = "20,40"; $deleteCurrent.Size = "490,20"
+                $deleteCurrent.ForeColor = "Gray"
+                $deleteCurrent.AutoEllipsis = $true
+                $deleteCurrent.Text = "Starting worker..."
+                $deleteForm.Controls.Add($deleteCurrent)
+
+                $deleteProgress = New-Object System.Windows.Forms.ProgressBar
+                $deleteProgress.Location = "20,70"; $deleteProgress.Size = "490,20"
+                $deleteProgress.Minimum = 0
+                $deleteProgress.Maximum = [Math]::Max(1, $targetArray.Count)
+                $deleteProgress.Value = 0
+                $deleteForm.Controls.Add($deleteProgress)
+
+                $btnCancelDelete = New-Object System.Windows.Forms.Button
+                $btnCancelDelete.Text = "Cancel"
+                $btnCancelDelete.Size = "90, 30"
+                $btnCancelDelete.Location = "420,105"
+                $btnCancelDelete.Anchor = "Bottom, Right"
+                $deleteForm.Controls.Add($btnCancelDelete)
+
+                Set-WmtWinFormsTheme -Control $deleteForm
+                Set-WmtWinFormsButtonTheme -Button $btnCancelDelete -Role Standard
+
+                $worker = @{
+                    PowerShell = $null
+                    Runspace   = $null
+                    Async      = $null
+                    Ended      = $false
+                }
+
+                $disposeWorker = {
+                    try {
+                        if ($worker.PowerShell) {
+                            $worker.PowerShell.Dispose()
                         }
                     }
-            
-                    Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]@($rowsToRemove))
-                    $freedFormatted = Format-FileSize $freedBytes
-                    [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount selected items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
+                    catch {}
+                    try {
+                        if ($worker.Runspace) {
+                            $worker.Runspace.Close()
+                            $worker.Runspace.Dispose()
+                        }
+                    }
+                    catch {}
+                    $worker.PowerShell = $null
+                    $worker.Runspace = $null
+                    $worker.Async = $null
+                }.GetNewClosure()
+
+                try {
+                    $runspace = [runspacefactory]::CreateRunspace()
+                    $runspace.ThreadOptions = "ReuseThread"
+                    $runspace.Open()
+
+                    $ps = [PowerShell]::Create()
+                    $ps.Runspace = $runspace
+                    [void]$ps.AddScript({
+                            param([object[]]$Targets, [hashtable]$State)
+
+                            $ErrorActionPreference = "SilentlyContinue"
+
+                            try {
+                                foreach ($target in @($Targets)) {
+                                    if ([bool]$State["Cancel"]) { break }
+
+                                    $path = [string]$target.FilePath
+                                    $idx = [int]$target.Index
+                                    $bytes = [int64]0
+                                    try { $bytes = [int64]$target.Size } catch {}
+
+                                    $State["Current"] = $path
+
+                                    try {
+                                        if ([string]::IsNullOrWhiteSpace($path)) {
+                                            [void]$State["CompletedIndices"].Add($idx)
+                                            $State["Missing"] = ([int]$State["Missing"]) + 1
+                                            continue
+                                        }
+
+                                        if (Test-Path -LiteralPath $path) {
+                                            $itemInfo = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                                            if ($itemInfo -and -not $itemInfo.PSIsContainer) {
+                                                try { $itemInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
+                                            }
+
+                                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                                            $State["Deleted"] = ([int]$State["Deleted"]) + 1
+                                            $State["Bytes"] = ([int64]$State["Bytes"]) + $bytes
+                                        }
+                                        else {
+                                            $State["Missing"] = ([int]$State["Missing"]) + 1
+                                        }
+
+                                        [void]$State["CompletedIndices"].Add($idx)
+                                    }
+                                    catch {
+                                        $State["Failed"] = ([int]$State["Failed"]) + 1
+                                        if (-not [string]::IsNullOrWhiteSpace($path)) {
+                                            [void]$State["FailedPaths"].Add($path)
+                                        }
+                                    }
+                                    finally {
+                                        $State["Processed"] = ([int]$State["Processed"]) + 1
+                                    }
+                                }
+                            }
+                            catch {
+                                $State["Error"] = $_.Exception.Message
+                            }
+                            finally {
+                                $State["IsCompleted"] = $true
+                            }
+                        }).AddArgument($targetArray).AddArgument($deleteState)
+
+                    $worker.PowerShell = $ps
+                    $worker.Runspace = $runspace
+                    $worker.Async = $ps.BeginInvoke()
+                }
+                catch {
+                    & $disposeWorker
+                    [System.Windows.Forms.MessageBox]::Show(
+                        "Could not start cleanup worker.`n$($_.Exception.Message)",
+                        "Cleanup Error",
+                        [System.Windows.Forms.MessageBoxButtons]::OK,
+                        [System.Windows.Forms.MessageBoxIcon]::Error
+                    ) | Out-Null
+                    return
+                }
+
+                $btnCleanSelected.Enabled = $false
+                $btnCleanAll.Enabled = $false
+                $menuDelete.Enabled = $false
+
+                $btnCancelDelete.Add_Click({
+                        $deleteState["Cancel"] = $true
+                        $btnCancelDelete.Enabled = $false
+                        $deleteCurrent.Text = "Stopping after the current item..."
+                    }.GetNewClosure())
+
+                $deleteTimer = New-Object System.Windows.Forms.Timer
+                $deleteTimer.Interval = 150
+                $deleteTimer.Add_Tick({
+                        try {
+                            $total = [Math]::Max(1, [int]$deleteState["Total"])
+                            $processed = [Math]::Max(0, [int]$deleteState["Processed"])
+                            $deleted = [Math]::Max(0, [int]$deleteState["Deleted"])
+                            $missing = [Math]::Max(0, [int]$deleteState["Missing"])
+                            $failed = [Math]::Max(0, [int]$deleteState["Failed"])
+                            $bytes = [int64]$deleteState["Bytes"]
+                            $currentPath = [string]$deleteState["Current"]
+                            $freed = & $formatDeleteBytes $bytes
+
+                            $deleteProgress.Value = [Math]::Min($deleteProgress.Maximum, $processed)
+                            $deleteLabel.Text = "$processed/$total processed | Deleted: $deleted | Failed: $failed | Recovered: $freed"
+
+                            if ([bool]$deleteState["Cancel"] -and -not [bool]$deleteState["IsCompleted"]) {
+                                $deleteCurrent.Text = "Stopping after the current item..."
+                            }
+                            elseif ($missing -gt 0) {
+                                $deleteCurrent.Text = "Current: $currentPath  ($missing already missing)"
+                            }
+                            else {
+                                $deleteCurrent.Text = "Current: $currentPath"
+                            }
+
+                            if ([bool]$deleteState["IsCompleted"] -or ($worker.Async -and $worker.Async.IsCompleted)) {
+                                $deleteTimer.Stop()
+                                try {
+                                    if ($worker.Async -and -not $worker.Ended) {
+                                        [void]$worker.PowerShell.EndInvoke($worker.Async)
+                                        $worker.Ended = $true
+                                    }
+                                }
+                                catch {
+                                    if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
+                                        $deleteState["Error"] = $_.Exception.Message
+                                    }
+                                }
+                                $deleteForm.Close()
+                            }
+                        }
+                        catch {
+                            $deleteState["Error"] = $_.Exception.Message
+                            $deleteTimer.Stop()
+                            $deleteForm.Close()
+                        }
+                    }.GetNewClosure())
+
+                try {
+                    $deleteForm.Add_Shown({ $deleteTimer.Start() }.GetNewClosure())
+                    $deleteForm.ShowDialog($gridForm) | Out-Null
+                }
+                finally {
+                    try { $deleteTimer.Stop(); $deleteTimer.Dispose() } catch {}
+                    try {
+                        if ($worker.Async -and $worker.Async.IsCompleted -and -not $worker.Ended) {
+                            [void]$worker.PowerShell.EndInvoke($worker.Async)
+                            $worker.Ended = $true
+                        }
+                    }
+                    catch {
+                        if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
+                            $deleteState["Error"] = $_.Exception.Message
+                        }
+                    }
+                    & $disposeWorker
+                    try { $deleteForm.Dispose() } catch {}
+                }
+
+                $indicesToRemove = @($deleteState["CompletedIndices"] | ForEach-Object { [int]$_ })
+                if ($indicesToRemove.Count -gt 0) {
+                    Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]$indicesToRemove)
+                }
+
+                $btnCleanSelected.Enabled = ($previewRows.Count -gt 0)
+                $btnCleanAll.Enabled = ($previewRows.Count -gt 0)
+                $menuDelete.Enabled = ($previewRows.Count -gt 0)
+
+                $finalFreed = & $formatDeleteBytes ([int64]$deleteState["Bytes"])
+                $finalDeleted = [int]$deleteState["Deleted"]
+                $finalMissing = [int]$deleteState["Missing"]
+                $finalFailed = [int]$deleteState["Failed"]
+                $wasCanceled = [bool]$deleteState["Cancel"]
+                $workerError = [string]$deleteState["Error"]
+
+                if ($finalFailed -gt 0) {
+                    Write-GuiLog "Preview cleanup completed with $finalFailed failure(s). Recovered: $finalFreed"
+                    foreach ($failedPath in @($deleteState["FailedPaths"] | Select-Object -First 5)) {
+                        Write-GuiLog "Failed to delete from Analyze: $failedPath"
+                    }
+                }
+                elseif ($wasCanceled) {
+                    Write-GuiLog "Preview cleanup canceled. Recovered: $finalFreed"
+                }
+                else {
+                    Write-GuiLog "Preview cleanup finished. Recovered: $finalFreed"
+                }
+
+                $resultText = if ($wasCanceled) {
+                    "Cleanup canceled.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
+                }
+                else {
+                    "Cleanup complete.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($workerError)) {
+                    $resultText += "`n`nWorker note: $workerError"
+                }
+
+                $icon = if ($finalFailed -gt 0 -or -not [string]::IsNullOrWhiteSpace($workerError)) {
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                }
+                else {
+                    [System.Windows.Forms.MessageBoxIcon]::Information
+                }
+
+                [System.Windows.Forms.MessageBox]::Show(
+                    $resultText,
+                    "Cleanup Results",
+                    [System.Windows.Forms.MessageBoxButtons]::OK,
+                    $icon
+                ) | Out-Null
+            }.GetNewClosure()
+
+            $btnCleanSelected.Add_Click({
+                    if ($grid.SelectedRows.Count -eq 0) { return }
+                    $targets = @(
+                        foreach ($row in @($grid.SelectedRows)) {
+                            [PSCustomObject]@{ Index = $row.Index }
+                        }
+                    )
+                    & $invokePreviewDeletion -Targets $targets -ActionTitle "Cleaning Selected Items"
+                })
+
+            $menuDelete.Add_Click({
+                    if ($grid.SelectedRows.Count -gt 0) {
+                        $targets = @(
+                            foreach ($row in @($grid.SelectedRows)) {
+                                [PSCustomObject]@{ Index = $row.Index }
+                            }
+                        )
+                        & $invokePreviewDeletion -Targets $targets -ActionTitle "Deleting Preview Items"
+                    }
                 })
 
             $btnCleanAll.Add_Click({
@@ -7078,26 +7366,12 @@ function Invoke-TempCleanup {
             
                     $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
                     if ($confirm -eq "Yes") {
-                        $cleanedCount = 0
-                        $freedBytes = 0
-                
-                        foreach ($row in @($previewRows)) {
-                            $path = $row.FilePath
-                            $bytes = [long]$row.Size
-                            try {
-                                if (Test-Path -LiteralPath $path) {
-                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                    $freedBytes += $bytes
-                                    $cleanedCount++
-                                }
+                        $targets = @(
+                            for ($i = 0; $i -lt $previewRows.Count; $i++) {
+                                [PSCustomObject]@{ Index = $i }
                             }
-                            catch {}
-                        }
-                
-                        $previewRows.Clear()
-                        Reset-WmtVirtualGridRowCount -Grid $grid
-                        $freedFormatted = Format-FileSize $freedBytes
-                        [System.Windows.Forms.MessageBox]::Show("Cleaned $cleanedCount items.`nRecovered: $freedFormatted", "Cleanup Success") | Out-Null
+                        )
+                        & $invokePreviewDeletion -Targets $targets -ActionTitle "Cleaning All Preview Items"
                     }
                 })
             
