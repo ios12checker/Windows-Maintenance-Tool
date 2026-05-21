@@ -17857,6 +17857,11 @@ $Script:StartWingetAction = {
     $script:WingetCurrentItemName = ""
     $script:WingetCompletedIndexes = @{}
     $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
+    $script:WingetStoreResourcesInUseSeen = $false
+    $script:WingetStoreErrorLogSeen = @{}
+    $script:WingetActionEventPath = Join-Path $env:TEMP ("WMT_WingetAction_{0}.events" -f ([Guid]::NewGuid().ToString("N")))
+    $script:WingetActionEventLineCount = 0
+    try { Set-Content -Path $script:WingetActionEventPath -Value "" -Encoding UTF8 -Force } catch {}
     if ($pbWingetProgress) {
         $pbWingetProgress.Minimum = 0
         $pbWingetProgress.Maximum = [Math]::Max(1, $totalItems)
@@ -17931,6 +17936,7 @@ $Script:StartWingetAction = {
         ActionName  = $ActionName
         CmdTemplate = $CmdTemplate
         TempPath    = $env:TEMP
+        EventPath   = $script:WingetActionEventPath
     }
 
     # 2. Start the Background Job
@@ -17940,6 +17946,7 @@ $Script:StartWingetAction = {
         $act = $ArgsDict.ActionName
         $tmpl = $ArgsDict.CmdTemplate
         $temp = $ArgsDict.TempPath
+        $eventPath = $ArgsDict.EventPath
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
@@ -17960,7 +17967,15 @@ $Script:StartWingetAction = {
             "0x8a150014" = "Network Error"
             "0x80070002" = "File Not Found"; "0x80070003" = "Path Not Found"; "0x80070005" = "Access Denied"
             "0x80070490" = "Element Not Found"; "0x80072ee7" = "DNS Lookup Fail"; "0x80072f8f" = "SSL Cert Error"
+            "0x80073d02" = "Resources Currently In Use"; "-2147009278" = "Resources Currently In Use"; "2147958018" = "Resources Currently In Use"
             "1603" = "Fatal MSI Error"
+        }
+
+        function Write-WmtActionEvent {
+            param([string]$Line)
+
+            if ([string]::IsNullOrWhiteSpace($eventPath) -or [string]::IsNullOrWhiteSpace($Line)) { return }
+            try { Add-Content -Path $eventPath -Value $Line -Encoding UTF8 -Force } catch {}
         }
 
         # Helper: Execute Command & Stream Output in Real-Time
@@ -18112,13 +18127,20 @@ $Script:StartWingetAction = {
                 [string]$Arguments,
                 [string]$PackageName,
                 [string]$TempPath,
-                [string]$ActionLabel = "Update"
+                [string]$ActionLabel = "Update",
+                [string]$StoreFallbackUri = "",
+                [string]$StoreFallbackWebUri = "",
+                [string]$EventPath = ""
             )
 
             $rand = [Guid]::NewGuid().ToString("N")
             $batPath = Join-Path $TempPath "WMT_StoreCLI_$rand.cmd"
             $resultPath = Join-Path $TempPath "WMT_StoreCLI_$rand.exit"
             $statusPath = Join-Path $TempPath "WMT_StoreCLI_$rand.status"
+            $resourcesInUsePath = Join-Path $TempPath "WMT_StoreCLI_$rand.resources"
+            $screenPath = Join-Path $TempPath "WMT_StoreCLI_$rand.screen"
+            $transcriptPath = Join-Path $TempPath "WMT_StoreCLI_$rand.transcript"
+            $runnerPath = Join-Path $TempPath "WMT_StoreCLI_$rand.run.ps1"
             $sendKeysPath = Join-Path $TempPath "WMT_StoreCLI_$rand.ps1"
             $safeTitle = (((($PackageName -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ')).Trim()
             if ([string]::IsNullOrWhiteSpace($safeTitle)) { $safeTitle = "Microsoft Store App" }
@@ -18133,9 +18155,20 @@ $Script:StartWingetAction = {
 
                 if ($ResultPath -and (Test-Path $ResultPath)) {
                     $exitText = (Get-Content -Path $ResultPath -Raw -ErrorAction SilentlyContinue).Trim()
+                    $exitHexMatch = [regex]::Match($exitText, '(?i)0x[0-9a-f]{8}')
+                    if ($exitHexMatch.Success) {
+                        $exitCodeUInt = [Convert]::ToUInt32($exitHexMatch.Value.Substring(2), 16)
+                        $exitCode = [BitConverter]::ToInt32([BitConverter]::GetBytes($exitCodeUInt), 0)
+                        return [PSCustomObject]@{ Found = $true; ExitCode = $exitCode }
+                    }
                     $exitMatch = [regex]::Match($exitText, '-?\d+')
                     $exitCode = 1
                     if ($exitMatch.Success -and [int]::TryParse($exitMatch.Value, [ref]$exitCode)) {
+                        return [PSCustomObject]@{ Found = $true; ExitCode = $exitCode }
+                    }
+                    $exitCodeUInt = [uint32]0
+                    if ($exitMatch.Success -and [uint32]::TryParse($exitMatch.Value, [ref]$exitCodeUInt)) {
+                        $exitCode = [BitConverter]::ToInt32([BitConverter]::GetBytes($exitCodeUInt), 0)
                         return [PSCustomObject]@{ Found = $true; ExitCode = $exitCode }
                     }
                     return [PSCustomObject]@{ Found = $true; ExitCode = 1 }
@@ -18159,11 +18192,62 @@ $Script:StartWingetAction = {
                 }
             }
 
+            function Show-WmtStoreCliWindow {
+                param([object]$Process)
+
+                if (-not $Process) { return }
+                try {
+                    if (-not ('WmtStoreCliWindow' -as [type])) {
+                        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+public static class WmtStoreCliWindow {
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+}
+"@
+                    }
+
+                    $handle = [IntPtr]::Zero
+                    for ($i = 0; $i -lt 10; $i++) {
+                        try { $Process.Refresh() } catch {}
+                        try { $handle = $Process.MainWindowHandle } catch { $handle = [IntPtr]::Zero }
+                        if ($handle -ne [IntPtr]::Zero) { break }
+                        Start-Sleep -Milliseconds 100
+                    }
+                    if ($handle -ne [IntPtr]::Zero) {
+                        [void][WmtStoreCliWindow]::ShowWindowAsync($handle, 9)
+                        [void][WmtStoreCliWindow]::SetForegroundWindow($handle)
+                    }
+                }
+                catch {}
+            }
+
+            function Write-WmtStoreCliActivityEvent {
+                param([string]$Line)
+
+                if ([string]::IsNullOrWhiteSpace($EventPath) -or [string]::IsNullOrWhiteSpace($Line)) { return }
+                try { Add-Content -Path $EventPath -Value $Line -Encoding UTF8 -Force } catch {}
+            }
+
+            function Test-WmtStoreCliResourcesInUseText {
+                param([string]$Text)
+
+                return (([string]$Text) -match '(?is)(0x80073d02|resources\s+(?:it\s+)?modifies\s+are\s+currently\s+in\s+use|resources[\s\S]{0,240}currently\s+in\s+use)')
+            }
+
             $sendKeysContent = @'
 param(
     [int]$TargetPid,
     [string]$PackageName,
-    [string]$StatusPath
+    [string]$StatusPath,
+    [string]$ResourcesInUsePath,
+    [string]$ScreenPath,
+    [string]$EventPath
 )
 
 Add-Type -TypeDefinition @"
@@ -18357,6 +18441,7 @@ function Get-WmtStoreCliMenuOptions {
 $targetKey = Get-WmtStoreCliNameKey $PackageName
 $menuSelected = $false
 $yesSent = $false
+$resourcesInUseSent = $false
 $deadline = (Get-Date).AddSeconds(90)
 
 function Set-WmtStoreCliStatus {
@@ -18369,6 +18454,12 @@ function Set-WmtStoreCliStatus {
     try {
         $line = "$Status|$Detail|$((Get-Date).ToString('o'))"
         Set-Content -Path $StatusPath -Value $line -Encoding Ascii -Force
+        if ($Status -eq "RESOURCES_IN_USE" -and -not [string]::IsNullOrWhiteSpace($ResourcesInUsePath)) {
+            Set-Content -Path $ResourcesInUsePath -Value $line -Encoding Ascii -Force
+            if (-not [string]::IsNullOrWhiteSpace($EventPath)) {
+                Add-Content -Path $EventPath -Value "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again." -Encoding UTF8 -Force
+            }
+        }
     }
     catch {}
 }
@@ -18379,6 +18470,9 @@ while ((Get-Date) -lt $deadline) {
     $screen = ""
     try { $screen = [WmtConsoleInput]::ReadScreen([uint32]$TargetPid) } catch {}
     $cleanScreen = ([string]$screen) -replace "`0", ""
+    if (-not [string]::IsNullOrWhiteSpace($ScreenPath)) {
+        try { Set-Content -Path $ScreenPath -Value $cleanScreen -Encoding UTF8 -Force } catch {}
+    }
 
     if (-not $menuSelected -and $cleanScreen -match '(?i)select a product') {
         $options = @(Get-WmtStoreCliMenuOptions -ScreenText $cleanScreen)
@@ -18408,7 +18502,11 @@ while ((Get-Date) -lt $deadline) {
         Set-WmtStoreCliStatus "ACCEPTED" $PackageName
     }
 
-    if ($cleanScreen -match '(?i)ready\s+to\s+download' -and $cleanScreen -match '\b0\s*%') {
+    if (-not $resourcesInUseSent -and $cleanScreen -match '(?is)(0x80073d02|resources\s+(?:it\s+)?modifies\s+are\s+currently\s+in\s+use|resources[\s\S]{0,240}currently\s+in\s+use)') {
+        $resourcesInUseSent = $true
+        Set-WmtStoreCliStatus "RESOURCES_IN_USE" $PackageName
+    }
+    elseif ($cleanScreen -match '(?i)ready\s+to\s+download' -and $cleanScreen -match '\b0\s*%') {
         Set-WmtStoreCliStatus "READY0" $PackageName
     }
     elseif ($cleanScreen -match '(\d{1,3})\s*%') {
@@ -18420,13 +18518,34 @@ while ((Get-Date) -lt $deadline) {
 }
 '@
 
+            $runnerContent = @"
+`$storeArgsLine = @'
+$Arguments
+'@
+`$transcriptPath = @'
+$transcriptPath
+'@
+`$exitCode = 1
+try { Start-Transcript -Path `$transcriptPath -Force | Out-Null } catch {}
+try {
+    Invoke-Expression ("store " + `$storeArgsLine)
+    if (`$null -ne `$global:LASTEXITCODE) { `$exitCode = [int]`$global:LASTEXITCODE } else { `$exitCode = 0 }
+}
+catch {
+    Write-Host `$_.Exception.Message
+    `$exitCode = 1
+}
+try { Stop-Transcript | Out-Null } catch {}
+exit `$exitCode
+"@
+
             $batContent = @"
 @echo off
 title $windowTitle
 echo WMT-GUI: $displayAction $safeTitle with Microsoft Store CLI...
 echo Auto-selecting matching Store CLI prompts and accepting updates without taking focus...
 echo.
-store $Arguments
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$runnerPath"
 set "WMT_EXIT=%ERRORLEVEL%"
 echo.
 echo Store CLI exit code: %WMT_EXIT%
@@ -18436,12 +18555,14 @@ exit /b %WMT_EXIT%
 "@
 
             try {
+                Set-Content -Path $runnerPath -Value $runnerContent -Encoding UTF8 -Force
                 Set-Content -Path $sendKeysPath -Value $sendKeysContent -Encoding Ascii -Force
                 Set-Content -Path $batPath -Value $batContent -Encoding Ascii -Force
-                Write-Output "LOG:[Store CLI] Launching minimized interactive $($ActionLabel.ToLowerInvariant()) window for: $PackageName"
-                $cmdProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -PassThru -WindowStyle Minimized
+                Write-Output "LOG:[Store CLI] Launching interactive $($ActionLabel.ToLowerInvariant()) window for: $PackageName"
+                $cmdProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -PassThru -WindowStyle Normal
+                Show-WmtStoreCliWindow $cmdProc
                 $safePackageArg = ([string]$PackageName).Replace('"', '')
-                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$sendKeysPath`" -TargetPid $($cmdProc.Id) -PackageName `"$safePackageArg`" -StatusPath `"$statusPath`"" -WindowStyle Hidden
+                Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$sendKeysPath`" -TargetPid $($cmdProc.Id) -PackageName `"$safePackageArg`" -StatusPath `"$statusPath`" -ResourcesInUsePath `"$resourcesInUsePath`" -ScreenPath `"$screenPath`" -EventPath `"$EventPath`"" -WindowStyle Hidden
                 Write-Output "LOG:  [store] Progress: 5%"
 
                 $storeCliTimeoutMinutes = if (([string]$Arguments).Trim().ToLowerInvariant() -eq "updates") { 10 } else { 3 }
@@ -18450,17 +18571,65 @@ exit /b %WMT_EXIT%
                 $storeProgress = 5
                 $lastStatusLine = ""
                 $readyZeroSince = $null
+                $storeCliResourcesInUse = $false
+                $storeCliResourcesInUseLogged = $false
                 while ((Get-Date) -lt $deadline) {
                     $result = Get-WmtStoreCliExitResult -ResultPath $resultPath -Process $cmdProc
                     if ($result.Found) {
                         if ($cmdProc -and -not $cmdProc.HasExited) {
                             try { [void]$cmdProc.WaitForExit(5000) } catch {}
                         }
-                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
-                        return [PSCustomObject]@{ ExitCode = [int]$result.ExitCode }
+                        if (Test-Path $resourcesInUsePath) {
+                            $storeCliResourcesInUse = $true
+                        }
+                        elseif (Test-Path $statusPath) {
+                            $finalStatusLine = (Get-Content -Path $statusPath -Raw -ErrorAction SilentlyContinue).Trim()
+                            if ($finalStatusLine -match '^RESOURCES_IN_USE\|') { $storeCliResourcesInUse = $true }
+                        }
+                        if (-not $storeCliResourcesInUse -and (Test-Path $screenPath)) {
+                            $finalScreenText = Get-Content -Path $screenPath -Raw -ErrorAction SilentlyContinue
+                            if (Test-WmtStoreCliResourcesInUseText $finalScreenText) {
+                                $storeCliResourcesInUse = $true
+                            }
+                        }
+                        if (-not $storeCliResourcesInUse -and (Test-Path $transcriptPath)) {
+                            $finalTranscriptText = Get-Content -Path $transcriptPath -Raw -ErrorAction SilentlyContinue
+                            if (Test-WmtStoreCliResourcesInUseText $finalTranscriptText) {
+                                $storeCliResourcesInUse = $true
+                            }
+                        }
+                        if ($storeCliResourcesInUse -and -not $storeCliResourcesInUseLogged) {
+                            $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                            Write-Output $resourcesInUseLog
+                            Write-WmtStoreCliActivityEvent $resourcesInUseLog
+                            $storeCliResourcesInUseLogged = $true
+                        }
+                        $exitCode = [int]$result.ExitCode
+                        if ($storeCliResourcesInUse -and ($exitCode -eq 0 -or $exitCode -eq 1)) {
+                            $exitCode = -2147009278
+                        }
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
+                        return [PSCustomObject]@{ ExitCode = $exitCode; ResourcesInUse = $storeCliResourcesInUse }
                     }
 
                     $now = Get-Date
+                    if (-not $storeCliResourcesInUse -and (Test-Path $transcriptPath)) {
+                        $transcriptText = Get-Content -Path $transcriptPath -Raw -ErrorAction SilentlyContinue
+                        if (Test-WmtStoreCliResourcesInUseText $transcriptText) {
+                            $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                            Write-Output $resourcesInUseLog
+                            Write-WmtStoreCliActivityEvent $resourcesInUseLog
+                            $storeCliResourcesInUse = $true
+                            $storeCliResourcesInUseLogged = $true
+                        }
+                    }
+                    if ((Test-Path $resourcesInUsePath) -and -not $storeCliResourcesInUse) {
+                        $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                        Write-Output $resourcesInUseLog
+                        Write-WmtStoreCliActivityEvent $resourcesInUseLog
+                        $storeCliResourcesInUse = $true
+                        $storeCliResourcesInUseLogged = $true
+                    }
                     if (Test-Path $statusPath) {
                         $statusLine = (Get-Content -Path $statusPath -Raw -ErrorAction SilentlyContinue).Trim()
                         if ($statusLine -and $statusLine -ne $lastStatusLine) {
@@ -18486,6 +18655,16 @@ exit /b %WMT_EXIT%
                                     Write-Output "LOG:[Store CLI] Accepted Store CLI confirmation prompt."
                                     break
                                 }
+                                "RESOURCES_IN_USE" {
+                                    if (-not $storeCliResourcesInUse) {
+                                        $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                                        Write-Output $resourcesInUseLog
+                                        Write-WmtStoreCliActivityEvent $resourcesInUseLog
+                                    }
+                                    $storeCliResourcesInUse = $true
+                                    $storeCliResourcesInUseLogged = $true
+                                    break
+                                }
                                 "READY0" {
                                     if (-not $readyZeroSince) {
                                         $readyZeroSince = $now
@@ -18506,14 +18685,30 @@ exit /b %WMT_EXIT%
                         }
                     }
 
-                    if ($readyZeroSince -and (New-TimeSpan -Start $readyZeroSince -End $now).TotalSeconds -ge 60) {
-                        Write-Output "LOG:[Store CLI] Store CLI remained at Ready to Download 0% for 60 seconds; stopping the stalled update."
+                    if ($readyZeroSince -and (New-TimeSpan -Start $readyZeroSince -End $now).TotalSeconds -ge 30) {
+                        $fallbackUri = ([string]$StoreFallbackUri).Trim()
+                        $fallbackWebUri = ([string]$StoreFallbackWebUri).Trim()
+                        if ([string]::IsNullOrWhiteSpace($fallbackUri)) { $fallbackUri = "ms-windows-store://home" }
+                        if ([string]::IsNullOrWhiteSpace($fallbackWebUri)) { $fallbackWebUri = $fallbackUri }
+                        try {
+                            $payload = [ordered]@{
+                                StoreUri    = $fallbackUri
+                                WebUri      = $fallbackWebUri
+                                PackageName = $PackageName
+                                ActionLabel = $ActionLabel
+                            }
+                            $json = $payload | ConvertTo-Json -Compress
+                            $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+                            Write-Output "STORE_FALLBACK:$encoded"
+                        }
+                        catch {}
+                        Write-Output "LOG:[Store CLI] Store CLI remained at Ready to Download 0% for 30 seconds; opening Microsoft Store fallback page."
                         try {
                             if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                         }
                         catch {}
-                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
-                        return [PSCustomObject]@{ ExitCode = -2; StalledReadyToDownload = $true }
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
+                        return [PSCustomObject]@{ ExitCode = -2; StalledReadyToDownload = $true; StoreFallbackUri = $fallbackUri }
                     }
 
                     if ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 15) {
@@ -18530,12 +18725,12 @@ exit /b %WMT_EXIT%
                     if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                 }
                 catch {}
-                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = -1 }
             }
             catch {
                 Write-Output "LOG:[Store CLI] Interactive launch failed: $($_.Exception.Message)"
-                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $sendKeysPath, $batPath)
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = 1 }
             }
         }
@@ -18571,6 +18766,8 @@ exit /b %WMT_EXIT%
             $userCmd = "" 
             $wingetArgs = $null
             $storeCliArgs = $null
+            $storeFallbackUri = ""
+            $storeFallbackWebUri = ""
             $skipReason = $null
             Write-Output "PROGRESS:${index}/${total}:$name"
 
@@ -18593,6 +18790,8 @@ exit /b %WMT_EXIT%
                     $safeStoreId = Get-StoreCliProductId $id
                     if ($act -eq "Update" -and $id -eq "__WMT_STORE_UPDATES_ALL__") {
                         $storeCliArgs = "updates"
+                        $storeFallbackUri = "ms-windows-store://downloadsandupdates"
+                        $storeFallbackWebUri = "https://apps.microsoft.com/home"
                         $cmd = "store $storeCliArgs"
                         $userCmd = $cmd
                     }
@@ -18601,6 +18800,8 @@ exit /b %WMT_EXIT%
                             $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
                             $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
                             $storeCliArgs = "$storeVerb `"$safeStoreId`"$storeApplyFlag"
+                            $storeFallbackUri = "ms-windows-store://pdp/?ProductId=$safeStoreId"
+                            $storeFallbackWebUri = "https://apps.microsoft.com/detail/$safeStoreId"
                         }
                         else {
                             $storeTarget = ([string]$name).Replace('"', '').Trim()
@@ -18613,6 +18814,9 @@ exit /b %WMT_EXIT%
                                 $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
                                 $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
                                 $storeCliArgs = "$storeVerb `"$storeTarget`"$storeApplyFlag"
+                                $escapedStoreTarget = [System.Uri]::EscapeDataString($storeTarget)
+                                $storeFallbackUri = "ms-windows-store://search/?query=$escapedStoreTarget"
+                                $storeFallbackWebUri = "https://apps.microsoft.com/search?query=$escapedStoreTarget"
                                 Write-Output "LOG:[Store CLI] Product ID unavailable for '$name'; using Store CLI's product picker with automatic exact-match selection."
                             }
                         }
@@ -18757,7 +18961,7 @@ exit /b %WMT_EXIT%
                     $p = Invoke-WingetLive $wingetArgs
                 }
                 elseif ($storeCliArgs) {
-                    $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act
+                    $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act -StoreFallbackUri $storeFallbackUri -StoreFallbackWebUri $storeFallbackWebUri -EventPath $eventPath
                 }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
@@ -18828,8 +19032,22 @@ exit /b %WMT_EXIT%
                         continue
                     }
                     if ($storeCliArgs) {
-                        if ($p.PSObject.Properties["StalledReadyToDownload"] -and $p.StalledReadyToDownload) {
-                            Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI stalled at Ready to Download 0%; Microsoft Store download broker did not start the transfer)"
+                        $storeResourcesInUse = (
+                            ($hex -eq "0x80073d02") -or
+                            ($dec -eq "-2147009278") -or
+                            ($dec -eq "2147958018") -or
+                            ($p.PSObject.Properties["ResourcesInUse"] -and $p.ResourcesInUse)
+                        )
+                        if ($storeResourcesInUse) {
+                            if (-not ($p.PSObject.Properties["ResourcesInUse"] -and $p.ResourcesInUse)) {
+                                $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                                Write-Output $resourcesInUseLog
+                                Write-WmtActionEvent $resourcesInUseLog
+                            }
+                            Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Microsoft Store says resources are currently in use; close the app and related Store/Xbox windows, then try again)"
+                        }
+                        elseif ($p.PSObject.Properties["StalledReadyToDownload"] -and $p.StalledReadyToDownload) {
+                            Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI isn't working; opened Microsoft Store so the item can be downloaded or updated directly)"
                         }
                         else {
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI action failed)"
@@ -18887,6 +19105,52 @@ timeout /t 5
     $processWingetLines = {
         param($lines)
         foreach ($line in $lines) {
+            if ($line -match "^STORE_FALLBACK:(.+)$") {
+                $payload = $null
+                try {
+                    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($matches[1].Trim()))
+                    $payload = $json | ConvertFrom-Json
+                }
+                catch {}
+
+                $storeUri = ""
+                $webUri = ""
+                $packageName = $script:WingetCurrentItemName
+                if ($payload) {
+                    $storeUri = ([string]$payload.StoreUri).Trim()
+                    $webUri = ([string]$payload.WebUri).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace([string]$payload.PackageName)) {
+                        $packageName = [string]$payload.PackageName
+                    }
+                }
+                if ([string]::IsNullOrWhiteSpace($packageName)) { $packageName = "this Microsoft Store item" }
+                if ([string]::IsNullOrWhiteSpace($storeUri)) { $storeUri = "ms-windows-store://home" }
+                if ([string]::IsNullOrWhiteSpace($webUri)) { $webUri = $storeUri }
+
+                $opened = $false
+                try {
+                    Start-Process $storeUri
+                    $opened = $true
+                    Write-GuiLog "[Store CLI] Opened Microsoft Store fallback page for $packageName."
+                }
+                catch {
+                    Write-GuiLog "[Store CLI] Could not open Microsoft Store URI: $($_.Exception.Message)"
+                }
+                if (-not $opened -and $webUri -and $webUri -ne $storeUri) {
+                    try {
+                        Start-Process $webUri
+                        $opened = $true
+                        Write-GuiLog "[Store CLI] Opened Microsoft Store web fallback page for $packageName."
+                    }
+                    catch {
+                        Write-GuiLog "[Store CLI] Could not open Microsoft Store web fallback: $($_.Exception.Message)"
+                    }
+                }
+
+                $msg = "Store CLI isn't working for $packageName. It stayed at Ready to Download 0% for more than 30 seconds.`r`n`r`nA Microsoft Store page was opened so you can download or update it directly."
+                [System.Windows.MessageBox]::Show($msg, "Microsoft Store CLI Stalled", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                continue
+            }
             if ($line -match "^RESULT:(\d+):(SUCCESS|SKIPPED|FAILED|CANCELLED):(.*)$") {
                 $doneIndex = [int]$matches[1]
                 $result = $matches[2]
@@ -18922,6 +19186,11 @@ timeout /t 5
             }
             if ($line -match "^LOG:(.*)") {
                 $logMsg = $matches[1].Trim()
+                if ($logMsg -match "^\[Store CLI\]\s+Error 0x80073d02:") {
+                    $script:WingetStoreResourcesInUseSeen = $true
+                    if ($script:WingetStoreErrorLogSeen.ContainsKey($logMsg)) { continue }
+                    $script:WingetStoreErrorLogSeen[$logMsg] = $true
+                }
                 if ($logMsg -match "^\[(?:winget|store)\]\s+Progress:\s*(\d+)%$") {
                     $script:WingetCurrentPercent = [int]$matches[1]
                     & $refreshWingetProgressUi
@@ -18950,9 +19219,24 @@ timeout /t 5
             }
         }
     }
-    
+
+    $readWingetActionEvents = {
+        if ([string]::IsNullOrWhiteSpace($script:WingetActionEventPath)) { return }
+        if (-not (Test-Path $script:WingetActionEventPath)) { return }
+
+        try {
+            $eventLines = @(Get-Content -Path $script:WingetActionEventPath -ErrorAction SilentlyContinue)
+            if ($eventLines.Count -le $script:WingetActionEventLineCount) { return }
+            $newLines = @($eventLines | Select-Object -Skip $script:WingetActionEventLineCount)
+            $script:WingetActionEventLineCount = $eventLines.Count
+            if ($newLines.Count -gt 0) { & $processWingetLines $newLines }
+        }
+        catch {}
+    }
+     
     $script:WingetTimer.Add_Tick({
             if (-not $script:WingetJob) { return }
+            & $readWingetActionEvents
             if ($script:WingetJob.HasMoreData) {
                 $results = Receive-Job -Job $script:WingetJob
                 if ($results) {
@@ -18971,6 +19255,7 @@ timeout /t 5
                 if ($results) {
                     & $processWingetLines $results
                 }
+                & $readWingetActionEvents
                 Remove-Job -Job $script:WingetJob
                 $script:WingetJob = $null
                 if ($script:WingetActiveAction) {
@@ -18981,7 +19266,35 @@ timeout /t 5
                             $script:WingetProgressFailed += $missing
                             $missingName = if ([string]::IsNullOrWhiteSpace($script:WingetCurrentItemName)) { "Microsoft Store item" } else { $script:WingetCurrentItemName }
                             & $setWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
-                            Write-GuiLog "[$($script:WingetActiveAction)] FAILED: $missing Store CLI item(s) ended without a result. This usually means Store CLI was stopped after a stalled or cancelled update."
+                            if (-not $script:WingetStoreResourcesInUseSeen) {
+                                try {
+                                    $cutoff = if ($script:WingetActionStartedAt) { $script:WingetActionStartedAt.AddSeconds(-5) } else { (Get-Date).AddMinutes(-10) }
+                                    $storeTempFiles = @(
+                                        Get-ChildItem -Path $env:TEMP -Filter "WMT_StoreCLI_*.resources" -File -ErrorAction SilentlyContinue
+                                        Get-ChildItem -Path $env:TEMP -Filter "WMT_StoreCLI_*.screen" -File -ErrorAction SilentlyContinue
+                                        Get-ChildItem -Path $env:TEMP -Filter "WMT_StoreCLI_*.transcript" -File -ErrorAction SilentlyContinue
+                                    ) | Where-Object { $_.LastWriteTime -ge $cutoff }
+                                    foreach ($storeTempFile in $storeTempFiles) {
+                                        $storeTempText = Get-Content -Path $storeTempFile.FullName -Raw -ErrorAction SilentlyContinue
+                                        if ($storeTempText -match '(?is)(0x80073d02|resources\s+(?:it\s+)?modifies\s+are\s+currently\s+in\s+use|resources[\s\S]{0,240}currently\s+in\s+use)') {
+                                            $script:WingetStoreResourcesInUseSeen = $true
+                                            $resourcesInUseLog = "[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
+                                            if (-not $script:WingetStoreErrorLogSeen.ContainsKey($resourcesInUseLog)) {
+                                                $script:WingetStoreErrorLogSeen[$resourcesInUseLog] = $true
+                                                Write-GuiLog $resourcesInUseLog
+                                            }
+                                            break
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+                            if ($script:WingetStoreResourcesInUseSeen) {
+                                Write-GuiLog "[$($script:WingetActiveAction)] FAILED: $missing Store CLI item(s) ended after Microsoft Store reported 0x80073d02 resources currently in use."
+                            }
+                            else {
+                                Write-GuiLog "[$($script:WingetActiveAction)] FAILED: $missing Store CLI item(s) ended without a result. This usually means Store CLI was stopped after a stalled or cancelled update."
+                            }
                         }
                         else {
                             # Some non-Store installers close their consoles without a reliable exit event.
