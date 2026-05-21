@@ -4687,31 +4687,31 @@ function Get-WmtCleanerMlEnvMap {
     $commonProgramW6432 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { ${env:CommonProgramFiles} }
 
     $map = @{
-        "AppData"             = $env:APPDATA
-        "LocalAppData"        = $env:LOCALAPPDATA
-        "LocalAppDataLow"     = (Join-Path $env:USERPROFILE "AppData\LocalLow")
-        "CommonAppData"       = $env:ProgramData
-        "ProgramFiles"        = $env:ProgramFiles
-        "ProgramW6432"        = $programW6432
-        "ProgramFiles(x86)"   = ${env:ProgramFiles(x86)}
-        "CommonProgramFiles"  = ${env:CommonProgramFiles}
-        "CommonProgramW6432"  = $commonProgramW6432
-        "UserProfile"         = $env:USERPROFILE
-        "HOME"                = $env:USERPROFILE
-        "Documents"           = $documents
-        "Music"               = $music
-        "Pictures"            = $pictures
-        "Video"               = $videos
-        "TEMP"                = $env:TEMP
-        "TMP"                 = $env:TEMP
-        "WinDir"              = $env:WINDIR
-        "SystemRoot"          = $env:SystemRoot
-        "XDG_CACHE_HOME"      = (Join-Path $env:LOCALAPPDATA "cache")
-        "XDG_CONFIG_HOME"     = $env:APPDATA
-        "XDG_DATA_HOME"       = $env:LOCALAPPDATA
-        "LOGNAME"             = $env:USERNAME
-        "USERNAME"            = $env:USERNAME
-        "cd"                  = (Get-Location).Path
+        "AppData"            = $env:APPDATA
+        "LocalAppData"       = $env:LOCALAPPDATA
+        "LocalAppDataLow"    = (Join-Path $env:USERPROFILE "AppData\LocalLow")
+        "CommonAppData"      = $env:ProgramData
+        "ProgramFiles"       = $env:ProgramFiles
+        "ProgramW6432"       = $programW6432
+        "ProgramFiles(x86)"  = ${env:ProgramFiles(x86)}
+        "CommonProgramFiles" = ${env:CommonProgramFiles}
+        "CommonProgramW6432" = $commonProgramW6432
+        "UserProfile"        = $env:USERPROFILE
+        "HOME"               = $env:USERPROFILE
+        "Documents"          = $documents
+        "Music"              = $music
+        "Pictures"           = $pictures
+        "Video"              = $videos
+        "TEMP"               = $env:TEMP
+        "TMP"                = $env:TEMP
+        "WinDir"             = $env:WINDIR
+        "SystemRoot"         = $env:SystemRoot
+        "XDG_CACHE_HOME"     = (Join-Path $env:LOCALAPPDATA "cache")
+        "XDG_CONFIG_HOME"    = $env:APPDATA
+        "XDG_DATA_HOME"      = $env:LOCALAPPDATA
+        "LOGNAME"            = $env:USERNAME
+        "USERNAME"           = $env:USERNAME
+        "cd"                 = (Get-Location).Path
     }
 
     return $map
@@ -4865,11 +4865,11 @@ function ConvertFrom-WmtCleanerMlFile {
     $envMapForVars = Get-WmtCleanerMlEnvMap
     $variables = @{}
     $variables["ProgramFiles"] = @($envMapForVars["ProgramFiles"], $envMapForVars["ProgramW6432"]) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-        Select-Object -Unique
+    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+    Select-Object -Unique
     $variables["CommonProgramFiles"] = @($envMapForVars["CommonProgramFiles"], $envMapForVars["CommonProgramW6432"]) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
-        Select-Object -Unique
+    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+    Select-Object -Unique
     foreach ($var in @($cleaner.var)) {
         if (-not $var.name) { continue }
         $values = New-Object System.Collections.Generic.List[string]
@@ -5448,24 +5448,24 @@ function Show-AdvancedCleanupSelection {
     }
 
     $preferredGroupOrder = @{
-        "System|Windows"                         = 0
-        "System|Explorer"                        = 1
-        "System|Windows Update"                  = 2
-        "System|Windows Logs"                    = 3
-        "Browsers / Internet|Google Chrome"      = 0
-        "Browsers / Internet|Microsoft Edge"     = 1
-        "Browsers / Internet|Mozilla Firefox"    = 2
-        "Browsers / Internet|Brave"              = 3
-        "Browsers / Internet|Opera"              = 4
-        "Productivity|Microsoft Office"          = 0
-        "Productivity|Microsoft Outlook"         = 1
-        "Productivity|Microsoft PowerToys"       = 2
-        "Productivity|Adobe"                     = 3
-        "Internet & Chat|Discord"                = 0
-        "Internet & Chat|Spotify"                = 1
-        "Games|Steam"                            = 0
-        "Games|Epic Games"                       = 1
-        "Games|Xbox"                             = 2
+        "System|Windows"                      = 0
+        "System|Explorer"                     = 1
+        "System|Windows Update"               = 2
+        "System|Windows Logs"                 = 3
+        "Browsers / Internet|Google Chrome"   = 0
+        "Browsers / Internet|Microsoft Edge"  = 1
+        "Browsers / Internet|Mozilla Firefox" = 2
+        "Browsers / Internet|Brave"           = 3
+        "Browsers / Internet|Opera"           = 4
+        "Productivity|Microsoft Office"       = 0
+        "Productivity|Microsoft Outlook"      = 1
+        "Productivity|Microsoft PowerToys"    = 2
+        "Productivity|Adobe"                  = 3
+        "Internet & Chat|Discord"             = 0
+        "Internet & Chat|Spotify"             = 1
+        "Games|Steam"                         = 0
+        "Games|Epic Games"                    = 1
+        "Games|Xbox"                          = 2
     }
 
     $normalizeCleanerName = {
@@ -5658,8 +5658,8 @@ function Show-AdvancedCleanupSelection {
             $global:sections = @()
 
             $grouped = $allRules |
-                Group-Object -Property { & $getCleanerDisplaySection $_ } |
-                Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
+            Group-Object -Property { & $getCleanerDisplaySection $_ } |
+            Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
             $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
             foreach ($group in $grouped) {
@@ -5695,10 +5695,10 @@ function Show-AdvancedCleanupSelection {
                 Set-WmtDoubleBuffered -Control $itemFlow
 
                 $secItems = $group.Group | Sort-Object `
-                    @{ Expression = { & $getCleanerGroupOrder $_ } }, `
-                    @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
-                    @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
-                    @{ Expression = { & $getCleanerDisplayName $_ } }
+                @{ Expression = { & $getCleanerGroupOrder $_ } }, `
+                @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
+                @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
+                @{ Expression = { & $getCleanerDisplayName $_ } }
                 $childChecks = @()
                 $currentGroup = $null
                 $isSecChecked = $true
@@ -5935,11 +5935,7 @@ function Show-AdvancedCleanupSelection {
             $isVisibleForAction = (-not $filterActive) -or ($cb.Visible -and $cb.Parent -and $cb.Parent.Visible)
             if ($cb.Checked -and $isVisibleForAction) { $selectedItems.Add($cb.Tag) }
         }
-        return ,$selectedItems
-    }.GetNewClosure()
-
-    $getActionableCleanerCount = {
-        return (& $getSelectedCleanerItems).Count
+        return , $selectedItems
     }.GetNewClosure()
 
     $submitCleanupSelection = {
@@ -6741,109 +6737,109 @@ function Invoke-TempCleanup {
 
     try {
         if (-not $usedOutOfProcessAnalyze) {
-        foreach ($item in $selections) {
-            if ($pForm.IsDisposed) { break }
+            foreach ($item in $selections) {
+                if ($pForm.IsDisposed) { break }
 
-            $startBytes = $stats.Bytes
+                $startBytes = $stats.Bytes
             
-            $stats.Progress += $ruleWeight
-            $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
+                $stats.Progress += $ruleWeight
+                $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
             
-            $itemName = if ($item -is [string]) {
-                if ($internalRuleDisplayNames.ContainsKey($item)) { $internalRuleDisplayNames[$item] } else { $item }
-            }
-            else {
-                $name = ([string]$item.Name).Trim().Trim(" *")
-                if ([string]::IsNullOrWhiteSpace($name)) { [string]$item.ID } else { $name }
-            }
-            $pLabel.Text = "${actionText}: $itemName"
+                $itemName = if ($item -is [string]) {
+                    if ($internalRuleDisplayNames.ContainsKey($item)) { $internalRuleDisplayNames[$item] } else { $item }
+                }
+                else {
+                    $name = ([string]$item.Name).Trim().Trim(" *")
+                    if ([string]::IsNullOrWhiteSpace($name)) { [string]$item.ID } else { $name }
+                }
+                $pLabel.Text = "${actionText}: $itemName"
 
-            # --- A. BLEACHBIT CLEANERML RULES ---
-            if (($item -is [PSCustomObject]) -and $item.PSObject.Properties["IsCleanerML"] -and [bool]$item.IsCleanerML) {
-                foreach ($rule in $item.Paths) {
-                    Invoke-CleanerMlClean -Rule $rule -RuleName $itemName
-                }
-            }
-            # --- B. WINAPP2 RULES ---
-            elseif ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
-                foreach ($rule in $item.Paths) {
-                    $isRecurse = ($rule.Options -notmatch "REMOVESELF")
-                    Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse -RuleName $itemName
-                }
-            }
-            # --- C. INTERNAL RULES ---
-            else {
-                switch ($item) {
-                    "TempFiles" { 
-                        Invoke-RobustClean $env:TEMP -RuleName $itemName
-                        Invoke-RobustClean "$env:SystemRoot\Temp" -RuleName $itemName
+                # --- A. BLEACHBIT CLEANERML RULES ---
+                if (($item -is [PSCustomObject]) -and $item.PSObject.Properties["IsCleanerML"] -and [bool]$item.IsCleanerML) {
+                    foreach ($rule in $item.Paths) {
+                        Invoke-CleanerMlClean -Rule $rule -RuleName $itemName
                     }
-                    "RecycleBin" { 
-                        try {
-                            $shell = New-Object -ComObject Shell.Application
-                            $bin = $shell.Namespace(0xA)
-                            $items = $bin.Items()
-                            $count = $items.Count
-
-                            if ($count -gt 0) {
-                                Write-GuiLog "Recycle Bin: Processing $count items..."
-                                foreach ($f in $items) {
-                                    try {
-                                        $path = $f.Path
-                                        if ($path -and (Test-Path -LiteralPath $path)) {
-                                            $size = Measure-WmtPathBytes -Path $path
-                                            $stats.Bytes += $size
-                                            
-                                            if (-not $isAnalyze) {
-                                                Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
-                                            }
-                                            else {
-                                                $previewList.Add([PSCustomObject]@{
-                                                        RuleName = "Recycle Bin"
-                                                        FilePath = $path
-                                                        RawBytes = $size
-                                                    })
-                                            }
-                                            $stats.Deleted++
-                                        }
-                                    }
-                                    catch {}
-                                }
-                            }
+                }
+                # --- B. WINAPP2 RULES ---
+                elseif ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
+                    foreach ($rule in $item.Paths) {
+                        $isRecurse = ($rule.Options -notmatch "REMOVESELF")
+                        Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse -RuleName $itemName
+                    }
+                }
+                # --- C. INTERNAL RULES ---
+                else {
+                    switch ($item) {
+                        "TempFiles" { 
+                            Invoke-RobustClean $env:TEMP -RuleName $itemName
+                            Invoke-RobustClean "$env:SystemRoot\Temp" -RuleName $itemName
                         }
-                        catch { Write-GuiLog "Recycle Bin Error: $($_.Exception.Message)" }
-                    }
-                    "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" -RuleName $itemName }
-                    "DNS" { if (-not $isAnalyze) { Clear-DnsClientCache -ErrorAction SilentlyContinue } }
-                    "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false -RuleName $itemName }
-                    "ThumbsDb" { Invoke-ThumbsDbDeepScan -RuleName $itemName }
-                    "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" -RuleName $itemName }
-                    "RunMRU" { if (-not $isAnalyze) { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue } }
-                    "Edge" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" -RuleName $itemName }
-                    "Chrome" { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" -RuleName $itemName }
-                    "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" -RuleName $itemName }
-                    "Firefox" { 
-                        if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
+                        "RecycleBin" { 
                             try {
-                                foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
-                                    Invoke-RobustClean "$profilePath\cache2\entries" -RuleName $itemName
+                                $shell = New-Object -ComObject Shell.Application
+                                $bin = $shell.Namespace(0xA)
+                                $items = $bin.Items()
+                                $count = $items.Count
+
+                                if ($count -gt 0) {
+                                    Write-GuiLog "Recycle Bin: Processing $count items..."
+                                    foreach ($f in $items) {
+                                        try {
+                                            $path = $f.Path
+                                            if ($path -and (Test-Path -LiteralPath $path)) {
+                                                $size = Measure-WmtPathBytes -Path $path
+                                                $stats.Bytes += $size
+                                            
+                                                if (-not $isAnalyze) {
+                                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
+                                                }
+                                                else {
+                                                    $previewList.Add([PSCustomObject]@{
+                                                            RuleName = "Recycle Bin"
+                                                            FilePath = $path
+                                                            RawBytes = $size
+                                                        })
+                                                }
+                                                $stats.Deleted++
+                                            }
+                                        }
+                                        catch {}
+                                    }
                                 }
                             }
-                            catch {}
+                            catch { Write-GuiLog "Recycle Bin Error: $($_.Exception.Message)" }
                         }
+                        "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" -RuleName $itemName }
+                        "DNS" { if (-not $isAnalyze) { Clear-DnsClientCache -ErrorAction SilentlyContinue } }
+                        "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false -RuleName $itemName }
+                        "ThumbsDb" { Invoke-ThumbsDbDeepScan -RuleName $itemName }
+                        "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" -RuleName $itemName }
+                        "RunMRU" { if (-not $isAnalyze) { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue } }
+                        "Edge" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" -RuleName $itemName }
+                        "Chrome" { Invoke-RobustClean "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache" -RuleName $itemName }
+                        "Brave" { Invoke-RobustClean "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache" -RuleName $itemName }
+                        "Firefox" { 
+                            if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
+                                try {
+                                    foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
+                                        Invoke-RobustClean "$profilePath\cache2\entries" -RuleName $itemName
+                                    }
+                                }
+                                catch {}
+                            }
+                        }
+                        "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
+                        "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" -RuleName $itemName }
                     }
-                    "Opera" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera Stable\Cache" -RuleName $itemName }
-                    "OperaGX" { Invoke-RobustClean "$env:APPDATA\Opera Software\Opera GX Stable\Cache" -RuleName $itemName }
+                }
+
+                $diffBytes = $stats.Bytes - $startBytes
+                if ($diffBytes -gt 0) {
+                    $itemStr = Format-FileSize $diffBytes
+                    $verb = if ($isAnalyze) { "Found" } else { "Cleaned" }
+                    Write-GuiLog "$verb $itemName : $itemStr"
                 }
             }
-
-            $diffBytes = $stats.Bytes - $startBytes
-            if ($diffBytes -gt 0) {
-                $itemStr = Format-FileSize $diffBytes
-                $verb = if ($isAnalyze) { "Found" } else { "Cleaned" }
-                Write-GuiLog "$verb $itemName : $itemStr"
-            }
-        }
         }
     }
     catch {
