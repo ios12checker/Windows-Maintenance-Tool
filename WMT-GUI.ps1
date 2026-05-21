@@ -18782,7 +18782,7 @@ exit /b %WMT_EXIT%
                     $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
                     $userFlags = "--accept-source-agreements --accept-package-agreements"
                     if ($act -eq "Install") { $wingetArgs = "install --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget install --id `"$id`" $userFlags" }
-                    if ($act -eq "Update") { $wingetArgs = "upgrade --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`" $userFlags" }
+                    if ($act -eq "Update") { $wingetArgs = "upgrade --id `"$id`" --include-unknown $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`" --include-unknown $userFlags" }
                     if ($act -eq "Uninstall") { $wingetArgs = "uninstall --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
                 }
                 # --- MICROSOFT STORE ---
@@ -19807,13 +19807,28 @@ $btnWingetScan.Add_Click({
                         if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
                         return $false
                     }
+
+                    function Test-WingetScanNoticeLine {
+                        param([string]$Text)
+
+                        if ([string]::IsNullOrWhiteSpace($Text)) { return $true }
+
+                        $trimmed = $Text.Trim()
+                        if ($trimmed -match "^-+") { return $true }
+                        if ($trimmed -match "(?i)--include-unknown") { return $true }
+                        if ($trimmed -match "(?i)explicit targeting" -or $trimmed -match "(?i)following packages have an upgrade available") { return $true }
+                        if ($trimmed -match "(?i)^(name|nom)\s+(id|identifiant)\s+version(\s+|$)") { return $true }
+                        if ($trimmed -match "(?i)^(no updates|all apps are up to date|your apps are up to date)") { return $true }
+
+                        return $false
+                    }
     
                     Write-Output "LOG:$SourceName source preflight already completed; starting scan..."
     
                     # Winget source-backed scans can legitimately take a while.
                     $timeoutMs = 120000
     
-                    $wArgs = "list --upgrade-available --accept-source-agreements --disable-interactivity --source $SourceName"
+                    $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements --disable-interactivity --source $SourceName"
                     try {
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo
                         $pInfo.FileName = "winget"
@@ -19858,8 +19873,7 @@ $btnWingetScan.Add_Click({
                             $lines = $out -split "`r`n"
                             foreach ($line in $lines) {
                                 $line = $line.Trim()
-                                if (!$line -or $line -match "^-+") { continue }
-                                if ($line -match "explicit targeting" -or $line -match "following packages have an upgrade available") { continue }
+                                if (Test-WingetScanNoticeLine $line) { continue }
     
                                 $parts = $line -split '\s+'
                                 $len = $parts.Count
@@ -19879,7 +19893,7 @@ $btnWingetScan.Add_Click({
                                     }
                                     if ($n -and $i -and $i.Length -gt 2 -and $i -notmatch "^Id$") {
                                         if (Test-Ignored $n $i) { continue }
-                                        if ($v -eq "Unknown") { $v = "?" }
+                                        if ($v -match "^(?i)(unknown|inconnu)$") { $v = "?" }
                                         [PSCustomObject]@{ Source = $SourceName; Name = $n; Id = $i; Version = $v; Available = $a }
                                     }
                                 }
