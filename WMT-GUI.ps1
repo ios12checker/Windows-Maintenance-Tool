@@ -3113,6 +3113,7 @@ function Save-WmtSettings {
             RegistryScan      = $Settings.RegistryScan
             WingetIgnore      = $Settings.WingetIgnore
             LoadWinapp2       = [bool]$Settings.LoadWinapp2
+            LoadCleanerML     = [bool]$Settings.LoadCleanerML
             EnabledProviders  = $Settings.EnabledProviders
             CustomDnsServers  = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
             CustomDohTemplate = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
@@ -3140,6 +3141,7 @@ function Get-WmtSettings {
         RegistryScan      = @{}
         WingetIgnore      = @()
         LoadWinapp2       = $false 
+        LoadCleanerML     = $false
         EnabledProviders  = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
         CustomDnsServers  = @()
         CustomDohTemplate = ""
@@ -3171,6 +3173,7 @@ function Get-WmtSettings {
                 $defaults.WingetIgnore = $clean.ToArray()
             }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
+            if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
             if ($json.PSObject.Properties["CustomDnsServers"]) {
                 $customDnsServers = @()
@@ -4656,6 +4659,310 @@ function Expand-EnvPath {
     return $expanded
 }
 
+function Test-WmtCleanerMlOs {
+    param($Node)
+
+    if (-not $Node) { return $true }
+    $os = ""
+    try { $os = [string]$Node.os } catch {}
+    if ([string]::IsNullOrWhiteSpace($os)) { return $true }
+    return ($os -match "(?i)\bwindows\b")
+}
+
+function Get-WmtXmlInnerText {
+    param($Node, [string]$Name)
+
+    if (-not $Node) { return "" }
+    $child = $Node.SelectSingleNode($Name)
+    if (-not $child) { return "" }
+    return ([string]$child.InnerText).Trim()
+}
+
+function Get-WmtCleanerMlEnvMap {
+    $documents = [Environment]::GetFolderPath("MyDocuments")
+    $music = [Environment]::GetFolderPath("MyMusic")
+    $pictures = [Environment]::GetFolderPath("MyPictures")
+    $videos = [Environment]::GetFolderPath("MyVideos")
+    $programW6432 = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+    $commonProgramW6432 = if (${env:CommonProgramW6432}) { ${env:CommonProgramW6432} } else { ${env:CommonProgramFiles} }
+
+    $map = @{
+        "AppData"             = $env:APPDATA
+        "LocalAppData"        = $env:LOCALAPPDATA
+        "LocalAppDataLow"     = (Join-Path $env:USERPROFILE "AppData\LocalLow")
+        "CommonAppData"       = $env:ProgramData
+        "ProgramFiles"        = $env:ProgramFiles
+        "ProgramW6432"        = $programW6432
+        "ProgramFiles(x86)"   = ${env:ProgramFiles(x86)}
+        "CommonProgramFiles"  = ${env:CommonProgramFiles}
+        "CommonProgramW6432"  = $commonProgramW6432
+        "UserProfile"         = $env:USERPROFILE
+        "HOME"                = $env:USERPROFILE
+        "Documents"           = $documents
+        "Music"               = $music
+        "Pictures"            = $pictures
+        "Video"               = $videos
+        "TEMP"                = $env:TEMP
+        "TMP"                 = $env:TEMP
+        "WinDir"              = $env:WINDIR
+        "SystemRoot"          = $env:SystemRoot
+        "XDG_CACHE_HOME"      = (Join-Path $env:LOCALAPPDATA "cache")
+        "XDG_CONFIG_HOME"     = $env:APPDATA
+        "XDG_DATA_HOME"       = $env:LOCALAPPDATA
+        "LOGNAME"             = $env:USERNAME
+        "USERNAME"            = $env:USERNAME
+        "cd"                  = (Get-Location).Path
+    }
+
+    return $map
+}
+
+function Expand-WmtCleanerMlPathVariants {
+    param(
+        [string]$Path,
+        [hashtable]$Variables
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return @() }
+
+    $paths = @([string]$Path)
+    $multiMatches = [regex]::Matches($Path, '\$\$([A-Za-z0-9_\-]+)\$\$')
+    foreach ($match in @($multiMatches)) {
+        $name = $match.Groups[1].Value
+        $token = '$$' + $name + '$$'
+        $values = @()
+        if ($Variables.ContainsKey($name)) { $values = @($Variables[$name]) }
+        if ($values.Count -eq 0) { $values = @("") }
+
+        $expanded = @()
+        foreach ($pathCandidate in $paths) {
+            foreach ($value in $values) {
+                $expanded += $pathCandidate.Replace($token, [string]$value)
+            }
+        }
+        $paths = $expanded
+    }
+
+    $envMap = Get-WmtCleanerMlEnvMap
+    $final = New-Object System.Collections.Generic.List[string]
+    foreach ($pathCandidate in $paths) {
+        $p = [string]$pathCandidate
+        if ($p.StartsWith("~/") -or $p.StartsWith("~\")) {
+            $p = Join-Path $env:USERPROFILE $p.Substring(2)
+        }
+        elseif ($p -eq "~") {
+            $p = $env:USERPROFILE
+        }
+
+        foreach ($key in $envMap.Keys) {
+            $value = [string]$envMap[$key]
+            if ([string]::IsNullOrWhiteSpace($value)) { continue }
+            $escapedKey = [regex]::Escape([string]$key)
+            $escapedValue = $value.Replace('$', '$$')
+            $p = [regex]::Replace($p, '%' + $escapedKey + '%', $escapedValue, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $p = [regex]::Replace($p, '\$\{' + $escapedKey + '\}', $escapedValue, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $p = [regex]::Replace($p, '\$' + $escapedKey + '\$', $escapedValue, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            $p = [regex]::Replace($p, '\$' + $escapedKey + '\b', $escapedValue, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        }
+
+        $p = [Environment]::ExpandEnvironmentVariables($p)
+        $p = $p -replace '/', '\'
+        if (-not [string]::IsNullOrWhiteSpace($p)) { [void]$final.Add($p) }
+    }
+
+    return @($final.ToArray() | Select-Object -Unique)
+}
+
+function Test-WmtCleanerMlWindowsPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($Path -match '^[\\/](bin|boot|dev|etc|home|lib|media|mnt|opt|proc|root|run|sbin|srv|sys|tmp|usr|var)([\\/]|$)') {
+        return $false
+    }
+    return $true
+}
+
+function Get-WmtBleachBitCleanerXmlDirectories {
+    $dataPath = Get-DataPath
+    $dirs = @(
+        (Join-Path $dataPath "bleachbit_cleanerml\bleachbit-master\cleaners"),
+        (Join-Path $dataPath "bleachbit-master\bleachbit-master\cleaners"),
+        (Join-Path $dataPath "cleanerml-master\cleanerml-master\release"),
+        (Join-Path $env:APPDATA "BleachBit\cleaners"),
+        (Join-Path $env:ProgramFiles "BleachBit\share\cleaners")
+    )
+
+    if (${env:ProgramFiles(x86)}) {
+        $dirs += (Join-Path ${env:ProgramFiles(x86)} "BleachBit\share\cleaners")
+    }
+
+    return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+}
+
+function Update-WmtBleachBitCleanerMlFiles {
+    $dataPath = Get-DataPath
+    $targetRoot = Join-Path $dataPath "bleachbit_cleanerml"
+    $zipPath = Join-Path $targetRoot "bleachbit-master.zip"
+    $extractRoot = Join-Path $targetRoot "bleachbit-master"
+
+    try {
+        [System.IO.Directory]::CreateDirectory($targetRoot) | Out-Null
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $url = "https://codeload.github.com/bleachbit/bleachbit/zip/refs/heads/master"
+        $wc = New-Object System.Net.WebClient
+        $wc.DownloadFile($url, $zipPath)
+        $wc.Dispose()
+
+        if (Test-Path -LiteralPath $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        [System.IO.Directory]::CreateDirectory($extractRoot) | Out-Null
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        [System.IO.Compression.ZipFile]::ExtractToDirectory($zipPath, $extractRoot)
+
+        $nested = Get-ChildItem -LiteralPath $extractRoot -Directory -Filter "bleachbit-*" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($nested -and (Test-Path -LiteralPath (Join-Path $nested.FullName "cleaners"))) {
+            $finalRoot = Join-Path $targetRoot "bleachbit-master-normalized"
+            if (Test-Path -LiteralPath $finalRoot) {
+                Remove-Item -LiteralPath $finalRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath $nested.FullName -Destination $finalRoot -Force
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force -ErrorAction SilentlyContinue
+            Rename-Item -LiteralPath $finalRoot -NewName "bleachbit-master" -Force
+        }
+    }
+    catch {
+        Write-GuiLog "CleanerML download warning: $($_.Exception.Message)"
+    }
+}
+
+function Get-WmtCleanerMlSection {
+    param([string]$CleanerName)
+
+    if ($CleanerName -match "(?i)\b(Chrome|Chromium|Edge|Firefox|Brave|Opera|Internet Explorer|SeaMonkey|Waterfox|LibreWolf|Vivaldi|Zen)\b") { return "Browsers / Internet" }
+    if ($CleanerName -match "(?i)\b(Discord|Pidgin|Skype|Telegram|Signal|HexChat|Thunderbird|FileZilla)\b") { return "Internet & Chat" }
+    if ($CleanerName -match "(?i)\b(Office|LibreOffice|Adobe|GIMP|Paint|Audacity|HandBrake|VLC|Java|Claude)\b") { return "Productivity" }
+    if ($CleanerName -match "(?i)\b(Deep scan|System|Windows|Explorer|Thumbnails|Localizations)\b") { return "System" }
+    if ($CleanerName -match "(?i)\b(Game|Steam|Minecraft|Roblox|Nexuiz|Warzone|Poker)\b") { return "Games" }
+    return "Applications"
+}
+
+function ConvertFrom-WmtCleanerMlFile {
+    param([string]$Path)
+
+    try { [xml]$xml = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop }
+    catch { return @() }
+
+    $cleaner = $xml.cleaner
+    if (-not $cleaner -or -not (Test-WmtCleanerMlOs $cleaner)) { return @() }
+
+    $cleanerId = if ($cleaner.id) { [string]$cleaner.id } else { [System.IO.Path]::GetFileNameWithoutExtension($Path) }
+    $cleanerName = Get-WmtXmlInnerText -Node $cleaner -Name "label"
+    if ([string]::IsNullOrWhiteSpace($cleanerName)) { $cleanerName = $cleanerId -replace '[_\-]+', ' ' }
+    $cleanerDesc = Get-WmtXmlInnerText -Node $cleaner -Name "description"
+
+    $envMapForVars = Get-WmtCleanerMlEnvMap
+    $variables = @{}
+    $variables["ProgramFiles"] = @($envMapForVars["ProgramFiles"], $envMapForVars["ProgramW6432"]) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Unique
+    $variables["CommonProgramFiles"] = @($envMapForVars["CommonProgramFiles"], $envMapForVars["CommonProgramW6432"]) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+        Select-Object -Unique
+    foreach ($var in @($cleaner.var)) {
+        if (-not $var.name) { continue }
+        $values = New-Object System.Collections.Generic.List[string]
+        foreach ($valueNode in @($var.value)) {
+            if (-not (Test-WmtCleanerMlOs $valueNode)) { continue }
+            foreach ($expandedValue in (Expand-WmtCleanerMlPathVariants -Path ([string]$valueNode.InnerText) -Variables $variables)) {
+                if (Test-WmtCleanerMlWindowsPath $expandedValue) { [void]$values.Add($expandedValue) }
+            }
+        }
+        if ($values.Count -gt 0) { $variables[[string]$var.name] = @($values.ToArray() | Select-Object -Unique) }
+    }
+
+    $rules = New-Object System.Collections.Generic.List[object]
+    foreach ($option in @($cleaner.option)) {
+        if (-not (Test-WmtCleanerMlOs $option)) { continue }
+
+        $optionId = if ($option.id) { [string]$option.id } else { "option" }
+        $optionName = Get-WmtXmlInnerText -Node $option -Name "label"
+        if ([string]::IsNullOrWhiteSpace($optionName)) { $optionName = $optionId -replace '[_\-]+', ' ' }
+        $optionDesc = Get-WmtXmlInnerText -Node $option -Name "description"
+        $optionWarning = Get-WmtXmlInnerText -Node $option -Name "warning"
+        $paths = New-Object System.Collections.Generic.List[object]
+
+        foreach ($action in @($option.action)) {
+            if ([string]$action.command -ne "delete") { continue }
+            if (-not (Test-WmtCleanerMlOs $action)) { continue }
+
+            $search = if ($action.search) { [string]$action.search } else { "file" }
+            if ($search -notin @("file", "glob", "walk.files", "walk.all", "walk.top", "deep")) { continue }
+
+            $rawPath = if ($action.path) { [string]$action.path } elseif ($search -eq "deep") { "%UserProfile%" } else { "" }
+            foreach ($expandedPath in (Expand-WmtCleanerMlPathVariants -Path $rawPath -Variables $variables)) {
+                if (-not (Test-WmtCleanerMlWindowsPath $expandedPath)) { continue }
+                [void]$paths.Add([PSCustomObject]@{
+                        Path        = $expandedPath
+                        Search      = $search
+                        Regex       = if ($action.regex) { [string]$action.regex } else { "" }
+                        WholeRegex  = if ($action.wholeregex) { [string]$action.wholeregex } else { "" }
+                        NRegex      = if ($action.nregex) { [string]$action.nregex } else { "" }
+                        NWholeRegex = if ($action.nwholeregex) { [string]$action.nwholeregex } else { "" }
+                        Type        = if ($action.type) { [string]$action.type } elseif ($search -eq "file") { "f" } else { "" }
+                    })
+            }
+        }
+
+        if ($paths.Count -gt 0) {
+            $safeId = ("CleanerML_{0}_{1}" -f $cleanerId, $optionId) -replace '[^a-zA-Z0-9_]', ''
+            [void]$rules.Add([PSCustomObject]@{
+                    Name        = "$cleanerName - $optionName"
+                    ID          = $safeId
+                    Section     = Get-WmtCleanerMlSection -CleanerName $cleanerName
+                    AppGroup    = $cleanerName
+                    Paths       = @($paths.ToArray())
+                    Desc        = (@($cleanerDesc, $optionDesc, $optionWarning) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join " "
+                    IsInternal  = $false
+                    IsCleanerML = $true
+                    Source      = "CleanerML"
+                })
+        }
+    }
+
+    return $rules.ToArray()
+}
+
+function Get-BleachBitCleanerMlRules {
+    param([switch]$Download)
+
+    if ($Download) { Update-WmtBleachBitCleanerMlFiles }
+    if (-not $script:CleanerMlRulesMemoryCache) { $script:CleanerMlRulesMemoryCache = @{} }
+
+    $dirs = @(Get-WmtBleachBitCleanerXmlDirectories)
+    if ($dirs.Count -eq 0) { return @() }
+
+    $xmlFiles = @($dirs | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter "*.xml" -File -ErrorAction SilentlyContinue } | Sort-Object FullName -Unique)
+    if ($xmlFiles.Count -eq 0) { return @() }
+
+    $memoryKey = ($xmlFiles | ForEach-Object { "{0}:{1}:{2}" -f $_.FullName, $_.Length, $_.LastWriteTimeUtc.Ticks }) -join "|"
+    if ($memoryKey -and $script:CleanerMlRulesMemoryCache.ContainsKey($memoryKey)) {
+        return $script:CleanerMlRulesMemoryCache[$memoryKey]
+    }
+
+    $allRules = New-Object System.Collections.Generic.List[object]
+    foreach ($file in $xmlFiles) {
+        foreach ($rule in @(ConvertFrom-WmtCleanerMlFile -Path $file.FullName)) {
+            [void]$allRules.Add($rule)
+        }
+    }
+
+    $final = @($allRules.ToArray() | Group-Object ID | ForEach-Object { $_.Group[0] } | Sort-Object Section, AppGroup, Name)
+    if ($memoryKey) { $script:CleanerMlRulesMemoryCache[$memoryKey] = $final }
+    return $final
+}
+
 function Get-Winapp2Rules {
     param([switch]$Download)
 
@@ -4921,6 +5228,7 @@ function Show-AdvancedCleanupSelection {
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.TempCleanup
     $isWinapp2Enabled = $currentSettings.LoadWinapp2
+    $isCleanerMlEnabled = $currentSettings.LoadCleanerML
 
     # --- FORM SETUP ---
     $form = New-Object System.Windows.Forms.Form
@@ -4938,13 +5246,13 @@ function Show-AdvancedCleanupSelection {
 
     # TOP PANEL
     $topPanel = New-Object System.Windows.Forms.Panel
-    $topPanel.Dock = "Top"; $topPanel.Height = 50
+    $topPanel.Dock = "Top"; $topPanel.Height = 78
     $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
     Set-WmtDoubleBuffered -Control $topPanel
 
     $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
-    $chkToggleWinapp2.Text = "Load Community Rules *"
-    $chkToggleWinapp2.Size = "220, 30"; $chkToggleWinapp2.Location = "15, 10"
+    $chkToggleWinapp2.Text = "Winapp2.ini rules"
+    $chkToggleWinapp2.Size = "170, 24"; $chkToggleWinapp2.Location = "15, 8"
     $chkToggleWinapp2.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
     $chkToggleWinapp2.ForeColor = "White"
     $chkToggleWinapp2.BackColor = $topPanel.BackColor
@@ -4954,8 +5262,19 @@ function Show-AdvancedCleanupSelection {
     $tt.SetToolTip($chkToggleWinapp2, "Enables 1000+ extra rules from Winapp2.ini")
     $topPanel.Controls.Add($chkToggleWinapp2)
 
+    $chkToggleCleanerML = New-Object System.Windows.Forms.CheckBox
+    $chkToggleCleanerML.Text = "BleachBit CleanerML"
+    $chkToggleCleanerML.Size = "190, 24"; $chkToggleCleanerML.Location = "15, 40"
+    $chkToggleCleanerML.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+    $chkToggleCleanerML.ForeColor = "White"
+    $chkToggleCleanerML.BackColor = $topPanel.BackColor
+    $chkToggleCleanerML.UseVisualStyleBackColor = $false
+    $chkToggleCleanerML.Checked = $isCleanerMlEnabled
+    $tt.SetToolTip($chkToggleCleanerML, "Loads BleachBit XML cleaners for broader app coverage.")
+    $topPanel.Controls.Add($chkToggleCleanerML)
+
     $txtSearch = New-Object System.Windows.Forms.TextBox
-    $txtSearch.Size = "200, 25"; $txtSearch.Location = "420, 12"
+    $txtSearch.Size = "200, 25"; $txtSearch.Location = "420, 26"
     $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
     $txtSearch.ForeColor = "White"
     $txtSearch.BorderStyle = "FixedSingle"
@@ -4964,7 +5283,7 @@ function Show-AdvancedCleanupSelection {
 
     $lblSearch = New-Object System.Windows.Forms.Label
     $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
-    $lblSearch.Location = "370, 15"; $lblSearch.Anchor = "Top, Right"
+    $lblSearch.Location = "370, 29"; $lblSearch.Anchor = "Top, Right"
     $lblSearch.ForeColor = "White"
     $lblSearch.BackColor = $topPanel.BackColor
     $topPanel.Controls.Add($lblSearch)
@@ -4986,14 +5305,14 @@ function Show-AdvancedCleanupSelection {
     $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
     $btnClean.Location = "490, 12"; $btnClean.BackColor = "SeaGreen"
     $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
-    $btnClean.Anchor = "Top, Right"; $btnClean.DialogResult = "OK"
+    $btnClean.Anchor = "Top, Right"; $btnClean.DialogResult = "None"
     $btnPanel.Controls.Add($btnClean)
 
     $btnAnalyze = New-Object System.Windows.Forms.Button
     $btnAnalyze.Text = "Analyze"; $btnAnalyze.Size = "100, 35"
     $btnAnalyze.Location = "380, 12"; $btnAnalyze.BackColor = "SteelBlue"
     $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
-    $btnAnalyze.Anchor = "Top, Right"; $btnAnalyze.DialogResult = "Yes"
+    $btnAnalyze.Anchor = "Top, Right"; $btnAnalyze.DialogResult = "None"
     $tt.SetToolTip($btnAnalyze, "Preview files that will be deleted without removing them.")
     $btnPanel.Controls.Add($btnAnalyze)
 
@@ -5101,7 +5420,8 @@ function Show-AdvancedCleanupSelection {
         [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
         [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
         [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail Cache"; Key = "Thumbnails"; Desc = "Explorer thumbnails"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail / Thumbs Cache"; Key = "Thumbnails"; Desc = "Explorer thumbcache_*.db thumbnail cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Deep Scan: Thumbs.db"; Key = "ThumbsDb"; Desc = "Finds scattered Thumbs.db files under your user profile. Can be slow."; IsInternal = $true; DefaultChecked = $false }
         [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
         [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
         [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
@@ -5117,6 +5437,206 @@ function Show-AdvancedCleanupSelection {
     $cleanupHeaderColor = Get-WmtThemeColor "BgPanel"
     $cleanupTextColor = Get-WmtThemeColor "TextPrimary"
     $cleanupCommunityTextColor = Get-WmtThemeColor "Accent"
+
+    $sectionOrder = @{
+        "System"              = 0
+        "Browsers / Internet" = 1
+        "Productivity"        = 2
+        "Internet & Chat"     = 3
+        "Games"               = 4
+        "Applications"        = 5
+    }
+
+    $preferredGroupOrder = @{
+        "System|Windows"                         = 0
+        "System|Explorer"                        = 1
+        "System|Windows Update"                  = 2
+        "System|Windows Logs"                    = 3
+        "Browsers / Internet|Google Chrome"      = 0
+        "Browsers / Internet|Microsoft Edge"     = 1
+        "Browsers / Internet|Mozilla Firefox"    = 2
+        "Browsers / Internet|Brave"              = 3
+        "Browsers / Internet|Opera"              = 4
+        "Productivity|Microsoft Office"          = 0
+        "Productivity|Microsoft Outlook"         = 1
+        "Productivity|Microsoft PowerToys"       = 2
+        "Productivity|Adobe"                     = 3
+        "Internet & Chat|Discord"                = 0
+        "Internet & Chat|Spotify"                = 1
+        "Games|Steam"                            = 0
+        "Games|Epic Games"                       = 1
+        "Games|Xbox"                             = 2
+    }
+
+    $normalizeCleanerName = {
+        param($Text)
+
+        $name = ([string]$Text).Trim().Trim(" *")
+        $name = $name -replace "\s+", " "
+
+        if ($name -eq ".Thumbnails") { return "Thumbnail / Thumbs Cache" }
+        return $name
+    }.GetNewClosure()
+
+    $getCleanerDisplayGroup = {
+        param($item)
+
+        $rawGroup = ([string]$item.AppGroup).Trim()
+        $name = & $normalizeCleanerName $item.Name
+
+        if ([bool]$item.IsInternal) {
+            if (-not [string]::IsNullOrWhiteSpace($rawGroup)) { return $rawGroup }
+            return "Windows"
+        }
+
+        switch -Regex ($name) {
+            "^(Google Chrome|Chrome)\b" { return "Google Chrome" }
+            "^(Microsoft Edge|Edge)\b" { return "Microsoft Edge" }
+            "^(Mozilla Firefox|Firefox)\b" { return "Mozilla Firefox" }
+            "^Brave\b" { return "Brave" }
+            "^Opera\b" { return "Opera" }
+            "^SeaMonkey\b" { return "SeaMonkey" }
+            "^Microsoft\s+Office\b|^Office\b" { return "Microsoft Office" }
+            "^Microsoft\s+Outlook\b|^Outlook\b" { return "Microsoft Outlook" }
+            "^Microsoft\s+PowerToys\b|^PowerToys\b" { return "Microsoft PowerToys" }
+            "^Adobe\b|Flash Player" { return "Adobe" }
+            "^Steam\b" { return "Steam" }
+            "^Epic Games\b|^Epic\b|Fortnite" { return "Epic Games" }
+            "^Xbox\b|Minecraft|Roblox" { return "Xbox" }
+            "^Discord\b" { return "Discord" }
+            "^Spotify\b" { return "Spotify" }
+            "^NVIDIA\b" { return "NVIDIA" }
+            "^AMD\b" { return "AMD" }
+            "^Windows Update\b" { return "Windows Update" }
+            "^Windows Logs\b|Event Logs|Event Viewer|Error Reporting" { return "Windows Logs" }
+            "^Windows\b|^Microsoft Store\b|^Microsoft\s+Windows\b" { return "Windows" }
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($rawGroup) -and $rawGroup -ne "General") {
+            if ($rawGroup -eq "Epic") { return "Epic Games" }
+            return $rawGroup
+        }
+
+        return "Other Apps"
+    }.GetNewClosure()
+
+    $getCleanerDisplayName = {
+        param($item)
+
+        $itemKey = if ($item.Key) { [string]$item.Key } else { [string]$item.ID }
+        if ($itemKey -eq "Thumbnails") { return "Thumbnail / Thumbs Cache" }
+
+        $name = & $normalizeCleanerName $item.Name
+        if (-not [bool]$item.IsInternal) {
+            $displayGroup = & $getCleanerDisplayGroup $item
+            if (-not [string]::IsNullOrWhiteSpace($displayGroup) -and $displayGroup -ne "Other Apps") {
+                $name = ($name -replace ("^" + [regex]::Escape($displayGroup) + "\s*[-:]?\s*"), "").Trim()
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($name)) { return "General Cleanup" }
+        return $name
+    }.GetNewClosure()
+
+    $getCleanerDisplaySection = {
+        param($item)
+
+        $rawSection = ([string]$item.Section).Trim()
+        $name = & $normalizeCleanerName $item.Name
+        $group = & $getCleanerDisplayGroup $item
+
+        if ([bool]$item.IsInternal) {
+            if (-not [string]::IsNullOrWhiteSpace($rawSection)) { return $rawSection }
+            return "System"
+        }
+
+        if ($group -in @("Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "SeaMonkey")) {
+            return "Browsers / Internet"
+        }
+        if ($group -in @("Discord", "Spotify")) { return "Internet & Chat" }
+        if ($group -in @("Steam", "Epic Games", "Xbox") -or $rawSection -eq "Games") { return "Games" }
+        if ($group -in @("Microsoft Office", "Microsoft Outlook", "Microsoft PowerToys", "Adobe")) { return "Productivity" }
+        if ($rawSection -in @("System", "Browsers / Internet", "Productivity", "Internet & Chat", "Games", "Applications")) {
+            return $rawSection
+        }
+        if ($name -match "(?i)\b(Outlook|Office|PowerToys|Adobe)\b") { return "Productivity" }
+        if ($name -match "(?i)\b(Chrome|Edge|Firefox|Brave|Opera|SeaMonkey|Browser)\b") { return "Browsers / Internet" }
+        if ($name -match "(?i)\b(Discord|Spotify|Slack|Telegram|WhatsApp|Signal|Zoom)\b") { return "Internet & Chat" }
+        if ($name -match "(?i)\b(Steam|Epic Games|Fortnite|Xbox|Minecraft|Roblox)\b") { return "Games" }
+
+        return "Applications"
+    }.GetNewClosure()
+
+    $getCleanerSectionOrder = {
+        param($section)
+
+        $sectionName = [string]$section
+        if ($sectionOrder.ContainsKey($sectionName)) { return [int]$sectionOrder[$sectionName] }
+        return 99
+    }.GetNewClosure()
+
+    $getCleanerGroupOrder = {
+        param($item)
+
+        $section = & $getCleanerDisplaySection $item
+        $group = & $getCleanerDisplayGroup $item
+        $key = "$section|$group"
+        if ($preferredGroupOrder.ContainsKey($key)) { return [int]$preferredGroupOrder[$key] }
+        return 50
+    }.GetNewClosure()
+
+    $applyCleanerSearch = {
+        if ($form.IsDisposed -or $mainPanel.IsDisposed) { return }
+
+        $q = $txtSearch.Text.ToLowerInvariant()
+        $mainPanel.SuspendLayout()
+        try {
+            for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
+                $ctrl = $mainPanel.Controls[$i]
+                if ($ctrl.Tag -ne "FLOW") { continue }
+
+                $hasVisibleChildren = $false
+                $currentGroupHeader = $null
+                $currentGroupHasVisibleChildren = $false
+                foreach ($child in $ctrl.Controls) {
+                    if ($child.Tag -eq "GROUPHEADER") {
+                        if ($currentGroupHeader) {
+                            $currentGroupHeader.Visible = ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
+                        }
+                        $currentGroupHeader = $child
+                        $currentGroupHasVisibleChildren = $false
+                        $child.Visible = ($q.Length -eq 0)
+                    }
+                    elseif ($child -is [System.Windows.Forms.CheckBox]) {
+                        $searchText = if ([string]::IsNullOrWhiteSpace($child.AccessibleDescription)) {
+                            $child.Text.ToLowerInvariant()
+                        }
+                        else {
+                            $child.AccessibleDescription
+                        }
+
+                        if ($searchText.Contains($q)) {
+                            $child.Visible = $true
+                            $hasVisibleChildren = $true
+                            $currentGroupHasVisibleChildren = $true
+                        }
+                        else {
+                            $child.Visible = $false
+                        }
+                    }
+                }
+                if ($currentGroupHeader) {
+                    $currentGroupHeader.Visible = ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
+                }
+                $ctrl.Visible = $hasVisibleChildren
+                if ($i -gt 0) { $mainPanel.Controls[$i - 1].Visible = $hasVisibleChildren }
+            }
+        }
+        finally {
+            $mainPanel.ResumeLayout($true)
+            & $updateAdvancedCleanerScrollExtent
+        }
+    }.GetNewClosure()
 
     # ------------------------------------------------
     # Render helper – rebuilds the entire panel from a rule list,
@@ -5137,7 +5657,9 @@ function Show-AdvancedCleanupSelection {
             $global:checkboxes.Clear()
             $global:sections = @()
 
-            $grouped = $allRules | Group-Object Section | Sort-Object Name
+            $grouped = $allRules |
+                Group-Object -Property { & $getCleanerDisplaySection $_ } |
+                Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
             $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
             foreach ($group in $grouped) {
@@ -5172,15 +5694,20 @@ function Show-AdvancedCleanupSelection {
                 $itemFlow.BackColor = $cleanupBackColor
                 Set-WmtDoubleBuffered -Control $itemFlow
 
-                $secItems = $group.Group | Sort-Object AppGroup, Name
+                $secItems = $group.Group | Sort-Object `
+                    @{ Expression = { & $getCleanerGroupOrder $_ } }, `
+                    @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
+                    @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
+                    @{ Expression = { & $getCleanerDisplayName $_ } }
                 $childChecks = @()
                 $currentGroup = $null
                 $isSecChecked = $true
                 $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
 
                 foreach ($item in $secItems) {
-                    if ($item.AppGroup -ne $currentGroup) {
-                        $currentGroup = $item.AppGroup
+                    $displayGroup = & $getCleanerDisplayGroup $item
+                    if ($displayGroup -ne $currentGroup) {
+                        $currentGroup = $displayGroup
                         $grpLbl = New-Object System.Windows.Forms.Label
                         $grpLbl.Text = $currentGroup
                         $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
@@ -5192,15 +5719,19 @@ function Show-AdvancedCleanupSelection {
                     }
 
                     $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
+                    $displayName = & $getCleanerDisplayName $item
                     $chk = New-Object System.Windows.Forms.CheckBox
                     $chk.ForeColor = $cleanupTextColor
 
                     if ($item.IsInternal) {
-                        $chk.Text = $item.Name
+                        $chk.Text = $displayName
+                    }
+                    elseif ($item.IsCleanerML) {
+                        $chk.Text = "$displayName (CleanerML)"
+                        $chk.ForeColor = $cleanupCommunityTextColor
                     }
                     else {
-                        $cleanName = $item.Name.Trim(" *")
-                        $chk.Text = "$cleanName (*)"
+                        $chk.Text = "$displayName (winapp2.ini)"
                         $chk.ForeColor = $cleanupCommunityTextColor
                     }
 
@@ -5208,6 +5739,23 @@ function Show-AdvancedCleanupSelection {
                     $chk.UseVisualStyleBackColor = $false
                     $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
                     $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
+                    $searchParts = [System.Collections.Generic.List[string]]::new()
+                    foreach ($part in @($chk.Text, $displayName, $displayGroup, $itemKey, $item.Name, $item.Desc, $item.AppGroup, $item.Section)) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$part)) { $searchParts.Add([string]$part) }
+                    }
+                    if ($itemKey -eq "Thumbnails") {
+                        $searchParts.AddRange([string[]]@("thumbs", "thumbcache", "thumbcache_*.db", "thumbs.db"))
+                    }
+                    elseif ($itemKey -eq "ThumbsDb") {
+                        $searchParts.AddRange([string[]]@("thumbs", "thumbnail", "thumbs.db", "deep scan"))
+                    }
+                    elseif (-not $item.IsInternal -and $item.Paths) {
+                        foreach ($pathRule in $item.Paths) {
+                            if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Path)) { $searchParts.Add([string]$pathRule.Path) }
+                            if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Pattern)) { $searchParts.Add([string]$pathRule.Pattern) }
+                        }
+                    }
+                    $chk.AccessibleDescription = ($searchParts -join " ").ToLowerInvariant()
 
                     # Restore previous state or use default
                     if ($prevStates.ContainsKey($itemKey)) {
@@ -5217,7 +5765,12 @@ function Show-AdvancedCleanupSelection {
                         $chk.Checked = $savedStates[$itemKey]
                     }
                     else {
-                        $chk.Checked = ($item.IsInternal -eq $true)
+                        if ($item.PSObject.Properties["DefaultChecked"]) {
+                            $chk.Checked = [bool]$item.DefaultChecked
+                        }
+                        else {
+                            $chk.Checked = ($item.IsInternal -eq $true)
+                        }
                     }
 
                     if (-not $chk.Checked) { $isSecChecked = $false }
@@ -5233,7 +5786,12 @@ function Show-AdvancedCleanupSelection {
 
                 $secChk.Add_CheckedChanged({
                         param($s, $e)
-                        foreach ($c in $childChecks) { $c.Checked = $s.Checked }
+                        $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+                        foreach ($c in $childChecks) {
+                            if (-not $filterActive -or ($c.Visible -and $c.Parent -and $c.Parent.Visible)) {
+                                $c.Checked = $s.Checked
+                            }
+                        }
                     }.GetNewClosure())
 
                 $controlsToAdd.Add($itemFlow)
@@ -5247,21 +5805,34 @@ function Show-AdvancedCleanupSelection {
             if ($form.IsHandleCreated) {
                 $null = $form.BeginInvoke([System.Action] { & $updateAdvancedCleanerScrollExtent })
             }
+            & $applyCleanerSearch
             $mainPanel.Invalidate()
         }
     }
 
+    $externalRuleState = @{
+        Winapp2   = @()
+        CleanerML = @()
+    }
+
+    $renderCurrentCleanerRules = {
+        $combined = @($internalRules)
+        if ($externalRuleState.Winapp2) { $combined += @($externalRuleState.Winapp2) }
+        if ($externalRuleState.CleanerML) { $combined += @($externalRuleState.CleanerML) }
+        & $RenderAllRules -allRules $combined
+    }.GetNewClosure()
+
     # Instant render of internal rules only
-    & $RenderAllRules -allRules $internalRules
+    & $renderCurrentCleanerRules
 
-    # Function to load community rules (maybe with forced download)
-    $loadCommunityRules = {
-        param([switch]$ForceDownload)
-
-        if (-not $chkToggleWinapp2.Checked) { return }
+    $loadExternalCleanerRules = {
+        param(
+            [switch]$ForceWinapp2Download,
+            [switch]$ForceCleanerMlDownload
+        )
 
         $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "Loading Community Rules..."; $lbl.ForeColor = Get-WmtThemeColor "Warning"
+        $lbl.Text = "Loading cleaner rules..."; $lbl.ForeColor = Get-WmtThemeColor "Warning"
         $lbl.BackColor = $cleanupBackColor
         $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
         $mainPanel.Controls.Add($lbl)
@@ -5270,84 +5841,150 @@ function Show-AdvancedCleanupSelection {
         $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
 
         try {
-            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-            $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
-            $shouldDownload = $ForceDownload -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
-
-            if ($shouldDownload) {
-                $winRules = Get-Winapp2Rules -Download:$true
+            if ($chkToggleWinapp2.Checked) {
+                $lbl.Text = "Loading Winapp2 rules..."
+                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+                $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
+                $shouldDownload = $ForceWinapp2Download -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
+                $externalRuleState.Winapp2 = @(Get-Winapp2Rules -Download:$shouldDownload)
             }
             else {
-                $winRules = Get-Winapp2Rules -Download:$false
+                $externalRuleState.Winapp2 = @()
             }
-            if ($winRules) {
-                # Merge internal + community and re-render once
-                $combined = @($internalRules) + $winRules
-                & $RenderAllRules -allRules $combined
+
+            if ($chkToggleCleanerML.Checked) {
+                $lbl.Text = "Loading BleachBit CleanerML..."
+                $hasLocalCleanerMl = ((Get-WmtBleachBitCleanerXmlDirectories).Count -gt 0)
+                $shouldDownloadCleanerMl = $ForceCleanerMlDownload -or (-not $hasLocalCleanerMl)
+                $externalRuleState.CleanerML = @(Get-BleachBitCleanerMlRules -Download:$shouldDownloadCleanerMl)
             }
+            else {
+                $externalRuleState.CleanerML = @()
+            }
+
+            & $renderCurrentCleanerRules
         }
-        catch {}
+        catch {
+            Write-GuiLog "Cleaner rules warning: $($_.Exception.Message)"
+            & $renderCurrentCleanerRules
+        }
         finally {
             $form.Cursor = [System.Windows.Forms.Cursors]::Default
             $mainPanel.Controls.Remove($lbl)
         }
-    }
+    }.GetNewClosure()
 
-    # Load saved community rules the same way the manual toggle does, once the
-    # form is visible. Activated is a small fallback for hosts that miss Shown.
+    # Load saved external rule sets once the form is visible. Activated is a
+    # fallback for hosts that miss Shown.
     $communityLoadState = @{ Started = $false }
     $loadCommunityRulesIfEnabled = {
-        if ($communityLoadState.Started -or $form.IsDisposed -or -not $chkToggleWinapp2.Checked) { return }
+        if ($communityLoadState.Started -or $form.IsDisposed -or (-not $chkToggleWinapp2.Checked -and -not $chkToggleCleanerML.Checked)) { return }
         $communityLoadState.Started = $true
         [System.Windows.Forms.Application]::DoEvents()
-        & $loadCommunityRules
+        & $loadExternalCleanerRules
     }.GetNewClosure()
 
     $form.Add_Shown({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
     $form.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
 
-    # Toggle handler
+    # Toggle handlers
     $chkToggleWinapp2.Add_Click({
             $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
             Save-WmtSettings -Settings $currentSettings
 
-            if ($chkToggleWinapp2.Checked) {
-                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-                $forceDownload = -not (Test-Path $iniPath)
-                & $loadCommunityRules -ForceDownload:$forceDownload
-            }
-            else {
-                # Revert to internal rules only
-                & $RenderAllRules -allRules $internalRules
-            }
+            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+            $forceDownload = $chkToggleWinapp2.Checked -and (-not (Test-Path $iniPath))
+            & $loadExternalCleanerRules -ForceWinapp2Download:$forceDownload
         })
+
+    $chkToggleCleanerML.Add_Click({
+            $currentSettings.LoadCleanerML = $chkToggleCleanerML.Checked
+            Save-WmtSettings -Settings $currentSettings
+
+            $forceDownload = $chkToggleCleanerML.Checked -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0)
+            & $loadExternalCleanerRules -ForceCleanerMlDownload:$forceDownload
+        })
+
+    $searchDelayTimer = New-Object System.Windows.Forms.Timer
+    $searchDelayTimer.Interval = 250
+    $searchDelayTimer.Add_Tick({
+            $searchDelayTimer.Stop()
+            & $applyCleanerSearch
+        }.GetNewClosure())
+    $form.Add_FormClosed({
+            try {
+                $searchDelayTimer.Stop()
+                $searchDelayTimer.Dispose()
+            }
+            catch {}
+        }.GetNewClosure())
 
     # Search logic
     $txtSearch.Add_TextChanged({
-            $q = $txtSearch.Text.ToLower()
-            $mainPanel.SuspendLayout()
-            for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
-                $ctrl = $mainPanel.Controls[$i]
-                if ($ctrl.Tag -eq "FLOW") {
-                    $hasVisibleChildren = $false
-                    foreach ($child in $ctrl.Controls) {
-                        if ($child -is [System.Windows.Forms.CheckBox]) {
-                            if ($child.Text.ToLower().Contains($q)) {
-                                $child.Visible = $true
-                                $hasVisibleChildren = $true
-                            }
-                            else { $child.Visible = $false }
-                        }
-                        elseif ($child.Tag -eq "GROUPHEADER") {
-                            $child.Visible = ($q.Length -eq 0)
-                        }
-                    }
-                    $ctrl.Visible = $hasVisibleChildren
-                    if ($i -gt 0) { $mainPanel.Controls[$i - 1].Visible = $hasVisibleChildren }
-                }
-            }
-            $mainPanel.ResumeLayout()
+            $searchDelayTimer.Stop()
+            $searchDelayTimer.Start()
         })
+
+    $selectionState = @{ Result = $null }
+
+    $getSelectedCleanerItems = {
+        $selectedItems = [System.Collections.Generic.List[object]]::new()
+        $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+        foreach ($key in $global:checkboxes.Keys) {
+            $cb = $global:checkboxes[$key]
+            $isVisibleForAction = (-not $filterActive) -or ($cb.Visible -and $cb.Parent -and $cb.Parent.Visible)
+            if ($cb.Checked -and $isVisibleForAction) { $selectedItems.Add($cb.Tag) }
+        }
+        return ,$selectedItems
+    }.GetNewClosure()
+
+    $getActionableCleanerCount = {
+        return (& $getSelectedCleanerItems).Count
+    }.GetNewClosure()
+
+    $submitCleanupSelection = {
+        param(
+            [string]$Action,
+            [System.Windows.Forms.DialogResult]$Result
+        )
+
+        $searchDelayTimer.Stop()
+        & $applyCleanerSearch
+
+        $selectedItems = & $getSelectedCleanerItems
+        if ($selectedItems.Count -le 0) {
+            $message = if ([string]::IsNullOrWhiteSpace($txtSearch.Text)) {
+                "Select at least one cleaner first."
+            }
+            else {
+                "No visible checked cleaners match the current search. Clear the search or check a visible cleaner."
+            }
+            [System.Windows.Forms.MessageBox]::Show(
+                $message,
+                "No Cleaners Selected",
+                [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Information
+            ) | Out-Null
+            return
+        }
+
+        foreach ($key in $global:checkboxes.Keys) {
+            $currentSettings.TempCleanup[$key] = $global:checkboxes[$key].Checked
+        }
+        $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
+        $currentSettings.LoadCleanerML = $chkToggleCleanerML.Checked
+        Save-WmtSettings -Settings $currentSettings
+
+        $selectionState.Result = [PSCustomObject]@{
+            Action = $Action
+            Items  = $selectedItems.ToArray()
+        }
+        $form.DialogResult = $Result
+        $form.Close()
+    }.GetNewClosure()
+
+    $btnClean.Add_Click({ & $submitCleanupSelection "Clean" ([System.Windows.Forms.DialogResult]::OK) }.GetNewClosure())
+    $btnAnalyze.Add_Click({ & $submitCleanupSelection "Analyze" ([System.Windows.Forms.DialogResult]::Yes) }.GetNewClosure())
 
     $form.AcceptButton = $btnClean
     $form.CancelButton = $btnCancel
@@ -5409,19 +6046,7 @@ function Show-AdvancedCleanupSelection {
     $guiResult = $form.ShowDialog()
 
     if ($guiResult -in @('OK', 'Yes')) {
-        $selectedItems = [System.Collections.Generic.List[object]]::new()
-        foreach ($key in $global:checkboxes.Keys) {
-            $cb = $global:checkboxes[$key]
-            if ($cb.Checked) { $selectedItems.Add($cb.Tag) }
-            $currentSettings.TempCleanup[$key] = $cb.Checked
-        }
-        $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-        Save-WmtSettings -Settings $currentSettings
-
-        return [PSCustomObject]@{
-            Action = if ($guiResult -eq 'OK') { 'Clean' } else { 'Analyze' }
-            Items  = $selectedItems.ToArray()
-        }
+        return $selectionState.Result
     }
     return $null
 }
@@ -5495,47 +6120,53 @@ function Invoke-TempCleanup {
         param($Path, $Pattern = "*", $Recurse = $true, $RuleName = "System File")
         
         $Path = [Environment]::ExpandEnvironmentVariables($Path)
-        if (-not (Test-Path -LiteralPath $Path)) { return }
+        $pathHasWildcard = ($Path -match '[\*\?]')
+        if (-not $pathHasWildcard -and -not (Test-Path -LiteralPath $Path)) { return }
 
         $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
         [System.Windows.Forms.Application]::DoEvents()
 
-        $opt = if ($Recurse) { [System.IO.SearchOption]::AllDirectories } else { [System.IO.SearchOption]::TopDirectoryOnly }
-        
         try {
-            $files = [System.IO.Directory]::EnumerateFiles($Path, $Pattern, $opt)
             $batchCount = 0
+            $patterns = @($Pattern -split ';' | ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            if ($patterns.Count -eq 0) { $patterns = @("*") }
 
-            foreach ($file in $files) {
-                try {
-                    $fInfo = [System.IO.FileInfo]::new($file)
-                    $size = $fInfo.Length
-                    
-                    if (-not $isAnalyze) {
-                        try { $fInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
-                        $fInfo.Delete() 
-                    }
-                    else {
-                        $previewList.Add([PSCustomObject]@{
-                                RuleName = $RuleName
-                                FilePath = $file
-                                RawBytes = $size
-                            })
-                    }
+            $roots = @()
+            if ($pathHasWildcard) {
+                $roots = @(Get-ChildItem -Path $Path -Force -ErrorAction SilentlyContinue)
+            }
+            else {
+                $roots = @(Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+            }
 
-                    $stats.Deleted++
-                    $stats.Bytes += $size
-                    $batchCount++
+            foreach ($root in $roots) {
+                if (-not $root) { continue }
 
-                    if ($batchCount -gt 50) {
-                        $mb = [math]::Round($stats.Bytes / 1MB, 2)
-                        $verb = if ($isAnalyze) { "Found" } else { "Removed" }
-                        $pLabel.Text = "${verb}: $($stats.Deleted) | Space: $mb MB"
-                        [System.Windows.Forms.Application]::DoEvents()
-                        $batchCount = 0
+                if (-not $root.PSIsContainer) {
+                    foreach ($patternItem in $patterns) {
+                        if ($root.Name -like $patternItem) {
+                            Add-WmtCleanupTarget -Path $root.FullName -RuleName $RuleName
+                            $batchCount++
+                            break
+                        }
                     }
                 }
-                catch {}
+                else {
+                    foreach ($patternItem in $patterns) {
+                        foreach ($file in @(Get-ChildItem -LiteralPath $root.FullName -Filter $patternItem -File -Recurse:$Recurse -Force -ErrorAction SilentlyContinue)) {
+                            Add-WmtCleanupTarget -Path $file.FullName -RuleName $RuleName
+                            $batchCount++
+
+                            if ($batchCount -gt 50) {
+                                $mb = [math]::Round($stats.Bytes / 1MB, 2)
+                                $verb = if ($isAnalyze) { "Found" } else { "Removed" }
+                                $pLabel.Text = "${verb}: $($stats.Deleted) | Space: $mb MB"
+                                [System.Windows.Forms.Application]::DoEvents()
+                                $batchCount = 0
+                            }
+                        }
+                    }
+                }
             }
 
             if ($Recurse) {
@@ -5547,11 +6178,569 @@ function Invoke-TempCleanup {
         catch {}
     }
 
+    function Add-WmtCleanupTarget {
+        param(
+            [string]$Path,
+            [string]$RuleName = "System File"
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+
+        try {
+            $itemInfo = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            $size = if ($itemInfo.PSIsContainer) { Measure-WmtPathBytes -Path $Path } else { [int64]$itemInfo.Length }
+
+            if (-not $isAnalyze) {
+                if (-not $itemInfo.PSIsContainer) {
+                    try { $itemInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
+                }
+                Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+            }
+            else {
+                $previewList.Add([PSCustomObject]@{
+                        RuleName = $RuleName
+                        FilePath = $Path
+                        RawBytes = $size
+                    })
+            }
+
+            $stats.Deleted++
+            $stats.Bytes += $size
+        }
+        catch {}
+    }
+
+    function Test-WmtCleanerMlTargetMatch {
+        param(
+            [System.IO.FileSystemInfo]$Item,
+            $Rule
+        )
+
+        if (-not $Item) { return $false }
+        $type = [string]$Rule.Type
+        if ($type -eq "f" -and $Item.PSIsContainer) { return $false }
+        if ($type -eq "d" -and -not $Item.PSIsContainer) { return $false }
+
+        $leaf = $Item.Name
+        $full = $Item.FullName
+        $regexOptions = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+
+        try {
+            if ($Rule.Regex -and -not [regex]::IsMatch($leaf, [string]$Rule.Regex, $regexOptions)) { return $false }
+            if ($Rule.WholeRegex -and -not [regex]::IsMatch($full, [string]$Rule.WholeRegex, $regexOptions)) { return $false }
+            if ($Rule.NRegex -and [regex]::IsMatch($leaf, [string]$Rule.NRegex, $regexOptions)) { return $false }
+            if ($Rule.NWholeRegex -and [regex]::IsMatch($full, [string]$Rule.NWholeRegex, $regexOptions)) { return $false }
+        }
+        catch {
+            return $false
+        }
+
+        return $true
+    }
+
+    function Invoke-CleanerMlClean {
+        param(
+            $Rule,
+            [string]$RuleName
+        )
+
+        $path = [Environment]::ExpandEnvironmentVariables([string]$Rule.Path)
+        if ([string]::IsNullOrWhiteSpace($path)) { return }
+
+        $search = if ($Rule.Search) { [string]$Rule.Search } else { "file" }
+        $targets = New-Object System.Collections.Generic.List[System.IO.FileSystemInfo]
+
+        try {
+            switch ($search) {
+                "file" {
+                    if ($path -match '[\*\?]') {
+                        foreach ($target in @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)) {
+                            if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                        }
+                    }
+                    elseif (Test-Path -LiteralPath $path) {
+                        $target = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                        if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                    }
+                }
+                "glob" {
+                    foreach ($target in @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)) {
+                        if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                    }
+                }
+                "walk.files" {
+                    $roots = @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)
+                    if ((Test-Path -LiteralPath $path) -and -not ($path -match '[\*\?]')) {
+                        $roots = @(Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+                    }
+                    foreach ($root in $roots) {
+                        if (-not $root) { continue }
+                        if (-not $root.PSIsContainer) {
+                            if (Test-WmtCleanerMlTargetMatch -Item $root -Rule $Rule) { [void]$targets.Add($root) }
+                            continue
+                        }
+                        foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+                            if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                        }
+                    }
+                }
+                "walk.all" {
+                    $roots = @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)
+                    if ((Test-Path -LiteralPath $path) -and -not ($path -match '[\*\?]')) {
+                        $roots = @(Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+                    }
+                    foreach ($root in $roots) {
+                        if (-not $root) { continue }
+                        if (Test-WmtCleanerMlTargetMatch -Item $root -Rule $Rule) { [void]$targets.Add($root) }
+                        if ($root.PSIsContainer) {
+                            foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                                if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                            }
+                        }
+                    }
+                }
+                "walk.top" {
+                    if (Test-Path -LiteralPath $path) {
+                        $root = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                        if ($root -and (Test-WmtCleanerMlTargetMatch -Item $root -Rule $Rule)) { [void]$targets.Add($root) }
+                        if ($root -and $root.PSIsContainer) {
+                            foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Force -ErrorAction SilentlyContinue)) {
+                                if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                            }
+                        }
+                    }
+                }
+                "deep" {
+                    if (Test-Path -LiteralPath $path) {
+                        $pStatus.Text = "Deep scan: $(Split-Path $path -Leaf)"
+                        [System.Windows.Forms.Application]::DoEvents()
+                        $root = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                        if ($root -and (Test-WmtCleanerMlTargetMatch -Item $root -Rule $Rule)) { [void]$targets.Add($root) }
+                        if ($root -and $root.PSIsContainer) {
+                            foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                                if (Test-WmtCleanerMlTargetMatch -Item $target -Rule $Rule) { [void]$targets.Add($target) }
+                            }
+                        }
+                    }
+                }
+            }
+
+            foreach ($target in @($targets.ToArray() | Sort-Object FullName -Unique)) {
+                Add-WmtCleanupTarget -Path $target.FullName -RuleName $RuleName
+            }
+        }
+        catch {}
+    }
+
+    function Invoke-ThumbsDbDeepScan {
+        param([string]$RuleName)
+
+        $rule = [PSCustomObject]@{
+            Path        = $env:USERPROFILE
+            Search      = "deep"
+            Regex       = "^Thumbs\.db(:encryptable)?$"
+            WholeRegex  = ""
+            NRegex      = ""
+            NWholeRegex = ""
+            Type        = "f"
+        }
+        Invoke-CleanerMlClean -Rule $rule -RuleName $RuleName
+    }
+
+    function Get-WmtCleanupItemDisplayName {
+        param($Item)
+
+        if ($Item -is [string]) {
+            if ($internalRuleDisplayNames.ContainsKey($Item)) { return $internalRuleDisplayNames[$Item] }
+            return $Item
+        }
+
+        $name = ([string]$Item.Name).Trim().Trim(" *")
+        if ([string]::IsNullOrWhiteSpace($name)) { return [string]$Item.ID }
+        return $name
+    }
+
+    function New-WmtAnalyzeScanTasks {
+        param($Items)
+
+        $tasks = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in $Items) {
+            $itemName = Get-WmtCleanupItemDisplayName -Item $item
+
+            if (($item -is [PSCustomObject]) -and $item.PSObject.Properties["IsCleanerML"] -and [bool]$item.IsCleanerML) {
+                foreach ($rule in @($item.Paths)) {
+                    [void]$tasks.Add([PSCustomObject]@{
+                            Engine      = "CleanerML"
+                            RuleName    = $itemName
+                            Path        = [string]$rule.Path
+                            Search      = if ($rule.Search) { [string]$rule.Search } else { "file" }
+                            Regex       = if ($rule.Regex) { [string]$rule.Regex } else { "" }
+                            WholeRegex  = if ($rule.WholeRegex) { [string]$rule.WholeRegex } else { "" }
+                            NRegex      = if ($rule.NRegex) { [string]$rule.NRegex } else { "" }
+                            NWholeRegex = if ($rule.NWholeRegex) { [string]$rule.NWholeRegex } else { "" }
+                            Type        = if ($rule.Type) { [string]$rule.Type } else { "" }
+                        })
+                }
+            }
+            elseif ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
+                foreach ($rule in @($item.Paths)) {
+                    [void]$tasks.Add([PSCustomObject]@{
+                            Engine   = "Robust"
+                            RuleName = $itemName
+                            Path     = [string]$rule.Path
+                            Pattern  = if ($rule.Pattern) { [string]$rule.Pattern } else { "*" }
+                            Recurse  = ([string]$rule.Options -notmatch "REMOVESELF")
+                        })
+                }
+            }
+            else {
+                switch ($item) {
+                    "TempFiles" {
+                        [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = $env:TEMP; Pattern = "*"; Recurse = $true })
+                        [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:SystemRoot\Temp"; Pattern = "*"; Recurse = $true })
+                    }
+                    "RecycleBin" { [void]$tasks.Add([PSCustomObject]@{ Engine = "RecycleBin"; RuleName = $itemName }) }
+                    "WER" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:ProgramData\Microsoft\Windows\WER"; Pattern = "*"; Recurse = $true }) }
+                    "Thumbnails" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:LOCALAPPDATA\Microsoft\Windows\Explorer"; Pattern = "thumbcache_*.db"; Recurse = $false }) }
+                    "ThumbsDb" { [void]$tasks.Add([PSCustomObject]@{ Engine = "CleanerML"; RuleName = $itemName; Path = $env:USERPROFILE; Search = "deep"; Regex = "^Thumbs\.db(:encryptable)?$"; WholeRegex = ""; NRegex = ""; NWholeRegex = ""; Type = "f" }) }
+                    "Recent" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:APPDATA\Microsoft\Windows\Recent"; Pattern = "*"; Recurse = $true }) }
+                    "Edge" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache"; Pattern = "*"; Recurse = $true }) }
+                    "Chrome" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:LOCALAPPDATA\Google\Chrome\User Data\Default\Cache"; Pattern = "*"; Recurse = $true }) }
+                    "Brave" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:LOCALAPPDATA\BraveSoftware\Brave-Browser\User Data\Default\Cache"; Pattern = "*"; Recurse = $true }) }
+                    "Firefox" {
+                        if (Test-Path "$env:LOCALAPPDATA\Mozilla\Firefox\Profiles") {
+                            try {
+                                foreach ($profilePath in [System.IO.Directory]::EnumerateDirectories("$env:LOCALAPPDATA\Mozilla\Firefox\Profiles")) {
+                                    [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$profilePath\cache2\entries"; Pattern = "*"; Recurse = $true })
+                                }
+                            }
+                            catch {}
+                        }
+                    }
+                    "Opera" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:APPDATA\Opera Software\Opera Stable\Cache"; Pattern = "*"; Recurse = $true }) }
+                    "OperaGX" { [void]$tasks.Add([PSCustomObject]@{ Engine = "Robust"; RuleName = $itemName; Path = "$env:APPDATA\Opera Software\Opera GX Stable\Cache"; Pattern = "*"; Recurse = $true }) }
+                }
+            }
+        }
+
+        return $tasks.ToArray()
+    }
+
+    function Invoke-WmtOutOfProcessAnalyze {
+        param($ScanTasks)
+
+        $tasks = @($ScanTasks)
+        if ($tasks.Count -eq 0) { return }
+
+        $jobScript = {
+            param($Task)
+
+            $ErrorActionPreference = "SilentlyContinue"
+            $results = [System.Collections.Generic.List[object]]::new()
+
+            function Measure-WorkerPathBytes {
+                param([string]$Path)
+
+                try {
+                    $item = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                    if (-not $item.PSIsContainer) { return [int64]$item.Length }
+
+                    $total = [int64]0
+                    foreach ($file in @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+                        try { $total += [int64]$file.Length } catch {}
+                    }
+                    return $total
+                }
+                catch { return [int64]0 }
+            }
+
+            function Add-WorkerTarget {
+                param([string]$Path, [string]$RuleName)
+
+                if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
+                try {
+                    $size = Measure-WorkerPathBytes -Path $Path
+                    [void]$results.Add([PSCustomObject]@{
+                            RuleName = $RuleName
+                            FilePath = $Path
+                            RawBytes = $size
+                        })
+                }
+                catch {}
+            }
+
+            function Test-WorkerCleanerMlTargetMatch {
+                param($Item, $Rule)
+
+                if (-not $Item) { return $false }
+                $type = [string]$Rule.Type
+                if ($type -eq "f" -and $Item.PSIsContainer) { return $false }
+                if ($type -eq "d" -and -not $Item.PSIsContainer) { return $false }
+
+                $leaf = $Item.Name
+                $full = $Item.FullName
+                $regexOptions = [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+
+                try {
+                    if ($Rule.Regex -and -not [regex]::IsMatch($leaf, [string]$Rule.Regex, $regexOptions)) { return $false }
+                    if ($Rule.WholeRegex -and -not [regex]::IsMatch($full, [string]$Rule.WholeRegex, $regexOptions)) { return $false }
+                    if ($Rule.NRegex -and [regex]::IsMatch($leaf, [string]$Rule.NRegex, $regexOptions)) { return $false }
+                    if ($Rule.NWholeRegex -and [regex]::IsMatch($full, [string]$Rule.NWholeRegex, $regexOptions)) { return $false }
+                }
+                catch { return $false }
+
+                return $true
+            }
+
+            function Invoke-WorkerRobustScan {
+                param($Task)
+
+                $path = [Environment]::ExpandEnvironmentVariables([string]$Task.Path)
+                $pathHasWildcard = ($path -match '[\*\?]')
+                if (-not $pathHasWildcard -and -not (Test-Path -LiteralPath $path)) { return }
+
+                $patterns = @([string]$Task.Pattern -split ';' | ForEach-Object { ([string]$_).Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                if ($patterns.Count -eq 0) { $patterns = @("*") }
+
+                $roots = if ($pathHasWildcard) {
+                    @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)
+                }
+                else {
+                    @(Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+                }
+
+                foreach ($root in $roots) {
+                    if (-not $root) { continue }
+                    if (-not $root.PSIsContainer) {
+                        foreach ($patternItem in $patterns) {
+                            if ($root.Name -like $patternItem) {
+                                Add-WorkerTarget -Path $root.FullName -RuleName $Task.RuleName
+                                break
+                            }
+                        }
+                    }
+                    else {
+                        foreach ($patternItem in $patterns) {
+                            foreach ($file in @(Get-ChildItem -LiteralPath $root.FullName -Filter $patternItem -File -Recurse:([bool]$Task.Recurse) -Force -ErrorAction SilentlyContinue)) {
+                                Add-WorkerTarget -Path $file.FullName -RuleName $Task.RuleName
+                            }
+                        }
+                    }
+                }
+            }
+
+            function Invoke-WorkerCleanerMlScan {
+                param($Task)
+
+                $path = [Environment]::ExpandEnvironmentVariables([string]$Task.Path)
+                if ([string]::IsNullOrWhiteSpace($path)) { return }
+
+                $targets = [System.Collections.Generic.List[System.IO.FileSystemInfo]]::new()
+                $search = if ($Task.Search) { [string]$Task.Search } else { "file" }
+
+                switch ($search) {
+                    "file" {
+                        if ($path -match '[\*\?]') {
+                            foreach ($target in @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)) {
+                                if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                            }
+                        }
+                        elseif (Test-Path -LiteralPath $path) {
+                            $target = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                            if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                        }
+                    }
+                    "glob" {
+                        foreach ($target in @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)) {
+                            if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                        }
+                    }
+                    "walk.files" {
+                        $roots = @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)
+                        if ((Test-Path -LiteralPath $path) -and -not ($path -match '[\*\?]')) {
+                            $roots = @(Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+                        }
+                        foreach ($root in $roots) {
+                            if (-not $root) { continue }
+                            if (-not $root.PSIsContainer) {
+                                if (Test-WorkerCleanerMlTargetMatch -Item $root -Rule $Task) { [void]$targets.Add($root) }
+                                continue
+                            }
+                            foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -File -Recurse -Force -ErrorAction SilentlyContinue)) {
+                                if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                            }
+                        }
+                    }
+                    "walk.all" {
+                        $roots = @(Get-ChildItem -Path $path -Force -ErrorAction SilentlyContinue)
+                        if ((Test-Path -LiteralPath $path) -and -not ($path -match '[\*\?]')) {
+                            $roots = @(Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue)
+                        }
+                        foreach ($root in $roots) {
+                            if (-not $root) { continue }
+                            if (Test-WorkerCleanerMlTargetMatch -Item $root -Rule $Task) { [void]$targets.Add($root) }
+                            if ($root.PSIsContainer) {
+                                foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                                    if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                                }
+                            }
+                        }
+                    }
+                    "walk.top" {
+                        if (Test-Path -LiteralPath $path) {
+                            $root = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                            if ($root -and (Test-WorkerCleanerMlTargetMatch -Item $root -Rule $Task)) { [void]$targets.Add($root) }
+                            if ($root -and $root.PSIsContainer) {
+                                foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Force -ErrorAction SilentlyContinue)) {
+                                    if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                                }
+                            }
+                        }
+                    }
+                    "deep" {
+                        if (Test-Path -LiteralPath $path) {
+                            $root = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                            if ($root -and (Test-WorkerCleanerMlTargetMatch -Item $root -Rule $Task)) { [void]$targets.Add($root) }
+                            if ($root -and $root.PSIsContainer) {
+                                foreach ($target in @(Get-ChildItem -LiteralPath $root.FullName -Recurse -Force -ErrorAction SilentlyContinue)) {
+                                    if (Test-WorkerCleanerMlTargetMatch -Item $target -Rule $Task) { [void]$targets.Add($target) }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                foreach ($target in @($targets.ToArray() | Sort-Object FullName -Unique)) {
+                    Add-WorkerTarget -Path $target.FullName -RuleName $Task.RuleName
+                }
+            }
+
+            function Invoke-WorkerRecycleBinScan {
+                param($Task)
+
+                try {
+                    $shell = New-Object -ComObject Shell.Application
+                    $bin = $shell.Namespace(0xA)
+                    foreach ($f in @($bin.Items())) {
+                        try {
+                            $path = $f.Path
+                            if ($path -and (Test-Path -LiteralPath $path)) {
+                                Add-WorkerTarget -Path $path -RuleName $Task.RuleName
+                            }
+                        }
+                        catch {}
+                    }
+                }
+                catch {}
+            }
+
+            switch ([string]$Task.Engine) {
+                "Robust" { Invoke-WorkerRobustScan -Task $Task }
+                "CleanerML" { Invoke-WorkerCleanerMlScan -Task $Task }
+                "RecycleBin" { Invoke-WorkerRecycleBinScan -Task $Task }
+            }
+
+            return $results.ToArray()
+        }
+
+        $maxParallel = [Math]::Max(1, [Math]::Min(4, [Environment]::ProcessorCount))
+        $queue = [System.Collections.Generic.Queue[object]]::new()
+        foreach ($task in $tasks) { $queue.Enqueue($task) }
+
+        $running = @{}
+        $completed = 0
+        $total = $tasks.Count
+        Write-GuiLog "Analyze scanner: starting $total task(s), up to $maxParallel out-of-process worker(s)."
+
+        while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+            while ($queue.Count -gt 0 -and $running.Count -lt $maxParallel) {
+                $task = $queue.Dequeue()
+                $job = Start-Job -ScriptBlock $jobScript -ArgumentList @($task)
+                $running[[int]$job.Id] = [PSCustomObject]@{ Job = $job; Task = $task }
+                $pStatus.Text = "Scanning: $($task.RuleName)"
+            }
+
+            foreach ($entry in @($running.GetEnumerator())) {
+                $job = $entry.Value.Job
+                if ($job.State -notin @("Completed", "Failed", "Stopped")) { continue }
+
+                $task = $entry.Value.Task
+                $rows = @()
+                try { $rows = @(Receive-Job -Job $job -ErrorAction SilentlyContinue) } catch {}
+                foreach ($row in $rows) {
+                    if (-not $row.FilePath) { continue }
+                    $rawBytes = [int64]0
+                    try { $rawBytes = [int64]$row.RawBytes } catch {}
+                    $previewList.Add([PSCustomObject]@{
+                            RuleName = [string]$row.RuleName
+                            FilePath = [string]$row.FilePath
+                            RawBytes = $rawBytes
+                        })
+                    $stats.Deleted++
+                    $stats.Bytes += $rawBytes
+                }
+
+                try { Remove-Job -Job $job -Force -ErrorAction SilentlyContinue } catch {}
+                $running.Remove($entry.Key)
+                $completed++
+
+                $stats.Progress = (100.0 * $completed / [Math]::Max(1, $total))
+                $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
+                $mb = [math]::Round($stats.Bytes / 1MB, 2)
+                $pLabel.Text = "Found: $($stats.Deleted) | Space: $mb MB"
+                $pStatus.Text = "Finished: $($task.RuleName)"
+            }
+
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 120
+
+            if ($pForm.IsDisposed) {
+                foreach ($entry in @($running.GetEnumerator())) {
+                    try { Stop-Job -Job $entry.Value.Job -Force -ErrorAction SilentlyContinue } catch {}
+                    try { Remove-Job -Job $entry.Value.Job -Force -ErrorAction SilentlyContinue } catch {}
+                }
+                break
+            }
+        }
+    }
+
     # 4. MAIN EXECUTION LOOP
     $actionText = if ($isAnalyze) { "Analyzing" } else { "Cleaning" }
     Write-GuiLog "--- Starting $actionText ---"
+    $internalRuleDisplayNames = @{
+        "TempFiles"  = "Temporary Files"
+        "RecycleBin" = "Recycle Bin"
+        "WER"        = "Error Logs (WER)"
+        "DNS"        = "DNS Cache"
+        "Thumbnails" = "Thumbnail / Thumbs Cache"
+        "ThumbsDb"   = "Deep Scan: Thumbs.db"
+        "Recent"     = "Recent Items"
+        "RunMRU"     = "Run History"
+        "Edge"       = "Microsoft Edge Cache"
+        "Chrome"     = "Google Chrome Cache"
+        "Brave"      = "Brave Cache"
+        "Firefox"    = "Mozilla Firefox Cache"
+        "Opera"      = "Opera Cache"
+        "OperaGX"    = "Opera GX Cache"
+    }
     
+    $usedOutOfProcessAnalyze = $false
+    if ($isAnalyze) {
+        $scanTasks = @(New-WmtAnalyzeScanTasks -Items $selections)
+        if ($scanTasks.Count -gt 0) {
+            try {
+                Invoke-WmtOutOfProcessAnalyze -ScanTasks $scanTasks
+                $usedOutOfProcessAnalyze = $true
+            }
+            catch {
+                Write-GuiLog "Out-of-process analyzer failed; falling back to in-process scan: $($_.Exception.Message)"
+                $usedOutOfProcessAnalyze = $false
+            }
+        }
+    }
+
     try {
+        if (-not $usedOutOfProcessAnalyze) {
         foreach ($item in $selections) {
             if ($pForm.IsDisposed) { break }
 
@@ -5560,17 +6749,29 @@ function Invoke-TempCleanup {
             $stats.Progress += $ruleWeight
             $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
             
-            $itemName = if ($item -is [string]) { $item } else { $item.Name }
+            $itemName = if ($item -is [string]) {
+                if ($internalRuleDisplayNames.ContainsKey($item)) { $internalRuleDisplayNames[$item] } else { $item }
+            }
+            else {
+                $name = ([string]$item.Name).Trim().Trim(" *")
+                if ([string]::IsNullOrWhiteSpace($name)) { [string]$item.ID } else { $name }
+            }
             $pLabel.Text = "${actionText}: $itemName"
 
-            # --- A. WINAPP2 RULES ---
-            if ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
+            # --- A. BLEACHBIT CLEANERML RULES ---
+            if (($item -is [PSCustomObject]) -and $item.PSObject.Properties["IsCleanerML"] -and [bool]$item.IsCleanerML) {
+                foreach ($rule in $item.Paths) {
+                    Invoke-CleanerMlClean -Rule $rule -RuleName $itemName
+                }
+            }
+            # --- B. WINAPP2 RULES ---
+            elseif ($item -is [System.Collections.IDictionary] -or $item -is [PSCustomObject]) {
                 foreach ($rule in $item.Paths) {
                     $isRecurse = ($rule.Options -notmatch "REMOVESELF")
                     Invoke-RobustClean -Path $rule.Path -Pattern $rule.Pattern -Recurse $isRecurse -RuleName $itemName
                 }
             }
-            # --- B. INTERNAL RULES ---
+            # --- C. INTERNAL RULES ---
             else {
                 switch ($item) {
                     "TempFiles" { 
@@ -5615,6 +6816,7 @@ function Invoke-TempCleanup {
                     "WER" { Invoke-RobustClean "$env:ProgramData\Microsoft\Windows\WER" -RuleName $itemName }
                     "DNS" { if (-not $isAnalyze) { Clear-DnsClientCache -ErrorAction SilentlyContinue } }
                     "Thumbnails" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Windows\Explorer" -Pattern "thumbcache_*.db" -Recurse:$false -RuleName $itemName }
+                    "ThumbsDb" { Invoke-ThumbsDbDeepScan -RuleName $itemName }
                     "Recent" { Invoke-RobustClean "$env:APPDATA\Microsoft\Windows\Recent" -RuleName $itemName }
                     "RunMRU" { if (-not $isAnalyze) { Remove-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\RunMRU" -Name * -ErrorAction SilentlyContinue } }
                     "Edge" { Invoke-RobustClean "$env:LOCALAPPDATA\Microsoft\Edge\User Data\Default\Cache" -RuleName $itemName }
@@ -5641,6 +6843,7 @@ function Invoke-TempCleanup {
                 $verb = if ($isAnalyze) { "Found" } else { "Cleaned" }
                 Write-GuiLog "$verb $itemName : $itemStr"
             }
+        }
         }
     }
     catch {
