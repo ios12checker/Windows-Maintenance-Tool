@@ -6111,6 +6111,123 @@ function Invoke-TempCleanup {
         return "$Bytes B"
     }
 
+    function Test-WmtCleanupPathStartsWith {
+        param(
+            [string]$Path,
+            [string]$Root
+        )
+
+        if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+
+        try {
+            $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+            $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd("\")
+            return ($fullPath.Equals($fullRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+                $fullPath.StartsWith($fullRoot + "\", [System.StringComparison]::OrdinalIgnoreCase))
+        }
+        catch {
+            return $false
+        }
+    }
+
+    function Get-WmtCleanupProtectionInfo {
+        param(
+            [string]$Path,
+            [System.IO.FileSystemInfo]$ItemInfo = $null
+        )
+
+        $reasons = [System.Collections.Generic.List[string]]::new()
+
+        if ([string]::IsNullOrWhiteSpace($Path)) {
+            return [PSCustomObject]@{ IsProtected = $false; Reason = "" }
+        }
+
+        try {
+            if (-not $ItemInfo) {
+                $ItemInfo = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+            }
+        }
+        catch [System.UnauthorizedAccessException] {
+            [void]$reasons.Add("Access denied")
+        }
+        catch {
+            if ($_.Exception.Message -match "(?i)access.*denied|unauthorized") {
+                [void]$reasons.Add("Access denied")
+            }
+        }
+
+        if ($ItemInfo) {
+            try {
+                $attrs = $ItemInfo.Attributes
+                if (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System) {
+                    [void]$reasons.Add("System attribute")
+                }
+
+                $protectedRoots = @(
+                    "$env:SystemRoot\Temp",
+                    "$env:SystemRoot\System32",
+                    "$env:SystemRoot\SysWOW64",
+                    "$env:SystemRoot\WinSxS",
+                    "$env:SystemRoot\servicing",
+                    "$env:SystemRoot\SystemResources",
+                    "$env:ProgramFiles\WindowsApps",
+                    "$env:ProgramFiles\Windows Defender",
+                    "${env:ProgramFiles(x86)}\Windows Defender",
+                    "$env:ProgramData\Microsoft\Windows Defender"
+                ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+                $isSystemArea = $false
+                foreach ($root in $protectedRoots) {
+                    if (Test-WmtCleanupPathStartsWith -Path $ItemInfo.FullName -Root $root) {
+                        $isSystemArea = $true
+                        break
+                    }
+                }
+
+                if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
+                    try {
+                        $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
+                        if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
+                            [void]$reasons.Add("System-owned")
+                        }
+                    }
+                    catch {
+                        if ($_.Exception.Message -match "(?i)access.*denied|unauthorized") {
+                            [void]$reasons.Add("Access denied")
+                        }
+                    }
+                }
+
+                if (-not $ItemInfo.PSIsContainer) {
+                    $stream = $null
+                    try {
+                        $stream = [System.IO.File]::Open($ItemInfo.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+                    }
+                    catch [System.UnauthorizedAccessException] {
+                        [void]$reasons.Add("Access denied")
+                    }
+                    catch [System.IO.IOException] {
+                        [void]$reasons.Add("In use")
+                    }
+                    catch {}
+                    finally {
+                        if ($stream) {
+                            try { $stream.Close() } catch {}
+                            try { $stream.Dispose() } catch {}
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+
+        $reasonText = (@($reasons.ToArray()) | Select-Object -Unique) -join ", "
+        return [PSCustomObject]@{
+            IsProtected = -not [string]::IsNullOrWhiteSpace($reasonText)
+            Reason      = $reasonText
+        }
+    }
+
     # --- HELPER: ROBUST CLEANER ---
     function Invoke-RobustClean {
         param($Path, $Pattern = "*", $Recurse = $true, $RuleName = "System File")
@@ -6193,10 +6310,13 @@ function Invoke-TempCleanup {
                 Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
             }
             else {
+                $protectionInfo = Get-WmtCleanupProtectionInfo -Path $Path -ItemInfo $itemInfo
                 $previewList.Add([PSCustomObject]@{
-                        RuleName = $RuleName
-                        FilePath = $Path
-                        RawBytes = $size
+                        RuleName         = $RuleName
+                        FilePath         = $Path
+                        RawBytes         = $size
+                        IsProtected      = [bool]$protectionInfo.IsProtected
+                        ProtectionReason = [string]$protectionInfo.Reason
                     })
             }
 
@@ -6450,16 +6570,137 @@ function Invoke-TempCleanup {
                 catch { return [int64]0 }
             }
 
+            function Test-WorkerPathStartsWith {
+                param(
+                    [string]$Path,
+                    [string]$Root
+                )
+
+                if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Root)) { return $false }
+
+                try {
+                    $fullPath = [System.IO.Path]::GetFullPath($Path).TrimEnd("\")
+                    $fullRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd("\")
+                    return ($fullPath.Equals($fullRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        $fullPath.StartsWith($fullRoot + "\", [System.StringComparison]::OrdinalIgnoreCase))
+                }
+                catch {
+                    return $false
+                }
+            }
+
+            function Get-WorkerProtectionInfo {
+                param(
+                    [string]$Path,
+                    [System.IO.FileSystemInfo]$ItemInfo = $null
+                )
+
+                $reasons = [System.Collections.Generic.List[string]]::new()
+
+                if ([string]::IsNullOrWhiteSpace($Path)) {
+                    return [PSCustomObject]@{ IsProtected = $false; Reason = "" }
+                }
+
+                try {
+                    if (-not $ItemInfo) {
+                        $ItemInfo = Get-Item -LiteralPath $Path -Force -ErrorAction Stop
+                    }
+                }
+                catch [System.UnauthorizedAccessException] {
+                    [void]$reasons.Add("Access denied")
+                }
+                catch {
+                    if ($_.Exception.Message -match "(?i)access.*denied|unauthorized") {
+                        [void]$reasons.Add("Access denied")
+                    }
+                }
+
+                if ($ItemInfo) {
+                    try {
+                        $attrs = $ItemInfo.Attributes
+                        if (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System) {
+                            [void]$reasons.Add("System attribute")
+                        }
+
+                        $protectedRoots = @(
+                            "$env:SystemRoot\Temp",
+                            "$env:SystemRoot\System32",
+                            "$env:SystemRoot\SysWOW64",
+                            "$env:SystemRoot\WinSxS",
+                            "$env:SystemRoot\servicing",
+                            "$env:SystemRoot\SystemResources",
+                            "$env:ProgramFiles\WindowsApps",
+                            "$env:ProgramFiles\Windows Defender",
+                            "${env:ProgramFiles(x86)}\Windows Defender",
+                            "$env:ProgramData\Microsoft\Windows Defender"
+                        ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+                        $isSystemArea = $false
+                        foreach ($root in $protectedRoots) {
+                            if (Test-WorkerPathStartsWith -Path $ItemInfo.FullName -Root $root) {
+                                $isSystemArea = $true
+                                break
+                            }
+                        }
+
+                        if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
+                            try {
+                                $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
+                                if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
+                                    [void]$reasons.Add("System-owned")
+                                }
+                            }
+                            catch {
+                                if ($_.Exception.Message -match "(?i)access.*denied|unauthorized") {
+                                    [void]$reasons.Add("Access denied")
+                                }
+                            }
+                        }
+
+                        if (-not $ItemInfo.PSIsContainer) {
+                            $stream = $null
+                            try {
+                                $stream = [System.IO.File]::Open($ItemInfo.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::None)
+                            }
+                            catch [System.UnauthorizedAccessException] {
+                                [void]$reasons.Add("Access denied")
+                            }
+                            catch [System.IO.IOException] {
+                                [void]$reasons.Add("In use")
+                            }
+                            catch {}
+                            finally {
+                                if ($stream) {
+                                    try { $stream.Close() } catch {}
+                                    try { $stream.Dispose() } catch {}
+                                }
+                            }
+                        }
+                    }
+                    catch {}
+                }
+
+                $reasonText = (@($reasons.ToArray()) | Select-Object -Unique) -join ", "
+                return [PSCustomObject]@{
+                    IsProtected = -not [string]::IsNullOrWhiteSpace($reasonText)
+                    Reason      = $reasonText
+                }
+            }
+
             function Add-WorkerTarget {
                 param([string]$Path, [string]$RuleName)
 
                 if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return }
                 try {
+                    $itemInfo = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
                     $size = Measure-WorkerPathBytes -Path $Path
+                    $protectionInfo = Get-WorkerProtectionInfo -Path $Path -ItemInfo $itemInfo
                     [void]$results.Add([PSCustomObject]@{
-                            RuleName = $RuleName
-                            FilePath = $Path
-                            RawBytes = $size
+                            RuleName         = $RuleName
+                            FilePath         = $Path
+                            RawBytes         = $size
+                            IsProtected      = [bool]$protectionInfo.IsProtected
+                            ProtectionReason = [string]$protectionInfo.Reason
                         })
                 }
                 catch {}
@@ -6668,9 +6909,11 @@ function Invoke-TempCleanup {
                     $rawBytes = [int64]0
                     try { $rawBytes = [int64]$row.RawBytes } catch {}
                     $previewList.Add([PSCustomObject]@{
-                            RuleName = [string]$row.RuleName
-                            FilePath = [string]$row.FilePath
-                            RawBytes = $rawBytes
+                            RuleName         = [string]$row.RuleName
+                            FilePath         = [string]$row.FilePath
+                            RawBytes         = $rawBytes
+                            IsProtected      = [bool]$row.IsProtected
+                            ProtectionReason = [string]$row.ProtectionReason
                         })
                     $stats.Deleted++
                     $stats.Bytes += $rawBytes
@@ -6794,10 +7037,13 @@ function Invoke-TempCleanup {
                                                     Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue
                                                 }
                                                 else {
+                                                    $protectionInfo = Get-WmtCleanupProtectionInfo -Path $path
                                                     $previewList.Add([PSCustomObject]@{
-                                                            RuleName = "Recycle Bin"
-                                                            FilePath = $path
-                                                            RawBytes = $size
+                                                            RuleName         = "Recycle Bin"
+                                                            FilePath         = $path
+                                                            RawBytes         = $size
+                                                            IsProtected      = [bool]$protectionInfo.IsProtected
+                                                            ProtectionReason = [string]$protectionInfo.Reason
                                                         })
                                                 }
                                                 $stats.Deleted++
@@ -6870,6 +7116,16 @@ function Invoke-TempCleanup {
             $gridBtnPanel.Height = 55
             $gridBtnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
 
+            $gridTip = New-Object System.Windows.Forms.ToolTip
+            $chkHideProtected = New-Object System.Windows.Forms.CheckBox
+            $chkHideProtected.Text = "Hide protected"
+            $chkHideProtected.AutoSize = $true
+            $chkHideProtected.Location = "15, 18"
+            $chkHideProtected.ForeColor = "Khaki"
+            $chkHideProtected.BackColor = $gridBtnPanel.BackColor
+            $chkHideProtected.UseVisualStyleBackColor = $false
+            $gridTip.SetToolTip($chkHideProtected, "Hide files that are system-owned, locked, access denied, or marked with the System attribute.")
+
             $btnCleanSelected = New-Object System.Windows.Forms.Button
             $btnCleanSelected.Text = "Clean Selected"
             $btnCleanSelected.Size = "120, 32"
@@ -6910,6 +7166,7 @@ function Invoke-TempCleanup {
             $gridBtnPanel.Controls.Add($btnCleanSelected)
             $gridBtnPanel.Controls.Add($btnCleanAll)
             $gridBtnPanel.Controls.Add($btnClose)
+            $gridBtnPanel.Controls.Add($chkHideProtected)
 
             # --- 2. THE DATA GRID ---
             $grid = New-Object System.Windows.Forms.DataGridView
@@ -6942,18 +7199,43 @@ function Invoke-TempCleanup {
             $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
             
             [void]$grid.Columns.Add("RuleName", "RuleName")
+            [void]$grid.Columns.Add("Protection", "Status")
             [void]$grid.Columns.Add("FilePath", "FilePath")
             [void]$grid.Columns.Add("Size", "Size")
-            $previewRows = New-WmtVirtualRows -Items @(
+            $previewItems = @(
                 foreach ($item in $previewList) {
+                    $isProtected = $false
+                    if ($item.PSObject.Properties["IsProtected"]) { $isProtected = [bool]$item.IsProtected }
+                    $protectionReason = ""
+                    if ($item.PSObject.Properties["ProtectionReason"]) { $protectionReason = [string]$item.ProtectionReason }
+                    if ($isProtected -and [string]::IsNullOrWhiteSpace($protectionReason)) { $protectionReason = "Protected / in use" }
+
                     [PSCustomObject]@{
-                        RuleName = $item.RuleName
-                        FilePath = $item.FilePath
-                        Size     = [long]$item.RawBytes
+                        RuleName         = $item.RuleName
+                        Protection       = if ($isProtected) { $protectionReason } else { "" }
+                        FilePath         = $item.FilePath
+                        Size             = [long]$item.RawBytes
+                        IsProtected      = $isProtected
+                        ProtectionReason = $protectionReason
                     }
                 }
             )
+            $allPreviewRows = New-WmtVirtualRows -Items $previewItems
+            $previewRows = New-WmtVirtualRows -Items $previewItems
+            $protectedPreviewCount = @($previewItems | Where-Object { [bool]$_.IsProtected }).Count
+            if ($protectedPreviewCount -gt 0) {
+                $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total, $protectedPreviewCount protected/in use)"
+                Write-GuiLog "Analysis flagged $protectedPreviewCount protected or in-use item(s)."
+            }
             Initialize-WmtVirtualDataGrid -Grid $grid -Rows $previewRows -EnableSort
+
+            $formatPreviewBytes = {
+                param([int64]$Bytes)
+                if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+                if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+                if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+                return "$Bytes B"
+            }.GetNewClosure()
             
             # --- THE MAGIC VISUAL TRICK ---
             # This intercepts the drawing of the grid. If it sees a number in the "Size" column, 
@@ -6961,15 +7243,35 @@ function Invoke-TempCleanup {
             $grid.Add_CellFormatting({
                     param($s, $e)
                     if ($e.RowIndex -ge 0 -and $e.ColumnIndex -ge 0 -and $null -ne $e.Value) {
+                        if ($e.RowIndex -lt $previewRows.Count) {
+                            $rowData = $previewRows[$e.RowIndex]
+                            if ($rowData -and [bool]$rowData.IsProtected) {
+                                $e.CellStyle.BackColor = [System.Drawing.Color]::FromArgb(64, 54, 18)
+                                $e.CellStyle.ForeColor = [System.Drawing.Color]::Khaki
+                                $e.CellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(120, 92, 24)
+                                $e.CellStyle.SelectionForeColor = [System.Drawing.Color]::White
+                            }
+                        }
+
                         if ($grid.Columns[$e.ColumnIndex].Name -eq "Size") {
-                            $e.Value = Format-FileSize -Bytes $e.Value
+                            $e.Value = & $formatPreviewBytes ([int64]$e.Value)
                             $e.FormattingApplied = $true
                         }
                     }
-                })
+                }.GetNewClosure())
+
+            $grid.Add_CellToolTipTextNeeded({
+                    param($s, $e)
+                    if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $previewRows.Count) { return }
+                    $rowData = $previewRows[$e.RowIndex]
+                    if ($rowData -and [bool]$rowData.IsProtected) {
+                        $e.ToolTipText = "Protected / in use: $($rowData.ProtectionReason)"
+                    }
+                }.GetNewClosure())
 
             # Lock the side columns to exactly fit their contents + headers
             $grid.Columns["RuleName"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
+            $grid.Columns["Protection"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
             $grid.Columns["Size"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
             # Force FilePath to soak up 100% of the remaining space
             $grid.Columns["FilePath"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
@@ -7006,6 +7308,60 @@ function Invoke-TempCleanup {
                         }
                     }
                 })
+
+            $refreshPreviewFilter = {
+                $previewRows.Clear()
+
+                foreach ($row in @($allPreviewRows)) {
+                    if ($chkHideProtected.Checked -and [bool]$row.IsProtected) { continue }
+                    [void]$previewRows.Add($row)
+                }
+
+                Reset-WmtVirtualGridRowCount -Grid $grid
+
+                $protectedRemaining = @($allPreviewRows | Where-Object { [bool]$_.IsProtected }).Count
+                $hiddenProtected = if ($chkHideProtected.Checked) { $protectedRemaining } else { 0 }
+
+                if ($protectedRemaining -gt 0) {
+                    $suffix = "$protectedRemaining protected/in use"
+                    if ($hiddenProtected -gt 0) { $suffix += ", $hiddenProtected hidden" }
+                    $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total, $suffix)"
+                }
+                else {
+                    $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total)"
+                }
+
+                $hasRows = ($previewRows.Count -gt 0)
+                $btnCleanSelected.Enabled = $hasRows
+                $btnCleanAll.Enabled = $hasRows
+                $menuDelete.Enabled = $hasRows
+            }.GetNewClosure()
+
+            $removePreviewRowsByIndices = {
+                param([int[]]$Indices)
+
+                if (-not $Indices -or $Indices.Count -eq 0) { return }
+
+                $rowsToRemove = [System.Collections.Generic.List[object]]::new()
+                foreach ($idx in ($Indices | Sort-Object -Unique)) {
+                    if ($idx -ge 0 -and $idx -lt $previewRows.Count) {
+                        [void]$rowsToRemove.Add($previewRows[$idx])
+                    }
+                }
+
+                foreach ($rowToRemove in @($rowsToRemove.ToArray())) {
+                    for ($i = $allPreviewRows.Count - 1; $i -ge 0; $i--) {
+                        if ([object]::ReferenceEquals($allPreviewRows[$i], $rowToRemove)) {
+                            $allPreviewRows.RemoveAt($i)
+                            break
+                        }
+                    }
+                }
+
+                & $refreshPreviewFilter
+            }.GetNewClosure()
+
+            $chkHideProtected.Add_CheckedChanged({ & $refreshPreviewFilter }.GetNewClosure())
             
             # --- 4. ACTION LOGIC (BUTTONS) ---
             $btnClose.Add_Click({ $gridForm.Close() })
@@ -7286,8 +7642,30 @@ function Invoke-TempCleanup {
                 }
 
                 $indicesToRemove = @($deleteState["CompletedIndices"] | ForEach-Object { [int]$_ })
+                $markedFailedRows = $false
+                $failedLookup = @{}
+                foreach ($failedPath in @($deleteState["FailedPaths"])) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$failedPath)) {
+                        $failedLookup[[string]$failedPath] = $true
+                    }
+                }
+
+                if ($failedLookup.Count -gt 0) {
+                    foreach ($row in @($allPreviewRows)) {
+                        if ($row -and $failedLookup.ContainsKey([string]$row.FilePath)) {
+                            $row.IsProtected = $true
+                            $row.ProtectionReason = "Delete failed"
+                            $row.Protection = "Delete failed"
+                            $markedFailedRows = $true
+                        }
+                    }
+                }
+
                 if ($indicesToRemove.Count -gt 0) {
-                    Remove-WmtVirtualGridRowsAt -Grid $grid -Indices ([int[]]$indicesToRemove)
+                    & $removePreviewRowsByIndices -Indices ([int[]]$indicesToRemove)
+                }
+                elseif ($markedFailedRows) {
+                    & $refreshPreviewFilter
                 }
 
                 $btnCleanSelected.Enabled = ($previewRows.Count -gt 0)
@@ -7382,6 +7760,7 @@ function Invoke-TempCleanup {
             $grid.BringToFront()       
 
             Set-WmtWinFormsTheme -Control $gridForm
+            $chkHideProtected.ForeColor = [System.Drawing.Color]::Khaki
             Set-WmtWinFormsButtonTheme -Button $btnCleanSelected -Role Primary
             Set-WmtWinFormsButtonTheme -Button $btnCleanAll -Role Danger
             Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
