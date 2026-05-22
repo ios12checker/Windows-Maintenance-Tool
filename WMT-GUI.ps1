@@ -4732,7 +4732,8 @@ function Expand-WmtCleanerMlPathVariants {
         $token = '$$' + $name + '$$'
         $values = @()
         if ($Variables.ContainsKey($name)) { $values = @($Variables[$name]) }
-        if ($values.Count -eq 0) { $values = @("") }
+        $values = @($values | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
+        if ($values.Count -eq 0) { return @() }
 
         $expanded = @()
         foreach ($pathCandidate in $paths) {
@@ -4773,6 +4774,121 @@ function Expand-WmtCleanerMlPathVariants {
     return @($final.ToArray() | Select-Object -Unique)
 }
 
+function ConvertTo-WmtRegistryProviderPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+
+    return $Path -replace "^(?i)HKCU\\?", "Registry::HKEY_CURRENT_USER\" `
+        -replace "^(?i)HKLM\\?", "Registry::HKEY_LOCAL_MACHINE\" `
+        -replace "^(?i)HKCR\\?", "Registry::HKEY_CLASSES_ROOT\" `
+        -replace "^(?i)HKU\\?", "Registry::HKEY_USERS\"
+}
+
+function Get-WmtCleanerMlRegistryValue {
+    param(
+        [string]$Path,
+        [string]$Name
+    )
+
+    $registryPath = ConvertTo-WmtRegistryProviderPath -Path $Path
+    if ([string]::IsNullOrWhiteSpace($registryPath) -or -not (Test-Path -LiteralPath $registryPath)) { return @() }
+    if ([string]::IsNullOrWhiteSpace($Name)) { return @($registryPath) }
+
+    try {
+        $item = Get-ItemProperty -LiteralPath $registryPath -Name $Name -ErrorAction Stop
+        $value = $item.$Name
+        if ($null -eq $value) { return @() }
+        return @($value)
+    }
+    catch {
+        return @()
+    }
+}
+
+function Get-WmtCleanerMlWildcardRoot {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return "" }
+    $wildcardIndex = $Path.IndexOfAny([char[]]@('*', '?'))
+    if ($wildcardIndex -lt 0) { return "" }
+
+    $beforeWildcard = $Path.Substring(0, $wildcardIndex)
+    $separatorIndex = $beforeWildcard.LastIndexOfAny([char[]]@('\', '/'))
+    if ($separatorIndex -le 0) { return "" }
+
+    return $beforeWildcard.Substring(0, $separatorIndex).TrimEnd('\', '/')
+}
+
+function Test-WmtCleanerMlGenericEvidenceRoot {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
+
+    try { $normalized = [System.IO.Path]::GetFullPath($Path).TrimEnd('\') }
+    catch { $normalized = $Path.TrimEnd('\') }
+
+    $genericRoots = @(
+        $env:SystemDrive,
+        $env:USERPROFILE,
+        $env:APPDATA,
+        $env:LOCALAPPDATA,
+        $env:ProgramData,
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)},
+        $env:TEMP,
+        $env:WINDIR,
+        $env:SystemRoot
+    ) | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+
+    foreach ($root in $genericRoots) {
+        try { $rootPath = [System.IO.Path]::GetFullPath([string]$root).TrimEnd('\') }
+        catch { $rootPath = ([string]$root).TrimEnd('\') }
+        if ($normalized.Equals($rootPath, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+
+    return $false
+}
+
+function Test-WmtCleanerMlPathEvidence {
+    param(
+        [string]$Path,
+        [string]$Search = "file"
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+
+    $expandedPath = [Environment]::ExpandEnvironmentVariables($Path) -replace '/', '\'
+    if (-not (Test-WmtCleanerMlWindowsPath $expandedPath)) { return $false }
+
+    try {
+        if ($expandedPath -match '[\*\?]') {
+            if (Test-Path -Path $expandedPath -ErrorAction SilentlyContinue) { return $true }
+            $wildcardRoot = Get-WmtCleanerMlWildcardRoot -Path $expandedPath
+            if (-not [string]::IsNullOrWhiteSpace($wildcardRoot) -and
+                -not (Test-WmtCleanerMlGenericEvidenceRoot -Path $wildcardRoot) -and
+                (Test-Path -LiteralPath $wildcardRoot -ErrorAction SilentlyContinue)) {
+                return $true
+            }
+            return $false
+        }
+
+        if (Test-Path -LiteralPath $expandedPath -ErrorAction SilentlyContinue) { return $true }
+
+        if ($Search -eq "file") {
+            $parent = [System.IO.Path]::GetDirectoryName($expandedPath)
+            if (-not [string]::IsNullOrWhiteSpace($parent) -and
+                -not (Test-WmtCleanerMlGenericEvidenceRoot -Path $parent) -and
+                (Test-Path -LiteralPath $parent -ErrorAction SilentlyContinue)) {
+                return $true
+            }
+        }
+    }
+    catch {}
+
+    return $false
+}
+
 function Test-WmtCleanerMlWindowsPath {
     param([string]$Path)
 
@@ -4798,6 +4914,76 @@ function Get-WmtBleachBitCleanerXmlDirectories {
     }
 
     return @($dirs | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique)
+}
+
+function Get-WmtBleachBitCleanerXmlFiles {
+    $dirs = @(Get-WmtBleachBitCleanerXmlDirectories)
+    if ($dirs.Count -eq 0) { return @() }
+
+    return @($dirs | ForEach-Object {
+            Get-ChildItem -LiteralPath $_ -Filter "*.xml" -File -ErrorAction SilentlyContinue
+        } | Sort-Object FullName -Unique)
+}
+
+function Get-WmtCleanerMlSourceSignature {
+    param($XmlFiles)
+
+    $files = @($XmlFiles | Where-Object { $_ } | Sort-Object FullName)
+    $totalLength = [int64]0
+    $latestWriteTicks = [int64]0
+    $fileMeta = New-Object System.Collections.Generic.List[object]
+
+    foreach ($file in $files) {
+        $length = [int64]$file.Length
+        $writeTicks = [int64]$file.LastWriteTimeUtc.Ticks
+        $totalLength += $length
+        if ($writeTicks -gt $latestWriteTicks) { $latestWriteTicks = $writeTicks }
+
+        [void]$fileMeta.Add([PSCustomObject]@{
+                Path              = [string]$file.FullName
+                Length            = $length
+                LastWriteUtcTicks = $writeTicks
+            })
+    }
+
+    return [PSCustomObject]@{
+        FileCount           = [int]$files.Count
+        TotalLength         = $totalLength
+        LatestWriteUtcTicks = $latestWriteTicks
+        Files               = @($fileMeta.ToArray())
+    }
+}
+
+function Test-WmtCleanerMlCacheMetaMatch {
+    param(
+        $Meta,
+        $SourceSignature,
+        [int]$CacheVersion
+    )
+
+    if (-not $Meta -or -not $SourceSignature) { return $false }
+
+    try {
+        if ([int]$Meta.CacheVersion -ne $CacheVersion) { return $false }
+        if ([int]$Meta.FileCount -ne [int]$SourceSignature.FileCount) { return $false }
+        if ([int64]$Meta.TotalLength -ne [int64]$SourceSignature.TotalLength) { return $false }
+        if ([int64]$Meta.LatestWriteUtcTicks -ne [int64]$SourceSignature.LatestWriteUtcTicks) { return $false }
+
+        $metaFiles = @($Meta.Files)
+        $sourceFiles = @($SourceSignature.Files)
+        if ($metaFiles.Count -ne $sourceFiles.Count) { return $false }
+
+        for ($i = 0; $i -lt $sourceFiles.Count; $i++) {
+            if ([string]$metaFiles[$i].Path -ne [string]$sourceFiles[$i].Path) { return $false }
+            if ([int64]$metaFiles[$i].Length -ne [int64]$sourceFiles[$i].Length) { return $false }
+            if ([int64]$metaFiles[$i].LastWriteUtcTicks -ne [int64]$sourceFiles[$i].LastWriteUtcTicks) { return $false }
+        }
+
+        return $true
+    }
+    catch {
+        return $false
+    }
 }
 
 function Update-WmtBleachBitCleanerMlFiles {
@@ -4875,8 +5061,31 @@ function ConvertFrom-WmtCleanerMlFile {
         $values = New-Object System.Collections.Generic.List[string]
         foreach ($valueNode in @($var.value)) {
             if (-not (Test-WmtCleanerMlOs $valueNode)) { continue }
-            foreach ($expandedValue in (Expand-WmtCleanerMlPathVariants -Path ([string]$valueNode.InnerText) -Variables $variables)) {
-                if (Test-WmtCleanerMlWindowsPath $expandedValue) { [void]$values.Add($expandedValue) }
+            $searchType = if ($valueNode.search) { [string]$valueNode.search } else { "" }
+            $expandedValues = @()
+
+            if ($searchType -eq "winreg") {
+                foreach ($registryValue in @(Get-WmtCleanerMlRegistryValue -Path ([string]$valueNode.path) -Name ([string]$valueNode.name))) {
+                    $expandedValues += [string]$registryValue
+                }
+            }
+            else {
+                $expandedValues = @(Expand-WmtCleanerMlPathVariants -Path ([string]$valueNode.InnerText) -Variables $variables)
+                if ($searchType -eq "glob") {
+                    $globbedValues = New-Object System.Collections.Generic.List[string]
+                    foreach ($expandedValue in $expandedValues) {
+                        foreach ($match in @(Get-ChildItem -Path $expandedValue -Force -ErrorAction SilentlyContinue)) {
+                            [void]$globbedValues.Add($match.FullName)
+                        }
+                    }
+                    $expandedValues = @($globbedValues.ToArray())
+                }
+            }
+
+            foreach ($expandedValue in $expandedValues) {
+                if ((Test-WmtCleanerMlWindowsPath $expandedValue) -and (Test-WmtCleanerMlPathEvidence -Path $expandedValue -Search "file")) {
+                    [void]$values.Add($expandedValue)
+                }
             }
         }
         if ($values.Count -gt 0) { $variables[[string]$var.name] = @($values.ToArray() | Select-Object -Unique) }
@@ -4915,7 +5124,15 @@ function ConvertFrom-WmtCleanerMlFile {
             }
         }
 
-        if ($paths.Count -gt 0) {
+        $hasCleanerMlEvidence = $false
+        foreach ($pathRule in @($paths.ToArray())) {
+            if (Test-WmtCleanerMlPathEvidence -Path ([string]$pathRule.Path) -Search ([string]$pathRule.Search)) {
+                $hasCleanerMlEvidence = $true
+                break
+            }
+        }
+
+        if ($paths.Count -gt 0 -and $hasCleanerMlEvidence) {
             $safeId = ("CleanerML_{0}_{1}" -f $cleanerId, $optionId) -replace '[^a-zA-Z0-9_]', ''
             [void]$rules.Add([PSCustomObject]@{
                     Name        = "$cleanerName - $optionName"
@@ -4937,19 +5154,82 @@ function ConvertFrom-WmtCleanerMlFile {
 function Get-BleachBitCleanerMlRules {
     param([switch]$Download)
 
+    $dataPath = Get-DataPath
+    $cachePath = Join-Path $dataPath "cleanerml_cache.json"
+    $cacheMetaPath = Join-Path $dataPath "cleanerml_cache.meta.json"
+    $cacheVersion = 2
+
     if ($Download) { Update-WmtBleachBitCleanerMlFiles }
     if (-not $script:CleanerMlRulesMemoryCache) { $script:CleanerMlRulesMemoryCache = @{} }
 
-    $dirs = @(Get-WmtBleachBitCleanerXmlDirectories)
-    if ($dirs.Count -eq 0) { return @() }
+    $xmlFiles = @(Get-WmtBleachBitCleanerXmlFiles)
+    $sourceSignature = Get-WmtCleanerMlSourceSignature -XmlFiles $xmlFiles
+    $memoryKey = if ($sourceSignature.FileCount -gt 0) {
+        "{0}|{1}|{2}|{3}" -f $cacheVersion, [int]$sourceSignature.FileCount, [int64]$sourceSignature.TotalLength, [int64]$sourceSignature.LatestWriteUtcTicks
+    }
+    elseif (Test-Path $cachePath) {
+        $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction SilentlyContinue
+        if ($cacheInfo) { "cache-only|{0}|{1}" -f [int64]$cacheInfo.Length, $cacheInfo.LastWriteTimeUtc.Ticks } else { "" }
+    }
+    else { "" }
 
-    $xmlFiles = @($dirs | ForEach-Object { Get-ChildItem -LiteralPath $_ -Filter "*.xml" -File -ErrorAction SilentlyContinue } | Sort-Object FullName -Unique)
-    if ($xmlFiles.Count -eq 0) { return @() }
-
-    $memoryKey = ($xmlFiles | ForEach-Object { "{0}:{1}:{2}" -f $_.FullName, $_.Length, $_.LastWriteTimeUtc.Ticks }) -join "|"
-    if ($memoryKey -and $script:CleanerMlRulesMemoryCache.ContainsKey($memoryKey)) {
+    if (-not $Download -and $memoryKey -and $script:CleanerMlRulesMemoryCache.ContainsKey($memoryKey)) {
         return $script:CleanerMlRulesMemoryCache[$memoryKey]
     }
+
+    $forceRebuild = $false
+    if (Test-Path $cachePath) {
+        try {
+            if ($sourceSignature.FileCount -gt 0) {
+                $cacheInfo = Get-Item -LiteralPath $cachePath -ErrorAction Stop
+                $meta = $null
+                if (Test-Path $cacheMetaPath) {
+                    $meta = Get-Content -LiteralPath $cacheMetaPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                }
+
+                if ($meta) {
+                    if (-not (Test-WmtCleanerMlCacheMetaMatch -Meta $meta -SourceSignature $sourceSignature -CacheVersion $cacheVersion)) {
+                        $forceRebuild = $true
+                    }
+                }
+                elseif ($sourceSignature.LatestWriteUtcTicks -gt $cacheInfo.LastWriteTimeUtc.Ticks) {
+                    $forceRebuild = $true
+                }
+            }
+            elseif (Test-Path $cacheMetaPath) {
+                $meta = Get-Content -LiteralPath $cacheMetaPath -Raw -ErrorAction Stop | ConvertFrom-Json
+                if ([int]$meta.CacheVersion -ne $cacheVersion) { $forceRebuild = $true }
+            }
+        }
+        catch {
+            $forceRebuild = ($sourceSignature.FileCount -gt 0)
+        }
+    }
+
+    if (-not $forceRebuild -and (Test-Path $cachePath)) {
+        try {
+            $cachedRules = @(Get-Content -LiteralPath $cachePath -Raw -ErrorAction Stop | ConvertFrom-Json)
+            if ($cachedRules.Count -gt 0) {
+                if (($sourceSignature.FileCount -gt 0) -and -not (Test-Path $cacheMetaPath)) {
+                    try {
+                        [PSCustomObject]@{
+                            CacheVersion        = $cacheVersion
+                            FileCount           = [int]$sourceSignature.FileCount
+                            TotalLength         = [int64]$sourceSignature.TotalLength
+                            LatestWriteUtcTicks = [int64]$sourceSignature.LatestWriteUtcTicks
+                            Files               = @($sourceSignature.Files)
+                        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cacheMetaPath -Force
+                    }
+                    catch {}
+                }
+                if ($memoryKey) { $script:CleanerMlRulesMemoryCache[$memoryKey] = $cachedRules }
+                return $cachedRules
+            }
+        }
+        catch {}
+    }
+
+    if ($xmlFiles.Count -eq 0) { return @() }
 
     $allRules = New-Object System.Collections.Generic.List[object]
     foreach ($file in $xmlFiles) {
@@ -4959,6 +5239,20 @@ function Get-BleachBitCleanerMlRules {
     }
 
     $final = @($allRules.ToArray() | Group-Object ID | ForEach-Object { $_.Group[0] } | Sort-Object Section, AppGroup, Name)
+
+    try {
+        $final | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath $cachePath -Force
+        [PSCustomObject]@{
+            CacheVersion        = $cacheVersion
+            FileCount           = [int]$sourceSignature.FileCount
+            TotalLength         = [int64]$sourceSignature.TotalLength
+            LatestWriteUtcTicks = [int64]$sourceSignature.LatestWriteUtcTicks
+            Files               = @($sourceSignature.Files)
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $cacheMetaPath -Force
+        $memoryKey = "{0}|{1}|{2}|{3}" -f $cacheVersion, [int]$sourceSignature.FileCount, [int64]$sourceSignature.TotalLength, [int64]$sourceSignature.LatestWriteUtcTicks
+    }
+    catch {}
+
     if ($memoryKey) { $script:CleanerMlRulesMemoryCache[$memoryKey] = $final }
     return $final
 }
@@ -5855,7 +6149,8 @@ function Show-AdvancedCleanupSelection {
             if ($chkToggleCleanerML.Checked) {
                 $lbl.Text = "Loading BleachBit CleanerML..."
                 $hasLocalCleanerMl = ((Get-WmtBleachBitCleanerXmlDirectories).Count -gt 0)
-                $shouldDownloadCleanerMl = $ForceCleanerMlDownload -or (-not $hasLocalCleanerMl)
+                $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
+                $shouldDownloadCleanerMl = $ForceCleanerMlDownload -or ((-not $hasLocalCleanerMl) -and (-not (Test-Path $cachePath)))
                 $externalRuleState.CleanerML = @(Get-BleachBitCleanerMlRules -Download:$shouldDownloadCleanerMl)
             }
             else {
@@ -5901,7 +6196,8 @@ function Show-AdvancedCleanupSelection {
             $currentSettings.LoadCleanerML = $chkToggleCleanerML.Checked
             Save-WmtSettings -Settings $currentSettings
 
-            $forceDownload = $chkToggleCleanerML.Checked -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0)
+            $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
+            $forceDownload = $chkToggleCleanerML.Checked -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0) -and (-not (Test-Path $cachePath))
             & $loadExternalCleanerRules -ForceCleanerMlDownload:$forceDownload
         })
 

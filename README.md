@@ -182,7 +182,7 @@ WMT stores generated files in a local `data` folder next to the script.
 | `SystemReports_*` | System, network, and driver reports |
 | `RegistryBackups` | Registry cleanup backups |
 | `hosts_backups` | Hosts file backups |
-| `winapp2.ini` / cache files | Advanced cleanup community rules |
+| `winapp2.ini`, CleanerML files / cache files | Advanced cleanup community rules |
 
 ## Safety Notes
 
