@@ -18512,6 +18512,7 @@ $Script:StartWingetAction = {
     $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
     $script:WingetStoreResourcesInUseSeen = $false
     $script:WingetStoreErrorLogSeen = @{}
+    $script:WingetStoreFallbackSeen = @{}
     $script:WingetActionEventPath = Join-Path $env:TEMP ("WMT_WingetAction_{0}.events" -f ([Guid]::NewGuid().ToString("N")))
     $script:WingetActionEventLineCount = 0
     try { Set-Content -Path $script:WingetActionEventPath -Value "" -Encoding UTF8 -Force } catch {}
@@ -18629,6 +18630,125 @@ $Script:StartWingetAction = {
 
             if ([string]::IsNullOrWhiteSpace($eventPath) -or [string]::IsNullOrWhiteSpace($Line)) { return }
             try { Add-Content -Path $eventPath -Value $Line -Encoding UTF8 -Force } catch {}
+        }
+
+        function Test-WmtStoreUpdateScanPreferredItem {
+            param(
+                [string]$Name,
+                [string]$Id
+            )
+
+            $text = (([string]$Name) + " " + ([string]$Id)).Trim()
+            if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+
+            return ($text -match '(?i)(^|\b)(Microsoft\s+Store|Windows\s+Store|Store\s+Experience\s+Host|Store\s+Purchase\s+App)(\b|$)' -or
+                $text -match '(?i)(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.Services\.Store\.Engagement|9WZDNCRFJBMP)')
+        }
+
+        function Invoke-WmtStoreFallbackPage {
+            param(
+                [string]$PackageName,
+                [string]$ActionLabel,
+                [string]$Reason,
+                [string]$ReasonText,
+                [string]$StoreUri = "ms-windows-store://downloadsandupdates",
+                [string]$WebUri = "https://apps.microsoft.com/home"
+            )
+
+            $fallbackUri = ([string]$StoreUri).Trim()
+            $fallbackWebUri = ([string]$WebUri).Trim()
+            if ([string]::IsNullOrWhiteSpace($fallbackUri)) { $fallbackUri = "ms-windows-store://downloadsandupdates" }
+            if ([string]::IsNullOrWhiteSpace($fallbackWebUri)) { $fallbackWebUri = $fallbackUri }
+
+            $fallbackId = [Guid]::NewGuid().ToString("N")
+            $fallbackAckPath = Join-Path $temp "WMT_StoreCLI_$fallbackId.fallback_ack"
+            try {
+                $payload = [ordered]@{
+                    FallbackId  = $fallbackId
+                    AckPath     = $fallbackAckPath
+                    StoreUri    = $fallbackUri
+                    WebUri      = $fallbackWebUri
+                    PackageName = $PackageName
+                    ActionLabel = $ActionLabel
+                    Reason      = $Reason
+                    ReasonText  = $ReasonText
+                }
+                $json = $payload | ConvertTo-Json -Compress
+                $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+                $fallbackLine = "STORE_FALLBACK:$encoded"
+                Write-Output $fallbackLine
+                Write-WmtActionEvent $fallbackLine
+            }
+            catch {}
+
+            $sentAt = Get-Date
+            $ackDeadline = $sentAt.AddSeconds(4)
+            $directFallbackAttempted = $false
+            while ((Get-Date) -lt $ackDeadline) {
+                if (Test-Path $fallbackAckPath) { break }
+
+                $now = Get-Date
+                if (-not $directFallbackAttempted -and (New-TimeSpan -Start $sentAt -End $now).TotalMilliseconds -ge 1500) {
+                    $directFallbackAttempted = $true
+                    $directOpened = $false
+                    try {
+                        Start-Process -FilePath $fallbackUri
+                        $directOpened = $true
+                        Write-Output "LOG:[Store] Requested Microsoft Store page directly for $PackageName."
+                    }
+                    catch {
+                        Write-Output "LOG:[Store] Direct Microsoft Store page launch failed: $($_.Exception.Message)"
+                    }
+
+                    if (-not $directOpened -and $fallbackWebUri -and $fallbackWebUri -ne $fallbackUri) {
+                        try {
+                            Start-Process -FilePath $fallbackWebUri
+                            Write-Output "LOG:[Store] Requested Microsoft Store web page directly for $PackageName."
+                        }
+                        catch {
+                            Write-Output "LOG:[Store] Direct Microsoft Store web page launch failed: $($_.Exception.Message)"
+                        }
+                    }
+                }
+
+                Start-Sleep -Milliseconds 200
+            }
+
+            try { Remove-Item -Path $fallbackAckPath -Force -ErrorAction SilentlyContinue } catch {}
+        }
+
+        function Invoke-WmtStoreAppUpdateScan {
+            param([string]$PackageName)
+
+            $displayName = if ([string]::IsNullOrWhiteSpace($PackageName)) { "Microsoft Store apps" } else { $PackageName }
+            $exitCode = 1
+            try {
+                Write-Output "LOG:[Store] Starting Microsoft Store app update scan for $displayName..."
+                $appManagement = Get-CimInstance -Namespace "Root\cimv2\mdm\dmmap" -ClassName "MDM_EnterpriseModernAppManagement_AppManagement01" -ErrorAction Stop | Select-Object -First 1
+                if (-not $appManagement) { throw "Store app-management provider returned no instances." }
+
+                $scanResult = Invoke-CimMethod -InputObject $appManagement -MethodName "UpdateScanMethod" -ErrorAction Stop
+                $returnValue = 0
+                if ($scanResult -and $scanResult.PSObject.Properties["ReturnValue"]) {
+                    $returnValue = [int]$scanResult.ReturnValue
+                }
+
+                if ($returnValue -eq 0) {
+                    Write-Output "LOG:[Store] Microsoft Store app update scan started."
+                    $exitCode = 0
+                    Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText "WMT started a Microsoft Store app update scan." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+                }
+                else {
+                    Write-Output "LOG:[Store] Microsoft Store app update scan returned code $returnValue."
+                    Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScanFailed" -ReasonText "WMT could not start the direct Store app update scan. The Store Library page was opened instead." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+                }
+            }
+            catch {
+                Write-Output "LOG:[Store] Microsoft Store app update scan failed: $($_.Exception.Message)"
+                Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScanFailed" -ReasonText "WMT could not start the direct Store app update scan. The Store Library page was opened instead." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+            }
+
+            return [PSCustomObject]@{ ExitCode = $exitCode; StoreUpdateScan = ($exitCode -eq 0) }
         }
 
         # Helper: Execute Command & Stream Output in Real-Time
@@ -18793,6 +18913,7 @@ $Script:StartWingetAction = {
             $resourcesInUsePath = Join-Path $TempPath "WMT_StoreCLI_$rand.resources"
             $screenPath = Join-Path $TempPath "WMT_StoreCLI_$rand.screen"
             $transcriptPath = Join-Path $TempPath "WMT_StoreCLI_$rand.transcript"
+            $fallbackAckPath = Join-Path $TempPath "WMT_StoreCLI_$rand.fallback_ack"
             $runnerPath = Join-Path $TempPath "WMT_StoreCLI_$rand.run.ps1"
             $sendKeysPath = Join-Path $TempPath "WMT_StoreCLI_$rand.ps1"
             $safeTitle = (((($PackageName -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ')).Trim()
@@ -18891,6 +19012,79 @@ public static class WmtStoreCliWindow {
                 param([string]$Text)
 
                 return (([string]$Text) -match '(?is)(0x80073d02|resources\s+(?:it\s+)?modifies\s+are\s+currently\s+in\s+use|resources[\s\S]{0,240}currently\s+in\s+use)')
+            }
+
+            function Invoke-WmtStoreCliFallback {
+                param(
+                    [string]$Reason,
+                    [string]$ReasonText,
+                    [string]$StoreUri,
+                    [string]$WebUri
+                )
+
+                $fallbackUri = ([string]$StoreUri).Trim()
+                $fallbackWebUri = ([string]$WebUri).Trim()
+                if ([string]::IsNullOrWhiteSpace($fallbackUri)) { $fallbackUri = "ms-windows-store://home" }
+                if ([string]::IsNullOrWhiteSpace($fallbackWebUri)) { $fallbackWebUri = $fallbackUri }
+
+                try {
+                    $payload = [ordered]@{
+                        FallbackId  = $rand
+                        AckPath     = $fallbackAckPath
+                        StoreUri    = $fallbackUri
+                        WebUri      = $fallbackWebUri
+                        PackageName = $PackageName
+                        ActionLabel = $ActionLabel
+                        Reason      = $Reason
+                        ReasonText  = $ReasonText
+                    }
+                    $json = $payload | ConvertTo-Json -Compress
+                    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
+                    $fallbackLine = "STORE_FALLBACK:$encoded"
+                    Write-Output $fallbackLine
+                    Write-WmtStoreCliActivityEvent $fallbackLine
+                }
+                catch {}
+
+                $sentAt = Get-Date
+                $ackDeadline = $sentAt.AddSeconds(6)
+                $directFallbackAttempted = $false
+                while ((Get-Date) -lt $ackDeadline) {
+                    if (Test-Path $fallbackAckPath) { break }
+
+                    $now = Get-Date
+                    if (-not $directFallbackAttempted -and (New-TimeSpan -Start $sentAt -End $now).TotalMilliseconds -ge 1500) {
+                        $directFallbackAttempted = $true
+                        $directOpened = $false
+                        try {
+                            Start-Process -FilePath $fallbackUri
+                            $directOpened = $true
+                            Write-Output "LOG:[Store CLI] Requested Microsoft Store fallback page directly for $PackageName."
+                        }
+                        catch {
+                            Write-Output "LOG:[Store CLI] Direct Microsoft Store fallback launch failed: $($_.Exception.Message)"
+                        }
+
+                        if (-not $directOpened -and $fallbackWebUri -and $fallbackWebUri -ne $fallbackUri) {
+                            try {
+                                Start-Process -FilePath $fallbackWebUri
+                                Write-Output "LOG:[Store CLI] Requested Microsoft Store web fallback page directly for $PackageName."
+                            }
+                            catch {
+                                Write-Output "LOG:[Store CLI] Direct Microsoft Store web fallback launch failed: $($_.Exception.Message)"
+                            }
+                        }
+                    }
+
+                    Start-Sleep -Milliseconds 200
+                }
+
+                return [PSCustomObject]@{
+                    StoreUri = $fallbackUri
+                    WebUri   = $fallbackWebUri
+                    Reason   = $Reason
+                    Acked    = (Test-Path $fallbackAckPath)
+                }
             }
 
             $sendKeysContent = @'
@@ -19224,6 +19418,7 @@ exit /b %WMT_EXIT%
                 $storeProgress = 5
                 $lastStatusLine = ""
                 $readyZeroSince = $null
+                $storeCliStartedAt = Get-Date
                 $storeCliResourcesInUse = $false
                 $storeCliResourcesInUseLogged = $false
                 while ((Get-Date) -lt $deadline) {
@@ -19261,7 +19456,7 @@ exit /b %WMT_EXIT%
                         if ($storeCliResourcesInUse -and ($exitCode -eq 0 -or $exitCode -eq 1)) {
                             $exitCode = -2147009278
                         }
-                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $fallbackAckPath, $sendKeysPath, $runnerPath, $batPath)
                         return [PSCustomObject]@{ ExitCode = $exitCode; ResourcesInUse = $storeCliResourcesInUse }
                     }
 
@@ -19338,30 +19533,31 @@ exit /b %WMT_EXIT%
                         }
                     }
 
-                    if ($readyZeroSince -and (New-TimeSpan -Start $readyZeroSince -End $now).TotalSeconds -ge 30) {
-                        $fallbackUri = ([string]$StoreFallbackUri).Trim()
-                        $fallbackWebUri = ([string]$StoreFallbackWebUri).Trim()
-                        if ([string]::IsNullOrWhiteSpace($fallbackUri)) { $fallbackUri = "ms-windows-store://home" }
-                        if ([string]::IsNullOrWhiteSpace($fallbackWebUri)) { $fallbackWebUri = $fallbackUri }
-                        try {
-                            $payload = [ordered]@{
-                                StoreUri    = $fallbackUri
-                                WebUri      = $fallbackWebUri
-                                PackageName = $PackageName
-                                ActionLabel = $ActionLabel
-                            }
-                            $json = $payload | ConvertTo-Json -Compress
-                            $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
-                            Write-Output "STORE_FALLBACK:$encoded"
+                    $installExceededFallbackWindow = ($ActionLabel -eq "Install" -and (New-TimeSpan -Start $storeCliStartedAt -End $now).TotalSeconds -ge 30)
+                    $readyZeroExceededFallbackWindow = ($readyZeroSince -and (New-TimeSpan -Start $readyZeroSince -End $now).TotalSeconds -ge 30)
+                    if (-not $storeCliResourcesInUse -and ($installExceededFallbackWindow -or $readyZeroExceededFallbackWindow)) {
+                        $fallbackReason = if ($installExceededFallbackWindow) { "InstallTimeout" } else { "ReadyToDownload0" }
+                        $fallbackReasonText = if ($installExceededFallbackWindow) {
+                            "Store CLI did not finish the install within 30 seconds"
                         }
-                        catch {}
-                        Write-Output "LOG:[Store CLI] Store CLI remained at Ready to Download 0% for 30 seconds; opening Microsoft Store fallback page."
+                        else {
+                            "Store CLI remained at Ready to Download 0% for 30 seconds"
+                        }
+                        Write-Output "LOG:[Store CLI] $fallbackReasonText; opening Microsoft Store fallback page."
                         try {
                             if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                         }
                         catch {}
-                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
-                        return [PSCustomObject]@{ ExitCode = -2; StalledReadyToDownload = $true; StoreFallbackUri = $fallbackUri }
+                        $fallbackResult = Invoke-WmtStoreCliFallback -Reason $fallbackReason -ReasonText $fallbackReasonText -StoreUri $StoreFallbackUri -WebUri $StoreFallbackWebUri
+                        Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $fallbackAckPath, $sendKeysPath, $runnerPath, $batPath)
+                        return [PSCustomObject]@{
+                            ExitCode                 = -2
+                            StoreFallbackOpened      = $true
+                            StoreFallbackReason      = $fallbackResult.Reason
+                            StalledReadyToDownload   = ($fallbackResult.Reason -eq "ReadyToDownload0")
+                            StoreFallbackUri         = $fallbackResult.StoreUri
+                            StoreFallbackAcknowledged = $fallbackResult.Acked
+                        }
                     }
 
                     if ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 15) {
@@ -19378,12 +19574,12 @@ exit /b %WMT_EXIT%
                     if ($cmdProc -and -not $cmdProc.HasExited) { Stop-Process -Id $cmdProc.Id -Force -ErrorAction SilentlyContinue }
                 }
                 catch {}
-                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $fallbackAckPath, $sendKeysPath, $runnerPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = -1 }
             }
             catch {
                 Write-Output "LOG:[Store CLI] Interactive launch failed: $($_.Exception.Message)"
-                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $sendKeysPath, $runnerPath, $batPath)
+                Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $fallbackAckPath, $sendKeysPath, $runnerPath, $batPath)
                 return [PSCustomObject]@{ ExitCode = 1 }
             }
         }
@@ -19419,6 +19615,7 @@ exit /b %WMT_EXIT%
             $userCmd = "" 
             $wingetArgs = $null
             $storeCliArgs = $null
+            $storeForceUpdateScan = $false
             $storeFallbackUri = ""
             $storeFallbackWebUri = ""
             $skipReason = $null
@@ -19441,6 +19638,7 @@ exit /b %WMT_EXIT%
                 # --- MICROSOFT STORE ---
                 elseif ($src -eq "msstore") {
                     $safeStoreId = Get-StoreCliProductId $id
+                    $preferStoreUpdateScan = Test-WmtStoreUpdateScanPreferredItem -Name $name -Id $id
                     if ($act -eq "Update" -and $id -eq "__WMT_STORE_UPDATES_ALL__") {
                         $storeCliArgs = "updates"
                         $storeFallbackUri = "ms-windows-store://downloadsandupdates"
@@ -19448,13 +19646,26 @@ exit /b %WMT_EXIT%
                         $cmd = "store $storeCliArgs"
                         $userCmd = $cmd
                     }
+                    elseif (($act -eq "Update" -or $act -eq "Install") -and $preferStoreUpdateScan) {
+                        $storeForceUpdateScan = $true
+                        $storeFallbackUri = "ms-windows-store://downloadsandupdates"
+                        $storeFallbackWebUri = "https://apps.microsoft.com/home"
+                        $cmd = "Microsoft Store app update scan"
+                        $userCmd = "PowerShell MDM_EnterpriseModernAppManagement UpdateScanMethod"
+                    }
                     elseif ($act -eq "Install" -or $act -eq "Update") {
                         if ($safeStoreId) {
                             $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
                             $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
                             $storeCliArgs = "$storeVerb `"$safeStoreId`"$storeApplyFlag"
-                            $storeFallbackUri = "ms-windows-store://pdp/?ProductId=$safeStoreId"
-                            $storeFallbackWebUri = "https://apps.microsoft.com/detail/$safeStoreId"
+                            if ($preferStoreUpdateScan) {
+                                $storeFallbackUri = "ms-windows-store://downloadsandupdates"
+                                $storeFallbackWebUri = "https://apps.microsoft.com/home"
+                            }
+                            else {
+                                $storeFallbackUri = "ms-windows-store://pdp/?ProductId=$safeStoreId"
+                                $storeFallbackWebUri = "https://apps.microsoft.com/detail/$safeStoreId"
+                            }
                         }
                         else {
                             $storeTarget = ([string]$name).Replace('"', '').Trim()
@@ -19468,8 +19679,14 @@ exit /b %WMT_EXIT%
                                 $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
                                 $storeCliArgs = "$storeVerb `"$storeTarget`"$storeApplyFlag"
                                 $escapedStoreTarget = [System.Uri]::EscapeDataString($storeTarget)
-                                $storeFallbackUri = "ms-windows-store://search/?query=$escapedStoreTarget"
-                                $storeFallbackWebUri = "https://apps.microsoft.com/search?query=$escapedStoreTarget"
+                                if ($preferStoreUpdateScan) {
+                                    $storeFallbackUri = "ms-windows-store://downloadsandupdates"
+                                    $storeFallbackWebUri = "https://apps.microsoft.com/home"
+                                }
+                                else {
+                                    $storeFallbackUri = "ms-windows-store://search/?query=$escapedStoreTarget"
+                                    $storeFallbackWebUri = "https://apps.microsoft.com/search?query=$escapedStoreTarget"
+                                }
                                 Write-Output "LOG:[Store CLI] Product ID unavailable for '$name'; using Store CLI's product picker with automatic exact-match selection."
                             }
                         }
@@ -19613,6 +19830,9 @@ exit /b %WMT_EXIT%
                     Write-Output "LOG:[$act] Running winget with live output..."
                     $p = Invoke-WingetLive $wingetArgs
                 }
+                elseif ($storeForceUpdateScan) {
+                    $p = Invoke-WmtStoreAppUpdateScan -PackageName $name
+                }
                 elseif ($storeCliArgs) {
                     $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act -StoreFallbackUri $storeFallbackUri -StoreFallbackWebUri $storeFallbackWebUri -EventPath $eventPath
                 }
@@ -19699,12 +19919,17 @@ exit /b %WMT_EXIT%
                             }
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Microsoft Store says resources are currently in use; close the app and related Store/Xbox windows, then try again)"
                         }
-                        elseif ($p.PSObject.Properties["StalledReadyToDownload"] -and $p.StalledReadyToDownload) {
+                        elseif (($p.PSObject.Properties["StoreFallbackOpened"] -and $p.StoreFallbackOpened) -or ($p.PSObject.Properties["StalledReadyToDownload"] -and $p.StalledReadyToDownload)) {
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI isn't working; opened Microsoft Store so the item can be downloaded or updated directly)"
                         }
                         else {
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI action failed)"
                         }
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+                    if ($storeForceUpdateScan) {
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (could not start Microsoft Store app update scan)"
                         Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
@@ -19768,10 +19993,18 @@ timeout /t 5
 
                 $storeUri = ""
                 $webUri = ""
+                $ackPath = ""
+                $fallbackId = ""
+                $reason = ""
+                $reasonText = ""
                 $packageName = $script:WingetCurrentItemName
                 if ($payload) {
                     $storeUri = ([string]$payload.StoreUri).Trim()
                     $webUri = ([string]$payload.WebUri).Trim()
+                    $ackPath = ([string]$payload.AckPath).Trim()
+                    $fallbackId = ([string]$payload.FallbackId).Trim()
+                    $reason = ([string]$payload.Reason).Trim()
+                    $reasonText = ([string]$payload.ReasonText).Trim()
                     if (-not [string]::IsNullOrWhiteSpace([string]$payload.PackageName)) {
                         $packageName = [string]$payload.PackageName
                     }
@@ -19779,6 +20012,13 @@ timeout /t 5
                 if ([string]::IsNullOrWhiteSpace($packageName)) { $packageName = "this Microsoft Store item" }
                 if ([string]::IsNullOrWhiteSpace($storeUri)) { $storeUri = "ms-windows-store://home" }
                 if ([string]::IsNullOrWhiteSpace($webUri)) { $webUri = $storeUri }
+                if ([string]::IsNullOrWhiteSpace($fallbackId)) { $fallbackId = "$storeUri|$packageName|$reason" }
+
+                if (-not $script:WingetStoreFallbackSeen) { $script:WingetStoreFallbackSeen = @{} }
+                if ($script:WingetStoreFallbackSeen.ContainsKey($fallbackId)) {
+                    continue
+                }
+                $script:WingetStoreFallbackSeen[$fallbackId] = $true
 
                 $opened = $false
                 try {
@@ -19799,8 +20039,30 @@ timeout /t 5
                         Write-GuiLog "[Store CLI] Could not open Microsoft Store web fallback: $($_.Exception.Message)"
                     }
                 }
+                if (-not [string]::IsNullOrWhiteSpace($ackPath)) {
+                    try {
+                        $ack = "opened=$opened|$((Get-Date).ToString('o'))"
+                        Set-Content -Path $ackPath -Value $ack -Encoding Ascii -Force
+                    }
+                    catch {}
+                }
 
-                $msg = "Store CLI isn't working for $packageName. It stayed at Ready to Download 0% for more than 30 seconds.`r`n`r`nA Microsoft Store page was opened so you can download or update it directly."
+                if ($reason -eq "UpdateScan" -or $reason -eq "UpdateScanFailed") {
+                    if (-not [string]::IsNullOrWhiteSpace($reasonText)) {
+                        Write-GuiLog "[Store] $reasonText"
+                    }
+                    continue
+                }
+
+                if ([string]::IsNullOrWhiteSpace($reasonText)) {
+                    if ($reason -eq "InstallTimeout") {
+                        $reasonText = "Store CLI did not finish the install within 30 seconds"
+                    }
+                    else {
+                        $reasonText = "Store CLI stayed at Ready to Download 0% for more than 30 seconds"
+                    }
+                }
+                $msg = "Store CLI isn't working for $packageName. $reasonText.`r`n`r`nA Microsoft Store page was opened so you can download or update it directly."
                 [System.Windows.MessageBox]::Show($msg, "Microsoft Store CLI Stalled", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
                 continue
             }
