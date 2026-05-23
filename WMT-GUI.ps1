@@ -18849,7 +18849,7 @@ $Script:StartWingetAction = {
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
     $script:WingetCompletedIndexes = @{}
-    $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
+    $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" -and $ActionName -eq "Install" }).Count -gt 0
     $script:WingetStoreResourcesInUseSeen = $false
     $script:WingetStoreErrorLogSeen = @{}
     $script:WingetStoreFallbackSeen = @{}
@@ -18995,7 +18995,8 @@ $Script:StartWingetAction = {
                 [string]$Reason,
                 [string]$ReasonText,
                 [string]$StoreUri = "ms-windows-store://downloadsandupdates",
-                [string]$WebUri = "https://apps.microsoft.com/home"
+                [string]$WebUri = "https://apps.microsoft.com/home",
+                [switch]$NoWait
             )
 
             $fallbackUri = ([string]$StoreUri).Trim()
@@ -19023,6 +19024,8 @@ $Script:StartWingetAction = {
                 Write-WmtActionEvent $fallbackLine
             }
             catch {}
+
+            if ($NoWait) { return }
 
             $sentAt = Get-Date
             $ackDeadline = $sentAt.AddSeconds(4)
@@ -19064,9 +19067,10 @@ $Script:StartWingetAction = {
             param([string]$PackageName)
 
             $displayName = if ([string]::IsNullOrWhiteSpace($PackageName)) { "Microsoft Store apps" } else { $PackageName }
-            $exitCode = 1
+            $scanStarted = $false
+            $reasonText = "WMT opened Microsoft Store Updates so Store apps can update while other installers continue."
             try {
-                Write-Output "LOG:[Store] Starting Microsoft Store app update scan for $displayName..."
+                Write-Output "LOG:[Store] Starting Microsoft Store update scan for $displayName..."
                 $appManagement = Get-CimInstance -Namespace "Root\cimv2\mdm\dmmap" -ClassName "MDM_EnterpriseModernAppManagement_AppManagement01" -ErrorAction Stop | Select-Object -First 1
                 if (-not $appManagement) { throw "Store app-management provider returned no instances." }
 
@@ -19078,20 +19082,21 @@ $Script:StartWingetAction = {
 
                 if ($returnValue -eq 0) {
                     Write-Output "LOG:[Store] Microsoft Store app update scan started."
-                    $exitCode = 0
-                    Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText "WMT started a Microsoft Store app update scan." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+                    $scanStarted = $true
+                    $reasonText = "WMT started a Microsoft Store app update scan and opened Microsoft Store Updates."
                 }
                 else {
                     Write-Output "LOG:[Store] Microsoft Store app update scan returned code $returnValue."
-                    Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScanFailed" -ReasonText "WMT could not start the direct Store app update scan. The Store Library page was opened instead." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+                    $reasonText = "WMT could not start the direct Store app update scan, so Microsoft Store Updates was opened instead."
                 }
             }
             catch {
                 Write-Output "LOG:[Store] Microsoft Store app update scan failed: $($_.Exception.Message)"
-                Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScanFailed" -ReasonText "WMT could not start the direct Store app update scan. The Store Library page was opened instead." -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
+                $reasonText = "WMT could not start the direct Store app update scan, so Microsoft Store Updates was opened instead."
             }
 
-            return [PSCustomObject]@{ ExitCode = $exitCode; StoreUpdateScan = ($exitCode -eq 0) }
+            Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText $reasonText -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home" -NoWait
+            return [PSCustomObject]@{ ExitCode = 0; StoreUpdateScan = $scanStarted; StoreUpdatesDelegated = $true }
         }
 
         # Helper: Execute Command & Stream Output in Real-Time
@@ -19947,6 +19952,14 @@ exit /b %WMT_EXIT%
             return ""
         }
 
+        $storeUpdatesDelegated = $false
+        $hasStoreUpdateItems = @($items | Where-Object { $act -eq "Update" -and ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
+        if ($hasStoreUpdateItems) {
+            Write-Output "LOG:[Store] Microsoft Store updates will run through the Store app while other installers continue."
+            [void](Invoke-WmtStoreAppUpdateScan -PackageName "Microsoft Store Updates")
+            $storeUpdatesDelegated = $true
+        }
+
         $total = @($items).Count
         $index = 0
         foreach ($item in $items) {
@@ -19963,6 +19976,16 @@ exit /b %WMT_EXIT%
             $storeFallbackWebUri = ""
             $skipReason = $null
             Write-Output "PROGRESS:${index}/${total}:$name"
+
+            if ($act -eq "Update" -and ([string]$src).ToLowerInvariant() -eq "msstore") {
+                if (-not $storeUpdatesDelegated) {
+                    [void](Invoke-WmtStoreAppUpdateScan -PackageName "Microsoft Store Updates")
+                    $storeUpdatesDelegated = $true
+                }
+                Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (delegated to Microsoft Store Updates)"
+                Write-Output "RESULT:${index}:SUCCESS:$name"
+                continue
+            }
 
             # --- COMMAND GENERATION ---
             if ($tmpl) {
@@ -19983,25 +20006,16 @@ exit /b %WMT_EXIT%
                 elseif ($src -eq "msstore") {
                     $safeStoreId = Get-StoreCliProductId $id
                     $preferStoreUpdateScan = Test-WmtStoreUpdateScanPreferredItem -Name $name -Id $id
-                    if ($act -eq "Update" -and $id -eq "__WMT_STORE_UPDATES_ALL__") {
-                        $storeCliArgs = "updates"
-                        $storeFallbackUri = "ms-windows-store://downloadsandupdates"
-                        $storeFallbackWebUri = "https://apps.microsoft.com/home"
-                        $cmd = "store $storeCliArgs"
-                        $userCmd = $cmd
-                    }
-                    elseif (($act -eq "Update" -or $act -eq "Install") -and $preferStoreUpdateScan) {
+                    if ($act -eq "Install" -and $preferStoreUpdateScan) {
                         $storeForceUpdateScan = $true
                         $storeFallbackUri = "ms-windows-store://downloadsandupdates"
                         $storeFallbackWebUri = "https://apps.microsoft.com/home"
                         $cmd = "Microsoft Store app update scan"
                         $userCmd = "PowerShell MDM_EnterpriseModernAppManagement UpdateScanMethod"
                     }
-                    elseif ($act -eq "Install" -or $act -eq "Update") {
+                    elseif ($act -eq "Install") {
                         if ($safeStoreId) {
-                            $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
-                            $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
-                            $storeCliArgs = "$storeVerb `"$safeStoreId`"$storeApplyFlag"
+                            $storeCliArgs = "install `"$safeStoreId`""
                             if ($preferStoreUpdateScan) {
                                 $storeFallbackUri = "ms-windows-store://downloadsandupdates"
                                 $storeFallbackWebUri = "https://apps.microsoft.com/home"
@@ -20019,9 +20033,7 @@ exit /b %WMT_EXIT%
                                 $skipReason = "Store CLI needs a product ID or package name, but this row has ID '$rawStoreId' and no usable name."
                             }
                             else {
-                                $storeVerb = if ($act -eq "Update") { "update" } else { "install" }
-                                $storeApplyFlag = if ($act -eq "Update") { " --apply" } else { "" }
-                                $storeCliArgs = "$storeVerb `"$storeTarget`"$storeApplyFlag"
+                                $storeCliArgs = "install `"$storeTarget`""
                                 $escapedStoreTarget = [System.Uri]::EscapeDataString($storeTarget)
                                 if ($preferStoreUpdateScan) {
                                     $storeFallbackUri = "ms-windows-store://downloadsandupdates"
@@ -20364,11 +20376,17 @@ timeout /t 5
                 }
                 $script:WingetStoreFallbackSeen[$fallbackId] = $true
 
+                $isStoreUpdateRequest = ($reason -eq "UpdateScan" -or $reason -eq "UpdateScanFailed")
                 $opened = $false
                 try {
                     Start-Process $storeUri
                     $opened = $true
-                    Write-GuiLog "[Store CLI] Opened Microsoft Store fallback page for $packageName."
+                    if ($isStoreUpdateRequest) {
+                        Write-GuiLog "[Store] Opened Microsoft Store Updates for $packageName."
+                    }
+                    else {
+                        Write-GuiLog "[Store CLI] Opened Microsoft Store fallback page for $packageName."
+                    }
                 }
                 catch {
                     Write-GuiLog "[Store CLI] Could not open Microsoft Store URI: $($_.Exception.Message)"
@@ -20377,7 +20395,12 @@ timeout /t 5
                     try {
                         Start-Process $webUri
                         $opened = $true
-                        Write-GuiLog "[Store CLI] Opened Microsoft Store web fallback page for $packageName."
+                        if ($isStoreUpdateRequest) {
+                            Write-GuiLog "[Store] Opened Microsoft Store web Updates page for $packageName."
+                        }
+                        else {
+                            Write-GuiLog "[Store CLI] Opened Microsoft Store web fallback page for $packageName."
+                        }
                     }
                     catch {
                         Write-GuiLog "[Store CLI] Could not open Microsoft Store web fallback: $($_.Exception.Message)"
@@ -20391,7 +20414,7 @@ timeout /t 5
                     catch {}
                 }
 
-                if ($reason -eq "UpdateScan" -or $reason -eq "UpdateScanFailed") {
+                if ($isStoreUpdateRequest) {
                     if (-not [string]::IsNullOrWhiteSpace($reasonText)) {
                         Write-GuiLog "[Store] $reasonText"
                     }
