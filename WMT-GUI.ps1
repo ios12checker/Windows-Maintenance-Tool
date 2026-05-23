@@ -18849,6 +18849,11 @@ $Script:StartWingetAction = {
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
     $script:WingetCompletedIndexes = @{}
+    $script:WingetActionStoreUpdateOnly = (
+        $ActionName -eq "Update" -and
+        $totalItems -gt 0 -and
+        @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -eq $totalItems
+    )
     $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" -and $ActionName -eq "Install" }).Count -gt 0
     $script:WingetStoreResourcesInUseSeen = $false
     $script:WingetStoreErrorLogSeen = @{}
@@ -18995,8 +19000,7 @@ $Script:StartWingetAction = {
                 [string]$Reason,
                 [string]$ReasonText,
                 [string]$StoreUri = "ms-windows-store://downloadsandupdates",
-                [string]$WebUri = "https://apps.microsoft.com/home",
-                [switch]$NoWait
+                [string]$WebUri = "https://apps.microsoft.com/home"
             )
 
             $fallbackUri = ([string]$StoreUri).Trim()
@@ -19024,8 +19028,6 @@ $Script:StartWingetAction = {
                 Write-WmtActionEvent $fallbackLine
             }
             catch {}
-
-            if ($NoWait) { return }
 
             $sentAt = Get-Date
             $ackDeadline = $sentAt.AddSeconds(4)
@@ -19095,7 +19097,7 @@ $Script:StartWingetAction = {
                 $reasonText = "WMT could not start the direct Store app update scan, so Microsoft Store Updates was opened instead."
             }
 
-            Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText $reasonText -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home" -NoWait
+            Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText $reasonText -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
             return [PSCustomObject]@{ ExitCode = 0; StoreUpdateScan = $scanStarted; StoreUpdatesDelegated = $true }
         }
 
@@ -20604,9 +20606,13 @@ timeout /t 5
                 if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
 
                 $nonSuccessCount = $script:WingetProgressSkipped + $script:WingetProgressFailed
-                $shouldRefreshAfterAction = ($script:WingetProgressSuccess -gt 0 -or $nonSuccessCount -eq 0)
+                $storeUpdateOnly = [bool]$script:WingetActionStoreUpdateOnly
+                $shouldRefreshAfterAction = (-not $storeUpdateOnly -and ($script:WingetProgressSuccess -gt 0 -or $nonSuccessCount -eq 0))
 
-                if ($script:WingetProgressSuccess -gt 0) {
+                if ($storeUpdateOnly) {
+                    Write-GuiLog "Action finished. Microsoft Store is handling downloads; package list was not refreshed."
+                }
+                elseif ($script:WingetProgressSuccess -gt 0) {
                     Write-GuiLog "Action finished. $($script:WingetProgressSuccess) explicit success(es). Refreshing package list..."
                 }
                 elseif (-not $shouldRefreshAfterAction) {
@@ -20621,6 +20627,7 @@ timeout /t 5
                     $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
                 }
                 $script:WingetActiveAction = $null
+                $script:WingetActionStoreUpdateOnly = $false
             }
         })
     $script:WingetTimer.Start()
