@@ -3112,6 +3112,7 @@ function Save-WmtSettings {
             TempCleanup       = $Settings.TempCleanup
             RegistryScan      = $Settings.RegistryScan
             WingetIgnore      = $Settings.WingetIgnore
+            WingetIncludeUnknown = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
             LoadWinapp2       = [bool]$Settings.LoadWinapp2
             LoadCleanerML     = [bool]$Settings.LoadCleanerML
             EnabledProviders  = $Settings.EnabledProviders
@@ -3140,6 +3141,7 @@ function Get-WmtSettings {
         TempCleanup       = @{}
         RegistryScan      = @{}
         WingetIgnore      = @()
+        WingetIncludeUnknown = $true
         LoadWinapp2       = $false 
         LoadCleanerML     = $false
         EnabledProviders  = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
@@ -3172,6 +3174,7 @@ function Get-WmtSettings {
                 if ($raw) { foreach ($item in $raw) { [void]$clean.Add("$item".Trim()) } }
                 $defaults.WingetIgnore = $clean.ToArray()
             }
+            if ($json.PSObject.Properties["WingetIncludeUnknown"]) { $defaults.WingetIncludeUnknown = [bool]$json.WingetIncludeUnknown }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
@@ -3204,6 +3207,37 @@ function Get-WmtSettings {
     # Cache the result
     $script:WmtSettingsCache = $defaults
     return $defaults
+}
+
+function Get-WmtWingetIncludeUnknown {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("WingetIncludeUnknown")) {
+        return [bool]$Settings["WingetIncludeUnknown"]
+    }
+    if ($Settings.PSObject.Properties["WingetIncludeUnknown"]) {
+        return [bool]$Settings.WingetIncludeUnknown
+    }
+
+    return $true
+}
+
+function Set-WmtWingetIncludeUnknown {
+    param([bool]$IncludeUnknown)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["WingetIncludeUnknown"] = $IncludeUnknown
+    }
+    elseif ($settings.PSObject.Properties["WingetIncludeUnknown"]) {
+        $settings.WingetIncludeUnknown = $IncludeUnknown
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "WingetIncludeUnknown" -Value $IncludeUnknown -Force
+    }
+    Save-WmtSettings -Settings $settings
 }
 
 function Show-DownloadStats {
@@ -16229,6 +16263,15 @@ function Set-WmtPowerSettingIndex {
             </Style.Triggers>
         </Style>
 
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display"/>
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+        </Style>
+
         <!-- Modern Navigation Button (crisp text) -->
         <Style TargetType="Button" x:Key="NavBtn">
             <Setter Property="Background" Value="Transparent"/>
@@ -16566,7 +16609,7 @@ function Set-WmtPowerSettingIndex {
 
                     <!-- Action Bar -->
                     <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                        <WrapPanel HorizontalAlignment="Right">
                             <Button Name="btnManageProviders" Content="Providers" Style="{StaticResource ActionBtn}" ToolTip="Manage package sources"/>
                             <Button Name="btnShowCatalog" Content="Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
                             <Button Name="btnWingetScan" Content="Refresh All" Style="{StaticResource AccentBtn}"/>
@@ -16576,7 +16619,7 @@ function Set-WmtPowerSettingIndex {
                             <Button Name="btnWingetUninstall" Content="Uninstall" Style="{StaticResource DestructiveBtn}"/>
                             <Button Name="btnWingetIgnore" Content="Ignore" Style="{StaticResource WarningBtn}"/>
                             <Button Name="btnWingetUnignore" Content="Manage Ignored" Style="{StaticResource ActionBtn}"/>
-                        </StackPanel>
+                        </WrapPanel>
                     </Border>
                 </Grid>
 
@@ -18415,6 +18458,7 @@ $LogBox = Get-Ctrl "LogBox"
 foreach ($itemsControl in @($lstWinget, $lstAppxPackages, $lstFw, $lstCatalog, $lstSearchResults)) {
     Enable-WmtWpfItemsVirtualization -Control $itemsControl
 }
+
 if ($LogBox) {
     $LogBox.Add_TextChanged({
             param($s, $e)
@@ -18881,12 +18925,14 @@ $Script:StartWingetAction = {
     }
     
     # 1. Define the Job Arguments
+    $wingetIncludeUnknown = Get-WmtWingetIncludeUnknown -Settings (Get-WmtSettings)
     $jobArgs = @{
-        Items       = $uniqueItems
-        ActionName  = $ActionName
-        CmdTemplate = $CmdTemplate
-        TempPath    = $env:TEMP
-        EventPath   = $script:WingetActionEventPath
+        Items                = $uniqueItems
+        ActionName           = $ActionName
+        CmdTemplate          = $CmdTemplate
+        TempPath             = $env:TEMP
+        EventPath            = $script:WingetActionEventPath
+        WingetIncludeUnknown = $wingetIncludeUnknown
     }
 
     # 2. Start the Background Job
@@ -18897,6 +18943,7 @@ $Script:StartWingetAction = {
         $tmpl = $ArgsDict.CmdTemplate
         $temp = $ArgsDict.TempPath
         $eventPath = $ArgsDict.EventPath
+        $wingetIncludeUnknown = [bool]$ArgsDict.WingetIncludeUnknown
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
@@ -19927,8 +19974,9 @@ exit /b %WMT_EXIT%
                 if ($src -eq "winget") {
                     $flags = "--accept-source-agreements --accept-package-agreements --disable-interactivity"
                     $userFlags = "--accept-source-agreements --accept-package-agreements"
+                    $includeUnknownFlag = if ($wingetIncludeUnknown) { " --include-unknown" } else { "" }
                     if ($act -eq "Install") { $wingetArgs = "install --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget install --id `"$id`" $userFlags" }
-                    if ($act -eq "Update") { $wingetArgs = "upgrade --id `"$id`" --include-unknown $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`" --include-unknown $userFlags" }
+                    if ($act -eq "Update") { $wingetArgs = "upgrade --id `"$id`"$includeUnknownFlag $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget upgrade --id `"$id`"$includeUnknownFlag $userFlags" }
                     if ($act -eq "Uninstall") { $wingetArgs = "uninstall --id `"$id`" $flags"; $cmd = "winget $wingetArgs"; $userCmd = "winget uninstall --id `"$id`" $userFlags" }
                 }
                 # --- MICROSOFT STORE ---
@@ -20567,7 +20615,7 @@ function Show-ProviderManager {
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="550" Width="500" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="590" Width="520" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -20591,6 +20639,12 @@ function Show-ProviderManager {
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
                 <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Text="Windows Package Manager" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
+            </Grid>
+
+            <Grid Margin="30,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkIncludeUnknown" Grid.Column="0"/>
+                <TextBlock Text="Include unknown" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Text="Adds --include-unknown to winget scans" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
             <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -20655,6 +20709,7 @@ function Show-ProviderManager {
 
     function Get-WinCtrl($name) { $win.FindName($name) }
     
+    $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkPip = Get-WinCtrl "chkPip"
     $chkNpm = Get-WinCtrl "chkNpm"
@@ -20665,6 +20720,7 @@ function Show-ProviderManager {
     $chkCargo = Get-WinCtrl "chkCargo"
     
     # Load settings
+    $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
     if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
@@ -20709,6 +20765,12 @@ function Show-ProviderManager {
         
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["WingetIncludeUnknown"] = [bool]$chkIncludeUnknown.IsChecked
+            }
+            else {
+                $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
+            }
             Save-WmtSettings -Settings $current
             $win.Close()
         })
@@ -20948,8 +21010,10 @@ $btnWingetScan.Add_Click({
             @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") 
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
+        $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+        Write-GuiLog "Winget include unknown: $includeUnknown"
 
         # Gate the actual winget scan behind a completed source refresh.
         # This keeps startup clickable but ensures the first visible package results are collected after source prep.
@@ -21011,7 +21075,7 @@ $btnWingetScan.Add_Click({
     
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
-                    param($SourceName, $IgnoreList)
+                    param($SourceName, $IgnoreList, $IncludeUnknown)
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
     
                     function Test-Ignored($n, $i) {
@@ -21039,7 +21103,8 @@ $btnWingetScan.Add_Click({
                     # Winget source-backed scans can legitimately take a while.
                     $timeoutMs = 120000
     
-                    $wArgs = "list --upgrade-available --include-unknown --accept-source-agreements --disable-interactivity --source $SourceName"
+                    $includeUnknownFlag = if ([bool]$IncludeUnknown) { " --include-unknown" } else { "" }
+                    $wArgs = "list --upgrade-available$includeUnknownFlag --accept-source-agreements --disable-interactivity --source $SourceName"
                     try {
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo
                         $pInfo.FileName = "winget"
@@ -21114,7 +21179,7 @@ $btnWingetScan.Add_Click({
                     catch {
                         Write-Output "LOG:$SourceName check failed: $($_.Exception.Message)"
                     }
-                }).AddArgument($wingetSource).AddArgument($ignoreList)
+                }).AddArgument($wingetSource).AddArgument($ignoreList).AddArgument([bool]$includeUnknown)
     
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
