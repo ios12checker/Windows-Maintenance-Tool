@@ -12,7 +12,7 @@ It is built for technicians, power users, and end users who want practical Windo
 ## Highlights
 
 - Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
-- Package updater with Winget, Microsoft Store, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
+- Package updater with Winget, Microsoft Store via Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
 - One-by-one package update flow with visible progress windows.
 - My Device dashboard with system specs, storage, network, battery/power, driver tools, RAM cleanup, TRIM, and Windows Update access.
 - Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
@@ -58,7 +58,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ### Updates and Software
 
-- Scan for updates from Winget, Microsoft Store, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
+- Scan for updates from Winget, Microsoft Store via Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
 - Update packages one at a time with a visible update window.
 - Search package results before updating.
 - Ignore selected Winget packages.
@@ -182,7 +182,7 @@ WMT stores generated files in a local `data` folder next to the script.
 | `SystemReports_*` | System, network, and driver reports |
 | `RegistryBackups` | Registry cleanup backups |
 | `hosts_backups` | Hosts file backups |
-| `winapp2.ini` / cache files | Advanced cleanup community rules |
+| `winapp2.ini`, CleanerML files / cache files | Advanced cleanup community rules |
 
 ## Safety Notes
 
