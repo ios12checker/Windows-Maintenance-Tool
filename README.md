@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v5.8-green)
+![Version](https://img.shields.io/badge/version-v5.9-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -12,58 +12,63 @@ It is built for technicians, power users, and end users who want practical Windo
 ## Highlights
 
 - Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
-- Package updater with Winget, Microsoft Store via Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
+- Full dark/light theme support with a persistent theme toggle.
+- Package updater with Winget, Microsoft Store / Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
 - One-by-one package update flow with visible progress windows.
-- My Device dashboard with system specs, storage, network, battery/power, driver tools, RAM cleanup, TRIM, and Windows Update access.
+- My Device dashboard with system specs, storage health, improved drive benchmark, network, battery/power, driver tools, RAM cleanup, TRIM, export, and quick shortcuts to related tools.
 - Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
 - Restore Manager with create, delete, restore, enable, and disable actions.
-- Advanced Cleanup with analyze/preview mode before deletion.
+- Advanced Cleanup with analyze/preview mode, Winapp2 community rules, and BleachBit CleanerML support.
 - Safety prompts, backups, revert actions, and clearer error messages for risky operations.
 
 ## Screenshot
 
-<img width="1920" height="1034" alt="image" src="https://github.com/user-attachments/assets/1045be3d-6feb-430a-81ec-0f7787fc74b0" />
+<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/907f83c8-fc7b-4938-a105-69389603ce2e" />
 
-## What's New in v5.8
 
-### Theme and Interface
+## What's New in v5.9
 
-- Added a full light theme for the main WPF interface and supporting WPF windows.
-- Improved theme naming, colors, and visibility across dark and light modes.
-- Added a theme toggle in Support & Credits.
-- Improved UI responsiveness for large lists and heavy tabs.
+### CleanerML and Cleanup
 
-### Performance and Large List Optimizations
+- Added BleachBit CleanerML support to Advanced Cleanup for much broader application cleanup coverage.
+- Added CleanerML caching so external cleaner rules load faster after the first run.
+- Added a separate cleanup worker runtime for delete operations so the UI stays responsive during large cleanup jobs.
+- Improved Analyze results with per-file status so protected or in-use files explain why they cannot be deleted.
 
-- Optimized Firewall Manager loading by lazy-loading rules, using background runspaces, caching base rules, and loading heavy per-rule details only when selected.
-- Improved large-list rendering with double buffering and better layout behavior.
-- Improved community cleanup rule list rendering so controls do not overlap the bottom buttons.
+### Microsoft Store and Package Updates
 
-### Benchmark, DNS, and Updates
+- Reworked Microsoft Store updates to use Store CLI / Store app update handling instead of the old Winget `msstore` source path.
+- Added Store fallback handling that opens the Microsoft Store update/download page when Store CLI cannot complete an update.
+- Added a Provider Manager option for Winget `--include-unknown` so unknown-version packages can be included in scans.
+- Improved Store CLI logging, timeout handling, and resources-in-use messages.
 
-- Reworked Drive Benchmark for more reliable real disk I/O results and less misleading Windows cache behavior.
-- Reworked DNS and DoH actions to run in background runspaces.
-- Added a richer Custom DNS dialog with IPv4/IPv6 validation and optional DoH template registration/removal.
-- Added right-click Winget manifest lookup for supported package rows.
-- Restored **Update All** and improved Winget result header parsing.
+### Registry Cleaner
 
-### Tweaks and Cleanup
+- Expanded registry cleaner coverage with more precise checks across uninstall entries, App Paths, fonts, environment PATH, COM/classes, file associations, namespaces, scheduled tasks, and startup-related entries.
+- Improved registry view handling for 32-bit and 64-bit registry locations.
+- Improved registry result details and copy/export usability.
+- Removed stale registry cleaner exclusions that blocked useful detections.
 
-- Added many new tweak controls for Explorer, mouse behavior, context menus, privacy, search, gaming, visual effects, notifications, and lock screen behavior.
-- Rewrote the Broken Shortcut Manager with rescan/stop support, status feedback, better detection, and right-click tools.
-- Added more relevant quick-action buttons to My Device cards.
+### Interface Fixes
 
+- Fixed white-text-on-white-box readability issues.
+- Added dark/light theme handling to search-related UI.
+- Cleaned up Registry Cleaner button layout to reduce extra spacing.
 
 ## Core Features
 
 ### Updates and Software
 
-- Scan for updates from Winget, Microsoft Store via Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
+- Scan for updates from Winget, Microsoft Store / Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
 - Update packages one at a time with a visible update window.
 - Search package results before updating.
 - Ignore selected Winget packages.
 - Browse and install curated software.
 - Handles slow providers with timeout protection.
+- Optionally include Winget unknown-version packages with `--include-unknown`.
+- Delegates Microsoft Store app updates through Store CLI / Microsoft Store update handling where supported.
+- Right-click supported Winget package rows to view manifest details.
+- Use **Update All** for batch update flows where available.
 
 ### System Health
 
@@ -78,9 +83,13 @@ It is built for technicians, power users, and end users who want practical Windo
 ### My Device
 
 - View Windows, CPU, RAM, GPU, motherboard, storage, network, battery, and power details.
+- View drive health details and run a drive benchmark.
+- Export the current My Device summary.
+- Use related quick-action buttons from My Device cards, including driver, cleanup, storage, DNS, and health tools.
 - Check driver versions and open vendor driver pages.
 - Clean RAM.
 - Run SSD TRIM and disk optimization tools.
+- Open Disk Management.
 - Open Windows Update quickly.
 
 ### Tweaks
@@ -92,18 +101,22 @@ It is built for technicians, power users, and end users who want practical Windo
 - Taskbar alignment, search, widgets, Task View, Chat, and button combine behavior.
 - Clock options for 12-hour/24-hour format and seconds display.
 - Hardware-Accelerated GPU Scheduling (HAGS) toggle.
+- Explorer options for file extensions, hidden files, full path title bars, launch location, and recent/frequent items.
+- Mouse pointer speed, acceleration, and single-click/double-click behavior.
+- Context menu tweaks for classic Windows 11 menu, Take Ownership, and PowerShell Here.
+- Privacy, search, gaming, visual effect, notification, and lock screen tweaks.
 - Bloatware and AppX cleanup tools.
 
 ### Cleanup
 
 - Delete temporary files and recycle bin data.
-- Analyze cleanup targets before deleting files.
+- Analyze cleanup targets before deleting files, including file status for protected or in-use items.
 - Clean selected files from the preview window.
-- Run advanced cleanup selections.
+- Run advanced cleanup selections with internal rules, Winapp2 community rules, and BleachBit CleanerML rules.
 - Clear Windows Event Logs.
 - Clean browser and Explorer traces.
-- Find and fix broken shortcuts.
-- Clean selected registry issues with backups and safelists.
+- Find, inspect, fix, or delete broken shortcuts using the rebuilt Broken Shortcut Manager.
+- Clean selected registry issues with backups, safelists, richer scan coverage, and clearer result details.
 - Clear Xbox credentials for login-loop fixes.
 - Free local OneDrive disk space while keeping cloud copies.
 
@@ -122,6 +135,8 @@ It is built for technicians, power users, and end users who want practical Windo
 
 - Flush DNS and reset network settings.
 - Set DNS to Cloudflare, Google, Quad9, DHCP, or custom DNS servers.
+- Set custom IPv4/IPv6 DNS servers from a dedicated dialog.
+- Register or remove DNS over HTTPS templates for custom DNS entries.
 - Enable or disable DNS over HTTPS rules.
 - View routing tables.
 - Edit the hosts file.
@@ -130,6 +145,7 @@ It is built for technicians, power users, and end users who want practical Windo
 ### Firewall Manager
 
 - View and search firewall rules.
+- Lazy-load firewall rules and selected-rule details for better responsiveness.
 - Add, edit, enable, disable, and delete firewall rules.
 - Export and import firewall policies.
 - Restore firewall defaults or purge rules with confirmation.
@@ -182,7 +198,7 @@ WMT stores generated files in a local `data` folder next to the script.
 | `SystemReports_*` | System, network, and driver reports |
 | `RegistryBackups` | Registry cleanup backups |
 | `hosts_backups` | Hosts file backups |
-| `winapp2.ini`, CleanerML files / cache files | Advanced cleanup community rules |
+| `winapp2.ini` / cache files | Advanced cleanup community rules |
 
 ## Safety Notes
 
@@ -229,4 +245,4 @@ Issues and pull requests are welcome. Please include:
 - Steps to reproduce
 - Screenshot or error output when possible
 
-If this tool helps you, consider starring the repository or Donating.
+If this tool helps you, consider starring the repository.
