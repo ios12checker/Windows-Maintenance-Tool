@@ -3413,7 +3413,8 @@ function Start-UpdateCheckBackground {
                 }
 
                 $versionPattern = '(\d+(?:\.\d+){0,3})'
-                if ($content -match ('\$AppVersion\s*=\s*["'']?{0}["'']?' -f $versionPattern)) {
+                $appVersionRegex = '\$AppVersion\s*=\s*[^\d\r\n]*(\d+(?:\.\d+){0,3})'
+                if ($content -match $appVersionRegex) {
                     $jobRes.RemoteVersion = $matches[1]
                     $jobRes.Status = "Success"
                 }
