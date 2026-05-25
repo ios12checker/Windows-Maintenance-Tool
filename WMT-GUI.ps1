@@ -173,6 +173,20 @@ function Write-GuiLog {
     }
 }
 
+function ConvertTo-WmtVersion {
+    param([string]$VersionText)
+
+    $raw = ([string]$VersionText).Trim()
+    $match = [regex]::Match($raw, '^\s*v?(\d+(?:\.\d+){0,3})\s*$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if (-not $match.Success) {
+        throw "Invalid version string: $VersionText"
+    }
+
+    $parts = @($match.Groups[1].Value.Split("."))
+    while ($parts.Count -lt 4) { $parts += "0" }
+    return [System.Version]::new([int]$parts[0], [int]$parts[1], [int]$parts[2], [int]$parts[3])
+}
+
 function Invoke-UiCommand {
     param(
         [scriptblock]$Sb, 
@@ -3398,11 +3412,12 @@ function Start-UpdateCheckBackground {
                     $sha.Dispose()
                 }
 
-                if ($content -match '\$AppVersion\s*=\s*"(\d+(\.\d+)+)"') {
+                $versionPattern = '(\d+(?:\.\d+){0,3})'
+                if ($content -match ('\$AppVersion\s*=\s*["'']?{0}["'']?' -f $versionPattern)) {
                     $jobRes.RemoteVersion = $matches[1]
                     $jobRes.Status = "Success"
                 }
-                elseif ($content -match "Windows Maintenance Tool.*v(\d+(\.\d+)+)") {
+                elseif ($content -match ("Windows Maintenance Tool.*v{0}" -f $versionPattern)) {
                     $jobRes.RemoteVersion = $matches[1]
                     $jobRes.Status = "Success"
                 }
@@ -3449,8 +3464,10 @@ function Start-UpdateCheckBackground {
                     }
 
                     if ($jobResult.Status -eq "Success") {
-                        $localVer = [Version]$script:AppVersion
-                        $remoteVer = [Version]$jobResult.RemoteVersion
+                        $localVerText = [string]$script:AppVersion
+                        $remoteVerText = [string]$jobResult.RemoteVersion
+                        $localVer = ConvertTo-WmtVersion $localVerText
+                        $remoteVer = ConvertTo-WmtVersion $remoteVerText
                         $remoteSeemsNewer = $true
                         try {
                             if ($jobResult.RemoteLastModifiedUtc -and $localScriptLastWriteUtc) {
@@ -3462,7 +3479,7 @@ function Start-UpdateCheckBackground {
                         $isContentPatch = ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and $remoteSeemsNewer)
                     
                         if ($lb) { 
-                            $lb.AppendText("[UPDATE] Local: v$localVer | Remote: v$remoteVer`n")
+                            $lb.AppendText("[UPDATE] Local: v$localVerText | Remote: v$remoteVerText`n")
                             if ($isContentPatch) { $lb.AppendText("[UPDATE] Same version but newer script content detected.`n") }
                             elseif ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and -not $remoteSeemsNewer) {
                                 $lb.AppendText("[UPDATE] Local script appears newer than remote; skipping patch prompt.`n")
@@ -3483,7 +3500,7 @@ function Start-UpdateCheckBackground {
                                     $lb.ScrollToEnd()
                                 }
                                 $window.Dispatcher.Invoke([Action] {
-                                        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nThis EXE build cannot replace itself with the raw PowerShell script. Open the Releases page to download the latest EXE?"
+                                        $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nThis EXE build cannot replace itself with the raw PowerShell script. Open the Releases page to download the latest EXE?"
                                         $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                                         if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
                                             Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/releases"
@@ -3495,10 +3512,10 @@ function Start-UpdateCheckBackground {
                             # Use Dispatcher to show dialog on UI thread
                             $window.Dispatcher.Invoke([Action] {
                                     $msg = if ($remoteVer -gt $localVer) {
-                                        "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nDo you want to update now?"
+                                        "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to update now?"
                                     }
                                     else {
-                                        "A script patch is available for your current version (v$localVer).`n`nThis updates fixes without changing the version number.`n`nDo you want to update now?"
+                                        "A script patch is available for your current version (v$localVerText).`n`nThis updates fixes without changing the version number.`n`nDo you want to update now?"
                                     }
                                     $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                             
