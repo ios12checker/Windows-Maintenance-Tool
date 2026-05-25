@@ -9,12 +9,58 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "5.9"
+$AppVersion = "6"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
 [Console]::OutputEncoding = $OEMEncoding
 $OutputEncoding = $OEMEncoding
+
+function Get-WmtCurrentProcessPath {
+    try {
+        $proc = [System.Diagnostics.Process]::GetCurrentProcess()
+        if ($proc -and $proc.MainModule -and $proc.MainModule.FileName) {
+            return $proc.MainModule.FileName
+        }
+    }
+    catch {}
+    return $null
+}
+
+$script:WmtScriptPath = if (-not [string]::IsNullOrWhiteSpace($PSCommandPath)) {
+    $PSCommandPath
+}
+elseif ($MyInvocation.MyCommand.Path) {
+    $MyInvocation.MyCommand.Path
+}
+else {
+    $null
+}
+
+$script:WmtProcessPath = Get-WmtCurrentProcessPath
+$script:WmtIsCompiledExe = $false
+if (-not [string]::IsNullOrWhiteSpace($script:WmtProcessPath)) {
+    $hostExe = Split-Path -Leaf $script:WmtProcessPath
+    $script:WmtIsCompiledExe = @("powershell.exe", "pwsh.exe", "powershell_ise.exe") -notcontains $hostExe
+}
+
+$script:WmtLaunchPath = if ($script:WmtIsCompiledExe) {
+    $script:WmtProcessPath
+}
+else {
+    $script:WmtScriptPath
+}
+
+$script:WmtRootPath = $null
+try {
+    if (-not [string]::IsNullOrWhiteSpace($script:WmtLaunchPath)) {
+        $script:WmtRootPath = Split-Path -Parent $script:WmtLaunchPath
+    }
+}
+catch {}
+if ([string]::IsNullOrWhiteSpace($script:WmtRootPath)) {
+    $script:WmtRootPath = (Get-Location).Path
+}
 
 # HIDE CONSOLE (Safe Check)
 # This prevents crashes if you run the script twice in the same session
@@ -34,7 +80,25 @@ catch {}
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell.exe "-File `"$PSCommandPath`"" -Verb RunAs
+    try {
+        if ($script:WmtIsCompiledExe -and (Test-Path -LiteralPath $script:WmtLaunchPath)) {
+            Start-Process -FilePath $script:WmtLaunchPath -Verb RunAs -WorkingDirectory $script:WmtRootPath
+        }
+        elseif ($script:WmtScriptPath -and (Test-Path -LiteralPath $script:WmtScriptPath)) {
+            $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $script:WmtScriptPath))
+            Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -WorkingDirectory $script:WmtRootPath
+        }
+        else {
+            throw "Could not resolve the WMT launch path."
+        }
+    }
+    catch {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            [System.Windows.Forms.MessageBox]::Show("Failed to restart Windows Maintenance Tool as administrator.`r`n`r`n$($_.Exception.Message)", "WMT Launch Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+        }
+        catch {}
+    }
     exit
 }
 
@@ -66,7 +130,7 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Typ
     $tokenCode = @'
     using System;
     using System.Runtime.InteropServices;
-    public class Win32 {
+    namespace Win32 {
         public class TokenManipulator {
             [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
             internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
@@ -2886,7 +2950,21 @@ function Set-MyDeviceNetworkDetails {
 }
 
 function Get-DataPath {
-    $root = Split-Path -Parent $PSCommandPath
+    $root = $script:WmtRootPath
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        foreach ($candidate in @($script:WmtLaunchPath, $script:WmtScriptPath, $PSCommandPath)) {
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                try {
+                    $root = Split-Path -Parent $candidate
+                    if (-not [string]::IsNullOrWhiteSpace($root)) { break }
+                }
+                catch {}
+            }
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($root)) {
+        $root = (Get-Location).Path
+    }
     $dataPath = Join-Path $root "data"
     if (-not (Test-Path $dataPath)) {
         New-Item -ItemType Directory -Path $dataPath -Force | Out-Null
@@ -3109,19 +3187,19 @@ function Save-WmtSettings {
 
         # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
         $saveObj = [PSCustomObject]@{
-            TempCleanup       = $Settings.TempCleanup
-            RegistryScan      = $Settings.RegistryScan
-            WingetIgnore      = $Settings.WingetIgnore
+            TempCleanup          = $Settings.TempCleanup
+            RegistryScan         = $Settings.RegistryScan
+            WingetIgnore         = $Settings.WingetIgnore
             WingetIncludeUnknown = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
-            LoadWinapp2       = [bool]$Settings.LoadWinapp2
-            LoadCleanerML     = [bool]$Settings.LoadCleanerML
-            EnabledProviders  = $Settings.EnabledProviders
-            CustomDnsServers  = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
-            CustomDohTemplate = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
-            CustomDohEnabled  = [bool]$Settings.CustomDohEnabled
-            Theme             = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
-            WindowState       = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
-            WindowBounds      = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
+            LoadWinapp2          = [bool]$Settings.LoadWinapp2
+            LoadCleanerML        = [bool]$Settings.LoadCleanerML
+            EnabledProviders     = $Settings.EnabledProviders
+            CustomDnsServers     = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
+            CustomDohTemplate    = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
+            CustomDohEnabled     = [bool]$Settings.CustomDohEnabled
+            Theme                = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
+            WindowState          = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
+            WindowBounds         = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     }
@@ -3138,19 +3216,19 @@ function Get-WmtSettings {
     
     # Default Structure
     $defaults = @{
-        TempCleanup       = @{}
-        RegistryScan      = @{}
-        WingetIgnore      = @()
+        TempCleanup          = @{}
+        RegistryScan         = @{}
+        WingetIgnore         = @()
         WingetIncludeUnknown = $true
-        LoadWinapp2       = $false 
-        LoadCleanerML     = $false
-        EnabledProviders  = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
-        CustomDnsServers  = @()
-        CustomDohTemplate = ""
-        CustomDohEnabled  = $false
-        Theme             = "dark"
-        WindowState       = "Normal"
-        WindowBounds      = @{
+        LoadWinapp2          = $false 
+        LoadCleanerML        = $false
+        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
+        CustomDnsServers     = @()
+        CustomDohTemplate    = ""
+        CustomDohEnabled     = $false
+        Theme                = "dark"
+        WindowState          = "Normal"
+        WindowBounds         = @{
             Top    = 0
             Left   = 0
             Width  = 1280
@@ -3276,7 +3354,8 @@ function Start-UpdateCheckBackground {
     }
 
     $localVersionStr = $script:AppVersion
-    $scriptPathForUpdate = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+    $runningAsExe = [bool]$script:WmtIsCompiledExe
+    $scriptPathForUpdate = if ($runningAsExe) { $null } else { $script:WmtScriptPath }
     $localScriptHash = ""
     $localScriptLastWriteUtc = $null
     try {
@@ -3397,6 +3476,21 @@ function Start-UpdateCheckBackground {
                                 else { $lb.AppendText(" -> Patch Update Available (same version).`n") }
                                 $lb.ScrollToEnd()
                             }
+
+                            if ($runningAsExe) {
+                                if ($lb) {
+                                    $lb.AppendText("[UPDATE] EXE build detected. Opening Releases is required for updates.`n")
+                                    $lb.ScrollToEnd()
+                                }
+                                $window.Dispatcher.Invoke([Action] {
+                                        $msg = "A new version is available!`n`nLocal Version:  v$localVer`nRemote Version: v$remoteVer`n`nThis EXE build cannot replace itself with the raw PowerShell script. Open the Releases page to download the latest EXE?"
+                                        $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
+                                        if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                            Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/releases"
+                                        }
+                                    })
+                                return
+                            }
                         
                             # Use Dispatcher to show dialog on UI thread
                             $window.Dispatcher.Invoke([Action] {
@@ -3415,7 +3509,7 @@ function Start-UpdateCheckBackground {
                                                 throw "Downloaded update content was empty or invalid."
                                             }
 
-                                            $scriptPath = if ($scriptPathForUpdate) { $scriptPathForUpdate } else { if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path } }
+                                            $scriptPath = $scriptPathForUpdate
                                             if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path $scriptPath)) {
                                                 throw "Could not resolve script path for self-update."
                                             }
@@ -8878,7 +8972,7 @@ function Invoke-RegistryTask {
         Add-Type -TypeDefinition @"
         using System;
         using System.Runtime.InteropServices;
-        public class Win32 {
+        namespace Win32 {
             public class TokenManipulator {
                 [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
                 internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
@@ -19901,11 +19995,11 @@ exit /b %WMT_EXIT%
                         $fallbackResult = Invoke-WmtStoreCliFallback -Reason $fallbackReason -ReasonText $fallbackReasonText -StoreUri $StoreFallbackUri -WebUri $StoreFallbackWebUri
                         Clear-WmtStoreCliTempFiles @($resultPath, $statusPath, $resourcesInUsePath, $screenPath, $fallbackAckPath, $sendKeysPath, $runnerPath, $batPath)
                         return [PSCustomObject]@{
-                            ExitCode                 = -2
-                            StoreFallbackOpened      = $true
-                            StoreFallbackReason      = $fallbackResult.Reason
-                            StalledReadyToDownload   = ($fallbackResult.Reason -eq "ReadyToDownload0")
-                            StoreFallbackUri         = $fallbackResult.StoreUri
+                            ExitCode                  = -2
+                            StoreFallbackOpened       = $true
+                            StoreFallbackReason       = $fallbackResult.Reason
+                            StalledReadyToDownload    = ($fallbackResult.Reason -eq "ReadyToDownload0")
+                            StoreFallbackUri          = $fallbackResult.StoreUri
                             StoreFallbackAcknowledged = $fallbackResult.Acked
                         }
                     }
