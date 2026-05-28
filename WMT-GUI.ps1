@@ -9327,6 +9327,7 @@ function Invoke-RegistryTask {
                         $endQuote = $clean.IndexOf('"', 1)
                         if ($endQuote -gt 1) {
                             $quotedPart = $clean.Substring(1, $endQuote - 1)
+                            if ($quotedPart -match "^(.*?),\s*-?\d+$") { $quotedPart = $matches[1].Trim() }
                             if (Test-PathExists $quotedPart) { return $quotedPart }
                             $clean = $quotedPart 
                         }
