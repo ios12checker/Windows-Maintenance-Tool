@@ -6395,14 +6395,16 @@ function Show-AdvancedCleanupSelection {
                     $displayGroup = & $getCleanerDisplayGroup $item
                     if ($displayGroup -ne $currentGroup) {
                         $currentGroup = $displayGroup
-                        $grpLbl = New-Object System.Windows.Forms.Label
-                        $grpLbl.Text = $currentGroup
-                        $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-                        $grpLbl.ForeColor = Get-WmtThemeColor "TextSecondary"
-                        $grpLbl.BackColor = $cleanupBackColor
-                        $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
-                        $grpLbl.Tag = "GROUPHEADER"
-                        $flowControlsToAdd.Add($grpLbl)
+                        if (-not [string]::IsNullOrWhiteSpace($displayGroup) -and $displayGroup -ne $sec) {
+                            $grpLbl = New-Object System.Windows.Forms.Label
+                            $grpLbl.Text = $currentGroup
+                            $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+                            $grpLbl.ForeColor = Get-WmtThemeColor "TextSecondary"
+                            $grpLbl.BackColor = $cleanupBackColor
+                            $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
+                            $grpLbl.Tag = "GROUPHEADER"
+                            $flowControlsToAdd.Add($grpLbl)
+                        }
                     }
 
                     $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
