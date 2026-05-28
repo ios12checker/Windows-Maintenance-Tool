@@ -69,7 +69,7 @@ if (-not ([System.Management.Automation.PSTypeName]'Win32Functions.Win32ShowWind
     Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions
 }
 try {
-    $hwnd = ([System.Diagnostics.Process]::GetCurrentProcess() | Get-Process).MainWindowHandle
+    $hwnd = [System.Diagnostics.Process]::GetCurrentProcess().MainWindowHandle
     if ($hwnd -ne [IntPtr]::Zero) {
         [Win32Functions.Win32ShowWindow]::ShowWindow($hwnd, 0) | Out-Null
     }
@@ -215,7 +215,10 @@ function Set-WmtDoubleBuffered {
     if (-not $Control) { return }
 
     try {
-        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        if (-not $script:WmtDoubleBufferedProperty) {
+            $script:WmtDoubleBufferedProperty = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
+        }
+        $prop = $script:WmtDoubleBufferedProperty
         if ($prop) { $prop.SetValue($Control, $true, $null) }
     }
     catch {}
@@ -8397,6 +8400,45 @@ function Show-RegistryCleaner {
         return ($lines -join [Environment]::NewLine)
     }
 
+    function Test-WmtRegistryFindingAutoSelected {
+        param($Item)
+
+        if ($Item -and $Item.PSObject.Properties["SafeToFix"]) {
+            return [bool]$Item.SafeToFix
+        }
+
+        $problem = [string]$Item.Problem
+        $type = [string]$Item.Type
+        $reviewOnlyPatterns = @(
+            '^ActiveX Issue$',
+            '^Unused Extension$',
+            '^Missing App Path$',
+            '^Invalid App Command',
+            '^Missing Uninstaller$',
+            '^Obsolete App Module Cache$',
+            '^Empty User Software Key$',
+            '^Invalid Shell Extension$',
+            '^Invalid Explorer Namespace$',
+            '^Invalid Font Entry$',
+            '^Orphaned TaskCache',
+            '^Invalid User Shell Command$',
+            '^Orphaned Service$',
+            '^Missing HelpDir$',
+            '^Invalid Default Icon$',
+            '^Missing Shared Ref$'
+        )
+
+        foreach ($pattern in $reviewOnlyPatterns) {
+            if ($problem -match $pattern) { return $false }
+        }
+
+        if ($type -eq "Key" -and $problem -ne "Obsolete Notify Icon") {
+            return $false
+        }
+
+        return $true
+    }
+
     # --- 1. Form Setup ---
     $f = New-Object System.Windows.Forms.Form
     $f.Text = "Deep Registry Cleaner"
@@ -8472,6 +8514,7 @@ function Show-RegistryCleaner {
     # --- 5. Populate Data ---
     $registryRows = New-WmtVirtualRows -Items @(
         foreach ($item in $ScanResults) {
+            $autoSelected = Test-WmtRegistryFindingAutoSelected -Item $item
             $details = if ($item.PSObject.Properties["Details"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Details)) {
                 [string]$item.Details
             }
@@ -8480,8 +8523,11 @@ function Show-RegistryCleaner {
                 $valueText = if ($null -ne $item.ValueName) { "; Value=$($item.ValueName)" } else { "" }
                 "$targetKind; Target=$($item.RegPath)$valueText"
             }
+            if (-not $autoSelected) {
+                $details = "Review only; not selected by default. $details"
+            }
             [PSCustomObject]@{
-                Check     = $true
+                Check     = $autoSelected
                 Problem   = $item.Problem
                 Data      = $item.Data
                 Key       = $item.DisplayKey
@@ -8567,17 +8613,17 @@ function Show-RegistryCleaner {
 
     # --- 7. Fix Button Logic ---
     $btnFix.Add_Click({
-            $toFix = @()
+            $toFix = [System.Collections.Generic.List[object]]::new()
             try { $dg.EndEdit() } catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
-                    $toFix += [PSCustomObject]@{
+                    [void]$toFix.Add([PSCustomObject]@{
                         RegPath    = $row.FullPath
                         ValueName  = $row.ValueName
                         Type       = $row.Type
                         DisplayKey = $row.Key
                         NewData    = $row.NewData
-                    }
+                    })
                 }
             }
 
@@ -8587,7 +8633,7 @@ function Show-RegistryCleaner {
             }
 
             # Return results to the main controller
-            $f.Tag = $toFix
+            $f.Tag = @($toFix)
             $f.DialogResult = "OK"
             $f.Close()
         })
@@ -8607,7 +8653,10 @@ function Show-RegistryCleaner {
 # =========================================================
 
 function Test-PathExists {
-    param($Path)
+    param(
+        $Path,
+        $RegistryView = $null
+    )
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
 
     $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
@@ -8624,40 +8673,51 @@ function Test-PathExists {
     }
 
     if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $true }
-    try {
-        if (Test-Path -LiteralPath $expanded -ErrorAction Stop) { return $true }
-    }
-    catch [System.UnauthorizedAccessException] { return $true }
-    catch [System.Security.SecurityException] { return $true }
-    catch {}
-    try {
-        [void](Get-Item -LiteralPath $expanded -Force -ErrorAction Stop)
-        return $true
-    }
-    catch {
-        if ($_.Exception.Message -match '(?i)access.*denied|unauthorized') { return $true }
-    }
-    if ($expanded -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
-        $packageParts = @($Matches.PackageName -split '_' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        if ($packageParts.Count -ge 2) {
-            $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Count - 1])"
-            try {
-                $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
-                $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
-                if ($root) { $root.Close(); return $true }
+
+    $probeCandidates = [System.Collections.Generic.List[string]]::new()
+    $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    if ($seenCandidates.Add($expanded.Trim())) { [void]$probeCandidates.Add($expanded.Trim()) }
+
+    if ([Environment]::Is64BitOperatingSystem) {
+        $system32Pattern = "^(?i)$([regex]::Escape($systemRoot))\\System32\\(?<SubPath>.+)$"
+        if ($expanded -match $system32Pattern) {
+            if ([string]$RegistryView -eq "Registry32") {
+                $wow64Candidate = (Join-Path (Join-Path $systemRoot "SysWOW64") $Matches.SubPath).Trim()
+                if ($seenCandidates.Add($wow64Candidate)) { [void]$probeCandidates.Add($wow64Candidate) }
             }
-            catch {}
+            $sysnativeCandidate = (Join-Path (Join-Path $systemRoot "Sysnative") $Matches.SubPath).Trim()
+            if ($seenCandidates.Add($sysnativeCandidate)) { [void]$probeCandidates.Add($sysnativeCandidate) }
         }
     }
-    if ($expanded -match "(?i)System32") {
-        $nativePath = $expanded -replace "(?i)System32", "Sysnative"
+
+    foreach ($candidate in $probeCandidates) {
         try {
-            if (Test-Path -LiteralPath $nativePath -ErrorAction Stop) { return $true }
+            if (Test-Path -LiteralPath $candidate -ErrorAction Stop) { return $true }
         }
         catch [System.UnauthorizedAccessException] { return $true }
         catch [System.Security.SecurityException] { return $true }
         catch {}
+        try {
+            [void](Get-Item -LiteralPath $candidate -Force -ErrorAction Stop)
+            return $true
+        }
+        catch {
+            if ($_.Exception.Message -match '(?i)access.*denied|unauthorized') { return $true }
+        }
+        if ($candidate -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
+            $packageParts = ([string]$Matches.PackageName).Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
+            if ($packageParts.Length -ge 2) {
+                $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Length - 1])"
+                try {
+                    $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
+                    $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
+                    if ($root) { $root.Close(); return $true }
+                }
+                catch {}
+            }
+        }
     }
+
     return $false
 }
 
@@ -9126,26 +9186,66 @@ function Invoke-RegistryTask {
                 Import-Module Microsoft.PowerShell.Management
                 Import-Module Microsoft.PowerShell.Security
                 $SelectedScans = @($SelectedScans)
+                $RegistrySafePathTokens = [string[]]@(
+                    "TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2",
+                    "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "notepad.exe",
+                    "write.exe", "mspaint.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost",
+                    "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker",
+                    "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe",
+                    "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe",
+                    "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon", "QuickActionsPS", "VailAudioProxy"
+                )
+                $RegistrySystemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
+                if ([string]::IsNullOrWhiteSpace($RegistrySystemRoot)) { $RegistrySystemRoot = "$env:SystemDrive\Windows" }
+                $RegistryProtectedWindowsFolders = @(
+                    foreach ($folder in [string[]]@("System32", "SysWOW64", "Sysnative", "WinSxS", "servicing", "SystemApps", "Microsoft.NET", "Fonts")) {
+                        Join-Path $RegistrySystemRoot $folder
+                    }
+                )
+                $RegistryPathExistsCache = [System.Collections.Generic.Dictionary[string, bool]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
                 # Internal Helper: Whitelist
                 function Test-IsWhitelisted {
                     param($Path)
                     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                    $SafeList = @("TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2", "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost", "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker", "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe", "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe", "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon", "QuickActionsPS", "VailAudioProxy")
-                    foreach ($safe in $SafeList) { if ($Path -match "(?i)$safe") { return $true } }
+                    $pathText = [string]$Path
+                    foreach ($safe in $RegistrySafePathTokens) {
+                        if ($pathText.IndexOf($safe, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
+                    }
+                    return $false
+                }
+
+                function Test-IsProtectedWindowsPath {
+                    param($Path)
+                    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+
+                    $text = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim().Trim('"'))
+                    $text = $text -replace '^(?i)\\\?\?\\', ''
+                    $text = $text -replace '^(?i)\\\\\?\\', ''
+
+                    $systemRoot = $RegistrySystemRoot
+                    if ($text -match '^(?i)(%SystemRoot%|%windir%|\\SystemRoot\\|System32\\)') { return $true }
+                    foreach ($protectedRoot in $RegistryProtectedWindowsFolders) {
+                        if ($text.Equals($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $text.StartsWith("$protectedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
+                            return $true
+                        }
+                    }
+
                     return $false
                 }
 
                 function Test-PathExists {
-                    param($Path)
+                    param(
+                        $Path,
+                        $RegistryView = $null
+                    )
                     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
 
                     $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
                     $expanded = $expanded -replace '^(?i)\\\?\?\\', ''
                     $expanded = $expanded -replace '^(?i)\\\\\?\\', ''
 
-                    $systemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
-                    if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = "$env:SystemDrive\Windows" }
+                    $systemRoot = $RegistrySystemRoot
                     if ($expanded -match '^(?i)\\SystemRoot\\(?<SubPath>.+)$') {
                         $expanded = Join-Path $systemRoot $Matches.SubPath
                     }
@@ -9154,40 +9254,66 @@ function Invoke-RegistryTask {
                     }
 
                     if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $true }
-                    try {
-                        if (Test-Path -LiteralPath $expanded -ErrorAction Stop) { return $true }
-                    }
-                    catch [System.UnauthorizedAccessException] { return $true }
-                    catch [System.Security.SecurityException] { return $true }
-                    catch {}
-                    try {
-                        [void](Get-Item -LiteralPath $expanded -Force -ErrorAction Stop)
-                        return $true
-                    }
-                    catch {
-                        if ($_.Exception.Message -match '(?i)access.*denied|unauthorized') { return $true }
-                    }
-                    if ($expanded -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
-                        $packageParts = @($Matches.PackageName -split '_' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-                        if ($packageParts.Count -ge 2) {
-                            $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Count - 1])"
-                            try {
-                                $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
-                                $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
-                                if ($root) { $root.Close(); return $true }
+
+                    $cacheKey = "$([string]$RegistryView)`0$expanded"
+                    if ($RegistryPathExistsCache.ContainsKey($cacheKey)) { return $RegistryPathExistsCache[$cacheKey] }
+
+                    $probeCandidates = [System.Collections.Generic.List[string]]::new()
+                    $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    if ($seenCandidates.Add($expanded.Trim())) { [void]$probeCandidates.Add($expanded.Trim()) }
+
+                    if ([Environment]::Is64BitOperatingSystem) {
+                        $system32Pattern = "^(?i)$([regex]::Escape($systemRoot))\\System32\\(?<SubPath>.+)$"
+                        if ($expanded -match $system32Pattern) {
+                            if ([string]$RegistryView -eq "Registry32") {
+                                $wow64Candidate = (Join-Path (Join-Path $systemRoot "SysWOW64") $Matches.SubPath).Trim()
+                                if ($seenCandidates.Add($wow64Candidate)) { [void]$probeCandidates.Add($wow64Candidate) }
                             }
-                            catch {}
+                            $sysnativeCandidate = (Join-Path (Join-Path $systemRoot "Sysnative") $Matches.SubPath).Trim()
+                            if ($seenCandidates.Add($sysnativeCandidate)) { [void]$probeCandidates.Add($sysnativeCandidate) }
                         }
                     }
-                    if ($expanded -match "(?i)System32") {
-                        $nativePath = $expanded -replace "(?i)System32", "Sysnative"
+
+                    foreach ($candidate in $probeCandidates) {
                         try {
-                            if (Test-Path -LiteralPath $nativePath -ErrorAction Stop) { return $true }
+                            if (Test-Path -LiteralPath $candidate -ErrorAction Stop) {
+                                $RegistryPathExistsCache[$cacheKey] = $true
+                                return $true
+                            }
                         }
-                        catch [System.UnauthorizedAccessException] { return $true }
-                        catch [System.Security.SecurityException] { return $true }
+                        catch [System.UnauthorizedAccessException] { $RegistryPathExistsCache[$cacheKey] = $true; return $true }
+                        catch [System.Security.SecurityException] { $RegistryPathExistsCache[$cacheKey] = $true; return $true }
                         catch {}
+                        try {
+                            [void](Get-Item -LiteralPath $candidate -Force -ErrorAction Stop)
+                            $RegistryPathExistsCache[$cacheKey] = $true
+                            return $true
+                        }
+                        catch {
+                            if ($_.Exception.Message -match '(?i)access.*denied|unauthorized') {
+                                $RegistryPathExistsCache[$cacheKey] = $true
+                                return $true
+                            }
+                        }
+                        if ($candidate -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
+                            $packageParts = ([string]$Matches.PackageName).Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
+                            if ($packageParts.Length -ge 2) {
+                                $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Length - 1])"
+                                try {
+                                    $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
+                                    $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
+                                    if ($root) {
+                                        $root.Close()
+                                        $RegistryPathExistsCache[$cacheKey] = $true
+                                        return $true
+                                    }
+                                }
+                                catch {}
+                            }
+                        }
                     }
+
+                    $RegistryPathExistsCache[$cacheKey] = $false
                     return $false
                 }
 
@@ -9209,11 +9335,10 @@ function Invoke-RegistryTask {
                     if ($clean.Contains(" ")) {
                         $parts = $clean -split " "
                         $candidate = $parts[0]
-                        $Check = { param($p) if (Test-PathExists $p) { return $true }; if (Test-PathExists "$p.exe") { return $true }; return $false }
-                        if (& $Check $candidate) { return $candidate }
+                        if ((Test-PathExists $candidate) -or (Test-PathExists "$candidate.exe")) { return $candidate }
                         for ($i = 1; $i -lt $parts.Count; $i++) {
                             $candidate += " " + $parts[$i]
-                            if (& $Check $candidate) { return $candidate }
+                            if ((Test-PathExists $candidate) -or (Test-PathExists "$candidate.exe")) { return $candidate }
                         }
                     }
                     return $clean
@@ -9603,7 +9728,7 @@ function Invoke-RegistryTask {
                                     if ($serverKey) {
                                         $rawServer = [string]$serverKey.GetValue($null)
                                         $serverPath = Get-ServiceImageExecutablePath $rawServer
-                                        if ($serverPath -and -not (Test-IsWhitelisted $serverPath) -and -not (Test-PathExists $serverPath)) {
+                                        if ($serverPath -and -not (Test-IsWhitelisted $serverPath) -and -not (Test-IsProtectedWindowsPath $serverPath) -and -not (Test-PathExists -Path $serverPath -RegistryView $scanView)) {
                                             return [PSCustomObject]@{ IsBroken = $true; Data = $serverPath; Details = "Referenced CLSID $normalized ($viewLabel registry view) points to missing COM server $serverPath." }
                                         }
                                     }
@@ -9828,7 +9953,7 @@ function Invoke-RegistryTask {
                                         $dll = $sub.GetValue($null)
                                         if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $dll)) { 
                                             $cleanDll = Get-RealExePath $dll
-                                            if (-not (Test-PathExists $cleanDll)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanDll; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\InProcServer32"; ValueName = $null; Type = "Key" }) }
+                                            if (-not (Test-IsProtectedWindowsPath $cleanDll) -and -not (Test-PathExists $cleanDll)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanDll; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\InProcServer32"; ValueName = $null; Type = "Key" }) }
                                         }
                                         $sub.Close() 
                                     }
@@ -9837,7 +9962,7 @@ function Invoke-RegistryTask {
                                         $exe = $sub2.GetValue($null)
                                         if ($exe -and $exe -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $exe)) {
                                             $cleanExe = Get-RealExePath $exe
-                                            if (-not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanExe; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\LocalServer32"; ValueName = $null; Type = "Key" }) }
+                                            if (-not (Test-IsProtectedWindowsPath $cleanExe) -and -not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanExe; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\LocalServer32"; ValueName = $null; Type = "Key" }) }
                                         }
                                         $sub2.Close()
                                     }
@@ -9859,7 +9984,7 @@ function Invoke-RegistryTask {
                             if ($ext.StartsWith(".")) { 
                                 try { 
                                     $sub = $root.OpenSubKey($ext)
-                                    if ($sub.SubKeyCount -eq 0 -and $null -eq $sub.GetValue($null)) { 
+                                    if ($sub.SubKeyCount -eq 0 -and $sub.ValueCount -eq 0 -and $null -eq $sub.GetValue($null)) { 
                                         [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Unused Extension"; Data = $ext; DisplayKey = $ext; RegPath = "HKCR:\$ext"; ValueName = $null; Type = "Key" }) 
                                     }; $sub.Close() 
                                 }
@@ -9916,7 +10041,7 @@ function Invoke-RegistryTask {
                                             $path = $sub.GetValue($null)
                                             if ($path -and $path -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $path)) {
                                                 $clean = Get-RealExePath $path
-                                                if (-not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing App Path"; Data = $clean; DisplayKey = "$app ($viewLabel)"; RegPath = "$(ConvertTo-WmtHklmViewPath -SubPath $key -View $view)\$app"; ValueName = $null; Type = "Key"; Details = "App Paths target is missing in the $viewLabel registry view." }) }
+                                                if (-not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing App Path"; Data = $clean; DisplayKey = "$app ($viewLabel)"; RegPath = "$(ConvertTo-WmtHklmViewPath -SubPath $key -View $view)\$app"; ValueName = $null; Type = "Key"; Details = "App Paths target is missing in the $viewLabel registry view." }) }
                                             }
                                             $sub.Close()
                                         }
@@ -9961,7 +10086,7 @@ function Invoke-RegistryTask {
                                                         if ($cmd) {
                                                             $clean = Get-RealExePath $cmd
                                                             if ($clean -and $clean -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $clean)) {
-                                                                if (-not (Test-PathExists $clean) -and $clean -notmatch "%1") {
+                                                                if (-not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean) -and $clean -notmatch "%1") {
                                                                     [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid App Command ($verb)"; Data = $clean; DisplayKey = $app; RegPath = "$($root.Name)\$app\shell\$verb\command"; ValueName = $null; Type = "Key" })
                                                                 }
                                                             }
@@ -10017,7 +10142,7 @@ function Invoke-RegistryTask {
                                             $isNoRemove = Test-IsRegistryFlagEnabled $sub.GetValue("NoRemove")
                                             if ($uString -and -not ([string]::IsNullOrWhiteSpace($displayName)) -and -not $isWindowsInstaller -and -not $isSystemComponent -and -not $isNoRemove) {
                                                 $clean = Get-UninstallExecutablePath $uString
-                                                if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
+                                                if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
                                                     [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Uninstaller"; Data = $clean; DisplayKey = "$displayName ($($target.Label))"; RegPath = "$($target.RegPrefix)\$subName"; ValueName = $null; Type = "Key"; Details = "Uninstall command points to a missing executable." })
                                                 }
                                             }
@@ -10093,7 +10218,7 @@ function Invoke-RegistryTask {
                                                 $exePath = [string]$sub.GetValue("ExecutablePath")
                                                 if (-not [string]::IsNullOrWhiteSpace($exePath)) {
                                                     $clean = Get-ServiceImageExecutablePath $exePath
-                                                    if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
+                                                    if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
                                                         [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Obsolete Notify Icon"; Data = $clean; DisplayKey = "$($target.Label)\$entry"; RegPath = "$($target.RegPrefix)\$entry"; ValueName = $null; Type = "Key" })
                                                     }
                                                 }
@@ -10393,7 +10518,7 @@ function Invoke-RegistryTask {
                                             $fontPath = Join-Path $fontDir $fontPath
                                         }
 
-                                        if (-not (Test-PathExists $fontPath)) {
+                                        if (-not (Test-IsProtectedWindowsPath $fontPath) -and -not (Test-PathExists $fontPath)) {
                                             [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                     Problem    = "Invalid Font Entry"
                                                     Data       = $fontPath
@@ -10435,7 +10560,7 @@ function Invoke-RegistryTask {
 
                                             $rawTarget = [string]$aliasKey.GetValue($null)
                                             $targetPath = Get-ServiceImageExecutablePath $rawTarget
-                                            if ($targetPath -and -not (Test-IsWhitelisted $targetPath) -and -not (Test-PathExists $targetPath)) {
+                                            if ($targetPath -and -not (Test-IsWhitelisted $targetPath) -and -not (Test-IsProtectedWindowsPath $targetPath) -and -not (Test-PathExists $targetPath)) {
                                                 [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                         Problem    = "Invalid App Execution Alias"
                                                         Data       = $targetPath
@@ -10604,6 +10729,7 @@ function Invoke-RegistryTask {
                                                 if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
                                                 if ($candidate -notmatch '^(?i)([a-z]:\\|\\\\)') { continue }
                                                 if (Test-IsWhitelisted $candidate) { continue }
+                                                if (Test-IsProtectedWindowsPath $candidate) { continue }
                                                 if (Test-PathExists $candidate) { continue }
 
                                                 [void]$SyncHash.Findings.Add([PSCustomObject]@{
@@ -10704,7 +10830,7 @@ function Invoke-RegistryTask {
 
                                                         $cmd = [string]$cmdKey.GetValue($null)
                                                         $clean = Get-ServiceImageExecutablePath $cmd
-                                                        if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
+                                                        if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
                                                             [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                                     Problem    = "Invalid User Shell Command"
                                                                     Data       = $clean
@@ -10752,7 +10878,7 @@ function Invoke-RegistryTask {
                                 if ($data -match "App=([^|]+)") {
                                     $appPath = $matches[1]; $expanded = [Environment]::ExpandEnvironmentVariables($appPath)
                                     if ($expanded -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $expanded)) {
-                                        if (-not (Test-PathExists $expanded)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid Firewall Rule"; Data = $expanded; DisplayKey = $valName; RegPath = "HKLM:\$key"; ValueName = $valName; Type = "Value" }) }
+                                        if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid Firewall Rule"; Data = $expanded; DisplayKey = $valName; RegPath = "HKLM:\$key"; ValueName = $valName; Type = "Value" }) }
                                     }
                                 }
                             }
@@ -10790,7 +10916,7 @@ function Invoke-RegistryTask {
                                         $img = [string]$sub.GetValue("ImagePath")
                                         if ($img -and $img -notmatch "\\drivers\\") {
                                             $clean = Get-ServiceImageExecutablePath $img
-                                            if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-PathExists $clean)) {
+                                            if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
                                                 [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Orphaned Service"; Data = $clean; DisplayKey = "$key\$svc"; RegPath = "HKLM:\$key\$svc"; ValueName = $null; Type = "Key" })
                                             }
                                         }
@@ -10823,7 +10949,7 @@ function Invoke-RegistryTask {
                                                 foreach ($ver in $verKey.GetSubKeyNames()) {
                                                     $numKey = $verKey.OpenSubKey($ver)
                                                     $helpDir = $numKey.GetValue("HELPDIR")
-                                                    if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-PathExists $helpDir)) {
+                                                    if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-IsProtectedWindowsPath $helpDir) -and -not (Test-PathExists $helpDir)) {
                                                         [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $helpDir; DisplayKey = "$guid ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver" -View $view); ValueName = "HELPDIR"; Type = "Value"; Details = "Type library HELPDIR path is missing in the $viewLabel registry view." })
                                                     }
                                                     $numKey.Close()
@@ -10861,7 +10987,7 @@ function Invoke-RegistryTask {
                                             $val = $iconKey.GetValue($null)
                                             if ($val) {
                                                 $cleanPath = Get-RealExePath $val
-                                                if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
+                                                if ($cleanPath -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $cleanPath) -and -not (Test-IsProtectedWindowsPath $cleanPath) -and -not (Test-PathExists $cleanPath) -and $cleanPath -notmatch "%1") {
                                                     [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Invalid Default Icon"; Data = $cleanPath; DisplayKey = "$ext ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "$ext\DefaultIcon" -View $view); ValueName = $null; Type = "Key"; Details = "DefaultIcon path is missing in the $viewLabel registry view." })
                                                 }
                                             }
@@ -10893,7 +11019,7 @@ function Invoke-RegistryTask {
                                     $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
                                     foreach ($val in $names) {
                                         $i++; & $Tick "Scanning DLL ($viewLabel): $val" $i $total
-                                        if ($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Shared Ref"; Data = $val; DisplayKey = "SharedDlls ($viewLabel)"; RegPath = (ConvertTo-WmtHklmViewPath -SubPath $key -View $view); ValueName = $val; Type = "Value"; Details = "SharedDlls value points to a missing path in the $viewLabel registry view." }) }
+                                        if ($val -match '^[a-zA-Z]:\\' -and -not (Test-IsProtectedWindowsPath $val) -and -not(Test-PathExists -Path $val -RegistryView $view)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Shared Ref"; Data = $val; DisplayKey = "SharedDlls ($viewLabel)"; RegPath = (ConvertTo-WmtHklmViewPath -SubPath $key -View $view); ValueName = $val; Type = "Value"; Details = "SharedDlls value points to a missing path in the $viewLabel registry view." }) }
                                     }
                                 }
                             }
@@ -10919,7 +11045,7 @@ function Invoke-RegistryTask {
                                     $v = $props.$n
                                     if ($v -is [string] -and $v -match '^[a-zA-Z]:\\') { 
                                         $cleanExe = Get-RealExePath $v
-                                        if (-not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Broken Startup"; Data = $cleanExe; DisplayKey = $n; RegPath = $p; ValueName = $n; Type = "Value" }) } 
+                                        if (-not (Test-IsProtectedWindowsPath $cleanExe) -and -not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Broken Startup"; Data = $cleanExe; DisplayKey = $n; RegPath = $p; ValueName = $n; Type = "Value" }) } 
                                     } 
                                 } 
                             } 
@@ -10936,7 +11062,7 @@ function Invoke-RegistryTask {
                             $names = $rk.GetValueNames(); $total = $names.Count; $i = 0
                             foreach ($val in $names) { 
                                 $i++; & $Tick "Scanning Installer: $val" $i $total
-                                if ($val -match '^[a-zA-Z]:\\' -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Installer Folder"; Data = $val; DisplayKey = "Installer"; RegPath = "HKLM:\$k"; ValueName = $val; Type = "Value" }) } 
+                                if ($val -match '^[a-zA-Z]:\\' -and -not (Test-IsProtectedWindowsPath $val) -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Installer Folder"; Data = $val; DisplayKey = "Installer"; RegPath = "HKLM:\$k"; ValueName = $val; Type = "Value" }) } 
                             }; $rk.Close() 
                         } 
                         & $EndCategory
@@ -10997,13 +11123,14 @@ function Invoke-RegistryTask {
                         param($toDelete, $bkDir) 
                     
                         $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
-                        $fixed = 0; $skipped = 0; $backedUpKeys = @()
+                        $fixed = 0; $skipped = 0
+                        $backedUpKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
                     
                         Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
 
                         foreach ($item in $toDelete) {
                             $uid = "$($item.RegPath):$($item.ValueName)"
-                            if ($uid -notin $backedUpKeys) { Backup-RegKey -ItemObj $item -FilePath $bkFile; $backedUpKeys += $uid }
+                            if ($backedUpKeys.Add($uid)) { Backup-RegKey -ItemObj $item -FilePath $bkFile }
                         
                             if ($item.Type -eq "SetValue") {
                                 Write-GuiLog "Updating: $($item.DisplayKey)"
