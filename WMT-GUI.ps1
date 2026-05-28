@@ -8277,9 +8277,14 @@ function Show-RegScanSelection {
         "Font Entries"                    = "Fonts"
         "App Execution Aliases"           = "AppAliases"
         "Scheduled Task Cache"            = "TaskCache"
+        "Scheduled Task Actions"          = "TaskActions"
         "Uninstall Metadata Values"       = "UninstallMetadata"
         "Environment PATH Entries"        = "EnvPath"
+        "RunOnce & Policy Startup"        = "StartupExtended"
+        "AppCompat Layers"                = "AppCompatLayers"
+        "User MRU Caches"                 = "UserMru"
         "Per-User Shell Commands"         = "UserShellCommands"
+        "Image File Execution Options"    = "IFEO"
         "Firewall Rules"                  = "Firewall"
     }
 
@@ -8290,7 +8295,7 @@ function Show-RegScanSelection {
     }
 
     # --- Generate Checkboxes Dynamically ---
-    $chkBoxes = @(); $y = 0; $count = 0
+    $chkBoxes = [System.Collections.Generic.List[object]]::new(); $y = 0; $count = 0
     foreach ($key in $categories.Keys) {
         $tag = $categories[$key]
         $chk = New-Object System.Windows.Forms.CheckBox
@@ -8312,18 +8317,18 @@ function Show-RegScanSelection {
         
         if ($count % 2 -ne 0) { $y += 30 }
         
-        $pnl.Controls.Add($chk); $chkBoxes += $chk; $count++
+        $pnl.Controls.Add($chk); [void]$chkBoxes.Add($chk); $count++
     }
 
     $startDeepScan = {
-        $selected = @()
+        $selected = [System.Collections.Generic.List[object]]::new()
         foreach ($c in $chkBoxes) {
-            if ($c.Checked) { $selected += $c.Tag }
+            if ($c.Checked) { [void]$selected.Add($c.Tag) }
             $currentSettings.RegistryScan[$c.Tag] = $c.Checked
         }
         Save-WmtSettings -Settings $currentSettings
 
-        $f.Tag = $selected
+        $f.Tag = @($selected)
         $f.DialogResult = "OK"
         $f.Close()
     }
@@ -8376,11 +8381,15 @@ function Show-RegistryCleaner {
         param([object[]]$Rows)
 
         $lines = New-Object System.Collections.Generic.List[string]
-        [void]$lines.Add("Problem`tType`tValueName`tData`tDisplayKey`tRegPath`tNewData`tDetails")
+        [void]$lines.Add("Problem`tAction`tRisk`tConfidence`tDefault`tType`tValueName`tData`tDisplayKey`tRegPath`tNewData`tDetails")
         foreach ($row in @($Rows)) {
             if ($null -eq $row) { continue }
             $values = @(
                 [string]$row.Problem
+                [string]$row.FixAction
+                [string]$row.Risk
+                [string]$row.Confidence
+                [string]$row.DefaultAction
                 [string]$row.Type
                 [string]$row.ValueName
                 [string]$row.Data
@@ -8500,6 +8509,10 @@ function Show-RegistryCleaner {
 
     # Visible Columns
     [void]$dg.Columns.Add("Problem", "Problem"); $dg.Columns["Problem"].Width = 185
+    [void]$dg.Columns.Add("FixAction", "Action"); $dg.Columns["FixAction"].Width = 90
+    [void]$dg.Columns.Add("Risk", "Risk"); $dg.Columns["Risk"].Width = 70
+    [void]$dg.Columns.Add("Confidence", "Confidence"); $dg.Columns["Confidence"].Width = 85
+    [void]$dg.Columns.Add("DefaultAction", "Default"); $dg.Columns["DefaultAction"].Width = 75
     [void]$dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Width = 65
     [void]$dg.Columns.Add("ValueName", "Value"); $dg.Columns["ValueName"].Width = 150
     [void]$dg.Columns.Add("Data", "Data (Path/Value)"); $dg.Columns["Data"].AutoSizeMode = "Fill"; $dg.Columns["Data"].FillWeight = 25
@@ -8515,13 +8528,34 @@ function Show-RegistryCleaner {
     $registryRows = New-WmtVirtualRows -Items @(
         foreach ($item in $ScanResults) {
             $autoSelected = Test-WmtRegistryFindingAutoSelected -Item $item
+            $fixAction = if ($item.Type -eq "ReviewOnly") { "Review" } elseif ($item.Type -eq "Key") { "Delete key" } elseif ($item.Type -eq "SetValue") { "Update value" } else { "Delete value" }
+            $risk = if ($item.PSObject.Properties["Risk"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Risk)) {
+                [string]$item.Risk
+            }
+            elseif (-not $autoSelected) {
+                "Review"
+            }
+            elseif ($item.Type -eq "Key") {
+                "Medium"
+            }
+            else {
+                "Low"
+            }
+            $confidence = if ($item.PSObject.Properties["Confidence"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Confidence)) {
+                [string]$item.Confidence
+            }
+            elseif ($autoSelected) {
+                "High"
+            }
+            else {
+                "Medium"
+            }
             $details = if ($item.PSObject.Properties["Details"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Details)) {
                 [string]$item.Details
             }
             else {
-                $targetKind = if ($item.Type -eq "Key") { "Delete key" } elseif ($item.Type -eq "SetValue") { "Update value" } else { "Delete value" }
                 $valueText = if ($null -ne $item.ValueName) { "; Value=$($item.ValueName)" } else { "" }
-                "$targetKind; Target=$($item.RegPath)$valueText"
+                "$fixAction; Target=$($item.RegPath)$valueText"
             }
             if (-not $autoSelected) {
                 $details = "Review only; not selected by default. $details"
@@ -8533,6 +8567,10 @@ function Show-RegistryCleaner {
                 Key       = $item.DisplayKey
                 FullPath  = $item.RegPath
                 ValueName = $item.ValueName
+                FixAction = $fixAction
+                Risk      = $risk
+                Confidence = $confidence
+                DefaultAction = if ($autoSelected) { "Selected" } else { "Review" }
                 Type      = $item.Type
                 NewData   = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
                 Details   = $details
@@ -8614,9 +8652,14 @@ function Show-RegistryCleaner {
     # --- 7. Fix Button Logic ---
     $btnFix.Add_Click({
             $toFix = [System.Collections.Generic.List[object]]::new()
+            $reviewOnlySelected = 0
             try { $dg.EndEdit() } catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
+                    if ($row.Type -eq "ReviewOnly") {
+                        $reviewOnlySelected++
+                        continue
+                    }
                     [void]$toFix.Add([PSCustomObject]@{
                         RegPath    = $row.FullPath
                         ValueName  = $row.ValueName
@@ -8628,7 +8671,8 @@ function Show-RegistryCleaner {
             }
 
             if ($toFix.Count -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("No issues selected.", "Registry Cleaner", "OK", "Information") | Out-Null
+                $msg = if ($reviewOnlySelected -gt 0) { "Only review-only findings were selected. These cannot be fixed automatically." } else { "No issues selected." }
+                [System.Windows.Forms.MessageBox]::Show($msg, "Registry Cleaner", "OK", "Information") | Out-Null
                 return
             }
 
@@ -9019,11 +9063,11 @@ function Show-SafetyDialog {
     
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Location = "20, 20"; $lbl.Size = "400, 80"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lbl.Text = "You are about to force-delete $Count invalid registry keys.`n`nThese keys are locked by the system. Deleting them is generally safe for cleanup, but carries a small risk."
+    $lbl.Text = "You are about to apply $Count selected registry cleanup action(s).`n`nWMT creates a .reg backup first. Value cleanup is usually low risk; key deletion and review-selected items carry more risk."
     $f.Controls.Add($lbl)
     
-    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = "Create Restore Point && Force Clean"; $b1.DialogResult = "Yes"; $b1.Location = "50, 110"; $b1.Size = "340, 45"; $b1.BackColor = "SeaGreen"; $b1.ForeColor = "White"; $b1.FlatStyle = "Flat"; $f.Controls.Add($b1)
-    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Force Clean (No Backup)"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
+    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = "Create Restore Point && Clean"; $b1.DialogResult = "Yes"; $b1.Location = "50, 110"; $b1.Size = "340, 45"; $b1.BackColor = "SeaGreen"; $b1.ForeColor = "White"; $b1.FlatStyle = "Flat"; $f.Controls.Add($b1)
+    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Clean With .reg Backup Only"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
     $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
     
     Set-WmtWinFormsTheme -Control $f
@@ -9147,15 +9191,18 @@ function Invoke-RegistryTask {
     if ($Action -eq "DeepClean") {
         $selectedScans = Show-RegScanSelection
         if (-not $selectedScans) { return }
+        if (@($selectedScans).Count -eq 0) {
+            [System.Windows.Forms.MessageBox]::Show("No registry scan targets selected.", "Registry Cleaner", "OK", "Information") | Out-Null
+            return
+        }
 
         # Progress UI
-        $pForm = New-Object System.Windows.Forms.Form; $pForm.Text = "Scanning Registry"; $pForm.Size = "500,120"; $pForm.StartPosition = "CenterScreen"; $pForm.ControlBox = $false
+        $pForm = New-Object System.Windows.Forms.Form; $pForm.Text = "Scanning Registry"; $pForm.Size = "500,160"; $pForm.StartPosition = "CenterScreen"; $pForm.ControlBox = $false
         $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $pForm.ForeColor = "White"
         $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location = "20,15"; $pLabel.Size = "460,20"; $pLabel.Text = "Initializing Background Scan..."; $pForm.Controls.Add($pLabel)
         $pBar = New-Object System.Windows.Forms.ProgressBar; $pBar.Location = "20,45"; $pBar.Size = "440,20"; $pForm.Controls.Add($pBar)
         Set-WmtWinFormsTheme -Control $pForm
         $pLabel.ForeColor = Get-WmtThemeColor "TextPrimary"
-        $pForm.Show()
 
         # Shared Data for Thread
         $syncHash = [hashtable]::Synchronized(@{
@@ -9163,8 +9210,25 @@ function Invoke-RegistryTask {
                 Status      = "Starting..."
                 Progress    = 0
                 IsCompleted = $false
+                CancelRequested = $false
                 Error       = $null
             })
+
+        $btnCancelScan = New-Object System.Windows.Forms.Button
+        $btnCancelScan.Text = "Cancel"
+        $btnCancelScan.Location = "360,75"
+        $btnCancelScan.Size = "100,30"
+        $btnCancelScan.FlatStyle = "Flat"
+        $btnCancelScan.Add_Click({
+                $syncHash.CancelRequested = $true
+                $syncHash.Status = "Canceling scan..."
+                $syncHash.Error = "Registry scan canceled."
+                $syncHash.IsCompleted = $true
+                try { if ($ps) { $ps.Stop() } } catch {}
+            }.GetNewClosure())
+        $pForm.Controls.Add($btnCancelScan)
+        Set-WmtWinFormsButtonTheme -Button $btnCancelScan -Role Standard
+        $pForm.Show()
 
         # --- RUNSPACE CONFIGURATION ---
         $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -10043,6 +10107,26 @@ function Invoke-RegistryTask {
                                                 $clean = Get-RealExePath $path
                                                 if (-not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing App Path"; Data = $clean; DisplayKey = "$app ($viewLabel)"; RegPath = "$(ConvertTo-WmtHklmViewPath -SubPath $key -View $view)\$app"; ValueName = $null; Type = "Key"; Details = "App Paths target is missing in the $viewLabel registry view." }) }
                                             }
+                                            $pathValue = [string]$sub.GetValue("Path", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            $missingSegments = @(Get-WmtMissingPathSegments $pathValue)
+                                            if ($missingSegments.Count -gt 0) {
+                                                $newPath = Get-WmtCleanedPathValue -PathValue $pathValue -MissingSegments $missingSegments
+                                                $data = $missingSegments[0]
+                                                if ($missingSegments.Count -gt 1) { $data = "$data ($($missingSegments.Count) missing App Paths entries)" }
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid App Paths PATH Entry"
+                                                        Data       = $data
+                                                        DisplayKey = "$app ($viewLabel)"
+                                                        RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath $key -View $view)\$app"
+                                                        ValueName  = "Path"
+                                                        Type       = "SetValue"
+                                                        NewData    = $newPath
+                                                        SafeToFix  = $true
+                                                        Risk       = "Low"
+                                                        Confidence = "High"
+                                                        Details    = "Rewrites this App Paths PATH value after removing missing segment(s): $($missingSegments -join '; ')"
+                                                    })
+                                            }
                                             $sub.Close()
                                         }
                                         catch {}
@@ -10196,6 +10280,97 @@ function Invoke-RegistryTask {
                                 }
                             }
                             $root.Close()
+                        }
+                        & $EndCategory
+                    }
+
+                    # 8B. APPCOMPAT LAYERS
+                    if ($SelectedScans -contains "AppCompatLayers") {
+                        $SyncHash.Status = "Scanning AppCompat Layers..."
+                        $layerTargets = New-Object System.Collections.Generic.List[object]
+                        $layerPath = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers"
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                [void]$layerTargets.Add([PSCustomObject]@{ BaseKey = $baseKey; SubPath = $layerPath; RegPrefix = (ConvertTo-WmtHklmViewPath -SubPath $layerPath -View $view); Label = "HKLM $(Get-WmtRegistryViewLabel $view) AppCompat Layers"; OwnsBaseKey = $true })
+                            }
+                            catch {}
+                        }
+                        foreach ($target in @(New-PerUserRegistryTargets -SubPath "Software\Microsoft\Windows NT\CurrentVersion\AppCompatFlags\Layers" -HkcuLabel "HKCU\AppCompat Layers")) {
+                            [void]$layerTargets.Add([PSCustomObject]@{ BaseKey = $target.BaseKey; SubPath = $target.SubPath; RegPrefix = $target.RegPrefix; Label = $target.Label; OwnsBaseKey = $false })
+                        }
+
+                        $total = [math]::Max($layerTargets.Count, 1); $i = 0
+                        foreach ($target in $layerTargets) {
+                            $i++; & $Tick "Scanning AppCompat Layers: $($target.Label)" $i $total
+                            $root = $null
+                            try {
+                                $root = $target.BaseKey.OpenSubKey($target.SubPath, $false)
+                                if ($root) {
+                                    foreach ($valName in $root.GetValueNames()) {
+                                        if ($valName -match '^(?i)([a-z]:\\|\\\\)' -and -not (Test-IsWhitelisted $valName) -and -not (Test-IsProtectedWindowsPath $valName) -and -not (Test-PathExists $valName)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Obsolete AppCompat Layer"
+                                                    Data       = $valName
+                                                    DisplayKey = $target.Label
+                                                    RegPath    = $target.RegPrefix
+                                                    ValueName  = $valName
+                                                    Type       = "Value"
+                                                    SafeToFix  = $true
+                                                    Risk       = "Low"
+                                                    Confidence = "High"
+                                                    Details    = "Compatibility layer value points to a missing executable. Cleanup deletes only this value."
+                                                })
+                                        }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                                if ($target.OwnsBaseKey -and $target.BaseKey) { $target.BaseKey.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 8C. USER MRU CACHES
+                    if ($SelectedScans -contains "UserMru") {
+                        $SyncHash.Status = "Scanning User MRU Caches..."
+                        $mruDefinitions = @(
+                            [PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"; Label = "Recent documents"; Risk = "Low" },
+                            [PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\OpenSavePidlMRU"; Label = "Open/save dialog history"; Risk = "Low" },
+                            [PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\ComDlg32\LastVisitedPidlMRU"; Label = "Last visited dialog history"; Risk = "Low" },
+                            [PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\MountPoints2"; Label = "Mounted device/network location cache"; Risk = "Medium" }
+                        )
+
+                        $total = [math]::Max($mruDefinitions.Count, 1); $i = 0
+                        foreach ($definition in $mruDefinitions) {
+                            $i++; & $Tick "Scanning MRU cache: $($definition.Label)" $i $total
+                            foreach ($target in @(New-PerUserRegistryTargets -SubPath $definition.SubPath -HkcuLabel "HKCU\$($definition.Label)")) {
+                                $root = $null
+                                try {
+                                    $root = $target.BaseKey.OpenSubKey($target.SubPath, $false)
+                                    if ($root -and ($root.SubKeyCount -gt 0 -or $root.ValueCount -gt 0)) {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                Problem    = "User MRU Cache"
+                                                Data       = $definition.Label
+                                                DisplayKey = $target.Label
+                                                RegPath    = $target.RegPrefix
+                                                ValueName  = $null
+                                                Type       = "Key"
+                                                SafeToFix  = $false
+                                                Risk       = $definition.Risk
+                                                Confidence = "High"
+                                                Details    = "Per-user history/cache key. Windows recreates it as needed; cleanup removes stored MRU entries under this key."
+                                            })
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($root) { $root.Close() }
+                                }
+                            }
                         }
                         & $EndCategory
                     }
@@ -10687,6 +10862,72 @@ function Invoke-RegistryTask {
                         & $EndCategory
                     }
 
+                    # 16B. SCHEDULED TASK ACTIONS
+                    if ($SelectedScans -contains "TaskActions") {
+                        $SyncHash.Status = "Scanning Scheduled Task Actions..."
+                        $taskRootPath = Join-Path (Join-Path $env:windir "System32") "Tasks"
+                        $taskFiles = [System.Collections.Generic.List[string]]::new()
+                        if ([System.IO.Directory]::Exists($taskRootPath)) {
+                            $pendingDirs = [System.Collections.Generic.Stack[string]]::new()
+                            $pendingDirs.Push($taskRootPath)
+                            while ($pendingDirs.Count -gt 0) {
+                                $dir = $pendingDirs.Pop()
+                                try {
+                                    foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                        [void]$taskFiles.Add($file)
+                                    }
+                                }
+                                catch {}
+                                try {
+                                    foreach ($childDir in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                                        [void]$pendingDirs.Push($childDir)
+                                    }
+                                }
+                                catch {}
+                            }
+                        }
+
+                        $total = [math]::Max($taskFiles.Count, 1); $i = 0
+                        foreach ($taskFile in $taskFiles) {
+                            $i++; & $Tick "Scanning Task Action: $taskFile" $i $total
+                            $relativeTask = $taskFile.Substring($taskRootPath.Length).TrimStart('\')
+                            if (Test-WmtProtectedSystemTaskPath $relativeTask) { continue }
+
+                            try {
+                                [xml]$taskXml = Get-Content -LiteralPath $taskFile -Raw -ErrorAction Stop
+                                $execNodes = $taskXml.SelectNodes("//*[local-name()='Exec']")
+                                foreach ($execNode in $execNodes) {
+                                    $commandNode = $execNode.SelectSingleNode("*[local-name()='Command']")
+                                    if (-not $commandNode) { continue }
+
+                                    $command = [string]$commandNode.InnerText
+                                    $commandPath = Get-ServiceImageExecutablePath $command
+                                    if ([string]::IsNullOrWhiteSpace($commandPath)) { continue }
+                                    if (Test-IsWhitelisted $commandPath) { continue }
+                                    if (Test-IsProtectedWindowsPath $commandPath) { continue }
+                                    if (Test-PathExists $commandPath) { continue }
+
+                                    $argumentNode = $execNode.SelectSingleNode("*[local-name()='Arguments']")
+                                    $argumentText = if ($argumentNode) { [string]$argumentNode.InnerText } else { "" }
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Broken Scheduled Task Action"
+                                            Data       = $commandPath
+                                            DisplayKey = "\$relativeTask"
+                                            RegPath    = $taskFile
+                                            ValueName  = $null
+                                            Type       = "ReviewOnly"
+                                            SafeToFix  = $false
+                                            Risk       = "Review"
+                                            Confidence = "High"
+                                            Details    = "Scheduled task Exec action points to a missing command. Command: $command Arguments: $argumentText. Review or edit the task in Task Scheduler."
+                                        })
+                                }
+                            }
+                            catch {}
+                        }
+                        & $EndCategory
+                    }
+
                     # 17. UNINSTALL METADATA VALUES
                     if ($SelectedScans -contains "UninstallMetadata") {
                         $SyncHash.Status = "Scanning Uninstall Metadata..."
@@ -10703,7 +10944,7 @@ function Invoke-RegistryTask {
                             [void]$uninstallTargets.Add([PSCustomObject]@{ BaseKey = $target.BaseKey; SubPath = $target.SubPath; RegPrefix = $target.RegPrefix; Label = $target.Label; OwnsBaseKey = $false })
                         }
 
-                        $metadataValues = @("DisplayIcon", "InstallLocation", "InstallSource", "ModifyPath", "Readme", "HelpLink", "URLInfoAbout")
+                        $metadataValues = @("DisplayIcon", "InstallLocation", "InstallSource", "ModifyPath", "QuietUninstallString", "Readme", "HelpLink", "URLInfoAbout")
                         $total = [math]::Max($uninstallTargets.Count, 1); $i = 0
                         foreach ($target in $uninstallTargets) {
                             $i++; & $Tick "Scanning Uninstall Metadata: $($target.Label)" $i $total
@@ -10725,12 +10966,14 @@ function Invoke-RegistryTask {
                                                 if ([string]::IsNullOrWhiteSpace($rawValue)) { continue }
                                                 if ($rawValue -match '^(?i)(https?|mailto):') { continue }
 
-                                                $candidate = if ($valueName -eq "ModifyPath") { Get-ServiceImageExecutablePath $rawValue } elseif ($valueName -eq "DisplayIcon") { Get-RealExePath $rawValue } else { [Environment]::ExpandEnvironmentVariables($rawValue.Trim('"')) }
+                                                $candidate = if ($valueName -eq "ModifyPath" -or $valueName -eq "QuietUninstallString") { Get-ServiceImageExecutablePath $rawValue } elseif ($valueName -eq "DisplayIcon") { Get-RealExePath $rawValue } else { [Environment]::ExpandEnvironmentVariables($rawValue.Trim('"')) }
                                                 if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
                                                 if ($candidate -notmatch '^(?i)([a-z]:\\|\\\\)') { continue }
                                                 if (Test-IsWhitelisted $candidate) { continue }
                                                 if (Test-IsProtectedWindowsPath $candidate) { continue }
                                                 if (Test-PathExists $candidate) { continue }
+
+                                                $isCommandMetadata = ($valueName -eq "ModifyPath" -or $valueName -eq "QuietUninstallString")
 
                                                 [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                         Problem    = "Invalid Uninstall Metadata"
@@ -10739,7 +10982,10 @@ function Invoke-RegistryTask {
                                                         RegPath    = "$($target.RegPrefix)\$appKeyName"
                                                         ValueName  = $valueName
                                                         Type       = "Value"
-                                                        Details    = "Uninstall metadata value points to a missing local path. Cleanup deletes only this value, not the uninstall key."
+                                                        SafeToFix  = (-not $isCommandMetadata)
+                                                        Risk       = if ($isCommandMetadata) { "Review" } else { "Low" }
+                                                        Confidence = "High"
+                                                        Details    = if ($isCommandMetadata) { "Uninstall command metadata points to a missing executable. Review before deleting because the app may still be installed." } else { "Uninstall metadata value points to a missing local path. Cleanup deletes only this value, not the uninstall key." }
                                                     })
                                             }
                                         }
@@ -10860,6 +11106,115 @@ function Invoke-RegistryTask {
                             catch {}
                             finally {
                                 if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 19B. IMAGE FILE EXECUTION OPTIONS
+                    if ($SelectedScans -contains "IFEO") {
+                        $SyncHash.Status = "Scanning Image File Execution Options..."
+                        $ifeoPath = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options"
+                        $silentPath = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\SilentProcessExit"
+
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            $baseKey = $null; $ifeoRoot = $null; $silentRoot = $null
+                            try {
+                                $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+
+                                $ifeoRoot = $baseKey.OpenSubKey($ifeoPath, $false)
+                                if ($ifeoRoot) {
+                                    $names = $ifeoRoot.GetSubKeyNames(); $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($imageName in $names) {
+                                        $i++; & $Tick "Scanning IFEO ($viewLabel): $imageName" $i $total
+                                        $imageKey = $null
+                                        try {
+                                            $imageKey = $ifeoRoot.OpenSubKey($imageName, $false)
+                                            if (-not $imageKey) { continue }
+
+                                            $debugger = [string]$imageKey.GetValue("Debugger", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            $debuggerPath = Get-ServiceImageExecutablePath $debugger
+                                            if ($debuggerPath -and -not (Test-IsWhitelisted $debuggerPath) -and -not (Test-IsProtectedWindowsPath $debuggerPath) -and -not (Test-PathExists $debuggerPath)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid IFEO Debugger"
+                                                        Data       = $debuggerPath
+                                                        DisplayKey = "$imageName ($viewLabel)"
+                                                        RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath $ifeoPath -View $view)\$imageName"
+                                                        ValueName  = "Debugger"
+                                                        Type       = "Value"
+                                                        SafeToFix  = $false
+                                                        Risk       = "Review"
+                                                        Confidence = "Medium"
+                                                        Details    = "Image File Execution Options Debugger points to a missing executable. Review before deleting because IFEO can be intentionally configured."
+                                                    })
+                                            }
+
+                                            $verifierDlls = [string]$imageKey.GetValue("VerifierDlls", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            foreach ($dllPath in @($verifierDlls -split ';')) {
+                                                $candidate = Get-RealExePath $dllPath
+                                                if ($candidate -and $candidate -match '^(?i)([a-z]:\\|\\\\)' -and -not (Test-IsWhitelisted $candidate) -and -not (Test-IsProtectedWindowsPath $candidate) -and -not (Test-PathExists $candidate)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid IFEO Verifier DLL"
+                                                            Data       = $candidate
+                                                            DisplayKey = "$imageName ($viewLabel)"
+                                                            RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath $ifeoPath -View $view)\$imageName"
+                                                            ValueName  = "VerifierDlls"
+                                                            Type       = "Value"
+                                                            SafeToFix  = $false
+                                                            Risk       = "Review"
+                                                            Confidence = "Medium"
+                                                            Details    = "IFEO VerifierDlls references a missing DLL. Review before deleting because verifier settings can be intentional."
+                                                        })
+                                                }
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($imageKey) { $imageKey.Close() }
+                                        }
+                                    }
+                                }
+
+                                $silentRoot = $baseKey.OpenSubKey($silentPath, $false)
+                                if ($silentRoot) {
+                                    $names = $silentRoot.GetSubKeyNames(); $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($imageName in $names) {
+                                        $i++; & $Tick "Scanning SilentProcessExit ($viewLabel): $imageName" $i $total
+                                        $imageKey = $null
+                                        try {
+                                            $imageKey = $silentRoot.OpenSubKey($imageName, $false)
+                                            if (-not $imageKey) { continue }
+
+                                            $monitor = [string]$imageKey.GetValue("MonitorProcess", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            $monitorPath = Get-ServiceImageExecutablePath $monitor
+                                            if ($monitorPath -and -not (Test-IsWhitelisted $monitorPath) -and -not (Test-IsProtectedWindowsPath $monitorPath) -and -not (Test-PathExists $monitorPath)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid SilentProcessExit Monitor"
+                                                        Data       = $monitorPath
+                                                        DisplayKey = "$imageName ($viewLabel)"
+                                                        RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath $silentPath -View $view)\$imageName"
+                                                        ValueName  = "MonitorProcess"
+                                                        Type       = "Value"
+                                                        SafeToFix  = $false
+                                                        Risk       = "Review"
+                                                        Confidence = "Medium"
+                                                        Details    = "SilentProcessExit monitor points to a missing executable. Review before deleting because process-monitor settings can be intentional."
+                                                    })
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($imageKey) { $imageKey.Close() }
+                                        }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($ifeoRoot) { $ifeoRoot.Close() }
+                                if ($silentRoot) { $silentRoot.Close() }
+                                if ($baseKey) { $baseKey.Close() }
                             }
                         }
                         & $EndCategory
@@ -11053,6 +11408,64 @@ function Invoke-RegistryTask {
                         & $EndCategory
                     }
 
+                    # 15B. RUNONCE AND POLICY STARTUP
+                    if ($SelectedScans -contains "StartupExtended") {
+                        $SyncHash.Status = "Scanning RunOnce and Policy Startup..."
+                        $startupTargets = New-Object System.Collections.Generic.List[object]
+                        $startupSubPaths = @(
+                            "SOFTWARE\Microsoft\Windows\CurrentVersion\RunOnce",
+                            "SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Explorer\Run"
+                        )
+                        foreach ($subPath in $startupSubPaths) {
+                            foreach ($view in @(Get-WmtRegistryViews)) {
+                                try {
+                                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                    [void]$startupTargets.Add([PSCustomObject]@{ BaseKey = $baseKey; SubPath = $subPath; RegPrefix = (ConvertTo-WmtHklmViewPath -SubPath $subPath -View $view); Label = "HKLM $(Get-WmtRegistryViewLabel $view)\$subPath"; OwnsBaseKey = $true })
+                                }
+                                catch {}
+                            }
+                            $userSubPath = $subPath -replace '^SOFTWARE\\', 'Software\'
+                            foreach ($target in @(New-PerUserRegistryTargets -SubPath $userSubPath -HkcuLabel "HKCU\$userSubPath")) {
+                                [void]$startupTargets.Add([PSCustomObject]@{ BaseKey = $target.BaseKey; SubPath = $target.SubPath; RegPrefix = $target.RegPrefix; Label = $target.Label; OwnsBaseKey = $false })
+                            }
+                        }
+
+                        $total = [math]::Max($startupTargets.Count, 1); $i = 0
+                        foreach ($target in $startupTargets) {
+                            $i++; & $Tick "Scanning Startup Extension: $($target.Label)" $i $total
+                            $root = $null
+                            try {
+                                $root = $target.BaseKey.OpenSubKey($target.SubPath, $false)
+                                if ($root) {
+                                    foreach ($valName in $root.GetValueNames()) {
+                                        $rawValue = [string]$root.GetValue($valName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                        $cleanExe = Get-ServiceImageExecutablePath $rawValue
+                                        if ($cleanExe -and -not (Test-IsWhitelisted $cleanExe) -and -not (Test-IsProtectedWindowsPath $cleanExe) -and -not (Test-PathExists $cleanExe)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Broken Startup Extension"
+                                                    Data       = $cleanExe
+                                                    DisplayKey = "$($target.Label)\$valName"
+                                                    RegPath    = $target.RegPrefix
+                                                    ValueName  = $valName
+                                                    Type       = "Value"
+                                                    SafeToFix  = $true
+                                                    Risk       = "Low"
+                                                    Confidence = "High"
+                                                    Details    = "RunOnce or policy startup value points to a missing executable. Cleanup deletes only this startup value."
+                                                })
+                                        }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                                if ($target.OwnsBaseKey -and $target.BaseKey) { $target.BaseKey.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
                     # 15. INSTALLER FOLDERS
                     if ($SelectedScans -contains "Installer") { 
                         $SyncHash.Status = "Scanning Installer Folders..."
@@ -11092,9 +11505,24 @@ function Invoke-RegistryTask {
                     $ps.Dispose()
                     $rs.Dispose()
 
-                    if ($syncHash.Error) { [System.Windows.Forms.MessageBox]::Show("Scan Error: $($syncHash.Error)", "Error", "OK", "Error"); return }
+                    if ($syncHash.Error) {
+                        if ([string]$syncHash.Error -eq "Registry scan canceled.") {
+                            Write-GuiLog "Registry scan canceled."
+                            return
+                        }
+                        [System.Windows.Forms.MessageBox]::Show("Scan Error: $($syncHash.Error)", "Error", "OK", "Error"); return
+                    }
 
                     $findings = $syncHash.Findings
+                    $uniqueFindings = [System.Collections.Generic.List[object]]::new()
+                    $seenFindings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                    foreach ($finding in @($findings)) {
+                        if ($null -eq $finding) { continue }
+                        $newData = if ($finding.PSObject.Properties["NewData"]) { [string]$finding.NewData } else { "" }
+                        $key = "$($finding.Type)`0$($finding.RegPath)`0$($finding.ValueName)`0$($finding.Problem)`0$newData"
+                        if ($seenFindings.Add($key)) { [void]$uniqueFindings.Add($finding) }
+                    }
+                    $findings = $uniqueFindings
                 
                     # --- RESULTS PROCESSING ---
                     if ($findings.Count -eq 0) {
@@ -11129,6 +11557,11 @@ function Invoke-RegistryTask {
                         Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
 
                         foreach ($item in $toDelete) {
+                            if ($item.Type -eq "ReviewOnly") {
+                                $skipped++
+                                Write-GuiLog "Review only (not changed): $($item.DisplayKey)"
+                                continue
+                            }
                             $uid = "$($item.RegPath):$($item.ValueName)"
                             if ($backedUpKeys.Add($uid)) { Backup-RegKey -ItemObj $item -FilePath $bkFile }
                         
