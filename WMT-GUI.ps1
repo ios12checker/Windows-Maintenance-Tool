@@ -169,7 +169,9 @@ function Write-GuiLog {
     param($Msg)
     if ($script:LogBox) {
         $script:LogBox.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
-        $script:LogBox.ScrollToEnd()
+        if (-not $script:WmtLogAutoScrollAttached) {
+            $script:LogBox.ScrollToEnd()
+        }
     }
 }
 
@@ -2309,8 +2311,12 @@ function New-WmtBrush {
         return $window.Resources[$resourceKey]
     }
 
-    try { return [System.Windows.Media.BrushConverter]::new().ConvertFromString($ColorOrKey) }
-    catch { return [System.Windows.Media.BrushConverter]::new().ConvertFromString("#8B949E") }
+    if (-not $script:WmtBrushConverter) {
+        $script:WmtBrushConverter = [System.Windows.Media.BrushConverter]::new()
+    }
+
+    try { return $script:WmtBrushConverter.ConvertFromString($ColorOrKey) }
+    catch { return $script:WmtBrushConverter.ConvertFromString("#8B949E") }
 }
 
 function Set-WmtThemeResources {
@@ -2967,6 +2973,10 @@ function Set-MyDeviceNetworkDetails {
 }
 
 function Get-DataPath {
+    if (-not [string]::IsNullOrWhiteSpace($script:DataDir) -and [System.IO.Directory]::Exists($script:DataDir)) {
+        return $script:DataDir
+    }
+
     $root = $script:WmtRootPath
     if ([string]::IsNullOrWhiteSpace($root)) {
         foreach ($candidate in @($script:WmtLaunchPath, $script:WmtScriptPath, $PSCommandPath)) {
@@ -2983,9 +2993,13 @@ function Get-DataPath {
         $root = (Get-Location).Path
     }
     $dataPath = Join-Path $root "data"
-    if (-not (Test-Path $dataPath)) {
-        New-Item -ItemType Directory -Path $dataPath -Force | Out-Null
+    try {
+        if (-not [System.IO.Directory]::Exists($dataPath)) {
+            [void][System.IO.Directory]::CreateDirectory($dataPath)
+        }
     }
+    catch {}
+    $script:DataDir = $dataPath
     return $dataPath
 }
 $script:DataDir = Get-DataPath
@@ -18347,8 +18361,17 @@ function Set-WmtPowerSettingIndex {
 $reader = (New-Object System.Xml.XmlNodeReader $xaml)
 $window = [Windows.Markup.XamlReader]::Load($reader)
 $script:LogBox = $window.FindName("LogBox")
+$script:WmtControlCache = @{}
 
-function Get-Ctrl { param($Name) return $window.FindName($Name) }
+function Get-Ctrl {
+    param([string]$Name)
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $null }
+    if ($script:WmtControlCache.ContainsKey($Name)) { return $script:WmtControlCache[$Name] }
+
+    $ctrl = $window.FindName($Name)
+    if ($ctrl) { $script:WmtControlCache[$Name] = $ctrl }
+    return $ctrl
+}
 
 # --- THEME PALETTES ---
 $script:CurrentTheme = "dark"
@@ -18508,7 +18531,11 @@ function Update-MyDeviceResponsiveLayout {
     }
 
     $itemWidth = [math]::Floor($contentWidth / $columns)
-    $cards.ItemWidth = [math]::Max($minCardWidth, $itemWidth)
+    $newItemWidth = [math]::Max($minCardWidth, $itemWidth)
+    $currentItemWidth = [double]$cards.ItemWidth
+    if ([double]::IsNaN($currentItemWidth) -or [math]::Abs($currentItemWidth - $newItemWidth) -ge 1) {
+        $cards.ItemWidth = $newItemWidth
+    }
 }
 
 function Get-MyDeviceExportTextLines {
@@ -18631,7 +18658,7 @@ function Set-ButtonIcon {
         $path.SetResourceReference([System.Windows.Shapes.Path]::FillProperty, "TextSecondary")
     }
     else {
-        $path.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString($Color)
+        $path.Fill = New-WmtBrush $Color
     }
     $path.Stretch = "Uniform"; $path.Height = $Scale; $path.Width = $Scale; $path.Margin = "0,0,10,0"
     $txt = New-Object System.Windows.Controls.TextBlock; $txt.Text = $Text; $txt.VerticalAlignment = "Center"
@@ -18669,7 +18696,7 @@ if ($btnHealth) {
     # Red Squircle
     $rect = New-Object System.Windows.Shapes.Rectangle
     $rect.RadiusX = 4; $rect.RadiusY = 4
-    $rect.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FF3333")
+    $rect.Fill = New-WmtBrush "#FF3333"
     [void]$grid.Children.Add($rect)
     
     # White Cross (Plus shape)
@@ -19132,6 +19159,7 @@ foreach ($itemsControl in @($lstWinget, $lstAppxPackages, $lstFw, $lstCatalog, $
 }
 
 if ($LogBox) {
+    $script:WmtLogAutoScrollAttached = $true
     $LogBox.Add_TextChanged({
             param($s, $e)
             if ($svLog) { $svLog.ScrollToEnd() } else { $s.ScrollToEnd() }
@@ -22501,9 +22529,30 @@ function Set-ListViewSort {
         [System.Collections.ArrayList]$Chain
     )
     if (-not $ListView -or -not $Chain -or $Chain.Count -eq 0) { return }
+    if ($ListView.Items.Count -eq 0) { return }
+
+    try {
+        $ListView.Items.SortDescriptions.Clear()
+        foreach ($rule in $Chain) {
+            if ([string]::IsNullOrWhiteSpace([string]$rule.Property)) { continue }
+            $direction = if ([bool]$rule.Descending) {
+                [System.ComponentModel.ListSortDirection]::Descending
+            }
+            else {
+                [System.ComponentModel.ListSortDirection]::Ascending
+            }
+            $description = [System.ComponentModel.SortDescription]::new([string]$rule.Property, $direction)
+            [void]$ListView.Items.SortDescriptions.Add($description)
+        }
+        $ListView.Items.Refresh()
+        return
+    }
+    catch {
+        try { $ListView.Items.SortDescriptions.Clear() } catch {}
+    }
+
     $items = @($ListView.Items)
     if ($items.Count -eq 0) { return }
-
     $sortSpec = foreach ($rule in $Chain) {
         @{ Expression = $rule.Property; Descending = [bool]$rule.Descending }
     }
