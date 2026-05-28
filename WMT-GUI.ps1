@@ -2358,6 +2358,238 @@ function Set-WmtThemedBrush {
     $Object.SetValue($Property, (New-WmtBrush $ColorOrKey))
 }
 
+function Set-WmtWindowOwner {
+    param([System.Windows.Window]$Child)
+
+    if (-not $Child) { return }
+    try {
+        if ($window -and [object]::ReferenceEquals($Child, $window) -eq $false -and $window.IsVisible) {
+            $Child.Owner = $window
+        }
+    }
+    catch {}
+}
+
+function Add-WmtWpfRuntimeResources {
+    param([System.Windows.FrameworkElement]$Element)
+
+    if (-not $Element) { return }
+    try {
+        if ($Element.Resources.Contains("__WmtRuntimeResourcesApplied")) { return }
+        if ($Element.Resources.Contains("TransparentScrollRepeatButton")) {
+            $Element.Resources["__WmtRuntimeResourcesApplied"] = $true
+            return
+        }
+
+        [xml]$runtimeResourcesXaml = @'
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Style TargetType="{x:Type TextBlock}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+    </Style>
+
+    <Style TargetType="{x:Type Button}">
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="MinWidth" Value="86"/>
+        <Setter Property="Padding" Value="14,0"/>
+        <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="UseLayoutRounding" Value="True"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type Button}">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                            <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource TextSecondary}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BorderBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.55"/>
+                            <Setter Property="Cursor" Value="Arrow"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="{x:Type TextBox}">
+        <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="9,6"/>
+        <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+        <Setter Property="CaretBrush" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Style.Triggers>
+            <Trigger Property="IsFocused" Value="True">
+                <Setter Property="BorderBrush" Value="{DynamicResource Accent}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style TargetType="{x:Type ComboBox}">
+        <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+    </Style>
+
+    <Style TargetType="{x:Type CheckBox}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <Style TargetType="{x:Type RadioButton}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="VerticalAlignment" Value="Center"/>
+    </Style>
+
+    <Style TargetType="{x:Type ListBox}">
+        <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+    </Style>
+
+    <Style TargetType="{x:Type ProgressBar}">
+        <Setter Property="Height" Value="10"/>
+        <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{DynamicResource Accent}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+    </Style>
+
+    <Style TargetType="{x:Type DataGrid}">
+        <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+        <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="RowBackground" Value="{DynamicResource BgDark}"/>
+        <Setter Property="AlternatingRowBackground" Value="{DynamicResource BgPanel}"/>
+        <Setter Property="HeadersVisibility" Value="Column"/>
+        <Setter Property="SelectionMode" Value="Extended"/>
+        <Setter Property="SelectionUnit" Value="FullRow"/>
+        <Setter Property="AutoGenerateColumns" Value="False"/>
+    </Style>
+
+    <Style TargetType="{x:Type DataGridColumnHeader}">
+        <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="0,0,1,1"/>
+        <Setter Property="Padding" Value="8,6"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+    </Style>
+
+    <Style TargetType="{x:Type DataGridCell}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderThickness" Value="0"/>
+    </Style>
+
+    <Style TargetType="{x:Type DataGridRow}">
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Style.Triggers>
+            <Trigger Property="IsSelected" Value="True">
+                <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
+            </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <Style x:Key="TransparentScrollRepeatButton" TargetType="{x:Type RepeatButton}">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type RepeatButton}">
+                    <Border Background="Transparent"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="{x:Type ScrollBar}">
+        <Setter Property="Width" Value="10"/>
+        <Setter Property="MinWidth" Value="10"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ScrollBar}">
+                    <Grid Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                        <Track x:Name="PART_Track" IsDirectionReversed="True">
+                            <Track.DecreaseRepeatButton>
+                                <RepeatButton x:Name="PageDecreaseButton" Command="{x:Static ScrollBar.PageUpCommand}" Style="{StaticResource TransparentScrollRepeatButton}"/>
+                            </Track.DecreaseRepeatButton>
+                            <Track.Thumb>
+                                <Thumb x:Name="ScrollThumb" MinHeight="34" Background="{DynamicResource BorderBrush}">
+                                    <Thumb.Template>
+                                        <ControlTemplate TargetType="{x:Type Thumb}">
+                                            <Border Background="{TemplateBinding Background}" CornerRadius="5" Margin="2"/>
+                                        </ControlTemplate>
+                                    </Thumb.Template>
+                                </Thumb>
+                            </Track.Thumb>
+                            <Track.IncreaseRepeatButton>
+                                <RepeatButton x:Name="PageIncreaseButton" Command="{x:Static ScrollBar.PageDownCommand}" Style="{StaticResource TransparentScrollRepeatButton}"/>
+                            </Track.IncreaseRepeatButton>
+                        </Track>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="Orientation" Value="Horizontal">
+                            <Setter Property="Width" Value="Auto"/>
+                            <Setter Property="MinWidth" Value="0"/>
+                            <Setter Property="Height" Value="10"/>
+                            <Setter Property="MinHeight" Value="10"/>
+                            <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                            <Setter TargetName="ScrollThumb" Property="MinWidth" Value="34"/>
+                            <Setter TargetName="ScrollThumb" Property="MinHeight" Value="0"/>
+                            <Setter TargetName="PageDecreaseButton" Property="Command" Value="{x:Static ScrollBar.PageLeftCommand}"/>
+                            <Setter TargetName="PageIncreaseButton" Property="Command" Value="{x:Static ScrollBar.PageRightCommand}"/>
+                        </Trigger>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ScrollThumb" Property="Background" Value="{DynamicResource TextSecondary}"/>
+                        </Trigger>
+                        <Trigger SourceName="ScrollThumb" Property="IsDragging" Value="True">
+                            <Setter TargetName="ScrollThumb" Property="Background" Value="{DynamicResource Accent}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.4"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+</ResourceDictionary>
+'@
+        $reader = [System.Xml.XmlNodeReader]::new($runtimeResourcesXaml)
+        $runtimeResources = [Windows.Markup.XamlReader]::Load($reader)
+        [void]$Element.Resources.MergedDictionaries.Add($runtimeResources)
+        $Element.Resources["__WmtRuntimeResourcesApplied"] = $true
+    }
+    catch {}
+}
+
+function Add-WmtWpfScrollResources {
+    param([System.Windows.FrameworkElement]$Element)
+    Add-WmtWpfRuntimeResources -Element $Element
+}
+
 function Add-WmtThemeResources {
     param([System.Windows.FrameworkElement]$Element)
 
@@ -2365,6 +2597,7 @@ function Add-WmtThemeResources {
     $theme = if ($script:CurrentTheme -and $script:ThemePalettes.ContainsKey($script:CurrentTheme)) { $script:CurrentTheme } else { "dark" }
     $palette = $script:ThemePalettes[$theme]
     Set-WmtThemeResources -Element $Element -Palette $palette
+    Add-WmtWpfRuntimeResources -Element $Element
 
     if (-not $script:WmtThemedElements) {
         $script:WmtThemedElements = [System.Collections.ArrayList]::new()
@@ -2388,6 +2621,35 @@ function Add-WmtThemeResources {
                 })
         }
     }
+}
+
+function Invoke-WmtDispatcherPump {
+    param([System.Windows.Threading.Dispatcher]$Dispatcher = $null)
+
+    try {
+        if (-not $Dispatcher) { $Dispatcher = [System.Windows.Threading.Dispatcher]::CurrentDispatcher }
+        $Dispatcher.Invoke([Action] {}, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+    catch {}
+}
+
+function Show-WmtMessageBox {
+    param(
+        [string]$Message,
+        [string]$Title = "Windows Maintenance Tool",
+        [System.Windows.MessageBoxButton]$Button = [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]$Image = [System.Windows.MessageBoxImage]::None,
+        [System.Windows.Window]$Owner = $null
+    )
+
+    try {
+        if (-not $Owner -and $window -and $window.IsVisible) { $Owner = $window }
+        if ($Owner) {
+            return [System.Windows.MessageBox]::Show($Owner, $Message, $Title, $Button, $Image)
+        }
+    }
+    catch {}
+    return [System.Windows.MessageBox]::Show($Message, $Title, $Button, $Image)
 }
 
 function Get-WmtThemeHex {
@@ -3010,34 +3272,44 @@ function Show-TextDialog {
         [string]$Title = "Output",
         [string]$Text = ""
     )
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = $Title
-    $f.Size = "800,600"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $f.ForeColor = [System.Drawing.Color]::White
 
-    $tb = New-Object System.Windows.Forms.RichTextBox
-    $tb.Dock = "Fill"
-    $tb.ReadOnly = $true
-    $tb.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-    $tb.ForeColor = [System.Drawing.Color]::White
-    $tb.Font = New-Object System.Drawing.Font("Consolas", 10)
-    $tb.Text = $Text
-    $tb.WordWrap = $false
-    $f.Controls.Add($tb)
+    [xml]$textDialogXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="860" Height="620" MinWidth="520" MinHeight="360"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="14">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = "Close"
-    $btn.Dock = "Bottom"
-    $btn.Height = 35
-    $btn.BackColor = "DimGray"
-    $btn.ForeColor = "White"
-    $btn.Add_Click({ $f.Close() })
-    $f.Controls.Add($btn)
+        <TextBox Name="txtOutput" Grid.Row="0" IsReadOnly="True" AcceptsReturn="True" AcceptsTab="True"
+                 TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas" FontSize="12" Background="{DynamicResource BgPanel}"/>
 
-    Set-WmtWinFormsTheme -Control $f
-    $f.ShowDialog() | Out-Null
+        <Button Name="btnClose" Grid.Row="1" Content="Close" Width="94" HorizontalAlignment="Right" Margin="0,12,0,0" IsCancel="True"/>
+    </Grid>
+</Window>
+'@
+
+    try {
+        $reader = [System.Xml.XmlNodeReader]::new($textDialogXaml)
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
+        Set-WmtWindowOwner -Child $dialog
+        $dialog.Title = $Title
+
+        $txtOutput = $dialog.FindName("txtOutput")
+        $btnClose = $dialog.FindName("btnClose")
+        $txtOutput.Text = $Text
+        $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+        $dialog.ShowDialog() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Failed to open text dialog: $($_.Exception.Message)"
+    }
 }
 
 function Get-WmtVisualAncestor {
@@ -4553,113 +4825,78 @@ function Invoke-HostsUpdate {
 
 # --- HOSTS EDITOR ---
 function Show-HostsEditor {
-    # 1. SETUP FORM
-    $hForm = New-Object System.Windows.Forms.Form
-    $hForm.Text = "Hosts File Editor"
-    $hForm.Size = "900, 700"
-    $hForm.StartPosition = "CenterScreen"
-    $hForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $hForm.KeyPreview = $true
-    
-    # Initialize Dirty Flag (False)
-    $hForm.Tag = $false
-    
-    # 2. CONTROLS
-    $txtHosts = New-Object System.Windows.Forms.RichTextBox
-    $txtHosts.Dock = "Fill"
-    $txtHosts.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-    $txtHosts.ForeColor = "White"
-    $txtHosts.Font = "Consolas, 11"
-    $txtHosts.AcceptsTab = $true
-    $txtHosts.DetectUrls = $false
-    $hForm.Controls.Add($txtHosts)
-    
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 50
-    $hForm.Controls.Add($pnl)
-    
-    $btn = New-Object System.Windows.Forms.Button
-    $btn.Text = "Save"
-    $btn.BackColor = "SeaGreen"
-    $btn.ForeColor = "White"
-    $btn.FlatStyle = "Flat"
-    $btn.Top = 10
-    $btn.Left = 20
-    $btn.Width = 100
-    $pnl.Controls.Add($btn)
-    
-    $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Ctrl+S to Save"
-    $lblInfo.ForeColor = "Gray"
-    $lblInfo.AutoSize = $true
-    $lblInfo.Top = 15
-    $lblInfo.Left = 140
-    $pnl.Controls.Add($lblInfo)
-
-    Set-WmtWinFormsTheme -Control $hForm
-    Set-WmtWinFormsButtonTheme -Button $btn -Role Success
-    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
-    
     $hostsPath = "$env:windir\System32\drivers\etc\hosts"
-    
-    # 3. LOAD FILE
+    $content = ""
+
     if (Test-Path $hostsPath) {
         $diskSize = (Get-Item $hostsPath).Length
         $content = Get-Content $hostsPath -Raw -ErrorAction SilentlyContinue
-        
-        # Safety Check
+
         if ($diskSize -gt 0 -and [string]::IsNullOrWhiteSpace($content)) {
-            [System.Windows.Forms.MessageBox]::Show("Could not read Hosts file. Aborting.", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            Show-WmtMessageBox -Message "Could not read Hosts file. Aborting." -Title "Error" -Image Error | Out-Null
             return
         }
-        $txtHosts.Text = $content
     }
-    
-    # 4. HIGHLIGHTING HELPER
-    $Highlight = {
-        $sel = $txtHosts.SelectionStart
-        $len = $txtHosts.SelectionLength
-        $txtHosts.SelectAll()
-        $txtHosts.SelectionColor = Get-WmtThemeColor "TextPrimary"
-        $s = $txtHosts.Text.IndexOf("# === BEGIN USER CUSTOM ENTRIES ===")
-        $e = $txtHosts.Text.IndexOf("# === END USER CUSTOM ENTRIES ===")
-        if ($s -ge 0 -and $e -gt $s) {
-            $txtHosts.Select($s, ($e + 33) - $s)
-            $txtHosts.SelectionColor = Get-WmtThemeColor "Accent"
-        }
-        $txtHosts.Select($sel, $len)
+
+    [xml]$hostsEditorXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Hosts File Editor" Width="920" Height="720" MinWidth="660" MinHeight="460"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBox Name="txtHosts" Grid.Row="0" Margin="14" AcceptsReturn="True" AcceptsTab="True"
+                 TextWrapping="NoWrap" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Auto"
+                 FontFamily="Consolas" FontSize="13" Background="{DynamicResource BgPanel}"/>
+
+        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="14,10">
+            <Grid>
+                <TextBlock Text="Ctrl+S to Save" Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Name="btnSave" Content="Save" Width="100" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+                    <Button Name="btnClose" Content="Close" Width="94" IsCancel="True"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+'@
+
+    try {
+        $reader = [System.Xml.XmlNodeReader]::new($hostsEditorXaml)
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
+        Set-WmtWindowOwner -Child $dialog
     }
-    & $Highlight
-    
-    # 5. CHANGE TRACKING
-    $txtHosts.Add_TextChanged({
-            $hForm.Tag = $true
-            if ($hForm.Text -notmatch "\*$") {
-                $hForm.Text = "Hosts File Editor *"
-            }
-        })
-    
-    # 6. SAVE LOGIC
+    catch {
+        Write-GuiLog "Failed to open Hosts editor: $($_.Exception.Message)"
+        return
+    }
+
+    $txtHosts = $dialog.FindName("txtHosts")
+    $btnSave = $dialog.FindName("btnSave")
+    $btnClose = $dialog.FindName("btnClose")
+    $state = @{ Dirty = $false }
+
+    $txtHosts.Text = $content
+
     $SaveAction = {
-        param($FormObj, $TextBox, $FilePath, $HighlightScript)
-        
+        param($DialogObj, $TextBox, $FilePath)
+
         try {
             if ([string]::IsNullOrWhiteSpace($TextBox.Text)) {
-                $check = [System.Windows.Forms.MessageBox]::Show(
-                    "Save EMPTY file?", 
-                    "Warning", 
-                    [System.Windows.Forms.MessageBoxButtons]::YesNo, 
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
-                if ($check -eq "No") { return $false }
+                $check = Show-WmtMessageBox -Owner $DialogObj -Message "Save EMPTY file?" -Title "Warning" -Button YesNo -Image Warning
+                if ($check -ne [System.Windows.MessageBoxResult]::Yes) { return $false }
             }
-            
-            # FIX: Write the GUI editor changes without BOM
+
             $utf8NoBom = New-Object System.Text.UTF8Encoding $false
             [System.IO.File]::WriteAllText($FilePath, $TextBox.Text, $utf8NoBom)
-            
-            # FIX: Ensure proper permissions instead of using icacls
+
             try {
                 $acl = Get-Acl -Path $FilePath
                 $usersSid = [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null)
@@ -4668,71 +4905,64 @@ function Show-HostsEditor {
                 Set-Acl -Path $FilePath -AclObject $acl
             }
             catch {}
-            
-            # Flush DNS cache so immediate changes take effect
+
             ipconfig /flushdns | Out-Null
 
             if ((Get-Item $FilePath).Length -eq 0 -and $TextBox.Text.Length -gt 0) {
                 throw "Write failed (0 bytes)."
             }
-            
-            # Reset State
-            if ($FormObj) {
-                $FormObj.Tag = $false
-                $FormObj.Text = "Hosts File Editor"
-            }
-            
-            [System.Windows.Forms.MessageBox]::Show("Saved successfully and flushed DNS!", "Success", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
-            
-            # Re-apply highlighting
-            & $HighlightScript
-            
+
+            $state.Dirty = $false
+            if ($DialogObj) { $DialogObj.Title = "Hosts File Editor" }
+            Show-WmtMessageBox -Owner $DialogObj -Message "Saved successfully and flushed DNS!" -Title "Success" -Image Information | Out-Null
             return $true
         }
         catch {
-            [System.Windows.Forms.MessageBox]::Show("Error saving: $_", "Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+            Show-WmtMessageBox -Owner $DialogObj -Message "Error saving: $_" -Title "Error" -Image Error | Out-Null
             return $false
         }
     }
-    
-    # 7. EVENTS
-    $btn.Add_Click({
-            $null = & $SaveAction -FormObj $hForm -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
-        })
-    
-    $hForm.Add_KeyDown({
-            param($src, $e)
-            if ($e.Control -and $e.KeyCode -eq 'S') {
-                $e.SuppressKeyPress = $true
-                $null = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+
+    $txtHosts.Add_TextChanged({
+            $state.Dirty = $true
+            if ($dialog.Title -notmatch "\*$") {
+                $dialog.Title = "Hosts File Editor *"
             }
-        })
-    
-    # 8. CLOSE PROMPT
-    $hForm.Add_FormClosing({
+        }.GetNewClosure())
+
+    $btnSave.Add_Click({
+            $null = & $SaveAction -DialogObj $dialog -TextBox $txtHosts -FilePath $hostsPath
+        }.GetNewClosure())
+
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+
+    $dialog.Add_KeyDown({
             param($src, $e)
-    
-            if ($src.Tag -eq $true) {
-                $res = [System.Windows.Forms.MessageBox]::Show(
-                    "You have unsaved changes. Save now?", 
-                    "Confirm", 
-                    [System.Windows.Forms.MessageBoxButtons]::YesNoCancel, 
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                )
-        
-                if ($res -eq "Yes") {
-                    $success = & $SaveAction -FormObj $src -TextBox $txtHosts -FilePath $hostsPath -HighlightScript $Highlight
+            if ($e.Key -eq [System.Windows.Input.Key]::S -and (([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control)) {
+                $e.Handled = $true
+                $null = & $SaveAction -DialogObj $src -TextBox $txtHosts -FilePath $hostsPath
+            }
+        }.GetNewClosure())
+
+    $dialog.Add_Closing({
+            param($src, $e)
+
+            if ($state.Dirty -eq $true) {
+                $res = Show-WmtMessageBox -Owner $src -Message "You have unsaved changes. Save now?" -Title "Confirm" -Button YesNoCancel -Image Warning
+
+                if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
+                    $success = & $SaveAction -DialogObj $src -TextBox $txtHosts -FilePath $hostsPath
                     if (-not $success) {
                         $e.Cancel = $true
                     }
                 }
-                elseif ($res -eq "Cancel") {
+                elseif ($res -eq [System.Windows.MessageBoxResult]::Cancel) {
                     $e.Cancel = $true
                 }
             }
-        })
-    
-    $hForm.ShowDialog()
+        }.GetNewClosure())
+
+    $dialog.ShowDialog() | Out-Null
 }
 # --- STORAGE / SYSTEM ---
 function Invoke-ChkdskAll {
@@ -6506,51 +6736,1157 @@ function Show-AdvancedCleanupSelection {
     return $null
 }
 
+function Show-WmtAdvancedCleanupSelectionWpf {
+    $currentSettings = Get-WmtSettings
+    $savedStates = $currentSettings.TempCleanup
+    $isWinapp2Enabled = [bool]$currentSettings.LoadWinapp2
+    $isCleanerMlEnabled = [bool]$currentSettings.LoadCleanerML
+
+    [xml]$cleanupSelectionXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Advanced Cleanup Selection" Width="720" Height="820" MinWidth="620" MinHeight="540"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="16,12">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="260"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel>
+                    <CheckBox Name="chkToggleWinapp2" Content="Winapp2.ini rules" FontWeight="SemiBold" Margin="0,0,0,8"/>
+                    <CheckBox Name="chkToggleCleanerML" Content="BleachBit CleanerML" FontWeight="SemiBold"/>
+                </StackPanel>
+                <TextBlock Name="lblStatus" Grid.Column="1" Margin="18,0" VerticalAlignment="Center" Foreground="{DynamicResource Warning}"/>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="Search" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,4"/>
+                    <TextBox Name="txtSearch" Height="34" VerticalContentAlignment="Center"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Padding="16,12">
+            <StackPanel Name="pnlRules"/>
+        </ScrollViewer>
+
+        <Border Grid.Row="2" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,1,0,0" Padding="16,12">
+            <Grid>
+                <Button Name="btnEventLogs" Content="Clear Event Logs" Width="132" HorizontalAlignment="Left" Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Name="btnCancel" Content="Cancel" Width="94" IsCancel="True" Margin="0,0,8,0"/>
+                    <Button Name="btnAnalyze" Content="Analyze" Width="104" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}" Margin="0,0,8,0"/>
+                    <Button Name="btnClean" Content="Clean Selected" Width="128" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" IsDefault="True"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+'@
+
+    try {
+        $reader = [System.Xml.XmlNodeReader]::new($cleanupSelectionXaml)
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
+        Set-WmtWindowOwner -Child $dialog
+        $workArea = [System.Windows.SystemParameters]::WorkArea
+        $dialog.Width = [Math]::Min(720, [Math]::Max(620, $workArea.Width - 80))
+        $dialog.Height = [Math]::Min(820, [Math]::Max(540, $workArea.Height - 80))
+    }
+    catch {
+        Write-GuiLog "Failed to open WPF cleanup selection: $($_.Exception.Message)"
+        return $null
+    }
+
+    $chkToggleWinapp2 = $dialog.FindName("chkToggleWinapp2")
+    $chkToggleCleanerML = $dialog.FindName("chkToggleCleanerML")
+    $txtSearch = $dialog.FindName("txtSearch")
+    $lblStatus = $dialog.FindName("lblStatus")
+    $pnlRules = $dialog.FindName("pnlRules")
+    $btnClean = $dialog.FindName("btnClean")
+    $btnAnalyze = $dialog.FindName("btnAnalyze")
+    $btnCancel = $dialog.FindName("btnCancel")
+    $btnEventLogs = $dialog.FindName("btnEventLogs")
+
+    $chkToggleWinapp2.IsChecked = $isWinapp2Enabled
+    $chkToggleCleanerML.IsChecked = $isCleanerMlEnabled
+
+    $internalRules = @(
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail / Thumbs Cache"; Key = "Thumbnails"; Desc = "Explorer thumbcache_*.db thumbnail cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Deep Scan: Thumbs.db"; Key = "ThumbsDb"; Desc = "Finds scattered Thumbs.db files under your user profile. Can be slow."; IsInternal = $true; DefaultChecked = $false }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
+        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
+    )
+
+    $cleanupCheckboxes = [ordered]@{}
+    $checkboxSearchText = @{}
+    $sectionEntries = [System.Collections.Generic.List[object]]::new()
+
+    $sectionOrder = @{
+        "System"              = 0
+        "Browsers / Internet" = 1
+        "Productivity"        = 2
+        "Internet & Chat"     = 3
+        "Games"               = 4
+        "Applications"        = 5
+    }
+
+    $preferredGroupOrder = @{
+        "System|Windows"                      = 0
+        "System|Explorer"                     = 1
+        "System|Windows Update"               = 2
+        "System|Windows Logs"                 = 3
+        "Browsers / Internet|Google Chrome"   = 0
+        "Browsers / Internet|Microsoft Edge"  = 1
+        "Browsers / Internet|Mozilla Firefox" = 2
+        "Browsers / Internet|Brave"           = 3
+        "Browsers / Internet|Opera"           = 4
+        "Productivity|Microsoft Office"       = 0
+        "Productivity|Microsoft Outlook"      = 1
+        "Productivity|Microsoft PowerToys"    = 2
+        "Productivity|Adobe"                  = 3
+        "Internet & Chat|Discord"             = 0
+        "Internet & Chat|Spotify"             = 1
+        "Games|Steam"                         = 0
+        "Games|Epic Games"                    = 1
+        "Games|Xbox"                          = 2
+    }
+
+    $normalizeCleanerName = {
+        param($Text)
+        $name = ([string]$Text).Trim().Trim(" *")
+        $name = $name -replace "\s+", " "
+        if ($name -eq ".Thumbnails") { return "Thumbnail / Thumbs Cache" }
+        return $name
+    }.GetNewClosure()
+
+    $getCleanerDisplayGroup = {
+        param($item)
+        $rawGroup = ([string]$item.AppGroup).Trim()
+        $name = & $normalizeCleanerName $item.Name
+        if ([bool]$item.IsInternal) {
+            if (-not [string]::IsNullOrWhiteSpace($rawGroup)) { return $rawGroup }
+            return "Windows"
+        }
+        switch -Regex ($name) {
+            "^(Google Chrome|Chrome)\b" { return "Google Chrome" }
+            "^(Microsoft Edge|Edge)\b" { return "Microsoft Edge" }
+            "^(Mozilla Firefox|Firefox)\b" { return "Mozilla Firefox" }
+            "^Brave\b" { return "Brave" }
+            "^Opera\b" { return "Opera" }
+            "^SeaMonkey\b" { return "SeaMonkey" }
+            "^Microsoft\s+Office\b|^Office\b" { return "Microsoft Office" }
+            "^Microsoft\s+Outlook\b|^Outlook\b" { return "Microsoft Outlook" }
+            "^Microsoft\s+PowerToys\b|^PowerToys\b" { return "Microsoft PowerToys" }
+            "^Adobe\b|Flash Player" { return "Adobe" }
+            "^Steam\b" { return "Steam" }
+            "^Epic Games\b|^Epic\b|Fortnite" { return "Epic Games" }
+            "^Xbox\b|Minecraft|Roblox" { return "Xbox" }
+            "^Discord\b" { return "Discord" }
+            "^Spotify\b" { return "Spotify" }
+            "^NVIDIA\b" { return "NVIDIA" }
+            "^AMD\b" { return "AMD" }
+            "^Windows Update\b" { return "Windows Update" }
+            "^Windows Logs\b|Event Logs|Event Viewer|Error Reporting" { return "Windows Logs" }
+            "^Windows\b|^Microsoft Store\b|^Microsoft\s+Windows\b" { return "Windows" }
+        }
+        if (-not [string]::IsNullOrWhiteSpace($rawGroup) -and $rawGroup -ne "General") {
+            if ($rawGroup -eq "Epic") { return "Epic Games" }
+            return $rawGroup
+        }
+        return "Other Apps"
+    }.GetNewClosure()
+
+    $getCleanerDisplayName = {
+        param($item)
+        $itemKey = if ($item.Key) { [string]$item.Key } else { [string]$item.ID }
+        if ($itemKey -eq "Thumbnails") { return "Thumbnail / Thumbs Cache" }
+        $name = & $normalizeCleanerName $item.Name
+        if (-not [bool]$item.IsInternal) {
+            $displayGroup = & $getCleanerDisplayGroup $item
+            if (-not [string]::IsNullOrWhiteSpace($displayGroup) -and $displayGroup -ne "Other Apps") {
+                $name = ($name -replace ("^" + [regex]::Escape($displayGroup) + "\s*[-:]?\s*"), "").Trim()
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($name)) { return "General Cleanup" }
+        return $name
+    }.GetNewClosure()
+
+    $getCleanerDisplaySection = {
+        param($item)
+        $rawSection = ([string]$item.Section).Trim()
+        $name = & $normalizeCleanerName $item.Name
+        $group = & $getCleanerDisplayGroup $item
+        if ([bool]$item.IsInternal) {
+            if (-not [string]::IsNullOrWhiteSpace($rawSection)) { return $rawSection }
+            return "System"
+        }
+        if ($group -in @("Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "SeaMonkey")) { return "Browsers / Internet" }
+        if ($group -in @("Discord", "Spotify")) { return "Internet & Chat" }
+        if ($group -in @("Steam", "Epic Games", "Xbox") -or $rawSection -eq "Games") { return "Games" }
+        if ($group -in @("Microsoft Office", "Microsoft Outlook", "Microsoft PowerToys", "Adobe")) { return "Productivity" }
+        if ($rawSection -in @("System", "Browsers / Internet", "Productivity", "Internet & Chat", "Games", "Applications")) { return $rawSection }
+        if ($name -match "(?i)\b(Outlook|Office|PowerToys|Adobe)\b") { return "Productivity" }
+        if ($name -match "(?i)\b(Chrome|Edge|Firefox|Brave|Opera|SeaMonkey|Browser)\b") { return "Browsers / Internet" }
+        if ($name -match "(?i)\b(Discord|Spotify|Slack|Telegram|WhatsApp|Signal|Zoom)\b") { return "Internet & Chat" }
+        if ($name -match "(?i)\b(Steam|Epic Games|Fortnite|Xbox|Minecraft|Roblox)\b") { return "Games" }
+        return "Applications"
+    }.GetNewClosure()
+
+    $getCleanerSectionOrder = {
+        param($section)
+        $sectionName = [string]$section
+        if ($sectionOrder.ContainsKey($sectionName)) { return [int]$sectionOrder[$sectionName] }
+        return 99
+    }.GetNewClosure()
+
+    $getCleanerGroupOrder = {
+        param($item)
+        $section = & $getCleanerDisplaySection $item
+        $group = & $getCleanerDisplayGroup $item
+        $key = "$section|$group"
+        if ($preferredGroupOrder.ContainsKey($key)) { return [int]$preferredGroupOrder[$key] }
+        return 50
+    }.GetNewClosure()
+
+    $setVisibility = {
+        param($Element, [bool]$Visible)
+        if ($Element) {
+            $Element.Visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+        }
+    }.GetNewClosure()
+
+    $applyCleanerSearch = {
+        $q = ([string]$txtSearch.Text).ToLowerInvariant()
+        foreach ($entry in @($sectionEntries.ToArray())) {
+            $hasVisibleChildren = $false
+            $currentGroupHeader = $null
+            $currentGroupHasVisibleChildren = $false
+
+            foreach ($child in @($entry.Flow.Children)) {
+                if ([string]$child.Tag -eq "GROUPHEADER") {
+                    if ($currentGroupHeader) {
+                        & $setVisibility $currentGroupHeader ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
+                    }
+                    $currentGroupHeader = $child
+                    $currentGroupHasVisibleChildren = $false
+                    & $setVisibility $child ($q.Length -eq 0)
+                    continue
+                }
+
+                if ($child -is [System.Windows.Controls.CheckBox]) {
+                    $searchKey = [string]$child.Uid
+                    $match = ($q.Length -eq 0 -or ($checkboxSearchText.ContainsKey($searchKey) -and $checkboxSearchText[$searchKey].Contains($q)))
+                    & $setVisibility $child $match
+                    if ($match) {
+                        $hasVisibleChildren = $true
+                        $currentGroupHasVisibleChildren = $true
+                    }
+                }
+            }
+
+            if ($currentGroupHeader) {
+                & $setVisibility $currentGroupHeader ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
+            }
+            & $setVisibility $entry.Header $hasVisibleChildren
+            & $setVisibility $entry.Flow $hasVisibleChildren
+        }
+    }.GetNewClosure()
+
+    $RenderAllRules = {
+        param($allRules)
+
+        $prevStates = @{}
+        foreach ($k in $cleanupCheckboxes.Keys) {
+            $prevStates[$k] = [bool]$cleanupCheckboxes[$k].IsChecked
+        }
+
+        $pnlRules.Children.Clear()
+        $cleanupCheckboxes.Clear()
+        $checkboxSearchText.Clear()
+        $sectionEntries.Clear()
+
+        $grouped = $allRules |
+            Group-Object -Property { & $getCleanerDisplaySection $_ } |
+            Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
+
+        foreach ($group in $grouped) {
+            $sec = $group.Name
+
+            $header = [System.Windows.Controls.Border]::new()
+            $header.Background = New-WmtBrush "BgPanel"
+            $header.BorderBrush = New-WmtBrush "BorderBrush"
+            $header.BorderThickness = "1"
+            $header.CornerRadius = "4"
+            $header.Padding = "10,7"
+            $header.Margin = "0,10,0,6"
+
+            $secChk = [System.Windows.Controls.CheckBox]::new()
+            $secChk.Content = $sec
+            $secChk.FontSize = 15
+            $secChk.FontWeight = [System.Windows.FontWeights]::SemiBold
+            Set-WmtThemedBrush -Object $secChk -Property ([System.Windows.Controls.CheckBox]::ForegroundProperty) -ColorOrKey "Accent"
+            $header.Child = $secChk
+
+            $flow = [System.Windows.Controls.StackPanel]::new()
+            $flow.Margin = "16,0,0,4"
+
+            $secItems = $group.Group | Sort-Object `
+                @{ Expression = { & $getCleanerGroupOrder $_ } }, `
+                @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
+                @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
+                @{ Expression = { & $getCleanerDisplayName $_ } }
+
+            $childChecks = [System.Collections.Generic.List[object]]::new()
+            $currentGroup = $null
+            $isSecChecked = $true
+
+            foreach ($item in $secItems) {
+                $displayGroup = & $getCleanerDisplayGroup $item
+                if ($displayGroup -ne $currentGroup) {
+                    $currentGroup = $displayGroup
+                    $grpLbl = [System.Windows.Controls.TextBlock]::new()
+                    $grpLbl.Text = $currentGroup
+                    $grpLbl.Tag = "GROUPHEADER"
+                    $grpLbl.Margin = "0,10,0,4"
+                    $grpLbl.FontWeight = [System.Windows.FontWeights]::SemiBold
+                    Set-WmtThemedBrush -Object $grpLbl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
+                    [void]$flow.Children.Add($grpLbl)
+                }
+
+                $itemKey = if ($item.Key) { [string]$item.Key } else { [string]$item.ID }
+                $displayName = & $getCleanerDisplayName $item
+
+                $chk = [System.Windows.Controls.CheckBox]::new()
+                $chk.Margin = "10,0,0,5"
+                $chk.Uid = $itemKey
+                $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
+
+                if ($item.IsInternal) {
+                    $chk.Content = $displayName
+                    Set-WmtThemedBrush -Object $chk -Property ([System.Windows.Controls.CheckBox]::ForegroundProperty) -ColorOrKey "TextPrimary"
+                }
+                elseif ($item.IsCleanerML) {
+                    $chk.Content = "$displayName (CleanerML)"
+                    Set-WmtThemedBrush -Object $chk -Property ([System.Windows.Controls.CheckBox]::ForegroundProperty) -ColorOrKey "Accent"
+                }
+                else {
+                    $chk.Content = "$displayName (winapp2.ini)"
+                    Set-WmtThemedBrush -Object $chk -Property ([System.Windows.Controls.CheckBox]::ForegroundProperty) -ColorOrKey "Accent"
+                }
+
+                $searchParts = [System.Collections.Generic.List[string]]::new()
+                foreach ($part in @($chk.Content, $displayName, $displayGroup, $itemKey, $item.Name, $item.Desc, $item.AppGroup, $item.Section)) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$part)) { $searchParts.Add([string]$part) }
+                }
+                if ($itemKey -eq "Thumbnails") {
+                    $searchParts.AddRange([string[]]@("thumbs", "thumbcache", "thumbcache_*.db", "thumbs.db"))
+                }
+                elseif ($itemKey -eq "ThumbsDb") {
+                    $searchParts.AddRange([string[]]@("thumbs", "thumbnail", "thumbs.db", "deep scan"))
+                }
+                elseif (-not $item.IsInternal -and $item.Paths) {
+                    foreach ($pathRule in $item.Paths) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Path)) { $searchParts.Add([string]$pathRule.Path) }
+                        if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Pattern)) { $searchParts.Add([string]$pathRule.Pattern) }
+                    }
+                }
+                $checkboxSearchText[$itemKey] = ($searchParts -join " ").ToLowerInvariant()
+
+                if ($prevStates.ContainsKey($itemKey)) {
+                    $chk.IsChecked = [bool]$prevStates[$itemKey]
+                }
+                elseif ($savedStates.ContainsKey($itemKey)) {
+                    $chk.IsChecked = [bool]$savedStates[$itemKey]
+                }
+                elseif ($item.PSObject.Properties["DefaultChecked"]) {
+                    $chk.IsChecked = [bool]$item.DefaultChecked
+                }
+                else {
+                    $chk.IsChecked = ([bool]$item.IsInternal)
+                }
+
+                if (-not [bool]$chk.IsChecked) { $isSecChecked = $false }
+                if ($item.Desc) { $chk.ToolTip = [string]$item.Desc }
+
+                [void]$flow.Children.Add($chk)
+                $cleanupCheckboxes[$itemKey] = $chk
+                [void]$childChecks.Add($chk)
+            }
+
+            $secChk.IsChecked = $isSecChecked
+            $secChk.Add_Checked({
+                    param($s, $e)
+                    $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+                    foreach ($c in $childChecks) {
+                        if (-not $filterActive -or $c.Visibility -eq [System.Windows.Visibility]::Visible) { $c.IsChecked = $true }
+                    }
+                }.GetNewClosure())
+            $secChk.Add_Unchecked({
+                    param($s, $e)
+                    $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+                    foreach ($c in $childChecks) {
+                        if (-not $filterActive -or $c.Visibility -eq [System.Windows.Visibility]::Visible) { $c.IsChecked = $false }
+                    }
+                }.GetNewClosure())
+
+            [void]$pnlRules.Children.Add($header)
+            [void]$pnlRules.Children.Add($flow)
+            [void]$sectionEntries.Add([PSCustomObject]@{ Header = $header; Flow = $flow; HeaderCheck = $secChk; Children = $childChecks })
+        }
+
+        & $applyCleanerSearch
+    }.GetNewClosure()
+
+    $externalRuleState = @{
+        Winapp2   = @()
+        CleanerML = @()
+    }
+
+    $renderCurrentCleanerRules = {
+        $combined = @($internalRules)
+        if ($externalRuleState.Winapp2) { $combined += @($externalRuleState.Winapp2) }
+        if ($externalRuleState.CleanerML) { $combined += @($externalRuleState.CleanerML) }
+        & $RenderAllRules -allRules $combined
+    }.GetNewClosure()
+
+    & $renderCurrentCleanerRules
+
+    $loadExternalCleanerRules = {
+        param(
+            [switch]$ForceWinapp2Download,
+            [switch]$ForceCleanerMlDownload
+        )
+
+        $lblStatus.Text = "Loading cleaner rules..."
+        $dialog.Cursor = [System.Windows.Input.Cursors]::Wait
+        Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+
+        try {
+            if ([bool]$chkToggleWinapp2.IsChecked) {
+                $lblStatus.Text = "Loading Winapp2 rules..."
+                Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+                $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
+                $shouldDownload = $ForceWinapp2Download -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
+                $externalRuleState.Winapp2 = @(Get-Winapp2Rules -Download:$shouldDownload)
+            }
+            else {
+                $externalRuleState.Winapp2 = @()
+            }
+
+            if ([bool]$chkToggleCleanerML.IsChecked) {
+                $lblStatus.Text = "Loading BleachBit CleanerML..."
+                Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                $hasLocalCleanerMl = ((Get-WmtBleachBitCleanerXmlDirectories).Count -gt 0)
+                $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
+                $shouldDownloadCleanerMl = $ForceCleanerMlDownload -or ((-not $hasLocalCleanerMl) -and (-not (Test-Path $cachePath)))
+                $externalRuleState.CleanerML = @(Get-BleachBitCleanerMlRules -Download:$shouldDownloadCleanerMl)
+            }
+            else {
+                $externalRuleState.CleanerML = @()
+            }
+
+            & $renderCurrentCleanerRules
+        }
+        catch {
+            Write-GuiLog "Cleaner rules warning: $($_.Exception.Message)"
+            & $renderCurrentCleanerRules
+        }
+        finally {
+            $dialog.Cursor = [System.Windows.Input.Cursors]::Arrow
+            $lblStatus.Text = ""
+        }
+    }.GetNewClosure()
+
+    $communityLoadState = @{ Started = $false }
+    $loadCommunityRulesIfEnabled = {
+        if ($communityLoadState.Started -or (-not [bool]$chkToggleWinapp2.IsChecked -and -not [bool]$chkToggleCleanerML.IsChecked)) { return }
+        $communityLoadState.Started = $true
+        & $loadExternalCleanerRules
+    }.GetNewClosure()
+
+    $dialog.Add_ContentRendered({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
+    $dialog.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
+
+    $chkToggleWinapp2.Add_Click({
+            $currentSettings.LoadWinapp2 = [bool]$chkToggleWinapp2.IsChecked
+            Save-WmtSettings -Settings $currentSettings
+
+            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
+            $forceDownload = [bool]$chkToggleWinapp2.IsChecked -and (-not (Test-Path $iniPath))
+            & $loadExternalCleanerRules -ForceWinapp2Download:$forceDownload
+        }.GetNewClosure())
+
+    $chkToggleCleanerML.Add_Click({
+            $currentSettings.LoadCleanerML = [bool]$chkToggleCleanerML.IsChecked
+            Save-WmtSettings -Settings $currentSettings
+
+            $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
+            $forceDownload = [bool]$chkToggleCleanerML.IsChecked -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0) -and (-not (Test-Path $cachePath))
+            & $loadExternalCleanerRules -ForceCleanerMlDownload:$forceDownload
+        }.GetNewClosure())
+
+    $searchDelayTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $searchDelayTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $searchDelayTimer.Add_Tick({
+            $searchDelayTimer.Stop()
+            & $applyCleanerSearch
+        }.GetNewClosure())
+
+    $txtSearch.Add_TextChanged({
+            $searchDelayTimer.Stop()
+            $searchDelayTimer.Start()
+        }.GetNewClosure())
+
+    $dialog.Add_Closed({
+            try { $searchDelayTimer.Stop() } catch {}
+        }.GetNewClosure())
+
+    $selectionState = @{ Result = $null }
+
+    $getSelectedCleanerItems = {
+        $selectedItems = [System.Collections.Generic.List[object]]::new()
+        $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
+        foreach ($key in $cleanupCheckboxes.Keys) {
+            $cb = $cleanupCheckboxes[$key]
+            $isVisibleForAction = (-not $filterActive) -or ($cb.Visibility -eq [System.Windows.Visibility]::Visible -and $cb.Parent.Visibility -eq [System.Windows.Visibility]::Visible)
+            if ([bool]$cb.IsChecked -and $isVisibleForAction) { [void]$selectedItems.Add($cb.Tag) }
+        }
+        return , $selectedItems
+    }.GetNewClosure()
+
+    $submitCleanupSelection = {
+        param([string]$Action)
+
+        $searchDelayTimer.Stop()
+        & $applyCleanerSearch
+
+        $selectedItems = & $getSelectedCleanerItems
+        if ($selectedItems.Count -le 0) {
+            $message = if ([string]::IsNullOrWhiteSpace($txtSearch.Text)) {
+                "Select at least one cleaner first."
+            }
+            else {
+                "No visible checked cleaners match the current search. Clear the search or check a visible cleaner."
+            }
+            Show-WmtMessageBox -Owner $dialog -Message $message -Title "No Cleaners Selected" -Image Information | Out-Null
+            return
+        }
+
+        foreach ($key in $cleanupCheckboxes.Keys) {
+            $currentSettings.TempCleanup[$key] = [bool]$cleanupCheckboxes[$key].IsChecked
+        }
+        $currentSettings.LoadWinapp2 = [bool]$chkToggleWinapp2.IsChecked
+        $currentSettings.LoadCleanerML = [bool]$chkToggleCleanerML.IsChecked
+        Save-WmtSettings -Settings $currentSettings
+
+        $selectionState.Result = [PSCustomObject]@{
+            Action = $Action
+            Items  = $selectedItems.ToArray()
+        }
+        $dialog.DialogResult = $true
+    }.GetNewClosure()
+
+    $btnClean.Add_Click({ & $submitCleanupSelection "Clean" }.GetNewClosure())
+    $btnAnalyze.Add_Click({ & $submitCleanupSelection "Analyze" }.GetNewClosure())
+    $btnCancel.Add_Click({ $dialog.Close() }.GetNewClosure())
+
+    $btnEventLogs.Add_Click({
+            $confirm = Show-WmtMessageBox -Owner $dialog -Message "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete." -Title "Confirm Clear Logs" -Button YesNo -Image Warning
+            if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+            $dialog.Cursor = [System.Windows.Input.Cursors]::Wait
+            $btnEventLogs.IsEnabled = $false
+            $btnEventLogs.Content = "Clearing..."
+
+            $script:EventLogRunspace = [PowerShell]::Create().AddScript({
+                    $logs = wevtutil el
+                    $cleared = 0
+                    foreach ($log in $logs) {
+                        wevtutil cl "$log" 2>$null
+                        $cleared++
+                    }
+                    return $cleared
+                })
+            $script:EventLogAsyncResult = $script:EventLogRunspace.BeginInvoke()
+
+            $script:EventLogTimer = [System.Windows.Threading.DispatcherTimer]::new()
+            $script:EventLogTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+            $script:EventLogTimer.Add_Tick({
+                    if ($script:EventLogAsyncResult.IsCompleted) {
+                        $script:EventLogTimer.Stop()
+                        $dialog.Cursor = [System.Windows.Input.Cursors]::Arrow
+                        $btnEventLogs.IsEnabled = $true
+                        $btnEventLogs.Content = "Clear Event Logs"
+                        try {
+                            $clearedCount = $script:EventLogRunspace.EndInvoke($script:EventLogAsyncResult)
+                            if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) {
+                                $clearedCount = $clearedCount[0]
+                            }
+                            Show-WmtMessageBox -Owner $dialog -Message "Successfully processed $clearedCount Event Logs." -Title "Success" -Image Information | Out-Null
+                        }
+                        catch {
+                            Show-WmtMessageBox -Owner $dialog -Message "Error: $($_.Exception.Message)" -Title "Error" -Image Error | Out-Null
+                        }
+                        $script:EventLogRunspace.Dispose()
+                    }
+                }.GetNewClosure())
+            $script:EventLogTimer.Start()
+        }.GetNewClosure())
+
+    $dialog.ShowDialog() | Out-Null
+    return $selectionState.Result
+}
+
+function Show-WmtCleanupPreviewWpf {
+    param(
+        [System.Collections.IEnumerable]$PreviewList,
+        [string]$FinalTotalFormatted
+    )
+
+    $formatPreviewBytes = {
+        param([int64]$Bytes)
+        if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+        if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+        if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+        return "$Bytes B"
+    }.GetNewClosure()
+
+    [xml]$cleanupPreviewXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="960" Height="680" MinWidth="760" MinHeight="500" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <DataGrid Name="dgPreview" Grid.Row="0" AlternationCount="2" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="RuleName" Binding="{Binding RuleName}" Width="180" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Status" Binding="{Binding Protection}" Width="160" IsReadOnly="True"/>
+                <DataGridTextColumn Header="FilePath" Binding="{Binding FilePath}" Width="*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Size" Width="96" IsReadOnly="True"/>
+            </DataGrid.Columns>
+        </DataGrid>
+
+        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="12" Margin="0,12,0,0">
+            <Grid>
+                <CheckBox Name="chkHideProtected" Content="Hide protected" Foreground="{DynamicResource Warning}" VerticalAlignment="Center"/>
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                    <Button Name="btnCleanSelected" Content="Clean Selected" MinWidth="124" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}" Margin="0,0,8,0"/>
+                    <Button Name="btnCleanAll" Content="Clean All" MinWidth="104" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,0"/>
+                    <Button Name="btnClose" Content="Close" Width="90" IsCancel="True"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlNodeReader]::new($cleanupPreviewXaml)
+    $previewWindow = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $previewWindow
+    Set-WmtWindowOwner -Child $previewWindow
+
+    $dg = $previewWindow.FindName("dgPreview")
+    $chkHideProtected = $previewWindow.FindName("chkHideProtected")
+    $btnCleanSelected = $previewWindow.FindName("btnCleanSelected")
+    $btnCleanAll = $previewWindow.FindName("btnCleanAll")
+    $btnClose = $previewWindow.FindName("btnClose")
+
+    $allPreviewRows = [System.Collections.Generic.List[object]]::new()
+    $rowId = 0
+    foreach ($item in @($PreviewList)) {
+        $isProtected = $false
+        if ($item.PSObject.Properties["IsProtected"]) { $isProtected = [bool]$item.IsProtected }
+        $protectionReason = ""
+        if ($item.PSObject.Properties["ProtectionReason"]) { $protectionReason = [string]$item.ProtectionReason }
+        if ($isProtected -and [string]::IsNullOrWhiteSpace($protectionReason)) { $protectionReason = "Protected / in use" }
+
+        $bytes = [int64]0
+        try { $bytes = [int64]$item.RawBytes } catch {}
+
+        [void]$allPreviewRows.Add([PSCustomObject]@{
+                RowId            = $rowId
+                RuleName         = [string]$item.RuleName
+                Protection       = if ($isProtected) { $protectionReason } else { "" }
+                FilePath         = [string]$item.FilePath
+                Size             = $bytes
+                SizeText         = & $formatPreviewBytes $bytes
+                IsProtected      = $isProtected
+                ProtectionReason = $protectionReason
+            })
+        $rowId++
+    }
+
+    $previewRows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
+    $dg.ItemsSource = $previewRows
+
+    $ctxMenu = [System.Windows.Controls.ContextMenu]::new()
+    $menuOpen = [System.Windows.Controls.MenuItem]::new()
+    $menuOpen.Header = "Go to file [Open folder]"
+    $menuDelete = [System.Windows.Controls.MenuItem]::new()
+    $menuDelete.Header = "Delete file"
+    [void]$ctxMenu.Items.Add($menuOpen)
+    [void]$ctxMenu.Items.Add($menuDelete)
+    $dg.ContextMenu = $ctxMenu
+
+    $dg.Add_PreviewMouseRightButtonDown({
+            param($s, $e)
+            $row = Get-WmtVisualAncestor -Element $e.OriginalSource -AncestorType ([System.Windows.Controls.DataGridRow])
+            if ($row) {
+                if (-not $row.IsSelected) {
+                    $dg.SelectedItems.Clear()
+                    $row.IsSelected = $true
+                }
+                try { $row.Focus() | Out-Null } catch {}
+            }
+        }.GetNewClosure())
+
+    $refreshPreviewFilter = {
+        $previewRows.Clear()
+        foreach ($row in @($allPreviewRows.ToArray())) {
+            if ([bool]$chkHideProtected.IsChecked -and [bool]$row.IsProtected) { continue }
+            [void]$previewRows.Add($row)
+        }
+
+        $protectedRemaining = @($allPreviewRows.ToArray() | Where-Object { [bool]$_.IsProtected }).Count
+        $hiddenProtected = if ([bool]$chkHideProtected.IsChecked) { $protectedRemaining } else { 0 }
+        if ($protectedRemaining -gt 0) {
+            $suffix = "$protectedRemaining protected/in use"
+            if ($hiddenProtected -gt 0) { $suffix += ", $hiddenProtected hidden" }
+            $previewWindow.Title = "Cleanup Analysis Preview ($FinalTotalFormatted Total, $suffix)"
+        }
+        else {
+            $previewWindow.Title = "Cleanup Analysis Preview ($FinalTotalFormatted Total)"
+        }
+
+        $hasRows = ($previewRows.Count -gt 0)
+        $btnCleanSelected.IsEnabled = $hasRows
+        $btnCleanAll.IsEnabled = $hasRows
+        $menuDelete.IsEnabled = $hasRows
+    }.GetNewClosure()
+
+    $removePreviewRowsByIds = {
+        param([int[]]$RowIds)
+        if (-not $RowIds -or $RowIds.Count -eq 0) { return }
+        $removeLookup = @{}
+        foreach ($id in $RowIds) { $removeLookup[[int]$id] = $true }
+        for ($i = $allPreviewRows.Count - 1; $i -ge 0; $i--) {
+            if ($removeLookup.ContainsKey([int]$allPreviewRows[$i].RowId)) {
+                $allPreviewRows.RemoveAt($i)
+            }
+        }
+        & $refreshPreviewFilter
+    }.GetNewClosure()
+
+    $openSelectedPath = {
+        if ($dg.SelectedItems.Count -le 0) { return }
+        $path = [string]$dg.SelectedItems[0].FilePath
+        if (Test-Path -LiteralPath $path) {
+            Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
+        }
+    }.GetNewClosure()
+
+    $invokePreviewDeletion = {
+        param(
+            [object[]]$Targets,
+            [string]$ActionTitle
+        )
+
+        $deleteTargets = [System.Collections.Generic.List[object]]::new()
+        $seenIds = @{}
+        foreach ($target in @($Targets)) {
+            if (-not $target) { continue }
+            $id = [int]$target.RowId
+            if ($seenIds.ContainsKey($id)) { continue }
+            [void]$deleteTargets.Add([PSCustomObject]@{
+                    RowId    = $id
+                    FilePath = [string]$target.FilePath
+                    Size     = [int64]$target.Size
+                })
+            $seenIds[$id] = $true
+        }
+
+        if ($deleteTargets.Count -eq 0) { return }
+
+        $targetArray = $deleteTargets.ToArray()
+        $completedIds = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+        $failedPaths = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+        $deleteState = [hashtable]::Synchronized(@{
+                Total        = $targetArray.Count
+                Processed    = 0
+                Deleted      = 0
+                Missing      = 0
+                Failed       = 0
+                Bytes        = [int64]0
+                Current      = ""
+                Cancel       = $false
+                IsCompleted  = $false
+                Error        = ""
+                CompletedIds = $completedIds
+                FailedPaths  = $failedPaths
+            })
+
+        [xml]$deleteProgressXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="560" Height="190" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Name="deleteLabel" Text="Preparing deletion..." TextTrimming="CharacterEllipsis"/>
+        <TextBlock Name="deleteCurrent" Grid.Row="1" Text="Starting worker..." Foreground="{DynamicResource TextSecondary}" Margin="0,8,0,14" TextTrimming="CharacterEllipsis"/>
+        <ProgressBar Name="deleteProgress" Grid.Row="2" Height="12" Minimum="0"/>
+        <Button Name="btnCancelDelete" Grid.Row="3" Content="Cancel" Width="94" HorizontalAlignment="Right" Margin="0,16,0,0"/>
+    </Grid>
+</Window>
+'@
+        $reader = [System.Xml.XmlNodeReader]::new($deleteProgressXaml)
+        $deleteWindow = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $deleteWindow
+        try { $deleteWindow.Owner = $previewWindow } catch {}
+        $deleteWindow.Title = $ActionTitle
+        $deleteLabel = $deleteWindow.FindName("deleteLabel")
+        $deleteCurrent = $deleteWindow.FindName("deleteCurrent")
+        $deleteProgress = $deleteWindow.FindName("deleteProgress")
+        $btnCancelDelete = $deleteWindow.FindName("btnCancelDelete")
+        $deleteProgress.Maximum = [Math]::Max(1, $targetArray.Count)
+
+        $worker = @{
+            PowerShell = $null
+            Runspace   = $null
+            Async      = $null
+            Ended      = $false
+        }
+
+        $disposeWorker = {
+            try { if ($worker.PowerShell) { $worker.PowerShell.Dispose() } } catch {}
+            try {
+                if ($worker.Runspace) {
+                    $worker.Runspace.Close()
+                    $worker.Runspace.Dispose()
+                }
+            }
+            catch {}
+            $worker.PowerShell = $null
+            $worker.Runspace = $null
+            $worker.Async = $null
+        }.GetNewClosure()
+
+        try {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ThreadOptions = "ReuseThread"
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+            [void]$ps.AddScript({
+                    param([object[]]$Targets, [hashtable]$State)
+                    $ErrorActionPreference = "SilentlyContinue"
+                    try {
+                        foreach ($target in @($Targets)) {
+                            if ([bool]$State["Cancel"]) { break }
+
+                            $path = [string]$target.FilePath
+                            $rowId = [int]$target.RowId
+                            $bytes = [int64]0
+                            try { $bytes = [int64]$target.Size } catch {}
+
+                            $State["Current"] = $path
+                            try {
+                                if ([string]::IsNullOrWhiteSpace($path)) {
+                                    [void]$State["CompletedIds"].Add($rowId)
+                                    $State["Missing"] = ([int]$State["Missing"]) + 1
+                                    continue
+                                }
+
+                                if (Test-Path -LiteralPath $path) {
+                                    $itemInfo = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                                    if ($itemInfo -and -not $itemInfo.PSIsContainer) {
+                                        try { $itemInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
+                                    }
+                                    Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
+                                    $State["Deleted"] = ([int]$State["Deleted"]) + 1
+                                    $State["Bytes"] = ([int64]$State["Bytes"]) + $bytes
+                                }
+                                else {
+                                    $State["Missing"] = ([int]$State["Missing"]) + 1
+                                }
+                                [void]$State["CompletedIds"].Add($rowId)
+                            }
+                            catch {
+                                $State["Failed"] = ([int]$State["Failed"]) + 1
+                                if (-not [string]::IsNullOrWhiteSpace($path)) {
+                                    [void]$State["FailedPaths"].Add($path)
+                                }
+                            }
+                            finally {
+                                $State["Processed"] = ([int]$State["Processed"]) + 1
+                            }
+                        }
+                    }
+                    catch {
+                        $State["Error"] = $_.Exception.Message
+                    }
+                    finally {
+                        $State["IsCompleted"] = $true
+                    }
+                }).AddArgument($targetArray).AddArgument($deleteState)
+
+            $worker.PowerShell = $ps
+            $worker.Runspace = $runspace
+            $worker.Async = $ps.BeginInvoke()
+        }
+        catch {
+            & $disposeWorker
+            Show-WmtMessageBox -Owner $previewWindow -Message "Could not start cleanup worker.`n$($_.Exception.Message)" -Title "Cleanup Error" -Image Error | Out-Null
+            return
+        }
+
+        $btnCleanSelected.IsEnabled = $false
+        $btnCleanAll.IsEnabled = $false
+        $menuDelete.IsEnabled = $false
+
+        $btnCancelDelete.Add_Click({
+                $deleteState["Cancel"] = $true
+                $btnCancelDelete.IsEnabled = $false
+                $deleteCurrent.Text = "Stopping after the current item..."
+            }.GetNewClosure())
+
+        $deleteTimer = [System.Windows.Threading.DispatcherTimer]::new()
+        $deleteTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+        $deleteTimer.Add_Tick({
+                try {
+                    $total = [Math]::Max(1, [int]$deleteState["Total"])
+                    $processed = [Math]::Max(0, [int]$deleteState["Processed"])
+                    $deleted = [Math]::Max(0, [int]$deleteState["Deleted"])
+                    $missing = [Math]::Max(0, [int]$deleteState["Missing"])
+                    $failed = [Math]::Max(0, [int]$deleteState["Failed"])
+                    $bytes = [int64]$deleteState["Bytes"]
+                    $currentPath = [string]$deleteState["Current"]
+                    $freed = & $formatPreviewBytes $bytes
+
+                    $deleteProgress.Value = [Math]::Min($deleteProgress.Maximum, $processed)
+                    $deleteLabel.Text = "$processed/$total processed | Deleted: $deleted | Failed: $failed | Recovered: $freed"
+                    if ([bool]$deleteState["Cancel"] -and -not [bool]$deleteState["IsCompleted"]) {
+                        $deleteCurrent.Text = "Stopping after the current item..."
+                    }
+                    elseif ($missing -gt 0) {
+                        $deleteCurrent.Text = "Current: $currentPath  ($missing already missing)"
+                    }
+                    else {
+                        $deleteCurrent.Text = "Current: $currentPath"
+                    }
+
+                    if ([bool]$deleteState["IsCompleted"] -or ($worker.Async -and $worker.Async.IsCompleted)) {
+                        $deleteTimer.Stop()
+                        try {
+                            if ($worker.Async -and -not $worker.Ended) {
+                                [void]$worker.PowerShell.EndInvoke($worker.Async)
+                                $worker.Ended = $true
+                            }
+                        }
+                        catch {
+                            if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
+                                $deleteState["Error"] = $_.Exception.Message
+                            }
+                        }
+                        $deleteWindow.Close()
+                    }
+                }
+                catch {
+                    $deleteState["Error"] = $_.Exception.Message
+                    $deleteTimer.Stop()
+                    $deleteWindow.Close()
+                }
+            }.GetNewClosure())
+
+        try {
+            $deleteWindow.Add_ContentRendered({ $deleteTimer.Start() }.GetNewClosure())
+            $deleteWindow.ShowDialog() | Out-Null
+        }
+        finally {
+            try { $deleteTimer.Stop() } catch {}
+            try {
+                if ($worker.Async -and $worker.Async.IsCompleted -and -not $worker.Ended) {
+                    [void]$worker.PowerShell.EndInvoke($worker.Async)
+                    $worker.Ended = $true
+                }
+            }
+            catch {
+                if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
+                    $deleteState["Error"] = $_.Exception.Message
+                }
+            }
+            & $disposeWorker
+        }
+
+        $completedRowIds = @($deleteState["CompletedIds"] | ForEach-Object { [int]$_ })
+        $failedLookup = @{}
+        foreach ($failedPath in @($deleteState["FailedPaths"])) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$failedPath)) { $failedLookup[[string]$failedPath] = $true }
+        }
+
+        if ($failedLookup.Count -gt 0) {
+            foreach ($row in @($allPreviewRows.ToArray())) {
+                if ($row -and $failedLookup.ContainsKey([string]$row.FilePath)) {
+                    $row.IsProtected = $true
+                    $row.ProtectionReason = "Delete failed"
+                    $row.Protection = "Delete failed"
+                }
+            }
+        }
+
+        if ($completedRowIds.Count -gt 0) { & $removePreviewRowsByIds -RowIds ([int[]]$completedRowIds) }
+        else { & $refreshPreviewFilter }
+
+        $finalFreed = & $formatPreviewBytes ([int64]$deleteState["Bytes"])
+        $finalDeleted = [int]$deleteState["Deleted"]
+        $finalMissing = [int]$deleteState["Missing"]
+        $finalFailed = [int]$deleteState["Failed"]
+        $wasCanceled = [bool]$deleteState["Cancel"]
+        $workerError = [string]$deleteState["Error"]
+
+        if ($finalFailed -gt 0) {
+            Write-GuiLog "Preview cleanup completed with $finalFailed failure(s). Recovered: $finalFreed"
+            foreach ($failedPath in @($deleteState["FailedPaths"] | Select-Object -First 5)) {
+                Write-GuiLog "Failed to delete from Analyze: $failedPath"
+            }
+        }
+        elseif ($wasCanceled) {
+            Write-GuiLog "Preview cleanup canceled. Recovered: $finalFreed"
+        }
+        else {
+            Write-GuiLog "Preview cleanup finished. Recovered: $finalFreed"
+        }
+
+        $resultText = if ($wasCanceled) {
+            "Cleanup canceled.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
+        }
+        else {
+            "Cleanup complete.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($workerError)) { $resultText += "`n`nWorker note: $workerError" }
+
+        $icon = if ($finalFailed -gt 0 -or -not [string]::IsNullOrWhiteSpace($workerError)) {
+            [System.Windows.MessageBoxImage]::Warning
+        }
+        else {
+            [System.Windows.MessageBoxImage]::Information
+        }
+        Show-WmtMessageBox -Owner $previewWindow -Message $resultText -Title "Cleanup Results" -Image $icon | Out-Null
+    }.GetNewClosure()
+
+    $menuOpen.Add_Click({ & $openSelectedPath }.GetNewClosure())
+    $menuDelete.Add_Click({
+            if ($dg.SelectedItems.Count -gt 0) {
+                & $invokePreviewDeletion -Targets @($dg.SelectedItems) -ActionTitle "Deleting Preview Items"
+            }
+        }.GetNewClosure())
+    $dg.Add_MouseDoubleClick({ & $openSelectedPath }.GetNewClosure())
+    $chkHideProtected.Add_Checked({ & $refreshPreviewFilter }.GetNewClosure())
+    $chkHideProtected.Add_Unchecked({ & $refreshPreviewFilter }.GetNewClosure())
+    $btnClose.Add_Click({ $previewWindow.Close() }.GetNewClosure())
+    $btnCleanSelected.Add_Click({
+            if ($dg.SelectedItems.Count -gt 0) {
+                & $invokePreviewDeletion -Targets @($dg.SelectedItems) -ActionTitle "Cleaning Selected Items"
+            }
+        }.GetNewClosure())
+    $btnCleanAll.Add_Click({
+            if ($previewRows.Count -eq 0) { return }
+            $confirm = Show-WmtMessageBox -Owner $previewWindow -Message "Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?" -Title "Confirm Clean All" -Button YesNo -Image Warning
+            if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+                & $invokePreviewDeletion -Targets @($previewRows) -ActionTitle "Cleaning All Preview Items"
+            }
+        }.GetNewClosure())
+
+    $protectedPreviewCount = @($allPreviewRows.ToArray() | Where-Object { [bool]$_.IsProtected }).Count
+    if ($protectedPreviewCount -gt 0) {
+        Write-GuiLog "Analysis flagged $protectedPreviewCount protected or in-use item(s)."
+    }
+    & $refreshPreviewFilter
+    $previewWindow.ShowDialog() | Out-Null
+}
+
 function Invoke-TempCleanup {
     # 1. GET SELECTION
-    $uiResult = Show-AdvancedCleanupSelection
-    
-    # FIX: Force the returned items into an array @() to prevent PowerShell 
+    $uiResult = Show-WmtAdvancedCleanupSelectionWpf
+
+    # FIX: Force the returned items into an array @() to prevent PowerShell
     # from unrolling single-item selections and losing the .Count property.
     $selections = @($uiResult.Items)
 
-    if (-not $uiResult -or $selections.Count -eq 0) { 
+    if (-not $uiResult -or $selections.Count -eq 0) {
         Write-GuiLog "Cleanup/Analysis canceled: No items selected."
-        return 
+        return
     }
 
     $isAnalyze = ($uiResult.Action -eq "Analyze")
-    
+
     # Generic List for high-performance preview tracking
     $previewList = New-Object System.Collections.Generic.List[PSCustomObject]
 
     # 2. SETUP PROGRESS UI
-    $pForm = New-Object System.Windows.Forms.Form
-    $pForm.Text = if ($isAnalyze) { "Analyzing System..." } else { "Deep Cleaning System" }
-    $pForm.Size = "500,160"
-    $pForm.StartPosition = "CenterScreen"
-    $pForm.ControlBox = $false
-    $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $pForm.ForeColor = "White"
+    [xml]$cleanupProgressXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Width="520" Height="170" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-    $pLabel = New-Object System.Windows.Forms.Label
-    $pLabel.Location = "20,15"; $pLabel.Size = "460,20"
-    $pLabel.Text = "Initializing..."
-    $pForm.Controls.Add($pLabel)
-
-    $pStatus = New-Object System.Windows.Forms.Label
-    $pStatus.Location = "20,40"; $pStatus.Size = "460,20"
-    $pStatus.ForeColor = "Gray"
-    $pStatus.Text = "Preparing..."
-    $pForm.Controls.Add($pStatus)
-
-    $pBar = New-Object System.Windows.Forms.ProgressBar
-    $pBar.Location = "20,70"; $pBar.Size = "440,20"
-    $pForm.Controls.Add($pBar)
-
-    Set-WmtWinFormsTheme -Control $pForm
+        <TextBlock Name="pLabel" Text="Initializing..." Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis"/>
+        <TextBlock Name="pStatus" Grid.Row="1" Text="Preparing..." Foreground="{DynamicResource TextSecondary}" Margin="0,8,0,14" TextTrimming="CharacterEllipsis"/>
+        <ProgressBar Name="pBar" Grid.Row="2" Minimum="0" Maximum="100" Height="12"/>
+    </Grid>
+</Window>
+'@
+    $reader = [System.Xml.XmlNodeReader]::new($cleanupProgressXaml)
+    $pForm = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $pForm
+    Set-WmtWindowOwner -Child $pForm
+    $pForm.Title = if ($isAnalyze) { "Analyzing System..." } else { "Deep Cleaning System" }
+    $pLabel = $pForm.FindName("pLabel")
+    $pStatus = $pForm.FindName("pStatus")
+    $pBar = $pForm.FindName("pBar")
+    $progressState = @{ Closed = $false }
+    $pForm.Add_Closed({ $progressState.Closed = $true }.GetNewClosure())
     $pForm.Show()
-    [System.Windows.Forms.Application]::DoEvents()
+    Invoke-WmtDispatcherPump -Dispatcher $pForm.Dispatcher
 
     # 3. STATS TRACKING
     $stats = @{
@@ -6558,7 +7894,7 @@ function Invoke-TempCleanup {
         Bytes    = 0
         Progress = 0.0
     }
-    
+
     $ruleWeight = 100.0 / ($selections.Count)
 
     # --- HELPER: FILE SIZE FORMATTER ---
@@ -6696,7 +8032,7 @@ function Invoke-TempCleanup {
         if (-not $pathHasWildcard -and -not (Test-Path -LiteralPath $Path)) { return }
 
         $pStatus.Text = "Scanning: $(Split-Path $Path -Leaf)"
-        [System.Windows.Forms.Application]::DoEvents()
+        Invoke-WmtDispatcherPump -Dispatcher $pForm.Dispatcher
 
         try {
             $batchCount = 0
@@ -6733,7 +8069,7 @@ function Invoke-TempCleanup {
                                 $mb = [math]::Round($stats.Bytes / 1MB, 2)
                                 $verb = if ($isAnalyze) { "Found" } else { "Removed" }
                                 $pLabel.Text = "${verb}: $($stats.Deleted) | Space: $mb MB"
-                                [System.Windows.Forms.Application]::DoEvents()
+                                Invoke-WmtDispatcherPump -Dispatcher $pForm.Dispatcher
                                 $batchCount = 0
                             }
                         }
@@ -6888,7 +8224,7 @@ function Invoke-TempCleanup {
                 "deep" {
                     if (Test-Path -LiteralPath $path) {
                         $pStatus.Text = "Deep scan: $(Split-Path $path -Leaf)"
-                        [System.Windows.Forms.Application]::DoEvents()
+                        Invoke-WmtDispatcherPump -Dispatcher $pForm.Dispatcher
                         $root = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
                         if ($root -and (Test-WmtCleanerMlTargetMatch -Item $root -Rule $Rule)) { [void]$targets.Add($root) }
                         if ($root -and $root.PSIsContainer) {
@@ -7389,10 +8725,10 @@ function Invoke-TempCleanup {
                 $pStatus.Text = "Finished: $($task.RuleName)"
             }
 
-            [System.Windows.Forms.Application]::DoEvents()
+            Invoke-WmtDispatcherPump -Dispatcher $pForm.Dispatcher
             Start-Sleep -Milliseconds 120
 
-            if ($pForm.IsDisposed) {
+            if ($progressState.Closed) {
                 foreach ($entry in @($running.GetEnumerator())) {
                     try { Stop-Job -Job $entry.Value.Job -Force -ErrorAction SilentlyContinue } catch {}
                     try { Remove-Job -Job $entry.Value.Job -Force -ErrorAction SilentlyContinue } catch {}
@@ -7440,7 +8776,7 @@ function Invoke-TempCleanup {
     try {
         if (-not $usedOutOfProcessAnalyze) {
             foreach ($item in $selections) {
-                if ($pForm.IsDisposed) { break }
+                if ($progressState.Closed) { break }
 
                 $startBytes = $stats.Bytes
             
@@ -7561,6 +8897,9 @@ function Invoke-TempCleanup {
         Write-GuiLog "Total Found: $finalTotalFormatted"
         
         if ($previewList.Count -gt 0) {
+            Show-WmtCleanupPreviewWpf -PreviewList $previewList -FinalTotalFormatted $finalTotalFormatted
+            return
+
             $gridForm = New-Object System.Windows.Forms.Form
             $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total)"
             $gridForm.Size = "800,650"
@@ -8227,13 +9566,13 @@ function Invoke-TempCleanup {
             $gridForm.ShowDialog() | Out-Null
         }
         else {
-            [System.Windows.Forms.MessageBox]::Show("No files found to clean.", "Analysis Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+            Show-WmtMessageBox -Message "No files found to clean." -Title "Analysis Results" -Image Information | Out-Null
         }
     }
     else {
         Write-GuiLog "Total Removed: $finalTotalFormatted"
         $msg = "Cleanup Complete.`n`nFiles Removed: $($stats.Deleted)`nSpace Recovered: $finalTotalFormatted"
-        [System.Windows.Forms.MessageBox]::Show($msg, "Cleanup Results", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+        Show-WmtMessageBox -Message $msg -Title "Cleanup Results" -Image Information | Out-Null
     }
 }
 
@@ -8242,29 +9581,6 @@ function Show-RegScanSelection {
     # 1. LOAD SETTINGS
     $currentSettings = Get-WmtSettings
     $savedStates = $currentSettings.RegistryScan
-
-    # --- Form Setup ---
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Select Registry Scan Targets"
-    $f.Size = "640, 550"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $f.ForeColor = "White"
-    $f.FormBorderStyle = "FixedDialog"
-    $f.MaximizeBox = $false
-
-    # --- Header Label ---
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Select areas to scan:"
-    $lbl.AutoSize = $true; $lbl.Location = "20, 15"
-    $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10, [System.Drawing.FontStyle]::Bold)
-    $f.Controls.Add($lbl)
-
-    # --- Scrollable Panel for Checkboxes ---
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Location = "20, 50"; $pnl.Size = "590, 380"; $pnl.AutoScroll = $true
-    Set-WmtDoubleBuffered -Control $pnl
-    $f.Controls.Add($pnl)
 
     # --- Define Categories ---
     $categories = [ordered]@{
@@ -8308,84 +9624,97 @@ function Show-RegScanSelection {
         }
     }
 
-    # --- Generate Checkboxes Dynamically ---
-    $chkBoxes = [System.Collections.Generic.List[object]]::new(); $y = 0; $count = 0
+    [xml]$regScanXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Select Registry Scan Targets" Width="680" Height="560" MinWidth="620" MinHeight="500"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="MinWidth" Value="106"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+            <Setter Property="Padding" Value="14,0"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Margin" Value="0,0,16,10"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,14">
+            <TextBlock Text="Select areas to scan" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+            <TextBlock Text="Checked targets are saved for future registry scans." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="14">
+            <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                <UniformGrid Name="pnlChecks" Columns="2"/>
+            </ScrollViewer>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                <Button Name="btnCancel" Content="Cancel" IsCancel="True"/>
+                <Button Name="btnBackupHKLM" Content="Export HKLM"/>
+                <Button Name="btnRestore" Content="Import Backup"/>
+            </StackPanel>
+            <Button Name="btnScan" Content="Start Deep Scan" HorizontalAlignment="Right" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" IsDefault="True"/>
+        </Grid>
+    </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $regScanXaml
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $dialog
+    Set-WmtWindowOwner -Child $dialog
+
+    $pnlChecks = $dialog.FindName("pnlChecks")
+    $btnBackupHKLM = $dialog.FindName("btnBackupHKLM")
+    $btnRestore = $dialog.FindName("btnRestore")
+    $btnScan = $dialog.FindName("btnScan")
+
+    $chkBoxes = [System.Collections.Generic.List[object]]::new()
     foreach ($key in $categories.Keys) {
         $tag = $categories[$key]
-        $chk = New-Object System.Windows.Forms.CheckBox
-        $chk.Text = $key
+        $chk = [System.Windows.Controls.CheckBox]::new()
+        $chk.Content = $key
         $chk.Tag = $tag
-        $chk.AutoSize = $true
-        
-        # APPLY SAVED STATE (Default to True)
-        if ($savedStates.ContainsKey($tag)) {
-            $chk.Checked = $savedStates[$tag]
-        }
-        else {
-            $chk.Checked = $true
-        }
-        
-        # Grid Layout: 2 Columns
-        if ($count % 2 -eq 0) { $x = 0 } else { $x = 280 }
-        $chk.Location = "$x, $y"
-        
-        if ($count % 2 -ne 0) { $y += 30 }
-        
-        $pnl.Controls.Add($chk); [void]$chkBoxes.Add($chk); $count++
+        $chk.IsChecked = if ($savedStates.ContainsKey($tag)) { [bool]$savedStates[$tag] } else { $true }
+        [void]$pnlChecks.Children.Add($chk)
+        [void]$chkBoxes.Add($chk)
     }
 
-    $startDeepScan = {
-        $selected = [System.Collections.Generic.List[object]]::new()
-        foreach ($c in $chkBoxes) {
-            if ($c.Checked) { [void]$selected.Add($c.Tag) }
-            $currentSettings.RegistryScan[$c.Tag] = $c.Checked
-        }
-        Save-WmtSettings -Settings $currentSettings
-
-        $f.Tag = @($selected)
-        $f.DialogResult = "OK"
-        $f.Close()
-    }
-
-    # --- Buttons ---
-    $btnBackupHKLM = New-Object System.Windows.Forms.Button
-    $btnBackupHKLM.Text = "Export HKLM"
-    $btnBackupHKLM.Location = "135, 450"; $btnBackupHKLM.Width = 130; $btnBackupHKLM.Height = 40
-    $btnBackupHKLM.BackColor = "DimGray"; $btnBackupHKLM.ForeColor = "White"; $btnBackupHKLM.FlatStyle = "Flat"
     $btnBackupHKLM.Add_Click({ Invoke-RegistryTask -Action "BackupHKLM" }.GetNewClosure())
-    $f.Controls.Add($btnBackupHKLM)
-
-    $btnRestore = New-Object System.Windows.Forms.Button
-    $btnRestore.Text = "Import Backup"
-    $btnRestore.Location = "275, 450"; $btnRestore.Width = 130; $btnRestore.Height = 40
-    $btnRestore.BackColor = "DimGray"; $btnRestore.ForeColor = "White"; $btnRestore.FlatStyle = "Flat"
     $btnRestore.Add_Click({ Invoke-RegistryTask -Action "Restore" }.GetNewClosure())
-    $f.Controls.Add($btnRestore)
+    $btnScan.Add_Click({
+            $selected = [System.Collections.Generic.List[object]]::new()
+            foreach ($c in $chkBoxes) {
+                if ([bool]$c.IsChecked) { [void]$selected.Add($c.Tag) }
+                $currentSettings.RegistryScan[$c.Tag] = [bool]$c.IsChecked
+            }
+            Save-WmtSettings -Settings $currentSettings
 
-    $btnScan = New-Object System.Windows.Forms.Button
-    $btnScan.Text = "Start Deep Scan"
-    $btnScan.Location = "450, 450"; $btnScan.Width = 160; $btnScan.Height = 40
-    $btnScan.BackColor = "SeaGreen"; $btnScan.ForeColor = "White"; $btnScan.FlatStyle = "Flat"
-    $btnScan.Add_Click({ & $startDeepScan }.GetNewClosure())
-    $f.Controls.Add($btnScan)
+            $dialog.Tag = @($selected)
+            $dialog.DialogResult = $true
+            $dialog.Close()
+        }.GetNewClosure())
 
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Cancel"
-    $btnCancel.Location = "20, 450"; $btnCancel.Width = 100; $btnCancel.Height = 40
-    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = "Cancel"
-    $f.Controls.Add($btnCancel)
-    
-    $f.AcceptButton = $btnScan; $f.CancelButton = $btnCancel
-
-    Set-WmtWinFormsTheme -Control $f
-    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
-    Set-WmtWinFormsButtonTheme -Button $btnBackupHKLM -Role Standard
-    Set-WmtWinFormsButtonTheme -Button $btnRestore -Role Standard
-    Set-WmtWinFormsButtonTheme -Button $btnScan -Role Success
-    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
-    [void]$f.ShowDialog()
-    return $f.Tag
+    if ($dialog.ShowDialog() -eq $true) { return $dialog.Tag }
+    return $null
 }
 # --- Registry Results UI ---
 function Show-RegistryCleaner {
@@ -8462,84 +9791,122 @@ function Show-RegistryCleaner {
         return $true
     }
 
-    # --- 1. Form Setup ---
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Deep Registry Cleaner"
-    $f.Size = "1280, 680"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.ForeColor = [System.Drawing.Color]::White
-    
-    # --- 2. Header Panel ---
-    $pnlHead = New-Object System.Windows.Forms.Panel
-    $pnlHead.Dock = "Top"; $pnlHead.Height = 60
-    $pnlHead.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $f.Controls.Add($pnlHead)
+    [xml]$registryCleanerXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Deep Registry Cleaner" Width="1280" Height="680" MinWidth="980" MinHeight="560"
+        WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Height" Value="34"/>
+            <Setter Property="MinWidth" Value="104"/>
+            <Setter Property="Margin" Value="6,0,0,0"/>
+            <Setter Property="Padding" Value="14,0"/>
+            <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+        </Style>
+        <Style TargetType="DataGrid">
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="GridLinesVisibility" Value="Horizontal"/>
+            <Setter Property="HorizontalGridLinesBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="VerticalGridLinesBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="RowBackground" Value="{DynamicResource BgDark}"/>
+            <Setter Property="AlternatingRowBackground" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="CanUserAddRows" Value="False"/>
+            <Setter Property="CanUserDeleteRows" Value="False"/>
+            <Setter Property="HeadersVisibility" Value="Column"/>
+            <Setter Property="SelectionMode" Value="Extended"/>
+            <Setter Property="SelectionUnit" Value="FullRow"/>
+            <Setter Property="AutoGenerateColumns" Value="False"/>
+            <Setter Property="ClipboardCopyMode" Value="IncludeHeader"/>
+        </Style>
+        <Style TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="BorderThickness" Value="0,0,1,1"/>
+            <Setter Property="Padding" Value="8,6"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+        </Style>
+        <Style TargetType="DataGridCell">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="6,3"/>
+        </Style>
+        <Style TargetType="DataGridRow">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Style.Triggers>
+                <Trigger Property="IsSelected" Value="True">
+                    <Setter Property="Background" Value="{DynamicResource Accent}"/>
+                    <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
 
-    $lblStatus = New-Object System.Windows.Forms.Label
-    $lblStatus.Text = "Scan Complete. Issues found: $($ScanResults.Count)"
-    $lblStatus.AutoSize = $true; $lblStatus.Top = 18; $lblStatus.Left = 15
-    $lblStatus.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-    $pnlHead.Controls.Add($lblStatus)
+        <Border Grid.Row="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="14" Margin="0,0,0,12">
+            <StackPanel>
+                <TextBlock Name="lblStatus" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                <TextBlock Text="Review checked findings before fixing. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
+            </StackPanel>
+        </Border>
 
-    # --- 3. Data Grid Configuration ---
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Fill"
-    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.ForeColor = [System.Drawing.Color]::White
-    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
-    $dg.BorderStyle = "None"
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $true
-    $dg.ClipboardCopyMode = [System.Windows.Forms.DataGridViewClipboardCopyMode]::EnableAlwaysIncludeHeaderText
-    Set-WmtDoubleBuffered -Control $dg
-    
-    # Header Styling
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersHeight = 35
-    $dg.ColumnHeadersBorderStyle = "Single"
+        <DataGrid Name="dgRegistry" Grid.Row="1" AlternationCount="2">
+            <DataGrid.Columns>
+                <DataGridCheckBoxColumn Header=" " Binding="{Binding Check, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="42"/>
+                <DataGridTextColumn Header="Problem" Binding="{Binding Problem}" Width="185" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Action" Binding="{Binding FixAction}" Width="90" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Risk" Binding="{Binding Risk}" Width="75" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Confidence" Binding="{Binding Confidence}" Width="92" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Default" Binding="{Binding DefaultAction}" Width="82" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Type" Binding="{Binding Type}" Width="80" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Value" Binding="{Binding ValueName}" Width="150" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Data (Path/Value)" Binding="{Binding Data}" Width="2*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Display Key" Binding="{Binding Key}" Width="1.4*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Exact Registry Path" Binding="{Binding FullPath}" Width="2*" IsReadOnly="True"/>
+                <DataGridTextColumn Header="Why Flagged" Binding="{Binding Details}" Width="2*" IsReadOnly="True"/>
+            </DataGrid.Columns>
+        </DataGrid>
 
-    # Row Styling
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
-    $dg.DefaultCellStyle.SelectionForeColor = "White"
-    
-    $f.Controls.Add($dg)
-    $dg.BringToFront()
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <Button Name="btnClose" Content="Close" IsCancel="True" HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Name="btnCopySelected" Content="Copy Selected Details" MinWidth="160"/>
+                <Button Name="btnCopyAll" Content="Copy All Details" MinWidth="140"/>
+                <Button Name="btnFix" Content="Fix Selected Issues..." MinWidth="180" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>
+'@
 
-    # --- 4. Define Columns ---
-    # Checkbox Column
-    $colChk = New-Object System.Windows.Forms.DataGridViewCheckBoxColumn
-    $colChk.HeaderText = " "
-    $colChk.Width = 30; $colChk.Name = "Check"; $colChk.TrueValue = $true; $colChk.FalseValue = $false
-    $colChk.ReadOnly = $false
-    [void]$dg.Columns.Add($colChk)
+    $reader = New-Object System.Xml.XmlNodeReader $registryCleanerXaml
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $dialog
+    Set-WmtWindowOwner -Child $dialog
 
-    # Visible Columns
-    [void]$dg.Columns.Add("Problem", "Problem"); $dg.Columns["Problem"].Width = 185
-    [void]$dg.Columns.Add("FixAction", "Action"); $dg.Columns["FixAction"].Width = 90
-    [void]$dg.Columns.Add("Risk", "Risk"); $dg.Columns["Risk"].Width = 70
-    [void]$dg.Columns.Add("Confidence", "Confidence"); $dg.Columns["Confidence"].Width = 85
-    [void]$dg.Columns.Add("DefaultAction", "Default"); $dg.Columns["DefaultAction"].Width = 75
-    [void]$dg.Columns.Add("Type", "Type"); $dg.Columns["Type"].Width = 65
-    [void]$dg.Columns.Add("ValueName", "Value"); $dg.Columns["ValueName"].Width = 150
-    [void]$dg.Columns.Add("Data", "Data (Path/Value)"); $dg.Columns["Data"].AutoSizeMode = "Fill"; $dg.Columns["Data"].FillWeight = 25
-    [void]$dg.Columns.Add("Key", "Display Key"); $dg.Columns["Key"].AutoSizeMode = "Fill"; $dg.Columns["Key"].FillWeight = 20
-    [void]$dg.Columns.Add("FullPath", "Exact Registry Path"); $dg.Columns["FullPath"].AutoSizeMode = "Fill"; $dg.Columns["FullPath"].FillWeight = 30
-    [void]$dg.Columns.Add("Details", "Why Flagged"); $dg.Columns["Details"].AutoSizeMode = "Fill"; $dg.Columns["Details"].FillWeight = 35
+    $lblStatus = $dialog.FindName("lblStatus")
+    $dg = $dialog.FindName("dgRegistry")
+    $btnFix = $dialog.FindName("btnFix")
+    $btnCopySelected = $dialog.FindName("btnCopySelected")
+    $btnCopyAll = $dialog.FindName("btnCopyAll")
+    $btnClose = $dialog.FindName("btnClose")
 
-    foreach ($col in $dg.Columns) {
-        if ($col.Name -ne "Check") { $col.ReadOnly = $true }
-    }
+    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count)"
 
-    # --- 5. Populate Data ---
-    $registryRows = New-WmtVirtualRows -Items @(
+    $registryRows = @(
         foreach ($item in $ScanResults) {
             $autoSelected = Test-WmtRegistryFindingAutoSelected -Item $item
             $fixAction = if ($item.Type -eq "ReviewOnly") { "Review" } elseif ($item.Type -eq "Key") { "Delete key" } elseif ($item.Type -eq "SetValue") { "Update value" } else { "Delete value" }
@@ -8591,75 +9958,31 @@ function Show-RegistryCleaner {
             }
         }
     )
-    Initialize-WmtVirtualDataGrid -Grid $dg -Rows $registryRows -EnableSort
-    $dg.Add_CurrentCellDirtyStateChanged({
-            if ($dg.IsCurrentCellDirty) {
-                $dg.CommitEdit([System.Windows.Forms.DataGridViewDataErrorContexts]::Commit)
-            }
-        })
-
-    # --- 6. Footer Panel & Buttons ---
-    $pnlBot = New-Object System.Windows.Forms.Panel
-    $pnlBot.Dock = "Bottom"; $pnlBot.Height = 64
-    $pnlBot.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnlBot)
-
-    $btnFix = New-Object System.Windows.Forms.Button
-    $btnFix.Text = "Fix Selected Issues..."
-    $btnFix.Width = 200; $btnFix.Height = 35; $btnFix.Top = 12; $btnFix.Left = 1040
-    $btnFix.Anchor = "Right, Bottom"
-    $btnFix.FlatStyle = "Flat"; $btnFix.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC"); $btnFix.ForeColor = "White"
-    $pnlBot.Controls.Add($btnFix)
-
-    $btnCopySelected = New-Object System.Windows.Forms.Button
-    $btnCopySelected.Text = "Copy Selected Details"
-    $btnCopySelected.Width = 170; $btnCopySelected.Height = 35; $btnCopySelected.Top = 12; $btnCopySelected.Left = 700
-    $btnCopySelected.Anchor = "Right, Bottom"
-    $btnCopySelected.FlatStyle = "Flat"; $btnCopySelected.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#333333"); $btnCopySelected.ForeColor = "White"
-    $pnlBot.Controls.Add($btnCopySelected)
-
-    $btnCopyAll = New-Object System.Windows.Forms.Button
-    $btnCopyAll.Text = "Copy All Details"
-    $btnCopyAll.Width = 150; $btnCopyAll.Height = 35; $btnCopyAll.Top = 12; $btnCopyAll.Left = 880
-    $btnCopyAll.Anchor = "Right, Bottom"
-    $btnCopyAll.FlatStyle = "Flat"; $btnCopyAll.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#333333"); $btnCopyAll.ForeColor = "White"
-    $pnlBot.Controls.Add($btnCopyAll)
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Close"
-    $btnCancel.Width = 100; $btnCancel.Height = 35; $btnCancel.Top = 12; $btnCancel.Left = 20
-    $btnCancel.FlatStyle = "Flat"; $btnCancel.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#333333"); $btnCancel.ForeColor = "White"
-    $btnCancel.Add_Click({ $f.Close() })
-    $pnlBot.Controls.Add($btnCancel)
+    $dg.ItemsSource = $registryRows
 
     $btnCopySelected.Add_Click({
-            $rowsToCopy = @()
-            foreach ($selectedRow in $dg.SelectedRows) {
-                if ($selectedRow.Index -ge 0 -and $selectedRow.Index -lt $registryRows.Count) {
-                    $rowsToCopy += $registryRows[$selectedRow.Index]
-                }
-            }
+            $rowsToCopy = @($dg.SelectedItems | Where-Object { $_ })
             if ($rowsToCopy.Count -eq 0) {
                 $rowsToCopy = @($registryRows | Where-Object { $_.Check -eq $true })
             }
             if ($rowsToCopy.Count -eq 0) { return }
 
             try {
-                [System.Windows.Forms.Clipboard]::SetText((ConvertTo-WmtRegistryResultClipboardText -Rows $rowsToCopy))
-                [System.Windows.Forms.MessageBox]::Show("Copied $($rowsToCopy.Count) registry result(s).", "Registry Cleaner", "OK", "Information") | Out-Null
+                [System.Windows.Clipboard]::SetText((ConvertTo-WmtRegistryResultClipboardText -Rows $rowsToCopy))
+                [System.Windows.MessageBox]::Show("Copied $($rowsToCopy.Count) registry result(s).", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
             }
             catch {
-                [System.Windows.Forms.MessageBox]::Show("Could not copy details:`n$($_.Exception.Message)", "Registry Cleaner", "OK", "Error") | Out-Null
+                [System.Windows.MessageBox]::Show("Could not copy details:`n$($_.Exception.Message)", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
             }
         })
 
     $btnCopyAll.Add_Click({
             try {
-                [System.Windows.Forms.Clipboard]::SetText((ConvertTo-WmtRegistryResultClipboardText -Rows @($registryRows)))
-                [System.Windows.Forms.MessageBox]::Show("Copied $($registryRows.Count) registry result(s).", "Registry Cleaner", "OK", "Information") | Out-Null
+                [System.Windows.Clipboard]::SetText((ConvertTo-WmtRegistryResultClipboardText -Rows @($registryRows)))
+                [System.Windows.MessageBox]::Show("Copied $($registryRows.Count) registry result(s).", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
             }
             catch {
-                [System.Windows.Forms.MessageBox]::Show("Could not copy details:`n$($_.Exception.Message)", "Registry Cleaner", "OK", "Error") | Out-Null
+                [System.Windows.MessageBox]::Show("Could not copy details:`n$($_.Exception.Message)", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
             }
         })
 
@@ -8667,7 +9990,11 @@ function Show-RegistryCleaner {
     $btnFix.Add_Click({
             $toFix = [System.Collections.Generic.List[object]]::new()
             $reviewOnlySelected = 0
-            try { $dg.EndEdit() } catch {}
+            try {
+                [void]$dg.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+                [void]$dg.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+            }
+            catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
                     if ($row.Type -eq "ReviewOnly") {
@@ -8686,24 +10013,20 @@ function Show-RegistryCleaner {
 
             if ($toFix.Count -eq 0) {
                 $msg = if ($reviewOnlySelected -gt 0) { "Only review-only findings were selected. These cannot be fixed automatically." } else { "No issues selected." }
-                [System.Windows.Forms.MessageBox]::Show($msg, "Registry Cleaner", "OK", "Information") | Out-Null
+                [System.Windows.MessageBox]::Show($msg, "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                 return
             }
 
             # Return results to the main controller
-            $f.Tag = @($toFix)
-            $f.DialogResult = "OK"
-            $f.Close()
+            $dialog.Tag = @($toFix.ToArray())
+            $dialog.DialogResult = $true
+            $dialog.Close()
         })
 
-    Set-WmtWinFormsTheme -Control $f
-    $lblStatus.ForeColor = Get-WmtThemeColor "TextPrimary"
-    Set-WmtWinFormsButtonTheme -Button $btnFix -Role Primary
-    Set-WmtWinFormsButtonTheme -Button $btnCopySelected -Role Standard
-    Set-WmtWinFormsButtonTheme -Button $btnCopyAll -Role Standard
-    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
-    [void]$f.ShowDialog()
-    return $f.Tag
+    $btnClose.Add_Click({ $dialog.Close() })
+
+    if ($dialog.ShowDialog() -eq $true) { return $dialog.Tag }
+    return $null
 }
 # =========================================================
 # 1. GLOBAL REGISTRY HELPERS
@@ -9070,26 +10393,54 @@ function Backup-RegKey {
 
 function Show-SafetyDialog {
     param($Count)
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Safety Pre-Check"; $f.Size = "450, 320"; $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32); $f.ForeColor = "White"
-    $f.FormBorderStyle = "FixedDialog"; $f.ControlBox = $false
-    
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Location = "20, 20"; $lbl.Size = "400, 80"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-    $lbl.Text = "You are about to apply $Count selected registry cleanup action(s).`n`nWMT creates a .reg backup first. Value cleanup is usually low risk; key deletion and review-selected items carry more risk."
-    $f.Controls.Add($lbl)
-    
-    $b1 = New-Object System.Windows.Forms.Button; $b1.Text = "Create Restore Point && Clean"; $b1.DialogResult = "Yes"; $b1.Location = "50, 110"; $b1.Size = "340, 45"; $b1.BackColor = "SeaGreen"; $b1.ForeColor = "White"; $b1.FlatStyle = "Flat"; $f.Controls.Add($b1)
-    $b2 = New-Object System.Windows.Forms.Button; $b2.Text = "Clean With .reg Backup Only"; $b2.DialogResult = "No"; $b2.Location = "50, 165"; $b2.Size = "340, 40"; $b2.BackColor = "IndianRed"; $b2.ForeColor = "White"; $b2.FlatStyle = "Flat"; $f.Controls.Add($b2)
-    $b3 = New-Object System.Windows.Forms.Button; $b3.Text = "Cancel"; $b3.DialogResult = "Cancel"; $b3.Location = "50, 220"; $b3.Size = "340, 40"; $b3.BackColor = "DimGray"; $b3.ForeColor = "White"; $b3.FlatStyle = "Flat"; $f.Controls.Add($b3)
-    
-    Set-WmtWinFormsTheme -Control $f
-    $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
-    Set-WmtWinFormsButtonTheme -Button $b1 -Role Success
-    Set-WmtWinFormsButtonTheme -Button $b2 -Role Danger
-    Set-WmtWinFormsButtonTheme -Button $b3 -Role Standard
-    return $f.ShowDialog()
+
+    [xml]$safetyXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Safety Pre-Check" Width="480" Height="330" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Text="Registry cleanup safety check" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+        <TextBlock Name="lblMessage" Grid.Row="1" Margin="0,12,0,14" Foreground="{DynamicResource TextSecondary}" LineHeight="19"/>
+
+        <StackPanel Grid.Row="2">
+            <Button Name="btnRestore" Content="Create Restore Point &amp; Clean" Height="40" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,0,8"/>
+            <Button Name="btnBackup" Content="Clean With .reg Backup Only" Height="38" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,0,8"/>
+            <Button Name="btnCancel" Content="Cancel" Height="36" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
+'@
+
+    $reader = [System.Xml.XmlNodeReader]::new($safetyXaml)
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $dialog
+    Set-WmtWindowOwner -Child $dialog
+
+    $dialog.FindName("lblMessage").Text = "You are about to apply $Count selected registry cleanup action(s).`n`nWMT creates a .reg backup first. Value cleanup is usually low risk; key deletion and review-selected items carry more risk."
+    $dialog.Tag = "Cancel"
+    $dialog.FindName("btnRestore").Add_Click({
+            $dialog.Tag = "Yes"
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+    $dialog.FindName("btnBackup").Add_Click({
+            $dialog.Tag = "No"
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+    $dialog.FindName("btnCancel").Add_Click({
+            $dialog.Tag = "Cancel"
+            $dialog.DialogResult = $false
+        }.GetNewClosure())
+
+    $dialog.ShowDialog() | Out-Null
+    return [string]$dialog.Tag
 }
 
 # =========================================================
@@ -9159,29 +10510,24 @@ function Invoke-RegistryTask {
                 throw "HKLM backup failed. reg.exe exit code: $LASTEXITCODE"
             }
 
-            [System.Windows.Forms.MessageBox]::Show("HKLM export saved to:`n$bkFile", "Registry Export", "OK", "Information") | Out-Null
+            Show-WmtMessageBox -Message "HKLM export saved to:`n$bkFile" -Title "Registry Export" -Image Information | Out-Null
         } "Exporting HKLM hive..." -ArgumentList $bkDir
         return
     }
 
     if ($Action -eq "Restore") {
-        $dlg = New-Object System.Windows.Forms.OpenFileDialog
+        $dlg = [Microsoft.Win32.OpenFileDialog]::new()
         $dlg.Title = "Select Registry Backup to Import"
         $dlg.Filter = "Registry backup (*.reg)|*.reg|All files (*.*)|*.*"
         if (Test-Path -LiteralPath $bkDir) {
             try { $dlg.InitialDirectory = (Resolve-Path -LiteralPath $bkDir).Path } catch {}
         }
 
-        if ($dlg.ShowDialog() -ne "OK") { return }
+        if ($dlg.ShowDialog() -ne $true) { return }
         $restoreFile = $dlg.FileName
 
-        $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Import this registry backup?`n`n$restoreFile`n`nThis can overwrite current registry values.",
-            "Import Registry Backup",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Warning
-        )
-        if ($confirm -ne "Yes") { return }
+        $confirm = Show-WmtMessageBox -Message "Import this registry backup?`n`n$restoreFile`n`nThis can overwrite current registry values." -Title "Import Registry Backup" -Button YesNo -Image Warning
+        if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
         Invoke-UiCommand {
             param($BackupFile)
@@ -9196,7 +10542,7 @@ function Invoke-RegistryTask {
                 throw "Registry restore failed. reg.exe exit code: $LASTEXITCODE"
             }
 
-            [System.Windows.Forms.MessageBox]::Show("Registry backup imported from:`n$BackupFile", "Registry Import", "OK", "Information") | Out-Null
+            Show-WmtMessageBox -Message "Registry backup imported from:`n$BackupFile" -Title "Registry Import" -Image Information | Out-Null
         } "Importing registry backup..." -ArgumentList $restoreFile
         return
     }
@@ -9206,17 +10552,37 @@ function Invoke-RegistryTask {
         $selectedScans = Show-RegScanSelection
         if (-not $selectedScans) { return }
         if (@($selectedScans).Count -eq 0) {
-            [System.Windows.Forms.MessageBox]::Show("No registry scan targets selected.", "Registry Cleaner", "OK", "Information") | Out-Null
+            Show-WmtMessageBox -Message "No registry scan targets selected." -Title "Registry Cleaner" -Image Information | Out-Null
             return
         }
 
         # Progress UI
-        $pForm = New-Object System.Windows.Forms.Form; $pForm.Text = "Scanning Registry"; $pForm.Size = "500,160"; $pForm.StartPosition = "CenterScreen"; $pForm.ControlBox = $false
-        $pForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30); $pForm.ForeColor = "White"
-        $pLabel = New-Object System.Windows.Forms.Label; $pLabel.Location = "20,15"; $pLabel.Size = "460,20"; $pLabel.Text = "Initializing Background Scan..."; $pForm.Controls.Add($pLabel)
-        $pBar = New-Object System.Windows.Forms.ProgressBar; $pBar.Location = "20,45"; $pBar.Size = "440,20"; $pForm.Controls.Add($pBar)
-        Set-WmtWinFormsTheme -Control $pForm
-        $pLabel.ForeColor = Get-WmtThemeColor "TextPrimary"
+        [xml]$registryProgressXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Scanning Registry" Width="520" Height="172" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Name="pLabel" Text="Initializing Background Scan..." Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis"/>
+        <ProgressBar Name="pBar" Grid.Row="1" Minimum="0" Maximum="100" Height="12" Margin="0,16,0,18"/>
+        <Button Name="btnCancelScan" Grid.Row="2" Content="Cancel" Width="100" HorizontalAlignment="Right"/>
+    </Grid>
+</Window>
+'@
+        $reader = [System.Xml.XmlNodeReader]::new($registryProgressXaml)
+        $pForm = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $pForm
+        Set-WmtWindowOwner -Child $pForm
+        $pLabel = $pForm.FindName("pLabel")
+        $pBar = $pForm.FindName("pBar")
+        $btnCancelScan = $pForm.FindName("btnCancelScan")
 
         # Shared Data for Thread
         $syncHash = [hashtable]::Synchronized(@{
@@ -9228,11 +10594,6 @@ function Invoke-RegistryTask {
                 Error       = $null
             })
 
-        $btnCancelScan = New-Object System.Windows.Forms.Button
-        $btnCancelScan.Text = "Cancel"
-        $btnCancelScan.Location = "360,75"
-        $btnCancelScan.Size = "100,30"
-        $btnCancelScan.FlatStyle = "Flat"
         $btnCancelScan.Add_Click({
                 $syncHash.CancelRequested = $true
                 $syncHash.Status = "Canceling scan..."
@@ -9240,8 +10601,6 @@ function Invoke-RegistryTask {
                 $syncHash.IsCompleted = $true
                 try { if ($ps) { $ps.Stop() } } catch {}
             }.GetNewClosure())
-        $pForm.Controls.Add($btnCancelScan)
-        Set-WmtWinFormsButtonTheme -Button $btnCancelScan -Role Standard
         $pForm.Show()
 
         # --- RUNSPACE CONFIGURATION ---
@@ -11524,7 +12883,8 @@ function Invoke-RegistryTask {
                             Write-GuiLog "Registry scan canceled."
                             return
                         }
-                        [System.Windows.Forms.MessageBox]::Show("Scan Error: $($syncHash.Error)", "Error", "OK", "Error"); return
+                        Show-WmtMessageBox -Message "Scan Error: $($syncHash.Error)" -Title "Error" -Image Error | Out-Null
+                        return
                     }
 
                     $findings = $syncHash.Findings
@@ -11540,7 +12900,7 @@ function Invoke-RegistryTask {
                 
                     # --- RESULTS PROCESSING ---
                     if ($findings.Count -eq 0) {
-                        [System.Windows.Forms.MessageBox]::Show("Registry Cleaner: No issues found!", "Scan Complete", "OK", "Information") | Out-Null
+                        Show-WmtMessageBox -Message "Registry Cleaner: No issues found!" -Title "Scan Complete" -Image Information | Out-Null
                         return
                     }
                 
@@ -16929,6 +18289,73 @@ function Set-WmtPowerSettingIndex {
 
         <!-- Subtle Shadow Effects (reduced for clarity) -->
         <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
+
+        <!-- Transparent, theme-aware scrollbars for all WPF scroll viewers -->
+        <Style x:Key="TransparentScrollRepeatButton" TargetType="{x:Type RepeatButton}">
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type RepeatButton}">
+                        <Border Background="Transparent"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style TargetType="{x:Type ScrollBar}">
+            <Setter Property="Width" Value="10"/>
+            <Setter Property="MinWidth" Value="10"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type ScrollBar}">
+                        <Grid Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                            <Track x:Name="PART_Track" IsDirectionReversed="True">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton x:Name="PageDecreaseButton" Command="{x:Static ScrollBar.PageUpCommand}" Style="{StaticResource TransparentScrollRepeatButton}"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb x:Name="ScrollThumb" MinHeight="34" Background="{DynamicResource BorderBrush}">
+                                        <Thumb.Template>
+                                            <ControlTemplate TargetType="{x:Type Thumb}">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="5" Margin="2"/>
+                                            </ControlTemplate>
+                                        </Thumb.Template>
+                                    </Thumb>
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton x:Name="PageIncreaseButton" Command="{x:Static ScrollBar.PageDownCommand}" Style="{StaticResource TransparentScrollRepeatButton}"/>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Orientation" Value="Horizontal">
+                                <Setter Property="Width" Value="Auto"/>
+                                <Setter Property="MinWidth" Value="0"/>
+                                <Setter Property="Height" Value="10"/>
+                                <Setter Property="MinHeight" Value="10"/>
+                                <Setter TargetName="PART_Track" Property="IsDirectionReversed" Value="False"/>
+                                <Setter TargetName="ScrollThumb" Property="MinWidth" Value="34"/>
+                                <Setter TargetName="ScrollThumb" Property="MinHeight" Value="0"/>
+                                <Setter TargetName="PageDecreaseButton" Property="Command" Value="{x:Static ScrollBar.PageLeftCommand}"/>
+                                <Setter TargetName="PageIncreaseButton" Property="Command" Value="{x:Static ScrollBar.PageRightCommand}"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="ScrollThumb" Property="Background" Value="{DynamicResource TextSecondary}"/>
+                            </Trigger>
+                            <Trigger SourceName="ScrollThumb" Property="IsDragging" Value="True">
+                                <Setter TargetName="ScrollThumb" Property="Background" Value="{DynamicResource Accent}"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Opacity" Value="0.4"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
 
         <!-- Modern TextBox (crisp text) -->
         <Style TargetType="TextBox">
@@ -23662,19 +25089,44 @@ $btnUpdateServices.Add_Click({
 $btnDotNetEnable.Add_Click({
         $res = [System.Windows.MessageBox]::Show("Set .NET roll-forward? This forces apps to use the latest installed .NET version (depending on selection).", "Set .NET RollForward", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
         if ($res -ne "Yes") { return }
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = "Set .NET RollForward"; $form.Size = "320,210"; $form.StartPosition = "CenterScreen"; $form.BackColor = [System.Drawing.Color]::FromArgb(35, 35, 35); $form.ForeColor = "White"
-        $opts = @("Runtime", "SDK", "Both")
-        $y = 15; $radios = @()
-        foreach ($o in $opts) { $rb = New-Object System.Windows.Forms.RadioButton; $rb.Text = $o; $rb.Tag = $o; $rb.Left = 20; $rb.Top = $y; $rb.ForeColor = "White"; $rb.BackColor = $form.BackColor; $form.Controls.Add($rb); $radios += $rb; $y += 30 }
-        $radios[0].Checked = $true
-        $ok = New-Object System.Windows.Forms.Button; $ok.Text = "Apply"; $ok.DialogResult = "OK"; $ok.Left = 20; $ok.Top = 120; $ok.Width = 260; $ok.BackColor = "SeaGreen"; $ok.ForeColor = "White"; $form.Controls.Add($ok); $form.AcceptButton = $ok
-    
-        if ($form.ShowDialog() -eq "OK") { 
-            $choice = ($radios | Where-Object { $_.Checked }).Tag; 
-            if ($choice) { 
-                Invoke-UiCommand { param($choice) Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." -ArgumentList $choice
-            } 
+
+        [xml]$rollForwardXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Set .NET RollForward" Width="340" Height="230" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <RadioButton Name="rbRuntime" Content="Runtime" GroupName="RollForward" IsChecked="True" Margin="0,0,0,10"/>
+            <RadioButton Name="rbSdk" Content="SDK" GroupName="RollForward" Margin="0,0,0,10"/>
+            <RadioButton Name="rbBoth" Content="Both" GroupName="RollForward"/>
+        </StackPanel>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnCancel" Content="Cancel" Width="90" IsCancel="True" Margin="0,0,8,0"/>
+            <Button Name="btnApply" Content="Apply" Width="100" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" IsDefault="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
+'@
+        $reader = [System.Xml.XmlNodeReader]::new($rollForwardXaml)
+        $dialog = [Windows.Markup.XamlReader]::Load($reader)
+        Add-WmtThemeResources -Element $dialog
+        Set-WmtWindowOwner -Child $dialog
+        $dialog.Tag = $null
+        $dialog.FindName("btnApply").Add_Click({
+                $choice = if ([bool]$dialog.FindName("rbSdk").IsChecked) { "SDK" } elseif ([bool]$dialog.FindName("rbBoth").IsChecked) { "Both" } else { "Runtime" }
+                $dialog.Tag = $choice
+                $dialog.DialogResult = $true
+            }.GetNewClosure())
+
+        if ($dialog.ShowDialog() -eq $true -and $dialog.Tag) {
+            $choice = [string]$dialog.Tag
+            Invoke-UiCommand { param($choice) Set-DotNetRollForward -Mode $choice } "Setting .NET roll-forward ($choice)..." -ArgumentList $choice
         }
     })
 $btnDotNetDisable.Add_Click({
