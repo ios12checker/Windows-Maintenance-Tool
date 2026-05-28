@@ -9223,7 +9223,6 @@ function Invoke-RegistryTask {
                     $text = $text -replace '^(?i)\\\?\?\\', ''
                     $text = $text -replace '^(?i)\\\\\?\\', ''
 
-                    $systemRoot = $RegistrySystemRoot
                     if ($text -match '^(?i)(%SystemRoot%|%windir%|\\SystemRoot\\|System32\\)') { return $true }
                     foreach ($protectedRoot in $RegistryProtectedWindowsFolders) {
                         if ($text.Equals($protectedRoot, [System.StringComparison]::OrdinalIgnoreCase) -or $text.StartsWith("$protectedRoot\", [System.StringComparison]::OrdinalIgnoreCase)) {
