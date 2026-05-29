@@ -2696,8 +2696,9 @@ function Set-WmtDataGridColumns {
         $col.IsReadOnly = $true
         if ($Widths -and $Widths.ContainsKey($column)) {
             $widthValue = $Widths[$column]
-            if ([string]$widthValue -eq "*") {
-                $col.Width = [System.Windows.Controls.DataGridLength]::new(1, [System.Windows.Controls.DataGridLengthUnitType]::Star)
+            if ([string]$widthValue -match '^(?<weight>\d+(?:\.\d+)?)?\*$') {
+                $weight = if ($matches["weight"]) { [double]$matches["weight"] } else { 1.0 }
+                $col.Width = [System.Windows.Controls.DataGridLength]::new($weight, [System.Windows.Controls.DataGridLengthUnitType]::Star)
             }
             else {
                 $col.Width = [double]$widthValue
@@ -2706,6 +2707,191 @@ function Set-WmtDataGridColumns {
         [void]$DataGrid.Columns.Add($col)
         if ($Hidden -contains $column) { $col.Visibility = [System.Windows.Visibility]::Collapsed }
     }
+}
+
+function ConvertTo-WmtScheduledTaskIdentity {
+    param(
+        [string]$FullName = "",
+        [string]$TaskName = "",
+        [string]$TaskPath = ""
+    )
+
+    if ([string]::IsNullOrWhiteSpace($TaskName) -and -not [string]::IsNullOrWhiteSpace($FullName)) {
+        $normalized = ([string]$FullName).Trim() -replace '/', '\'
+        if (-not $normalized.StartsWith("\")) { $normalized = "\$normalized" }
+        $parts = @($normalized.Trim("\") -split '\\' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        if ($parts.Count -gt 0) {
+            $TaskName = $parts[$parts.Count - 1]
+            if ($parts.Count -gt 1) { $TaskPath = "\" + (($parts[0..($parts.Count - 2)]) -join "\") + "\" }
+            else { $TaskPath = "\" }
+        }
+    }
+
+    $TaskName = ([string]$TaskName).Trim()
+    $TaskPath = ([string]$TaskPath).Trim() -replace '/', '\'
+    if ([string]::IsNullOrWhiteSpace($TaskPath)) { $TaskPath = "\" }
+    if (-not $TaskPath.StartsWith("\")) { $TaskPath = "\$TaskPath" }
+    if (-not $TaskPath.EndsWith("\")) { $TaskPath = "$TaskPath\" }
+
+    $full = if ($TaskPath -eq "\") { "\$TaskName" } else { "$TaskPath$TaskName" }
+    [PSCustomObject]@{
+        TaskName = $TaskName
+        TaskPath = $TaskPath
+        FullName = $full
+    }
+}
+
+function Get-WmtScheduledTaskByIdentity {
+    param(
+        [string]$FullName = "",
+        [string]$TaskName = "",
+        [string]$TaskPath = ""
+    )
+
+    $id = ConvertTo-WmtScheduledTaskIdentity -FullName $FullName -TaskName $TaskName -TaskPath $TaskPath
+    if ([string]::IsNullOrWhiteSpace($id.TaskName)) { return $null }
+
+    try {
+        return Get-ScheduledTask -TaskName $id.TaskName -TaskPath $id.TaskPath -ErrorAction Stop | Select-Object -First 1
+    }
+    catch {
+        try {
+            return Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq $id.TaskName -and $_.TaskPath -eq $id.TaskPath } | Select-Object -First 1
+        }
+        catch {}
+    }
+    return $null
+}
+
+function Get-WmtScheduledTaskRows {
+    param(
+        [string[]]$FullPaths = @(),
+        [string[]]$TaskPaths = @()
+    )
+
+    $tasks = @()
+    if ($FullPaths -and $FullPaths.Count -gt 0) {
+        foreach ($fullPath in $FullPaths) {
+            $task = Get-WmtScheduledTaskByIdentity -FullName $fullPath
+            if ($task) { $tasks += $task }
+        }
+    }
+    else {
+        try {
+            $tasks = @(Get-ScheduledTask -ErrorAction Stop)
+            if ($TaskPaths -and $TaskPaths.Count -gt 0) {
+                $normalizedPaths = @($TaskPaths | ForEach-Object { (ConvertTo-WmtScheduledTaskIdentity -TaskPath $_ -TaskName "_").TaskPath })
+                $tasks = @($tasks | Where-Object { $_.TaskPath -in $normalizedPaths })
+            }
+        }
+        catch {
+            $tasks = @()
+        }
+    }
+
+    foreach ($task in @($tasks)) {
+        $id = ConvertTo-WmtScheduledTaskIdentity -TaskName $task.TaskName -TaskPath $task.TaskPath
+        [PSCustomObject]@{
+            TaskName    = [string]$id.TaskName
+            TaskPath    = [string]$id.TaskPath
+            State       = [string]$task.State
+            Enabled     = if ([string]$task.State -eq "Disabled") { "No" } else { "Yes" }
+            Author      = [string]$task.Author
+            Description = [string]$task.Description
+            FullName    = [string]$id.FullName
+        }
+    }
+}
+
+function Invoke-WmtScheduledTaskAction {
+    param(
+        [ValidateSet("Enable", "Disable", "Delete")][string]$Action,
+        [string]$FullName = "",
+        [string]$TaskName = "",
+        [string]$TaskPath = ""
+    )
+
+    $id = ConvertTo-WmtScheduledTaskIdentity -FullName $FullName -TaskName $TaskName -TaskPath $TaskPath
+    try {
+        $task = Get-WmtScheduledTaskByIdentity -TaskName $id.TaskName -TaskPath $id.TaskPath
+        if (-not $task) { throw "Task not found: $($id.FullName)" }
+
+        switch ($Action) {
+            "Enable" { Enable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null }
+            "Disable" { Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null }
+            "Delete" { Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop | Out-Null }
+        }
+
+        [PSCustomObject]@{ Success = $true; Task = $id.FullName; Message = "$Action succeeded." }
+    }
+    catch {
+        [PSCustomObject]@{ Success = $false; Task = $id.FullName; Message = $_.Exception.Message }
+    }
+}
+
+function Show-WmtScheduledTasksDialog {
+    param(
+        [string]$Title = "Scheduled Tasks",
+        [string[]]$FullPaths = @(),
+        [string[]]$TaskPaths = @()
+    )
+
+    $content = @'
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DataGrid Name="dgTasks" IsReadOnly="True" SelectionMode="Extended" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        <TextBlock Name="lblStatus" Grid.Row="1" Foreground="{DynamicResource TextSecondary}" Margin="0,10,0,0"/>
+        <WrapPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnRefresh" Content="Refresh" MinWidth="92" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}" Margin="0,0,8,8"/>
+            <Button Name="btnEnable" Content="Enable" MinWidth="92" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
+            <Button Name="btnDisable" Content="Disable" MinWidth="92" Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}" Margin="0,0,8,8"/>
+            <Button Name="btnClose" Content="Close" Width="92" IsCancel="True" Margin="0,0,8,8"/>
+        </WrapPanel>
+    </Grid>
+'@
+    $dialog = New-WmtWindowFromXaml -Title $Title -ContentXaml $content -Width 960 -Height 560 -MinWidth 760 -MinHeight 420
+    $dg = $dialog.FindName("dgTasks")
+    $lblStatus = $dialog.FindName("lblStatus")
+    $btnRefresh = $dialog.FindName("btnRefresh")
+    $btnEnable = $dialog.FindName("btnEnable")
+    $btnDisable = $dialog.FindName("btnDisable")
+    $btnClose = $dialog.FindName("btnClose")
+
+    $state = @{ Table = $null }
+    $load = {
+        $rows = @(Get-WmtScheduledTaskRows -FullPaths $FullPaths -TaskPaths $TaskPaths)
+        $table = New-WmtDataTable -Columns @("TaskName", "TaskPath", "State", "Enabled", "Author", "Description", "FullName") -Rows $rows
+        $state.Table = $table
+        $dg.ItemsSource = $table.DefaultView
+        Set-WmtDataGridColumns -DataGrid $dg -Columns @("TaskName", "TaskPath", "State", "Enabled", "Author", "Description", "FullName") -Widths @{ TaskName = "*"; TaskPath = 260; State = 100; Enabled = 80; Author = 180; Description = "2*" } -Hidden @("FullName")
+        $lblStatus.Text = if ($table.Rows.Count -gt 0) { "$($table.Rows.Count) task(s)" } else { "No scheduled tasks found. Try running WMT as administrator." }
+    }.GetNewClosure()
+
+    $invokeSelected = {
+        param([string]$Action)
+        $selected = @(Get-WmtDataGridSelectedRows -DataGrid $dg)
+        if ($selected.Count -eq 0) { return }
+        $failures = @()
+        foreach ($row in $selected) {
+            $result = Invoke-WmtScheduledTaskAction -Action $Action -TaskName ([string]$row["TaskName"]) -TaskPath ([string]$row["TaskPath"])
+            if (-not $result.Success) { $failures += "$($result.Task): $($result.Message)" }
+        }
+        & $load
+        if ($failures.Count -gt 0) {
+            Show-WmtMessageBox -Owner $dialog -Message ($failures -join "`r`n") -Title "Scheduled Tasks" -Image Warning | Out-Null
+        }
+    }.GetNewClosure()
+
+    $btnRefresh.Add_Click({ & $load }.GetNewClosure())
+    $btnEnable.Add_Click({ & $invokeSelected "Enable" }.GetNewClosure())
+    $btnDisable.Add_Click({ & $invokeSelected "Disable" }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dialog.Add_ContentRendered({ & $load }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
 }
 
 function Get-WmtThemeHex {
@@ -14160,94 +14346,214 @@ function Show-SystemRestoreManager {
 function Show-StartupManager {
     param([string]$DefaultTab = "Windows")
 
-    $content = @"
-    <Grid Margin="14">
-        <TabControl Name="tabStartup"/>
+    $content = @'
+    <Grid Margin="0" Background="{DynamicResource BgDark}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <Border Grid.Row="0" Background="{DynamicResource BgDark}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1" Padding="14,10">
+            <StackPanel Name="tabHeader" Orientation="Horizontal"/>
+        </Border>
+        <Grid Name="mainHost" Grid.Row="1" Background="{DynamicResource BgDark}"/>
     </Grid>
-"@
+'@
     $dialog = New-WmtWindowFromXaml -Title "Startup Manager" -ContentXaml $content -Width 1220 -Height 720 -MinWidth 960 -MinHeight 560
-    $tabControl = $dialog.FindName("tabStartup")
+    $tabHeader = $dialog.FindName("tabHeader")
+    $mainHost = $dialog.FindName("mainHost")
     $tabs = @{}
+    $tabButtons = @{}
+    $tabLoaded = @{
+        "Windows"         = $false
+        "Scheduled Tasks" = $false
+        "Context Menu"    = $false
+        "Services"        = $false
+    }
 
-    function New-WmtStartupButton {
-        param([string]$Text, [string]$Role = "Standard")
+    function Set-StartupButtonRole {
+        param(
+            [System.Windows.Controls.Button]$Button,
+            [string]$Role = "Standard"
+        )
+        if (-not $Button) { return }
+        $bgKey = switch ($Role) {
+            "Success" { "Success"; break }
+            "Danger" { "Danger"; break }
+            "Warning" { "Warning"; break }
+            "Primary" { "Accent"; break }
+            default { "BgElevated"; break }
+        }
+        $fgKey = switch ($Role) {
+            "Success" { "SuccessText"; break }
+            "Danger" { "DangerText"; break }
+            "Warning" { "WarningText"; break }
+            "Primary" { "AccentText"; break }
+            default { "TextPrimary"; break }
+        }
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey $bgKey
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey $fgKey
+        Set-WmtThemedBrush -Object $Button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+    }
+
+    function New-StartupButton {
+        param(
+            [System.Windows.Controls.Panel]$Parent,
+            [string]$Text,
+            [string]$Role = "Standard"
+        )
         $button = [System.Windows.Controls.Button]::new()
         $button.Content = $Text
-        $button.MinWidth = 92
-        $button.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
-        if ($Role -eq "Success") {
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Success"
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "SuccessText"
-        }
-        elseif ($Role -eq "Danger") {
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Danger"
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "DangerText"
-        }
-        elseif ($Role -eq "Warning") {
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Warning"
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "WarningText"
-        }
-        elseif ($Role -eq "Primary") {
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Accent"
-            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "AccentText"
-        }
+        $button.MinWidth = 108
+        $button.Height = 34
+        $button.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+        $button.Padding = [System.Windows.Thickness]::new(14, 0, 14, 0)
+        $button.BorderThickness = [System.Windows.Thickness]::new(1)
+        $button.FocusVisualStyle = $null
+        Set-StartupButtonRole -Button $button -Role $Role
+        [void]$Parent.Children.Add($button)
         return $button
     }
 
-    function New-WmtStartupTab {
-        param([string]$Header)
-        $tab = [System.Windows.Controls.TabItem]::new()
-        $tab.Header = $Header
+    function New-TabButton {
+        param([string]$Text)
+        $button = [System.Windows.Controls.Button]::new()
+        $button.Content = $Text
+        $button.Width = 160
+        $button.Height = 32
+        $button.Margin = [System.Windows.Thickness]::new(0, 0, 8, 0)
+        $button.Padding = [System.Windows.Thickness]::new(12, 0, 12, 0)
+        $button.BorderThickness = [System.Windows.Thickness]::new(1)
+        $button.FocusVisualStyle = $null
+        $button.Cursor = [System.Windows.Input.Cursors]::Hand
+        Set-StartupButtonRole -Button $button -Role "Standard"
+        Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextSecondary"
+        [void]$tabHeader.Children.Add($button)
+        $tabButtons[$Text] = $button
+        return $button
+    }
+
+    function Set-TabButtonActive {
+        param([string]$Title)
+        foreach ($key in @($tabButtons.Keys)) {
+            $button = $tabButtons[$key]
+            if ($key -eq $Title) {
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "Accent"
+            }
+            else {
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextSecondary"
+                Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+            }
+        }
+    }
+
+    function New-StartupPage {
+        param([string]$Title)
+
         $root = [System.Windows.Controls.Grid]::new()
-        $root.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
+        $root.Background = $dialog.Resources["BgDark"]
+        $root.Visibility = [System.Windows.Visibility]::Collapsed
         foreach ($h in @("Auto", "*", "Auto")) {
             $row = [System.Windows.Controls.RowDefinition]::new()
             $row.Height = if ($h -eq "*") { [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) } else { [System.Windows.GridLength]::Auto }
             [void]$root.RowDefinitions.Add($row)
         }
+        [void]$mainHost.Children.Add($root)
 
+        $topBorder = [System.Windows.Controls.Border]::new()
+        $topBorder.Padding = [System.Windows.Thickness]::new(14, 10, 14, 10)
+        $topBorder.BorderThickness = [System.Windows.Thickness]::new(0, 0, 0, 1)
+        Set-WmtThemedBrush -Object $topBorder -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $topBorder -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $top = [System.Windows.Controls.Grid]::new()
-        $top.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
-        $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
-        $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
-        $top.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
-        $top.ColumnDefinitions[1].Width = [System.Windows.GridLength]::Auto
+        foreach ($width in @("Auto", "360", "Auto", "Auto", "*")) {
+            $col = [System.Windows.Controls.ColumnDefinition]::new()
+            $col.Width = if ($width -eq "*") { [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) } elseif ($width -eq "Auto") { [System.Windows.GridLength]::Auto } else { [System.Windows.GridLength]::new([double]$width) }
+            [void]$top.ColumnDefinitions.Add($col)
+        }
+        $label = [System.Windows.Controls.TextBlock]::new()
+        $label.Text = "Search:"
+        $label.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $label.Margin = [System.Windows.Thickness]::new(0, 0, 10, 0)
+        $label.FontWeight = [System.Windows.FontWeights]::SemiBold
+        Set-WmtThemedBrush -Object $label -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        [void]$top.Children.Add($label)
+
         $search = [System.Windows.Controls.TextBox]::new()
         $search.Height = 34
+        $search.FocusVisualStyle = $null
         $search.VerticalContentAlignment = [System.Windows.VerticalAlignment]::Center
-        $search.ToolTip = "Search"
+        [System.Windows.Controls.Grid]::SetColumn($search, 1)
         [void]$top.Children.Add($search)
+
+        $clear = [System.Windows.Controls.Button]::new()
+        $clear.Content = "Clear"
+        $clear.Height = 32
+        $clear.MinWidth = 72
+        $clear.Margin = [System.Windows.Thickness]::new(8, 0, 12, 0)
+        $clear.FocusVisualStyle = $null
+        Set-StartupButtonRole -Button $clear -Role "Standard"
+        [System.Windows.Controls.Grid]::SetColumn($clear, 2)
+        [void]$top.Children.Add($clear)
+
         $count = [System.Windows.Controls.TextBlock]::new()
-        $count.Margin = [System.Windows.Thickness]::new(12, 7, 0, 0)
+        $count.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $count.Text = "0 items"
         Set-WmtThemedBrush -Object $count -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
-        [System.Windows.Controls.Grid]::SetColumn($count, 1)
+        [System.Windows.Controls.Grid]::SetColumn($count, 3)
         [void]$top.Children.Add($count)
-        [System.Windows.Controls.Grid]::SetRow($top, 0)
-        [void]$root.Children.Add($top)
+        $topBorder.Child = $top
+        [System.Windows.Controls.Grid]::SetRow($topBorder, 0)
+        [void]$root.Children.Add($topBorder)
 
         $grid = [System.Windows.Controls.DataGrid]::new()
         $grid.IsReadOnly = $true
         $grid.CanUserAddRows = $false
         $grid.CanUserDeleteRows = $false
         $grid.SelectionMode = [System.Windows.Controls.DataGridSelectionMode]::Extended
+        $grid.SelectionUnit = [System.Windows.Controls.DataGridSelectionUnit]::FullRow
         $grid.AlternationCount = 2
+        $grid.BorderThickness = [System.Windows.Thickness]::new(0)
+        $grid.FocusVisualStyle = $null
+        $grid.HeadersVisibility = [System.Windows.Controls.DataGridHeadersVisibility]::Column
+        $grid.GridLinesVisibility = [System.Windows.Controls.DataGridGridLinesVisibility]::Horizontal
+        Set-WmtThemedBrush -Object $grid -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgDark"
+        Set-WmtThemedBrush -Object $grid -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtThemedBrush -Object $grid -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         [System.Windows.Controls.Grid]::SetRow($grid, 1)
         [void]$root.Children.Add($grid)
 
+        $bottomBorder = [System.Windows.Controls.Border]::new()
+        $bottomBorder.Padding = [System.Windows.Thickness]::new(14, 12, 14, 12)
+        $bottomBorder.BorderThickness = [System.Windows.Thickness]::new(0, 1, 0, 0)
+        Set-WmtThemedBrush -Object $bottomBorder -Property ([System.Windows.Controls.Border]::BackgroundProperty) -ColorOrKey "BgPanel"
+        Set-WmtThemedBrush -Object $bottomBorder -Property ([System.Windows.Controls.Border]::BorderBrushProperty) -ColorOrKey "BorderBrush"
         $buttons = [System.Windows.Controls.WrapPanel]::new()
-        $buttons.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
-        $buttons.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
-        [System.Windows.Controls.Grid]::SetRow($buttons, 2)
-        [void]$root.Children.Add($buttons)
+        $buttons.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Left
+        $bottomBorder.Child = $buttons
+        [System.Windows.Controls.Grid]::SetRow($bottomBorder, 2)
+        [void]$root.Children.Add($bottomBorder)
 
-        $tab.Content = $root
-        [void]$tabControl.Items.Add($tab)
-        $obj = [PSCustomObject]@{ Header = $Header; Tab = $tab; Grid = $grid; SearchBox = $search; CountLabel = $count; Buttons = $buttons; Meta = $null }
-        $tabs[$Header] = $obj
+        $grid.Add_PreviewMouseRightButtonDown({
+                param($eventSource, $e)
+                $row = Get-WmtVisualAncestor -Element $e.OriginalSource -AncestorType ([System.Windows.Controls.DataGridRow])
+                if ($row) {
+                    if (-not $row.IsSelected) {
+                        $eventSource.SelectedItems.Clear()
+                        $row.IsSelected = $true
+                    }
+                    try { $row.Focus() | Out-Null } catch {}
+                }
+            }.GetNewClosure())
+
+        $obj = [PSCustomObject]@{ Header = $Title; Root = $root; Grid = $grid; SearchBox = $search; CountLabel = $count; ClearButton = $clear; Buttons = $buttons; Meta = $null }
+        $tabs[$Title] = $obj
         return $obj
     }
 
-    function Set-WmtStartupTabData {
+    function Set-StartupTabData {
         param($TabObj, [System.Data.DataTable]$DataTable, [string[]]$SearchColumns, [string[]]$Hidden = @(), [hashtable]$Widths = @{})
         $TabObj.Grid.ItemsSource = $DataTable.DefaultView
         Set-WmtDataGridColumns -DataGrid $TabObj.Grid -Columns @($DataTable.Columns | ForEach-Object { $_.ColumnName }) -Widths $Widths -Hidden $Hidden
@@ -14255,7 +14561,7 @@ function Show-StartupManager {
         $TabObj.CountLabel.Text = "$($DataTable.Rows.Count) items"
     }
 
-    function Update-WmtStartupTabFilter {
+    function Update-StartupTabFilter {
         param($TabObj)
         if (-not $TabObj -or -not $TabObj.Meta) { return }
         $q = $TabObj.SearchBox.Text.Trim()
@@ -14273,7 +14579,7 @@ function Show-StartupManager {
         $TabObj.CountLabel.Text = "$($TabObj.Meta.View.Count) shown / $($TabObj.Meta.Table.Rows.Count) total"
     }
 
-    function Show-WmtStartupRowDetails {
+    function Show-StartupRowDetails {
         param($TabObj, [string]$Title)
         $row = Get-WmtDataGridSelectedRows -DataGrid $TabObj.Grid | Select-Object -First 1
         if (-not $row) { return }
@@ -14290,7 +14596,7 @@ function Show-StartupManager {
         param($TabObj, [object[]]$Rows)
         foreach ($row in @($Rows)) { try { $row.Delete() } catch {} }
         $TabObj.Meta.Table.AcceptChanges()
-        Update-WmtStartupTabFilter -TabObj $TabObj
+        & $fnUpdateStartupTabFilter $TabObj
     }
 
     function Get-StartupApprovedState {
@@ -14326,156 +14632,366 @@ function Show-StartupManager {
         Set-ItemProperty -Path $approvedPath -Name $ValueName -Value $payload -Type Binary -ErrorAction SilentlyContinue
     }
 
-    $winTab = New-WmtStartupTab "Windows"
-    $taskTab = New-WmtStartupTab "Scheduled Tasks"
-    $ctxTab = New-WmtStartupTab "Context Menu"
-    $svcTab = New-WmtStartupTab "Services"
-
-    $loadWindows = {
-        $table = New-WmtDataTable -Columns @("Name", "Enabled", "Scope", "Type", "Command", "Location", "ItemPath", "ValueName", "RootRunPath")
-        foreach ($def in @(
-                @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"; Scope = "Current User" },
-                @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; Scope = "All Users" },
-                @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Scope = "All Users (32-bit)" }
-            )) {
-            if (Test-Path $def.Path) {
-                $props = Get-ItemProperty -Path $def.Path -ErrorAction SilentlyContinue
-                foreach ($p in $props.PSObject.Properties) {
-                    if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
-                    $row = $table.NewRow()
-                    $row["Name"] = $p.Name; $row["Enabled"] = if (Get-StartupApprovedState "Registry" $def.Path $p.Name) { "Yes" } else { "No" }
-                    $row["Scope"] = $def.Scope; $row["Type"] = "Registry"; $row["Command"] = [string]$p.Value; $row["Location"] = $def.Path
-                    $row["ItemPath"] = $def.Path; $row["ValueName"] = $p.Name; $row["RootRunPath"] = $def.Path
-                    [void]$table.Rows.Add($row)
-                }
+    function Get-RegRunEntries {
+        param([string]$Path, [string]$Scope)
+        $items = @()
+        if (-not (Test-Path $Path)) { return $items }
+        $props = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
+        if (-not $props) { return $items }
+        foreach ($p in $props.PSObject.Properties) {
+            if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
+            $items += [PSCustomObject]@{
+                Name        = $p.Name
+                Command     = "$($p.Value)"
+                Location    = $Path
+                EntryType   = "Registry"
+                Scope       = $Scope
+                Enabled     = (& $fnGetStartupApprovedState "Registry" $Path $p.Name)
+                ItemPath    = $Path
+                ValueName   = $p.Name
+                RootRunPath = $Path
             }
         }
-        foreach ($def in @(
-                @{ Path = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"; Scope = "Current User" },
-                @{ Path = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"; Scope = "All Users" }
-            )) {
-            if (Test-Path $def.Path) {
-                foreach ($filePath in Get-WmtEnumeratedFiles -Path $def.Path) {
-                    $file = [System.IO.FileInfo]::new($filePath)
-                    $row = $table.NewRow()
-                    $row["Name"] = $file.BaseName; $row["Enabled"] = if (Get-StartupApprovedState "StartupFolder" $def.Path $file.Name) { "Yes" } else { "No" }
-                    $row["Scope"] = $def.Scope; $row["Type"] = "StartupFolder"; $row["Command"] = $file.FullName; $row["Location"] = $def.Path
-                    $row["ItemPath"] = $file.FullName; $row["ValueName"] = $file.Name; $row["RootRunPath"] = $def.Path
-                    [void]$table.Rows.Add($row)
-                }
+        return $items
+    }
+
+    function Get-StartupFolderEntries {
+        param([string]$Path, [string]$Scope)
+        $items = @()
+        if (-not (Test-Path $Path)) { return $items }
+        foreach ($filePath in Get-WmtEnumeratedFiles -Path $Path) {
+            $file = [System.IO.FileInfo]::new($filePath)
+            $items += [PSCustomObject]@{
+                Name        = $file.BaseName
+                Command     = $file.FullName
+                Location    = $Path
+                EntryType   = "StartupFolder"
+                Scope       = $Scope
+                Enabled     = (& $fnGetStartupApprovedState "StartupFolder" $Path $file.Name)
+                ItemPath    = $file.FullName
+                ValueName   = $file.Name
+                RootRunPath = $Path
             }
         }
-        Set-WmtStartupTabData $winTab $table @("Name", "Enabled", "Scope", "Type", "Command", "Location") @("Command", "Location", "ItemPath", "ValueName", "RootRunPath") @{ Name = "*"; Enabled = 80; Scope = 160; Type = 130 }
-        Update-WmtStartupTabFilter $winTab
-    }.GetNewClosure()
+        return $items
+    }
 
-    $loadTasks = {
-        $table = New-WmtDataTable -Columns @("TaskName", "Path", "State")
-        foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State)) {
-            $row = $table.NewRow(); $row["TaskName"] = $t.TaskName; $row["Path"] = $t.TaskPath; $row["State"] = [string]$t.State; [void]$table.Rows.Add($row)
+    function Add-GridContextMenu {
+        param($TabObj, [System.Windows.Controls.Button[]]$Buttons)
+        $menu = [System.Windows.Controls.ContextMenu]::new()
+        Set-WmtThemedBrush -Object $menu -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
+        Set-WmtThemedBrush -Object $menu -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        foreach ($button in @($Buttons)) {
+            $item = [System.Windows.Controls.MenuItem]::new()
+            $item.Header = [string]$button.Content
+            $item.Tag = $button
+            $item.Add_Click({
+                    param($eventSource, $e)
+                    $button = [System.Windows.Controls.Button]$eventSource.Tag
+                    $button.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $button))
+                }.GetNewClosure())
+            [void]$menu.Items.Add($item)
         }
-        Set-WmtStartupTabData $taskTab $table @("TaskName", "Path", "State") @() @{ TaskName = "*"; Path = 260; State = 120 }
-        Update-WmtStartupTabFilter $taskTab
-    }.GetNewClosure()
+        $TabObj.Grid.ContextMenu = $menu
+    }
 
-    $loadContext = {
+    function Invoke-StartupWindowsLoad {
+        $items = @()
+        $items += & $fnGetRegRunEntries "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" "Current User"
+        $items += & $fnGetRegRunEntries "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "All Users"
+        $items += & $fnGetRegRunEntries "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run" "All Users (32-bit)"
+        $items += & $fnGetStartupFolderEntries "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" "Current User"
+        $items += & $fnGetStartupFolderEntries "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup" "All Users"
+
+        $table = [System.Data.DataTable]::new()
+        foreach ($name in @("Name", "Enabled", "Scope", "Type", "Command", "Location", "ItemPath", "ValueName", "RootRunPath")) { [void]$table.Columns.Add($name) }
+        foreach ($item in @($items)) {
+            $row = $table.NewRow()
+            $row["Name"] = [string]$item.Name
+            $row["Enabled"] = if ([bool]$item.Enabled) { "Yes" } else { "No" }
+            $row["Scope"] = [string]$item.Scope
+            $row["Type"] = [string]$item.EntryType
+            $row["Command"] = [string]$item.Command
+            $row["Location"] = [string]$item.Location
+            $row["ItemPath"] = [string]$item.ItemPath
+            $row["ValueName"] = [string]$item.ValueName
+            $row["RootRunPath"] = [string]$item.RootRunPath
+            [void]$table.Rows.Add($row)
+        }
+        & $fnSetStartupTabData $winTab $table @("Name", "Enabled", "Scope", "Type", "Command", "Location") @("Command", "Location", "ItemPath", "ValueName", "RootRunPath") @{ Name = "44*"; Enabled = "12*"; Scope = "24*"; Type = "20*" }
+        & $fnUpdateStartupTabFilter $winTab
+    }
+
+    function Invoke-StartupTasksLoad {
+        $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State)
+        $table = [System.Data.DataTable]::new()
+        foreach ($name in @("TaskName", "Path", "State")) { [void]$table.Columns.Add($name) }
+        foreach ($task in @($tasks)) {
+            $row = $table.NewRow()
+            $row["TaskName"] = [string]$task.TaskName
+            $row["Path"] = [string]$task.TaskPath
+            $row["State"] = [string]$task.State
+            [void]$table.Rows.Add($row)
+        }
+        & $fnSetStartupTabData $taskTab $table @("TaskName", "Path", "State") @() @{ TaskName = "*"; Path = 260; State = 120 }
+        & $fnUpdateStartupTabFilter $taskTab
+    }
+
+    function Invoke-StartupContextMenuLoad {
         if (-not (Get-PSDrive HKCR -ErrorAction SilentlyContinue)) { New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null }
-        $table = New-WmtDataTable -Columns @("Name", "Enabled", "Root", "Path", "KeyName")
-        foreach ($r in @(
+        $table = [System.Data.DataTable]::new()
+        foreach ($name in @("Name", "Enabled", "Root", "Path", "KeyName")) { [void]$table.Columns.Add($name) }
+        foreach ($rootInfo in @(
                 @{ Path = "HKCR:\*\shell"; RootName = "All Files (*)" },
                 @{ Path = "HKCR:\Directory\shell"; RootName = "Directory" },
                 @{ Path = "HKCR:\Directory\Background\shell"; RootName = "Directory Background" },
                 @{ Path = "HKCR:\Drive\shell"; RootName = "Drive" }
             )) {
-            foreach ($s in @(Get-ChildItem -LiteralPath $r.Path -ErrorAction SilentlyContinue)) {
+            if (-not (Test-Path -LiteralPath $rootInfo.Path -ErrorAction SilentlyContinue)) { continue }
+            foreach ($subKey in @(Get-ChildItem -LiteralPath $rootInfo.Path -ErrorAction SilentlyContinue)) {
                 $row = $table.NewRow()
-                $row["Name"] = $s.PSChildName
-                $row["Enabled"] = if ($null -ne (Get-ItemProperty -LiteralPath $s.PSPath -Name "LegacyDisable" -ErrorAction SilentlyContinue)) { "No" } else { "Yes" }
-                $row["Root"] = $r.RootName; $row["Path"] = $s.PSPath; $row["KeyName"] = $s.Name
+                $row["Name"] = [string]$subKey.PSChildName
+                $row["Enabled"] = if ($null -ne (Get-ItemProperty -LiteralPath $subKey.PSPath -Name "LegacyDisable" -ErrorAction SilentlyContinue)) { "No" } else { "Yes" }
+                $row["Root"] = [string]$rootInfo.RootName
+                $row["Path"] = [string]$subKey.PSPath
+                $row["KeyName"] = [string]$subKey.Name
                 [void]$table.Rows.Add($row)
             }
         }
-        Set-WmtStartupTabData $ctxTab $table @("Name", "Enabled", "Root", "KeyName") @("Path", "KeyName") @{ Name = "*"; Enabled = 80; Root = 210 }
-        Update-WmtStartupTabFilter $ctxTab
-    }.GetNewClosure()
+        & $fnSetStartupTabData $ctxTab $table @("Name", "Enabled", "Root", "KeyName") @("Path", "KeyName") @{ Name = "68*"; Enabled = "12*"; Root = "20*" }
+        & $fnUpdateStartupTabFilter $ctxTab
+    }
 
-    $loadServices = {
-        $table = New-WmtDataTable -Columns @("Name", "DisplayName", "StartType", "State")
-        foreach ($s in @(Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName)) {
+    function Invoke-StartupServicesLoad {
+        $table = [System.Data.DataTable]::new()
+        foreach ($name in @("Name", "DisplayName", "StartType", "State")) { [void]$table.Columns.Add($name) }
+        foreach ($service in @(Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName)) {
             $startType = "Unknown"
             try {
-                switch ((Get-ItemProperty -Path ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name Start -ErrorAction SilentlyContinue).Start) {
-                    0 { $startType = "Boot" } 1 { $startType = "System" } 2 { $startType = "Automatic" } 3 { $startType = "Manual" } 4 { $startType = "Disabled" }
+                $rawStart = (Get-ItemProperty -Path ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $service.Name) -Name Start -ErrorAction SilentlyContinue).Start
+                switch ($rawStart) {
+                    0 { $startType = "Boot" }
+                    1 { $startType = "System" }
+                    2 { $startType = "Automatic" }
+                    3 { $startType = "Manual" }
+                    4 { $startType = "Disabled" }
+                    default { if ($null -ne $rawStart) { $startType = [string]$rawStart } }
                 }
             }
             catch {}
-            $row = $table.NewRow(); $row["Name"] = $s.Name; $row["DisplayName"] = $s.DisplayName; $row["StartType"] = $startType; $row["State"] = [string]$s.Status; [void]$table.Rows.Add($row)
+            $row = $table.NewRow()
+            $row["Name"] = [string]$service.Name
+            $row["DisplayName"] = [string]$service.DisplayName
+            $row["StartType"] = [string]$startType
+            $row["State"] = [string]$service.Status
+            [void]$table.Rows.Add($row)
         }
-        Set-WmtStartupTabData $svcTab $table @("Name", "DisplayName", "StartType", "State") @() @{ DisplayName = "*"; Name = 190; StartType = 110; State = 100 }
-        Update-WmtStartupTabFilter $svcTab
-    }.GetNewClosure()
+        & $fnSetStartupTabData $svcTab $table @("Name", "DisplayName", "StartType", "State") @() @{ DisplayName = "56*"; Name = "24*"; StartType = "10*"; State = "10*" }
+        & $fnUpdateStartupTabFilter $svcTab
+    }
 
-    function Add-Buttons {
-        param($Tab, [object[]]$Definitions)
-        foreach ($def in $Definitions) {
-            $button = New-WmtStartupButton -Text $def.Text -Role $def.Role
-            $button.Add_Click($def.Action)
-            [void]$Tab.Buttons.Children.Add($button)
+    function Invoke-StartupTabLoad {
+        param([string]$TabName, [bool]$Force = $false)
+        if (-not $Force -and $tabLoaded.ContainsKey($TabName) -and $tabLoaded[$TabName]) { return }
+        Set-WmtBusyCursor -Busy
+        try {
+            switch ($TabName) {
+                "Windows" { & $LoadWindowsStartup }
+                "Scheduled Tasks" { & $LoadScheduledTasks }
+                "Context Menu" { & $LoadContextMenu }
+                "Services" { & $LoadServices }
+            }
+            if ($tabLoaded.ContainsKey($TabName)) { $tabLoaded[$TabName] = $true }
+        }
+        catch {
+            Show-WmtMessageBox -Owner $dialog -Message "Failed to load tab '$TabName'.`n$($_.Exception.Message)" -Title "Startup Manager" -Image Error | Out-Null
+        }
+        finally {
+            Set-WmtBusyCursor
         }
     }
+
+    function Set-StartupView {
+        param([string]$Title)
+        foreach ($key in @($tabs.Keys)) {
+            $tabs[$key].Root.Visibility = if ($key -eq $Title) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+        }
+        & $fnSetTabButtonActive $Title
+        & $fnInvokeStartupTabLoad $Title $false
+    }
+
+    function Invoke-WmtStartupTaskSelection {
+        param([ValidateSet("Enable", "Disable", "Delete")][string]$Action)
+
+        $selected = @(Get-WmtDataGridSelectedRows -DataGrid $taskTab.Grid)
+        if ($selected.Count -eq 0) { return }
+        if ($Action -eq "Delete") {
+            $confirm = Show-WmtMessageBox -Owner $dialog -Message "Delete $($selected.Count) selected scheduled task(s)?" -Title "Confirm" -Button YesNo -Image Warning
+            if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+        }
+
+        Set-WmtBusyCursor -Busy
+        $failures = @()
+        try {
+            foreach ($row in $selected) {
+                $name = [string]$row["TaskName"]
+                $path = [string]$row["Path"]
+                $result = Invoke-WmtScheduledTaskAction -Action $Action -TaskName $name -TaskPath $path
+                if ($result.Success) {
+                    if ($Action -eq "Enable") { $row["State"] = "Ready" }
+                    elseif ($Action -eq "Disable") { $row["State"] = "Disabled" }
+                    elseif ($Action -eq "Delete") { $row.Delete() }
+                }
+                else {
+                    $failures += "$($result.Task): $($result.Message)"
+                }
+            }
+            if ($Action -eq "Delete") { $taskTab.Meta.Table.AcceptChanges() }
+            & $fnUpdateStartupTabFilter $taskTab
+        }
+        finally {
+            Set-WmtBusyCursor
+        }
+
+        if ($failures.Count -gt 0) {
+            Show-WmtMessageBox -Owner $dialog -Message ($failures -join "`r`n") -Title "Scheduled Tasks" -Image Warning | Out-Null
+        }
+    }
+
+    $btnWinTab = New-TabButton "Windows"
+    $btnTaskTab = New-TabButton "Scheduled Tasks"
+    $btnCtxTab = New-TabButton "Context Menu"
+    $btnSvcTab = New-TabButton "Services"
+
+    $winTab = New-StartupPage "Windows"
+    $taskTab = New-StartupPage "Scheduled Tasks"
+    $ctxTab = New-StartupPage "Context Menu"
+    $svcTab = New-StartupPage "Services"
+
+    $fnSetTabButtonActive = ${function:Set-TabButtonActive}.GetNewClosure()
+    $fnSetStartupTabData = ${function:Set-StartupTabData}.GetNewClosure()
+    $fnUpdateStartupTabFilter = ${function:Update-StartupTabFilter}.GetNewClosure()
+    $fnShowStartupRowDetails = ${function:Show-StartupRowDetails}.GetNewClosure()
+    $fnGetStartupApprovedState = ${function:Get-StartupApprovedState}.GetNewClosure()
+    $fnSetStartupApprovedState = ${function:Set-StartupApprovedState}.GetNewClosure()
+    $fnRemoveWmtDataRows = ${function:Remove-WmtDataRows}.GetNewClosure()
+    $fnGetRegRunEntries = ${function:Get-RegRunEntries}.GetNewClosure()
+    $fnGetStartupFolderEntries = ${function:Get-StartupFolderEntries}.GetNewClosure()
+    $LoadWindowsStartup = ${function:Invoke-StartupWindowsLoad}.GetNewClosure()
+    $LoadScheduledTasks = ${function:Invoke-StartupTasksLoad}.GetNewClosure()
+    $LoadContextMenu = ${function:Invoke-StartupContextMenuLoad}.GetNewClosure()
+    $LoadServices = ${function:Invoke-StartupServicesLoad}.GetNewClosure()
+    $fnInvokeStartupTabLoad = ${function:Invoke-StartupTabLoad}.GetNewClosure()
+    $fnSetStartupView = ${function:Set-StartupView}.GetNewClosure()
+    $fnInvokeStartupTaskSelection = ${function:Invoke-WmtStartupTaskSelection}.GetNewClosure()
+
+    $btnWinTab.Add_Click({ & $fnSetStartupView "Windows" }.GetNewClosure())
+    $btnTaskTab.Add_Click({ & $fnSetStartupView "Scheduled Tasks" }.GetNewClosure())
+    $btnCtxTab.Add_Click({ & $fnSetStartupView "Context Menu" }.GetNewClosure())
+    $btnSvcTab.Add_Click({ & $fnSetStartupView "Services" }.GetNewClosure())
 
     foreach ($t in @($winTab, $taskTab, $ctxTab, $svcTab)) {
         $t.SearchBox.Tag = $t
         $t.Grid.Tag = $t
+        $t.ClearButton.Tag = $t
         $t.SearchBox.Add_TextChanged({
                 param($eventSource, $e)
-                Update-WmtStartupTabFilter -TabObj $eventSource.Tag
+                & $fnUpdateStartupTabFilter $eventSource.Tag
+            }.GetNewClosure())
+        $t.ClearButton.Add_Click({
+                param($eventSource, $e)
+                $eventSource.Tag.SearchBox.Text = ""
             }.GetNewClosure())
         $t.Grid.Add_MouseDoubleClick({
                 param($eventSource, $e)
-                Show-WmtStartupRowDetails -TabObj $eventSource.Tag -Title "$($eventSource.Tag.Header) Details"
+                & $fnShowStartupRowDetails $eventSource.Tag "$($eventSource.Tag.Header) Details"
             }.GetNewClosure())
     }
 
-    Add-Buttons $winTab @(
-        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadWindows }.GetNewClosure() },
-        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure() },
-        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $winTab.Grid) { Set-StartupApprovedState $r["Type"] $r["RootRunPath"] $r["ValueName"] $true; $r["Enabled"] = "Yes" } }.GetNewClosure() },
-        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $winTab.Grid) { Set-StartupApprovedState $r["Type"] $r["RootRunPath"] $r["ValueName"] $false; $r["Enabled"] = "No" } }.GetNewClosure() },
-        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $winTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { if ($r["Type"] -eq "StartupFolder") { Remove-Item -LiteralPath $r["ItemPath"] -Force -ErrorAction SilentlyContinue } elseif ($r["ItemPath"] -and $r["ValueName"]) { Remove-ItemProperty -Path $r["ItemPath"] -Name $r["ValueName"] -ErrorAction SilentlyContinue } }; Remove-WmtDataRows $winTab $sel }.GetNewClosure() }
-    )
-    Add-Buttons $taskTab @(
-        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadTasks }.GetNewClosure() },
-        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $taskTab "Task Details" }.GetNewClosure() },
-        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $taskTab.Grid) { Enable-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -ErrorAction SilentlyContinue; $r["State"] = "Ready" } }.GetNewClosure() },
-        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $taskTab.Grid) { Disable-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -ErrorAction SilentlyContinue; $r["State"] = "Disabled" } }.GetNewClosure() },
-        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $taskTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected tasks?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { Unregister-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -Confirm:$false -ErrorAction SilentlyContinue }; Remove-WmtDataRows $taskTab $sel }.GetNewClosure() }
-    )
-    Add-Buttons $ctxTab @(
-        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadContext }.GetNewClosure() },
-        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $ctxTab "Context Menu Details" }.GetNewClosure() },
-        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $ctxTab.Grid) { Remove-ItemProperty -LiteralPath $r["Path"] -Name "LegacyDisable" -ErrorAction SilentlyContinue; $r["Enabled"] = "Yes" } }.GetNewClosure() },
-        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $ctxTab.Grid) { Set-ItemProperty -LiteralPath $r["Path"] -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue; $r["Enabled"] = "No" } }.GetNewClosure() },
-        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $ctxTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected context menu entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { Remove-Item -LiteralPath $r["Path"] -Recurse -Force -ErrorAction SilentlyContinue }; Remove-WmtDataRows $ctxTab $sel }.GetNewClosure() }
-    )
-    Add-Buttons $svcTab @(
-        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadServices }.GetNewClosure() },
-        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $svcTab "Service Details" }.GetNewClosure() },
-        @{ Text = "Enable Auto"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Automatic -ErrorAction SilentlyContinue; $r["StartType"] = "Automatic" } }.GetNewClosure() },
-        @{ Text = "Manual"; Role = "Primary"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Manual -ErrorAction SilentlyContinue; $r["StartType"] = "Manual" } }.GetNewClosure() },
-        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Disabled -ErrorAction SilentlyContinue; $r["StartType"] = "Disabled" } }.GetNewClosure() },
-        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $svcTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected services? This is risky." -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { $serviceName = [string]$r["Name"]; if (-not [string]::IsNullOrWhiteSpace($serviceName)) { sc.exe delete $serviceName | Out-Null } }; Remove-WmtDataRows $svcTab $sel }.GetNewClosure() }
-    )
+    $btnWinRefresh = New-StartupButton $winTab.Buttons "Refresh" "Standard"
+    $btnWinDetails = New-StartupButton $winTab.Buttons "Details" "Standard"
+    $btnWinEnable = New-StartupButton $winTab.Buttons "Enable" "Success"
+    $btnWinDisable = New-StartupButton $winTab.Buttons "Disable" "Warning"
+    $btnWinDelete = New-StartupButton $winTab.Buttons "Delete" "Danger"
+    Add-GridContextMenu -TabObj $winTab -Buttons @($btnWinRefresh, $btnWinDetails, $btnWinEnable, $btnWinDisable, $btnWinDelete)
+
+    $btnTaskRefresh = New-StartupButton $taskTab.Buttons "Refresh" "Standard"
+    $btnTaskDetails = New-StartupButton $taskTab.Buttons "Details" "Standard"
+    $btnTaskEnable = New-StartupButton $taskTab.Buttons "Enable" "Success"
+    $btnTaskDisable = New-StartupButton $taskTab.Buttons "Disable" "Warning"
+    $btnTaskDelete = New-StartupButton $taskTab.Buttons "Delete" "Danger"
+    Add-GridContextMenu -TabObj $taskTab -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
+
+    $btnCtxRefresh = New-StartupButton $ctxTab.Buttons "Refresh" "Standard"
+    $btnCtxDetails = New-StartupButton $ctxTab.Buttons "Details" "Standard"
+    $btnCtxEnable = New-StartupButton $ctxTab.Buttons "Enable" "Success"
+    $btnCtxDisable = New-StartupButton $ctxTab.Buttons "Disable" "Warning"
+    $btnCtxDelete = New-StartupButton $ctxTab.Buttons "Delete" "Danger"
+    Add-GridContextMenu -TabObj $ctxTab -Buttons @($btnCtxRefresh, $btnCtxDetails, $btnCtxEnable, $btnCtxDisable, $btnCtxDelete)
+
+    $btnSvcRefresh = New-StartupButton $svcTab.Buttons "Refresh" "Standard"
+    $btnSvcDetails = New-StartupButton $svcTab.Buttons "Details" "Standard"
+    $btnSvcEnable = New-StartupButton $svcTab.Buttons "Enable Auto" "Success"
+    $btnSvcManual = New-StartupButton $svcTab.Buttons "Manual" "Primary"
+    $btnSvcDisable = New-StartupButton $svcTab.Buttons "Disable" "Warning"
+    $btnSvcDelete = New-StartupButton $svcTab.Buttons "Delete" "Danger"
+    Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
+
+    $btnWinRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Windows" $true }.GetNewClosure())
+    $btnWinDetails.Add_Click({ & $fnShowStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure())
+    $btnWinEnable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $winTab.Grid) { & $fnSetStartupApprovedState ([string]$row["Type"]) ([string]$row["RootRunPath"]) ([string]$row["ValueName"]) $true; $row["Enabled"] = "Yes" } }.GetNewClosure())
+    $btnWinDisable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $winTab.Grid) { & $fnSetStartupApprovedState ([string]$row["Type"]) ([string]$row["RootRunPath"]) ([string]$row["ValueName"]) $false; $row["Enabled"] = "No" } }.GetNewClosure())
+    $btnWinDelete.Add_Click({
+            $selected = @(Get-WmtDataGridSelectedRows $winTab.Grid)
+            if ($selected.Count -eq 0) { return }
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            foreach ($row in $selected) {
+                $type = [string]$row["Type"]
+                $itemPath = [string]$row["ItemPath"]
+                $valueName = [string]$row["ValueName"]
+                if ($type -eq "StartupFolder") { Remove-Item -LiteralPath $itemPath -Force -ErrorAction SilentlyContinue }
+                elseif ($type -eq "Registry" -and $itemPath -and $valueName) { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue }
+            }
+            & $fnRemoveWmtDataRows $winTab $selected
+        }.GetNewClosure())
+
+    $btnTaskRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Scheduled Tasks" $true }.GetNewClosure())
+    $btnTaskDetails.Add_Click({ & $fnShowStartupRowDetails $taskTab "Task Details" }.GetNewClosure())
+    $btnTaskEnable.Add_Click({ & $fnInvokeStartupTaskSelection Enable }.GetNewClosure())
+    $btnTaskDisable.Add_Click({ & $fnInvokeStartupTaskSelection Disable }.GetNewClosure())
+    $btnTaskDelete.Add_Click({ & $fnInvokeStartupTaskSelection Delete }.GetNewClosure())
+
+    $btnCtxRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Context Menu" $true }.GetNewClosure())
+    $btnCtxDetails.Add_Click({ & $fnShowStartupRowDetails $ctxTab "Context Menu Details" }.GetNewClosure())
+    $btnCtxEnable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $ctxTab.Grid) { $path = [string]$row["Path"]; if ($path -and (Test-Path -LiteralPath $path)) { Remove-ItemProperty -LiteralPath $path -Name "LegacyDisable" -ErrorAction SilentlyContinue; $row["Enabled"] = "Yes" } } }.GetNewClosure())
+    $btnCtxDisable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $ctxTab.Grid) { $path = [string]$row["Path"]; if ($path -and (Test-Path -LiteralPath $path)) { Set-ItemProperty -LiteralPath $path -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue; $row["Enabled"] = "No" } } }.GetNewClosure())
+    $btnCtxDelete.Add_Click({
+            $selected = @(Get-WmtDataGridSelectedRows $ctxTab.Grid)
+            if ($selected.Count -eq 0) { return }
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected context menu entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            foreach ($row in $selected) { $path = [string]$row["Path"]; if ($path -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue } }
+            & $fnRemoveWmtDataRows $ctxTab $selected
+        }.GetNewClosure())
+
+    $btnSvcRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Services" $true }.GetNewClosure())
+    $btnSvcDetails.Add_Click({ & $fnShowStartupRowDetails $svcTab "Service Details" }.GetNewClosure())
+    $btnSvcEnable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue; $row["StartType"] = "Automatic" } } }.GetNewClosure())
+    $btnSvcManual.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Manual -ErrorAction SilentlyContinue; $row["StartType"] = "Manual" } } }.GetNewClosure())
+    $btnSvcDisable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue; $row["StartType"] = "Disabled" } } }.GetNewClosure())
+    $btnSvcDelete.Add_Click({
+            $selected = @(Get-WmtDataGridSelectedRows $svcTab.Grid)
+            if ($selected.Count -eq 0) { return }
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected services? This is risky." -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            foreach ($row in $selected) { $name = [string]$row["Name"]; if ($name) { sc.exe delete $name | Out-Null } }
+            & $fnRemoveWmtDataRows $svcTab $selected
+        }.GetNewClosure())
 
     $dialog.Add_ContentRendered({
-            Set-WmtBusyCursor -Busy
-            try { & $loadWindows; & $loadTasks; & $loadContext; & $loadServices }
-            finally { Set-WmtBusyCursor }
             switch ($DefaultTab) {
-                "Scheduled Tasks" { $tabControl.SelectedItem = $taskTab.Tab }
-                "Context Menu" { $tabControl.SelectedItem = $ctxTab.Tab }
-                "Services" { $tabControl.SelectedItem = $svcTab.Tab }
-                default { $tabControl.SelectedItem = $winTab.Tab }
+                "Scheduled Tasks" { & $fnSetStartupView "Scheduled Tasks" }
+                "Context Menu" { & $fnSetStartupView "Context Menu" }
+                "Services" { & $fnSetStartupView "Services" }
+                default { & $fnSetStartupView "Windows" }
             }
         }.GetNewClosure())
     $dialog.ShowDialog() | Out-Null
@@ -21883,11 +22399,13 @@ $btnTasksDisableTelemetry.Add_Click({
         Invoke-UiCommand {
             param($tasks)
             foreach ($task in $tasks) {
-                try {
-                    Disable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+                $result = Invoke-WmtScheduledTaskAction -Action Disable -FullName $task
+                if ($result.Success) {
                     Write-GuiLog "Disabled: $task"
                 }
-                catch {}
+                else {
+                    Write-GuiLog "Failed to disable $task`: $($result.Message)"
+                }
             }
             Write-GuiLog "Telemetry tasks disabled!"
         } "Disabling telemetry tasks..." -ArgumentList $script:TelemetryTasks
@@ -21897,19 +22415,20 @@ $btnTasksRestore.Add_Click({
         Invoke-UiCommand {
             param($tasks)
             foreach ($task in $tasks) {
-                try {
-                    Enable-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue | Out-Null
+                $result = Invoke-WmtScheduledTaskAction -Action Enable -FullName $task
+                if ($result.Success) {
                     Write-GuiLog "Enabled: $task"
                 }
-                catch {}
+                else {
+                    Write-GuiLog "Failed to enable $task`: $($result.Message)"
+                }
             }
             Write-GuiLog "Telemetry tasks restored!"
         } "Restoring telemetry tasks..." -ArgumentList $script:TelemetryTasks
     })
 
 $btnTasksView.Add_Click({
-        Get-ScheduledTask | Where-Object { $_.TaskPath -eq "\Microsoft\Windows\Application Experience\" -or $_.TaskPath -eq "\Microsoft\Windows\Customer Experience Improvement Program\" } | 
-        Select-Object TaskName, TaskPath, State | Out-GridView -Title "Telemetry Tasks"
+        Show-WmtScheduledTasksDialog -Title "Telemetry Tasks" -FullPaths $script:TelemetryTasks
     })
 
 # --- WINDOWS UPDATE PRESETS ---
