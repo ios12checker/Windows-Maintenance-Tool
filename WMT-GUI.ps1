@@ -3881,7 +3881,7 @@ function Get-WmtSettings {
         WingetIncludeUnknown = $true
         LoadWinapp2          = $false 
         LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo")
+        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
         CustomDnsServers     = @()
         CustomDohTemplate    = ""
         CustomDohEnabled     = $false
@@ -14999,15 +14999,504 @@ function Show-StartupManager {
 
     function Show-StartupRowDetails {
         param($TabObj, [string]$Title)
-        $row = Get-WmtDataGridSelectedRows -DataGrid $TabObj.Grid | Select-Object -First 1
-        if (-not $row) { return }
-        $lines = [System.Collections.Generic.List[string]]::new()
-        foreach ($col in $TabObj.Meta.Table.Columns) {
-            $name = $col.ColumnName
-            $val = [string]$row[$name]
-            if (-not [string]::IsNullOrWhiteSpace($val)) { [void]$lines.Add("{0}: {1}" -f $name, $val) }
+
+        $selectedRows = @(Get-WmtDataGridSelectedRows -DataGrid $TabObj.Grid)
+        if ($selectedRows.Count -eq 0) {
+            Show-WmtMessageBox -Owner $dialog -Message "Select one startup entry first." -Title "Startup Manager" -Image Information | Out-Null
+            return
         }
-        if ($lines.Count -gt 0) { Show-TextDialog -Title $Title -Text ($lines -join "`r`n") }
+
+        $row = $selectedRows | Select-Object -First 1
+        $tabName = [string]$TabObj.Header
+
+        function Get-StartupCellValue {
+            param($Row, [string]$Name)
+            try {
+                if ($Row -is [System.Data.DataRow]) {
+                    if ($Row.Table.Columns.Contains($Name)) { return [string]$Row[$Name] }
+                }
+                elseif ($Row -is [System.Data.DataRowView]) {
+                    if ($Row.Row.Table.Columns.Contains($Name)) { return [string]$Row.Row[$Name] }
+                }
+                elseif ($Row -is [System.Collections.IDictionary]) {
+                    if ($Row.Contains($Name)) { return [string]$Row[$Name] }
+                }
+                else {
+                    $prop = $Row.PSObject.Properties[$Name]
+                    if ($prop) { return [string]$prop.Value }
+                }
+            }
+            catch {}
+            return ""
+        }
+
+        function Set-StartupCellValue {
+            param($Row, [string]$Name, [string]$Value)
+            try {
+                if ($Row -is [System.Data.DataRow]) {
+                    if ($Row.Table.Columns.Contains($Name)) { $Row[$Name] = $Value }
+                }
+                elseif ($Row -is [System.Data.DataRowView]) {
+                    if ($Row.Row.Table.Columns.Contains($Name)) { $Row.Row[$Name] = $Value }
+                }
+                elseif ($Row -is [System.Collections.IDictionary]) {
+                    $Row[$Name] = $Value
+                }
+                else {
+                    $prop = $Row.PSObject.Properties[$Name]
+                    if ($prop) { $prop.Value = $Value }
+                }
+            }
+            catch {}
+        }
+
+        function Set-StartupEditorVisibility {
+            param([object[]]$Controls, [bool]$Visible)
+            $visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+            foreach ($control in @($Controls)) {
+                try { if ($control) { $control.Visibility = $visibility } } catch {}
+            }
+        }
+
+        function Split-WmtStartupCommandLine {
+            param([string]$CommandLine)
+            $cmd = ([string]$CommandLine).Trim()
+            if ([string]::IsNullOrWhiteSpace($cmd)) { return [PSCustomObject]@{ Target = ""; Arguments = "" } }
+            if ($cmd.StartsWith('"')) {
+                $closingQuote = $cmd.IndexOf('"', 1)
+                if ($closingQuote -gt 1) {
+                    return [PSCustomObject]@{
+                        Target    = $cmd.Substring(1, $closingQuote - 1)
+                        Arguments = $cmd.Substring($closingQuote + 1).Trim()
+                    }
+                }
+            }
+            $exeMatch = [regex]::Match($cmd, '^(?<target>.+?\.exe)(?<args>\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+            if ($exeMatch.Success) {
+                return [PSCustomObject]@{
+                    Target    = $exeMatch.Groups['target'].Value.Trim()
+                    Arguments = $exeMatch.Groups['args'].Value.Trim()
+                }
+            }
+            $firstSpace = $cmd.IndexOf(' ')
+            if ($firstSpace -gt 0) {
+                return [PSCustomObject]@{
+                    Target    = $cmd.Substring(0, $firstSpace).Trim()
+                    Arguments = $cmd.Substring($firstSpace + 1).Trim()
+                }
+            }
+            return [PSCustomObject]@{ Target = $cmd; Arguments = "" }
+        }
+
+        function Get-WmtShortcutCommandLine {
+            param([string]$ShortcutPath)
+            if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -or -not [System.IO.File]::Exists($ShortcutPath)) { return "" }
+            $shell = $null
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $shortcut = $shell.CreateShortcut($ShortcutPath)
+                $target = [string]$shortcut.TargetPath
+                $arguments = [string]$shortcut.Arguments
+                if ([string]::IsNullOrWhiteSpace($target)) { return "" }
+                if ($target -match '\s') { $target = '"{0}"' -f $target }
+                return (($target, $arguments) -join " ").Trim()
+            }
+            catch { return "" }
+            finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+        }
+
+        function Set-WmtShortcutCommandLine {
+            param([string]$ShortcutPath, [string]$CommandLine)
+            if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) { return }
+            if (-not [System.IO.File]::Exists($ShortcutPath)) { throw "Shortcut file was not found: $ShortcutPath" }
+            $parts = Split-WmtStartupCommandLine $CommandLine
+            if ([string]::IsNullOrWhiteSpace([string]$parts.Target)) { throw "Shortcut target cannot be blank." }
+            $shell = $null
+            try {
+                $shell = New-Object -ComObject WScript.Shell
+                $shortcut = $shell.CreateShortcut($ShortcutPath)
+                $shortcut.TargetPath = [string]$parts.Target
+                $shortcut.Arguments = [string]$parts.Arguments
+                $expandedTarget = [Environment]::ExpandEnvironmentVariables(([string]$parts.Target).Trim('"'))
+                if ([System.IO.File]::Exists($expandedTarget)) {
+                    $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
+                    if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) { $shortcut.WorkingDirectory = $targetDir }
+                }
+                $shortcut.Save()
+            }
+            finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+        }
+
+        function Get-WmtRegistryDefaultValue {
+            param([string]$Path)
+            try {
+                if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path)) {
+                    $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+                    return [string]$key.GetValue("")
+                }
+            }
+            catch {}
+            return ""
+        }
+
+        function Set-WmtRegistryDefaultValue {
+            param([string]$Path, [string]$Value)
+            if ([string]::IsNullOrWhiteSpace($Path)) { return }
+            if (-not (Test-Path -LiteralPath $Path)) { throw "Registry key was not found: $Path" }
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            $key.SetValue("", [string]$Value)
+        }
+
+        $content = @'
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Name="lblHeading" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+            <TextBlock Name="lblHint" Margin="0,4,0,0" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondary}"/>
+        </StackPanel>
+
+        <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="140"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Name="lblName" Grid.Row="0" Grid.Column="0" Text="Name" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBox Name="txtName" Grid.Row="0" Grid.Column="1" Height="34" Margin="0,0,0,10" VerticalContentAlignment="Center"/>
+
+                <TextBlock Name="lblDisplayName" Grid.Row="1" Grid.Column="0" Text="Display name" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBox Name="txtDisplayName" Grid.Row="1" Grid.Column="1" Height="34" Margin="0,0,0,10" VerticalContentAlignment="Center"/>
+
+                <TextBlock Name="lblCommand" Grid.Row="2" Grid.Column="0" Text="Command" Margin="0,0,12,10" VerticalAlignment="Top" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBox Name="txtCommand" Grid.Row="2" Grid.Column="1" Height="96" Margin="0,0,0,10" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+
+                <TextBlock Name="lblLocation" Grid.Row="3" Grid.Column="0" Text="Location" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBox Name="txtLocation" Grid.Row="3" Grid.Column="1" Height="34" Margin="0,0,0,10" IsReadOnly="True" VerticalContentAlignment="Center"/>
+
+                <TextBlock Name="lblValueName" Grid.Row="4" Grid.Column="0" Text="Value / path" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBox Name="txtValueName" Grid.Row="4" Grid.Column="1" Height="34" Margin="0,0,0,10" IsReadOnly="True" VerticalContentAlignment="Center"/>
+
+                <TextBlock Name="lblStartupType" Grid.Row="5" Grid.Column="0" Text="Startup type" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <ComboBox Name="cboStartupType" Grid.Row="5" Grid.Column="1" Height="34" Margin="0,0,0,10"/>
+
+                <TextBlock Name="lblEnabled" Grid.Row="6" Grid.Column="0" Text="Enabled" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+                <CheckBox Name="chkEnabled" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10" VerticalAlignment="Center" Content="Enabled" Foreground="{DynamicResource TextPrimary}"/>
+            </Grid>
+        </ScrollViewer>
+
+        <Grid Grid.Row="2" Margin="0,14,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Name="lblStatus" Grid.Column="0" VerticalAlignment="Center" TextWrapping="Wrap" Foreground="{DynamicResource Warning}"/>
+            <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
+                <Button Name="btnBrowse" Content="Browse Command" MinWidth="124" Margin="0,0,8,8"/>
+                <Button Name="btnOpenLocation" Content="Open Location" MinWidth="112" Margin="0,0,8,8"/>
+                <Button Name="btnOpenNative" Content="Open Native Editor" MinWidth="136" Margin="0,0,8,8"/>
+                <Button Name="btnSave" Content="Save" MinWidth="94" IsDefault="True" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
+                <Button Name="btnClose" Content="Close" MinWidth="94" IsCancel="True" Margin="0,0,0,8"/>
+            </WrapPanel>
+        </Grid>
+    </Grid>
+'@
+
+        $editor = New-WmtWindowFromXaml -Title $Title -ContentXaml $content -Width 820 -Height 560 -MinWidth 680 -MinHeight 460
+        try { $editor.Owner = $dialog } catch {}
+
+        $lblHeading = $editor.FindName("lblHeading")
+        $lblHint = $editor.FindName("lblHint")
+        $lblName = $editor.FindName("lblName")
+        $txtName = $editor.FindName("txtName")
+        $lblDisplayName = $editor.FindName("lblDisplayName")
+        $txtDisplayName = $editor.FindName("txtDisplayName")
+        $lblCommand = $editor.FindName("lblCommand")
+        $txtCommand = $editor.FindName("txtCommand")
+        $lblLocation = $editor.FindName("lblLocation")
+        $txtLocation = $editor.FindName("txtLocation")
+        $lblValueName = $editor.FindName("lblValueName")
+        $txtValueName = $editor.FindName("txtValueName")
+        $lblStartupType = $editor.FindName("lblStartupType")
+        $cboStartupType = $editor.FindName("cboStartupType")
+        $lblEnabled = $editor.FindName("lblEnabled")
+        $chkEnabled = $editor.FindName("chkEnabled")
+        $lblStatus = $editor.FindName("lblStatus")
+        $btnBrowse = $editor.FindName("btnBrowse")
+        $btnOpenLocation = $editor.FindName("btnOpenLocation")
+        $btnOpenNative = $editor.FindName("btnOpenNative")
+        $btnSave = $editor.FindName("btnSave")
+        $btnClose = $editor.FindName("btnClose")
+
+        [void]$cboStartupType.Items.Add("Automatic")
+        [void]$cboStartupType.Items.Add("Manual")
+        [void]$cboStartupType.Items.Add("Disabled")
+
+        $entryType = Get-StartupCellValue $row "Type"
+        $itemPath = Get-StartupCellValue $row "ItemPath"
+        $valueName = Get-StartupCellValue $row "ValueName"
+        $rootRunPath = Get-StartupCellValue $row "RootRunPath"
+        $ctxPath = Get-StartupCellValue $row "Path"
+        $serviceName = Get-StartupCellValue $row "Name"
+        $taskName = Get-StartupCellValue $row "TaskName"
+        $taskPath = Get-StartupCellValue $row "Path"
+
+        $lblHeading.Text = "Edit $tabName entry"
+        $lblHint.Text = "Changes are written immediately when you press Save. Protected/all-users entries may require running WMT as administrator."
+        $txtName.Text = Get-StartupCellValue $row "Name"
+        $txtDisplayName.Text = Get-StartupCellValue $row "DisplayName"
+        $txtCommand.Text = Get-StartupCellValue $row "Command"
+        $txtLocation.Text = Get-StartupCellValue $row "Location"
+        $txtValueName.Text = $valueName
+        $chkEnabled.IsChecked = ((Get-StartupCellValue $row "Enabled") -ne "No")
+
+        Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $false
+        $btnBrowse.Visibility = [System.Windows.Visibility]::Visible
+
+        switch ($tabName) {
+            "Windows" {
+                if ($entryType -eq "StartupFolder") {
+                    $shortcutCommand = Get-WmtShortcutCommandLine $itemPath
+                    if (-not [string]::IsNullOrWhiteSpace($shortcutCommand)) { $txtCommand.Text = $shortcutCommand }
+                    $txtValueName.Text = $itemPath
+                    $lblCommand.Text = "Shortcut target"
+                    $lblValueName.Text = "File path"
+                    $lblHint.Text = "For Startup Folder shortcuts, Save can rename the file and update .lnk targets/arguments. Non-shortcut startup files can be renamed here."
+                }
+                else {
+                    $lblCommand.Text = "Run command"
+                    $lblValueName.Text = "Registry value"
+                    $lblHint.Text = "Edit the Run value name, command, and StartupApproved enabled state. HKLM entries may require administrator rights."
+                }
+            }
+            "Scheduled Tasks" {
+                $txtName.Text = $taskName
+                $txtName.IsReadOnly = $true
+                $txtCommand.Text = "Use the native Task Scheduler editor for actions, triggers, conditions, and arguments. This WMT editor can enable or disable the task."
+                $txtCommand.IsReadOnly = $true
+                $txtLocation.Text = $taskPath
+                $txtValueName.Text = ("{0}{1}" -f $taskPath, $taskName)
+                $chkEnabled.IsChecked = ((Get-StartupCellValue $row "State") -ne "Disabled")
+                $lblCommand.Text = "Notes"
+                $lblLocation.Text = "Task path"
+                $lblValueName.Text = "Task identity"
+                Set-StartupEditorVisibility @($btnBrowse, $btnOpenNative) $true
+                $btnBrowse.Visibility = [System.Windows.Visibility]::Collapsed
+                $btnOpenNative.Content = "Open Task Scheduler"
+                $lblHint.Text = "Task names/paths are read-only here. Use Save to enable or disable, or open Task Scheduler for advanced edits."
+            }
+            "Context Menu" {
+                $display = Get-WmtRegistryDefaultValue $ctxPath
+                if ([string]::IsNullOrWhiteSpace($display)) { $display = Get-StartupCellValue $row "Name" }
+                $txtName.Text = $display
+                $cmdPath = if ([string]::IsNullOrWhiteSpace($ctxPath)) { "" } else { "$ctxPath\command" }
+                $txtCommand.Text = Get-WmtRegistryDefaultValue $cmdPath
+                $txtLocation.Text = $ctxPath
+                $txtValueName.Text = Get-StartupCellValue $row "KeyName"
+                $chkEnabled.IsChecked = ((Get-StartupCellValue $row "Enabled") -ne "No")
+                $lblName.Text = "Menu text"
+                $lblCommand.Text = "Command"
+                $lblLocation.Text = "Registry key"
+                $lblValueName.Text = "Key name"
+                $lblHint.Text = "Edit the menu text/default value, command subkey, and LegacyDisable enabled state."
+            }
+            "Services" {
+                $txtName.Text = $serviceName
+                $txtName.IsReadOnly = $true
+                $txtDisplayName.Text = Get-StartupCellValue $row "DisplayName"
+                $txtCommand.Text = "Service binary paths are not edited here. Use Registry Editor or sc.exe config for advanced service path changes."
+                $txtCommand.IsReadOnly = $true
+                $txtLocation.Text = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                $txtValueName.Text = $serviceName
+                $currentStartType = Get-StartupCellValue $row "StartType"
+                if (-not (@("Automatic", "Manual", "Disabled") -contains $currentStartType) -and -not [string]::IsNullOrWhiteSpace($currentStartType)) { [void]$cboStartupType.Items.Add($currentStartType) }
+                $cboStartupType.SelectedItem = $currentStartType
+                Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $true
+                Set-StartupEditorVisibility @($lblEnabled, $chkEnabled, $btnBrowse) $false
+                $btnOpenNative.Content = "Open Services"
+                $lblName.Text = "Service name"
+                $lblCommand.Text = "Notes"
+                $lblLocation.Text = "Registry key"
+                $lblValueName.Text = "Service name"
+                $lblHint.Text = "Edit the service display name and startup type. Service name and binary path are kept read-only for safety."
+            }
+        }
+
+        $btnBrowse.Add_Click({
+                $picker = [Microsoft.Win32.OpenFileDialog]::new()
+                $picker.Filter = "Programs and scripts|*.exe;*.bat;*.cmd;*.ps1;*.vbs;*.lnk|All files|*.*"
+                $existingParts = Split-WmtStartupCommandLine $txtCommand.Text
+                $existingTarget = [Environment]::ExpandEnvironmentVariables(([string]$existingParts.Target).Trim('"'))
+                try {
+                    if (-not [string]::IsNullOrWhiteSpace($existingTarget) -and [System.IO.File]::Exists($existingTarget)) {
+                        $picker.InitialDirectory = [System.IO.Path]::GetDirectoryName($existingTarget)
+                        $picker.FileName = [System.IO.Path]::GetFileName($existingTarget)
+                    }
+                }
+                catch {}
+                if ($picker.ShowDialog($editor) -eq $true) {
+                    $picked = [string]$picker.FileName
+                    if ($picked -match '\s') { $picked = '"{0}"' -f $picked }
+                    $txtCommand.Text = $picked
+                }
+            }.GetNewClosure())
+
+        $btnOpenLocation.Add_Click({
+                try {
+                    switch ($tabName) {
+                        "Windows" {
+                            if ($entryType -eq "StartupFolder" -and -not [string]::IsNullOrWhiteSpace($itemPath) -and [System.IO.File]::Exists($itemPath)) { Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $itemPath) }
+                            elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Start-Process regedit.exe }
+                        }
+                        "Scheduled Tasks" { Start-Process taskschd.msc }
+                        "Context Menu" { Start-Process regedit.exe }
+                        "Services" { Start-Process services.msc }
+                    }
+                }
+                catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
+            }.GetNewClosure())
+
+        $btnOpenNative.Add_Click({
+                try {
+                    switch ($tabName) {
+                        "Scheduled Tasks" { Start-Process taskschd.msc }
+                        "Services" { Start-Process services.msc }
+                        default { Start-Process regedit.exe }
+                    }
+                }
+                catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
+            }.GetNewClosure())
+
+        $btnSave.Add_Click({
+                Set-WmtBusyCursor -Busy
+                $lblStatus.Text = "Saving..."
+                try {
+                    switch ($tabName) {
+                        "Windows" {
+                            $newName = ([string]$txtName.Text).Trim()
+                            $newCommand = ([string]$txtCommand.Text).Trim()
+                            $enabled = [bool]$chkEnabled.IsChecked
+                            if ([string]::IsNullOrWhiteSpace($newName)) { throw "Name cannot be blank." }
+
+                            if ($entryType -eq "Registry") {
+                                $runPath = if ([string]::IsNullOrWhiteSpace($rootRunPath)) { $itemPath } else { $rootRunPath }
+                                if ([string]::IsNullOrWhiteSpace($runPath)) { throw "Registry path is missing." }
+                                if ([string]::IsNullOrWhiteSpace($newCommand)) { throw "Run command cannot be blank." }
+                                if (-not (Test-Path -LiteralPath $runPath)) { New-Item -Path $runPath -Force -ErrorAction Stop | Out-Null }
+                                Set-ItemProperty -Path $runPath -Name $newName -Value $newCommand -ErrorAction Stop
+                                if ($valueName -and $newName -ne $valueName) {
+                                    Remove-ItemProperty -Path $runPath -Name $valueName -ErrorAction SilentlyContinue
+                                }
+                                & $fnSetStartupApprovedState "Registry" $runPath $newName $enabled
+                                Set-StartupCellValue $row "Name" $newName
+                                Set-StartupCellValue $row "Command" $newCommand
+                                Set-StartupCellValue $row "ItemPath" $runPath
+                                Set-StartupCellValue $row "ValueName" $newName
+                                Set-StartupCellValue $row "RootRunPath" $runPath
+                                Set-StartupCellValue $row "Enabled" $(if ($enabled) { "Yes" } else { "No" })
+                            }
+                            elseif ($entryType -eq "StartupFolder") {
+                                if ([string]::IsNullOrWhiteSpace($itemPath) -or -not [System.IO.File]::Exists($itemPath)) { throw "Startup folder item was not found." }
+                                $directory = [System.IO.Path]::GetDirectoryName($itemPath)
+                                $extension = [System.IO.Path]::GetExtension($itemPath)
+                                if ([string]::IsNullOrWhiteSpace($extension)) { $extension = ".lnk" }
+                                $newFileName = $newName
+                                if ([System.IO.Path]::GetExtension($newFileName) -eq "") { $newFileName = "$newFileName$extension" }
+                                if ($newFileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw "Name contains invalid file-name characters." }
+                                $newPath = Join-Path $directory $newFileName
+                                if ($newPath -ne $itemPath) {
+                                    Move-Item -LiteralPath $itemPath -Destination $newPath -Force -ErrorAction Stop
+                                    $itemPath = $newPath
+                                    $valueName = [System.IO.Path]::GetFileName($newPath)
+                                }
+                                if ($itemPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrWhiteSpace($newCommand)) {
+                                    Set-WmtShortcutCommandLine -ShortcutPath $itemPath -CommandLine $newCommand
+                                }
+                                & $fnSetStartupApprovedState "StartupFolder" $directory ([System.IO.Path]::GetFileName($itemPath)) $enabled
+                                Set-StartupCellValue $row "Name" ([System.IO.Path]::GetFileNameWithoutExtension($itemPath))
+                                Set-StartupCellValue $row "Command" $(if ($itemPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -and -not [string]::IsNullOrWhiteSpace($newCommand)) { $newCommand } else { $itemPath })
+                                Set-StartupCellValue $row "Location" $directory
+                                Set-StartupCellValue $row "ItemPath" $itemPath
+                                Set-StartupCellValue $row "ValueName" ([System.IO.Path]::GetFileName($itemPath))
+                                Set-StartupCellValue $row "RootRunPath" $directory
+                                Set-StartupCellValue $row "Enabled" $(if ($enabled) { "Yes" } else { "No" })
+                            }
+                        }
+                        "Scheduled Tasks" {
+                            if ([string]::IsNullOrWhiteSpace($taskName)) { throw "Task name is missing." }
+                            if ([bool]$chkEnabled.IsChecked) {
+                                Enable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop | Out-Null
+                                Set-StartupCellValue $row "State" "Ready"
+                            }
+                            else {
+                                Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop | Out-Null
+                                Set-StartupCellValue $row "State" "Disabled"
+                            }
+                        }
+                        "Context Menu" {
+                            if ([string]::IsNullOrWhiteSpace($ctxPath)) { throw "Registry key is missing." }
+                            $newDisplayName = ([string]$txtName.Text).Trim()
+                            $newCommand = ([string]$txtCommand.Text).Trim()
+                            if (-not (Test-Path -LiteralPath $ctxPath)) { throw "Registry key was not found." }
+                            if (-not [string]::IsNullOrWhiteSpace($newDisplayName)) {
+                                Set-WmtRegistryDefaultValue -Path $ctxPath -Value $newDisplayName
+                                Set-ItemProperty -LiteralPath $ctxPath -Name "MUIVerb" -Value $newDisplayName -ErrorAction SilentlyContinue
+                                Set-StartupCellValue $row "Name" $newDisplayName
+                            }
+                            if (-not [string]::IsNullOrWhiteSpace($newCommand)) {
+                                Set-WmtRegistryDefaultValue -Path "$ctxPath\command" -Value $newCommand
+                            }
+                            if ([bool]$chkEnabled.IsChecked) {
+                                Remove-ItemProperty -LiteralPath $ctxPath -Name "LegacyDisable" -ErrorAction SilentlyContinue
+                                Set-StartupCellValue $row "Enabled" "Yes"
+                            }
+                            else {
+                                Set-ItemProperty -LiteralPath $ctxPath -Name "LegacyDisable" -Value "" -ErrorAction Stop
+                                Set-StartupCellValue $row "Enabled" "No"
+                            }
+                        }
+                        "Services" {
+                            if ([string]::IsNullOrWhiteSpace($serviceName)) { throw "Service name is missing." }
+                            $newDisplayName = ([string]$txtDisplayName.Text).Trim()
+                            $newStartType = [string]$cboStartupType.SelectedItem
+                            if (-not [string]::IsNullOrWhiteSpace($newDisplayName)) {
+                                Set-Service -Name $serviceName -DisplayName $newDisplayName -ErrorAction Stop
+                                Set-StartupCellValue $row "DisplayName" $newDisplayName
+                            }
+                            if (@("Automatic", "Manual", "Disabled") -contains $newStartType) {
+                                Set-Service -Name $serviceName -StartupType $newStartType -ErrorAction Stop
+                                Set-StartupCellValue $row "StartType" $newStartType
+                            }
+                        }
+                    }
+                    try { $TabObj.Grid.Items.Refresh() } catch {}
+                    & $fnUpdateStartupTabFilter $TabObj
+                    $lblStatus.Text = "Saved."
+                    $editor.DialogResult = $true
+                }
+                catch {
+                    $lblStatus.Text = "Save failed: $($_.Exception.Message)"
+                    Show-WmtMessageBox -Owner $editor -Message "Could not save changes.`n$($_.Exception.Message)" -Title "Startup Manager" -Image Error | Out-Null
+                }
+                finally { Set-WmtBusyCursor }
+            }.GetNewClosure())
+
+        $btnClose.Add_Click({ $editor.Close() }.GetNewClosure())
+        $editor.ShowDialog() | Out-Null
     }
 
     function Remove-WmtDataRows {
@@ -17545,7 +18034,7 @@ function Set-ButtonIcon {
 }
 
 # --- ICONS & TOOLTIPS ---
-Set-ButtonIcon "btnTabUpdates" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Updates (Winget)" "Manage Windows software updates via Winget" 18 "#00FF00"
+Set-ButtonIcon "btnTabUpdates" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Updates" "Manage software updates across enabled providers" 18 "#00FF00"
 # Set-ButtonIcon "btnTabHealth" - CUSTOM LOGIC BELOW
 Set-ButtonIcon "btnTabNetwork" "M5,3A2,2 0 0,0 3,5V15A2,2 0 0,0 5,17H8V15H5V5H19V15H16V17H19A2,2 0 0,0 21,15V5A2,2 0 0,0 19,3H5M11,15H13V17H11V15M11,11H13V13H11V11M11,7H13V9H11V7Z" "Network & DNS" "DNS, IP Config, Network Repair tools" 18
 Set-ButtonIcon "btnTabFirewall" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M12,11.95L7,12.2V11.2L12,10.95L17,11.2V12.2L12,11.95Z" "Firewall Manager" "View and manage Windows Firewall rules" 18 "#FF5555"
@@ -17614,7 +18103,7 @@ Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0
 Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
 (Get-Ctrl "btnWingetFind").Width = 100
 Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
-Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks the Winget repository for available application updates"
+Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks enabled providers for available application updates"
 Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
 Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
@@ -18132,8 +18621,8 @@ function Update-WmtSearchIndexEntries {
 }
 # --- GLOBAL SEARCH INDEX ---
 
-# 1. Updates (Winget)
-Add-SearchIndexEntry "btnWingetScan"        "Check for Updates (Winget)"      "btnTabUpdates"
+# 1. Updates
+Add-SearchIndexEntry "btnWingetScan"        "Check Package Updates"           "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
@@ -18428,7 +18917,7 @@ $Script:StartWingetAction = {
     }
     catch {}
 
-    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id -Unique)
+    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, LibraryPath, InstallDir, ManifestPath -Unique)
     $totalItems = $uniqueItems.Count
     
     # UI Updates
@@ -18459,6 +18948,7 @@ $Script:StartWingetAction = {
     $script:WingetStoreResourcesInUseSeen = $false
     $script:WingetStoreErrorLogSeen = @{}
     $script:WingetStoreFallbackSeen = @{}
+    $script:WingetSteamOpenSeen = @{}
     $script:WingetActionEventPath = Join-Path $env:TEMP ("WMT_WingetAction_{0}.events" -f ([Guid]::NewGuid().ToString("N")))
     $script:WingetActionEventLineCount = 0
     try { Set-Content -Path $script:WingetActionEventPath -Value "" -Encoding UTF8 -Force } catch {}
@@ -19660,6 +20150,55 @@ exit /b %WMT_EXIT%
                         $userCmd = "winget uninstall --id `"$id`" --source msstore $userFlags"
                     }
                 }
+                # --- STEAM GAMES ---
+                elseif (([string]$src).ToLowerInvariant() -eq "steam") {
+                    if ($act -eq "Update") {
+                        # Steam game updates have to be handled by the Steam client.
+                        # Always open Downloads first; launching the game directly can fail silently
+                        # when WMT is elevated or when Steam is not already running.
+                        $steamUri = "steam://open/downloads"
+                        $steamRunUri = if (-not [string]::IsNullOrWhiteSpace([string]$id)) { "steam://rungameid/$id" } else { "" }
+
+                        Write-Output "LOG:[Steam] Opening Steam Downloads for $name."
+                        try {
+                            $steamPayload = [ordered]@{
+                                Uri         = $steamUri
+                                RunUri      = $steamRunUri
+                                PackageName = $name
+                                AppId       = $id
+                            }
+                            $steamJson = $steamPayload | ConvertTo-Json -Compress
+                            $steamEncoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($steamJson))
+                            $steamOpenLine = "STEAM_OPEN:$steamEncoded"
+                            Write-Output $steamOpenLine
+                            Write-WmtStoreCliActivityEvent $steamOpenLine
+                        }
+                        catch {
+                            Write-Output "LOG:[Steam] Could not prepare Steam request: $($_.Exception.Message)"
+                        }
+
+                        # Backup path: request Steam directly from this worker process too.
+                        # The GUI still receives STEAM_OPEN and runs the visible launcher, but this
+                        # catches cases where the UI timer/event reader misses the worker output.
+                        try {
+                            Start-Process -FilePath $steamUri -ErrorAction Stop | Out-Null
+                            Write-Output "LOG:[Steam] Direct worker Steam protocol launch requested."
+                        }
+                        catch {
+                            Write-Output "LOG:[Steam] Direct worker Steam protocol launch failed: $($_.Exception.Message)"
+                        }
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (opened Steam updater)"
+                        Write-Output "RESULT:${index}:SUCCESS:$name"
+                        continue
+                    }
+                    elseif ($act -eq "Install") {
+                        $cmd = "Start-Process `"steam://install/$id`""
+                        $userCmd = "Open Steam install prompt for app $id"
+                    }
+                    elseif ($act -eq "Uninstall") {
+                        $skipReason = "Steam game uninstall should be handled from the Steam client."
+                    }
+                }
                 # --- SCOOP (Likely requires User Mode) ---
                 elseif ($src -eq "scoop") {
                     if ($act -eq "Install") { $cmd = "scoop install `"$id`"" }
@@ -19751,6 +20290,7 @@ exit /b %WMT_EXIT%
                         "^(scoop)$" { "Scoop"; break }
                         "^(gem|ruby)$" { "RubyGem"; break }
                         "^(cargo|rust)$" { "Cargo"; break }
+                        "^(steam)$" { "Steam"; break }
                         default { "Package" }
                     }
                     if ($isPipUpdate) { $windowTag = "PIP" }
@@ -19942,6 +20482,251 @@ timeout /t 5
     $processWingetLines = {
         param($lines)
         foreach ($line in $lines) {
+            if ($line -match "^STEAM_OPEN:(.+)$") {
+                $payload = $null
+                try {
+                    $json = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($matches[1].Trim()))
+                    $payload = $json | ConvertFrom-Json
+                }
+                catch {
+                    Write-GuiLog "[Steam] Could not decode Steam launch request: $($_.Exception.Message)"
+                }
+
+                $steamUri = "steam://open/downloads"
+                $steamRunUri = ""
+                $packageName = $script:WingetCurrentItemName
+                $appId = ""
+                if ($payload) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$payload.Uri)) { $steamUri = [string]$payload.Uri }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$payload.RunUri)) { $steamRunUri = [string]$payload.RunUri }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$payload.PackageName)) { $packageName = [string]$payload.PackageName }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$payload.AppId)) { $appId = [string]$payload.AppId }
+                }
+                if ([string]::IsNullOrWhiteSpace($packageName)) { $packageName = "Steam" }
+                Write-GuiLog "[Steam] Received STEAM_OPEN request for $packageName ($steamUri)."
+
+                # Prevent spamming the same Steam URL multiple times during bulk runs.
+                if (-not $script:WingetSteamOpenSeen) { $script:WingetSteamOpenSeen = @{} }
+                $seenKey = if (-not [string]::IsNullOrWhiteSpace($appId)) { "$steamUri|$appId" } else { $steamUri }
+                if ($script:WingetSteamOpenSeen.ContainsKey($seenKey)) { continue }
+                $script:WingetSteamOpenSeen[$seenKey] = $true
+
+                function Find-WmtSteamExeForLaunch {
+                    $candidates = New-Object System.Collections.Generic.List[string]
+                    $addCandidate = {
+                        param([string]$Path)
+                        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+                        try {
+                            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+                            if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) {
+                                [void]$candidates.Add($expanded)
+                            }
+                        }
+                        catch {}
+                    }
+                    foreach ($registryPath in @(
+                            "HKCU:\Software\Valve\Steam",
+                            "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+                            "HKLM:\SOFTWARE\Valve\Steam"
+                        )) {
+                        try {
+                            $props = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+                            if ($props.PSObject.Properties["SteamExe"]) { & $addCandidate ([string]$props.SteamExe) }
+                            foreach ($propName in @("SteamPath", "InstallPath")) {
+                                if ($props.PSObject.Properties[$propName]) {
+                                    & $addCandidate (Join-Path ([string]$props.$propName) "steam.exe")
+                                }
+                            }
+                        }
+                        catch {}
+                    }
+                    foreach ($path in @(
+                            "${env:ProgramFiles(x86)}\Steam\steam.exe",
+                            "${env:ProgramFiles}\Steam\steam.exe"
+                        )) { & $addCandidate $path }
+                    return @($candidates) | Select-Object -First 1
+                }
+
+                function Invoke-WmtSteamVisiblePowerShellLauncher {
+                    param(
+                        [string]$Uri,
+                        [string]$Label
+                    )
+
+                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
+
+                    # This is intentionally a visible PowerShell child process because the same
+                    # Start-Process "steam://..." command works when the user runs it manually.
+                    # If this window does not appear, the GUI did not receive/process STEAM_OPEN.
+                    try {
+                        $safeUriForScript = ([string]$Uri).Replace("'", "''")
+                        $launcherPath = Join-Path $env:TEMP ("WMT_OpenSteam_{0}.ps1" -f ([Guid]::NewGuid().ToString('N')))
+                        $launcherContent = @"
+`$ErrorActionPreference = 'Continue'
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+Write-Host 'WMT Steam launcher'
+Write-Host 'Opening: $Uri'
+Write-Host ''
+try {
+    Start-Process -FilePath '$safeUriForScript'
+    Write-Host 'Steam protocol request was sent with Start-Process.'
+}
+catch {
+    Write-Host "Start-Process steam URI failed: `$(`$_.Exception.Message)"
+    try {
+        `$cmdArgs = '/c start "" "$safeUriForScript"'
+        Start-Process -FilePath `$env:ComSpec -ArgumentList `$cmdArgs -WindowStyle Normal
+        Write-Host 'Visible cmd fallback was started.'
+    }
+    catch {
+        Write-Host "Visible cmd fallback failed: `$(`$_.Exception.Message)"
+    }
+}
+Write-Host ''
+Write-Host 'Closing this launcher in 6 seconds...'
+Start-Sleep -Seconds 6
+try { Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
+"@
+                        Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding UTF8 -Force
+
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName = "powershell.exe"
+                        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
+                        $psi.UseShellExecute = $true
+                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+                        [void][System.Diagnostics.Process]::Start($psi)
+
+                        Write-GuiLog "[Steam] Started visible PowerShell Steam launcher for $Label ($Uri)."
+                        return $true
+                    }
+                    catch {
+                        Write-GuiLog "[Steam] Visible PowerShell launcher failed for $Label`: $($_.Exception.Message)"
+                    }
+
+                    return $false
+                }
+
+                function Invoke-WmtSteamVisibleCmdLauncher {
+                    param(
+                        [string]$Uri,
+                        [string]$Label
+                    )
+
+                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
+
+                    try {
+                        $safeUri = ([string]$Uri).Replace('"', '')
+                        $launcherPath = Join-Path $env:TEMP ("WMT_OpenSteam_{0}.cmd" -f ([Guid]::NewGuid().ToString('N')))
+                        $launcherContent = @"
+@echo off
+title WMT Steam launcher
+echo WMT Steam launcher
+echo Opening: $safeUri
+echo.
+start "" "$safeUri"
+echo Steam protocol request sent.
+echo Closing this launcher in 6 seconds...
+timeout /t 6 /nobreak >nul
+del "%~f0" >nul 2>nul
+"@
+                        Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding Ascii -Force
+
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName = $launcherPath
+                        $psi.UseShellExecute = $true
+                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+                        [void][System.Diagnostics.Process]::Start($psi)
+
+                        Write-GuiLog "[Steam] Started visible cmd Steam launcher for $Label ($Uri)."
+                        return $true
+                    }
+                    catch {
+                        Write-GuiLog "[Steam] Visible cmd launcher failed for $Label`: $($_.Exception.Message)"
+                    }
+
+                    return $false
+                }
+
+                function Invoke-WmtSteamShellExecuteUri {
+                    param(
+                        [string]$Uri,
+                        [string]$Label
+                    )
+
+                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
+
+                    try {
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName = $Uri
+                        $psi.UseShellExecute = $true
+                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+                        [void][System.Diagnostics.Process]::Start($psi)
+                        Write-GuiLog "[Steam] Sent Steam protocol with ShellExecute for $Label ($Uri)."
+                        return $true
+                    }
+                    catch {
+                        Write-GuiLog "[Steam] ShellExecute URI failed for $Label`: $($_.Exception.Message)"
+                    }
+
+                    return $false
+                }
+
+                function Open-WmtSteamUriFromGui {
+                    param(
+                        [string]$Uri,
+                        [string]$Label,
+                        [switch]$PreferSteamExe
+                    )
+
+                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
+                    $steamExe = Find-WmtSteamExeForLaunch
+
+                    Write-GuiLog "[Steam] Launch request received for $Label ($Uri)."
+
+                    # First try the visible child PowerShell, because that exactly mirrors the
+                    # manual PowerShell command path that is known to work on the user's machine.
+                    if (Invoke-WmtSteamVisiblePowerShellLauncher -Uri $Uri -Label $Label) { return $true }
+
+                    # Then try ShellExecute and a visible .cmd fallback. These are intentionally
+                    # not hidden so failures are visible instead of being swallowed silently.
+                    if (Invoke-WmtSteamShellExecuteUri -Uri $Uri -Label $Label) { return $true }
+                    if (Invoke-WmtSteamVisibleCmdLauncher -Uri $Uri -Label $Label) { return $true }
+
+                    if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
+                        try {
+                            Start-Process -FilePath $steamExe -ArgumentList "-silent" -ErrorAction Stop | Out-Null
+                            Write-GuiLog "[Steam] Started steam.exe fallback: $steamExe"
+                            Start-Sleep -Milliseconds 1000
+                            if (Invoke-WmtSteamVisiblePowerShellLauncher -Uri $Uri -Label $Label) { return $true }
+                            if (Invoke-WmtSteamVisibleCmdLauncher -Uri $Uri -Label $Label) { return $true }
+                        }
+                        catch {
+                            Write-GuiLog "[Steam] Steam.exe startup fallback failed for $Label`: $($_.Exception.Message)"
+                        }
+                    }
+                    else {
+                        Write-GuiLog "[Steam] steam.exe fallback was skipped because Steam was not found in registry/common paths."
+                    }
+
+                    return $false
+                }
+
+                $opened = Open-WmtSteamUriFromGui -Uri $steamUri -Label $packageName -PreferSteamExe
+                if (-not $opened -and $steamUri -ne "steam://open/downloads") {
+                    $opened = Open-WmtSteamUriFromGui -Uri "steam://open/downloads" -Label "Steam Downloads" -PreferSteamExe
+                }
+
+                if ($opened) {
+                    Write-GuiLog "[Steam] Opened Steam updater for $packageName."
+                    if (-not [string]::IsNullOrWhiteSpace($steamRunUri)) {
+                        Write-GuiLog "[Steam] If the download does not start automatically, click Update/Resume in Steam Downloads for app $appId."
+                    }
+                }
+                else {
+                    Write-GuiLog "[Steam] Could not open Steam. Start Steam manually and open Downloads to finish updating $packageName."
+                }
+                continue
+            }
             if ($line -match "^STORE_FALLBACK:(.+)$") {
                 $payload = $null
                 try {
@@ -20239,14 +21024,14 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam") -Force
     }
     $enabled = $settings.EnabledProviders
 
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="620" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="670" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -20344,6 +21129,14 @@ function Show-ProviderManager {
                 <TextBlock Name="lblCargoStatus" Text="Checking..." Grid.Column="2"/>
                 <Button Name="btnProviderCargoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads.">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkSteam" Grid.Column="0"/>
+                <TextBlock Text="Steam Games" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblSteamStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderSteamAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
         </StackPanel>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
@@ -20365,6 +21158,7 @@ function Show-ProviderManager {
     $chkScoop = Get-WinCtrl "chkScoop"
     $chkGem = Get-WinCtrl "chkGem"
     $chkCargo = Get-WinCtrl "chkCargo"
+    $chkSteam = Get-WinCtrl "chkSteam"
 
     $providerDefinitions = @(
         [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
@@ -20375,7 +21169,8 @@ function Show-ProviderManager {
         [PSCustomObject]@{ Key = "chocolatey"; DisplayName = "Chocolatey"; Commands = [string[]]@("choco"); Label = "lblChocoStatus"; Button = "btnProviderChocoAction" },
         [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
         [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
-        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" }
+        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
+        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" }
     )
     $providerInstallState = @{}
     $providerActionMonitors = @{}
@@ -20662,6 +21457,145 @@ cargo --version
                 }
                 break
             }
+            "steam" {
+                if ($installing) {
+                    @'
+function Get-WmtSteamExe {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+            if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) { [void]$candidates.Add($expanded) }
+        }
+        catch {}
+    }
+    foreach ($registryPath in @(
+            "HKCU:\Software\Valve\Steam",
+            "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+            "HKLM:\SOFTWARE\Valve\Steam"
+        )) {
+        try {
+            $props = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+            if ($props.PSObject.Properties["SteamExe"]) { & $add ([string]$props.SteamExe) }
+            foreach ($propName in @("SteamPath", "InstallPath")) {
+                if ($props.PSObject.Properties[$propName]) { & $add (Join-Path ([string]$props.$propName) "steam.exe") }
+            }
+        }
+        catch {}
+    }
+    foreach ($path in @(
+            "${env:ProgramFiles(x86)}\Steam\steam.exe",
+            "${env:ProgramFiles}\Steam\steam.exe"
+        )) { & $add $path }
+    return @($candidates) | Select-Object -First 1
+}
+
+$steamExe = Get-WmtSteamExe
+if ([string]::IsNullOrWhiteSpace($steamExe)) {
+    if (Get-Command winget -ErrorAction SilentlyContinue) {
+        winget install --id Valve.Steam --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+        Update-WmtProviderPathEnvironment
+        $steamExe = Get-WmtSteamExe
+    }
+    else {
+        Start-Process "https://store.steampowered.com/about/"
+        throw "Steam install needs winget or a manual Steam install. Opened the Steam download page."
+    }
+}
+
+$steamExe = Get-WmtSteamExe
+if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
+    Start-Process -FilePath $steamExe -ArgumentList "-silent"
+    Start-Sleep -Seconds 2
+    try {
+        Start-Process "steam://open/downloads"
+        Write-Host "Steam Downloads protocol request was sent."
+    }
+    catch {
+        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
+        $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
+        Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
+    }
+    Write-Host "Steam was started. Use the Downloads page to process pending game updates."
+}
+else {
+    Start-Process "https://store.steampowered.com/about/"
+    throw "Steam was not found after install attempt. Opened the Steam download page."
+}
+'@
+                }
+                else {
+                    @'
+function Get-WmtSteamExe {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param([string]$Path)
+        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+        try {
+            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+            if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) { [void]$candidates.Add($expanded) }
+        }
+        catch {}
+    }
+    foreach ($registryPath in @(
+            "HKCU:\Software\Valve\Steam",
+            "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+            "HKLM:\SOFTWARE\Valve\Steam"
+        )) {
+        try {
+            $props = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+            if ($props.PSObject.Properties["SteamExe"]) { & $add ([string]$props.SteamExe) }
+            foreach ($propName in @("SteamPath", "InstallPath")) {
+                if ($props.PSObject.Properties[$propName]) { & $add (Join-Path ([string]$props.$propName) "steam.exe") }
+            }
+        }
+        catch {}
+    }
+    foreach ($path in @(
+            "${env:ProgramFiles(x86)}\Steam\steam.exe",
+            "${env:ProgramFiles}\Steam\steam.exe"
+        )) { & $add $path }
+    return @($candidates) | Select-Object -First 1
+}
+
+$steamExe = Get-WmtSteamExe
+if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
+    Start-Process -FilePath $steamExe -ArgumentList "-silent"
+    Start-Sleep -Seconds 2
+    try {
+        Start-Process "steam://open/downloads"
+        Write-Host "Steam Downloads protocol request was sent."
+    }
+    catch {
+        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
+        $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
+        Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
+    }
+    Write-Host "Steam was started. Use the Downloads page to process pending game updates."
+}
+else {
+    try {
+        Start-Process "steam://open/downloads"
+        Write-Host "Steam Downloads protocol request was sent."
+    }
+    catch {
+        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
+        try {
+            $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
+            Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
+        }
+        catch {
+            Start-Process "https://store.steampowered.com/about/"
+            throw "Steam was not found. Opened the Steam download page."
+        }
+    }
+}
+'@
+                }
+                break
+            }
             default { "" }
         }
 
@@ -20719,6 +21653,12 @@ exit `$exitCode
             if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
             if (Get-Command $cmd -ErrorAction SilentlyContinue) { return $true }
         }
+        if ($Provider.PSObject.Properties["RegistryPaths"]) {
+            foreach ($registryPath in @($Provider.RegistryPaths)) {
+                if ([string]::IsNullOrWhiteSpace($registryPath)) { continue }
+                if (Test-Path -LiteralPath $registryPath) { return $true }
+            }
+        }
         return $false
     }.GetNewClosure()
     $updateProviderStatuses = {
@@ -20735,8 +21675,14 @@ exit `$exitCode
                     Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
                 }
                 if ($buttonCtrl) {
-                    $buttonCtrl.Content = "Repair"
-                    $buttonCtrl.ToolTip = "Repair or refresh $($provider.DisplayName)"
+                    if ($provider.Key -eq "steam") {
+                        $buttonCtrl.Content = "Open"
+                        $buttonCtrl.ToolTip = "Open Steam and its Downloads updater"
+                    }
+                    else {
+                        $buttonCtrl.Content = "Repair"
+                        $buttonCtrl.ToolTip = "Repair or refresh $($provider.DisplayName)"
+                    }
                     $buttonCtrl.IsEnabled = $true
                 }
             }
@@ -20760,8 +21706,13 @@ exit `$exitCode
         if (-not $provider) { return }
 
         $installed = if ($providerInstallState.ContainsKey($ProviderKey)) { [bool]$providerInstallState[$ProviderKey] } else { [bool](& $testProviderInstalled -Provider $provider) }
-        $action = if ($installed) { "Repair" } else { "Install" }
-        $message = "$action $($provider.DisplayName)?`r`n`r`nThis opens a PowerShell window and may download provider files from the internet."
+        $action = if ($ProviderKey -eq "steam" -and $installed) { "Open" } elseif ($installed) { "Repair" } else { "Install" }
+        $message = if ($ProviderKey -eq "steam" -and $action -eq "Open") {
+            "Open Steam Downloads?`r`n`r`nThis starts Steam so its own updater can process pending game updates."
+        }
+        else {
+            "$action $($provider.DisplayName)?`r`n`r`nThis opens a PowerShell window and may download provider files from the internet."
+        }
         if ((Show-WmtMessageBox -Owner $win -Message $message -Title "$action Provider" -Button YesNo -Image Question) -ne [System.Windows.MessageBoxResult]::Yes) {
             return
         }
@@ -20873,6 +21824,7 @@ exit `$exitCode
     if ("scoop" -in $enabled) { $chkScoop.IsChecked = $true }
     if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
+    if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
 
     & $updateProviderStatuses
     foreach ($provider in $providerDefinitions) {
@@ -20893,6 +21845,7 @@ exit `$exitCode
             if ($chkScoop.IsChecked) { $newEnabled += "scoop" }
             if ($chkGem.IsChecked) { $newEnabled += "gem" }
             if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
+            if ($chkSteam.IsChecked) { $newEnabled += "steam" }
         
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
@@ -21138,7 +22091,7 @@ $btnWingetScan.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") 
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
@@ -21733,6 +22686,235 @@ $btnWingetScan.Add_Click({
                 }).AddArgument($ignoreList)
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
+
+        # I. STEAM WORKER
+        if ("steam" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    Write-Output "LOG:Scanning Steam game manifests..."
+
+                    function Add-UniqueSteamPath {
+                        param(
+                            [System.Collections.Generic.List[string]]$Paths,
+                            [string]$Path
+                        )
+
+                        if ([string]::IsNullOrWhiteSpace($Path)) { return }
+                        $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+                        $expanded = $expanded -replace '/', '\'
+                        $expanded = $expanded -replace '\\\\', '\'
+                        try {
+                            $full = [System.IO.Path]::GetFullPath($expanded)
+                            if ((Test-Path -LiteralPath $full) -and -not $Paths.Contains($full)) {
+                                [void]$Paths.Add($full)
+                            }
+                        }
+                        catch {}
+                    }
+
+                    function ConvertFrom-SteamVdfPath {
+                        param([string]$Value)
+                        if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+                        $path = ([string]$Value).Trim()
+                        $path = $path -replace '\\\\', '\'
+                        $path = $path -replace '/', '\'
+                        return [Environment]::ExpandEnvironmentVariables($path)
+                    }
+
+                    function Get-SteamManifestValue {
+                        param(
+                            [string]$Text,
+                            [string]$Key
+                        )
+
+                        if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Key)) { return "" }
+                        $pattern = '"' + [regex]::Escape($Key) + '"\s+"([^"]*)"'
+                        $match = [regex]::Match($Text, $pattern)
+                        if ($match.Success) { return [string]$match.Groups[1].Value }
+                        return ""
+                    }
+
+                    function Get-SteamManifestNumber {
+                        param(
+                            [string]$Text,
+                            [string]$Key
+                        )
+
+                        $value = Get-SteamManifestValue -Text $Text -Key $Key
+                        $number = [long]0
+                        if ([long]::TryParse(([string]$value), [ref]$number)) { return $number }
+                        return [long]0
+                    }
+
+                    function Get-SteamInstallRoots {
+                        $paths = [System.Collections.Generic.List[string]]::new()
+                        $registryPaths = @(
+                            "HKCU:\Software\Valve\Steam",
+                            "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam",
+                            "HKLM:\SOFTWARE\Valve\Steam"
+                        )
+
+                        foreach ($registryPath in $registryPaths) {
+                            try {
+                                $props = Get-ItemProperty -LiteralPath $registryPath -ErrorAction Stop
+                                foreach ($propName in @("SteamPath", "InstallPath")) {
+                                    if ($props.PSObject.Properties[$propName]) {
+                                        Add-UniqueSteamPath -Paths $paths -Path ([string]$props.$propName)
+                                    }
+                                }
+                                if ($props.PSObject.Properties["SteamExe"] -and -not [string]::IsNullOrWhiteSpace([string]$props.SteamExe)) {
+                                    Add-UniqueSteamPath -Paths $paths -Path (Split-Path -Parent ([string]$props.SteamExe))
+                                }
+                            }
+                            catch {}
+                        }
+
+                        foreach ($candidate in @(
+                                "${env:ProgramFiles(x86)}\Steam",
+                                "${env:ProgramFiles}\Steam",
+                                "${env:SystemDrive}\Steam",
+                                "${env:SystemDrive}\steamcmd"
+                            )) {
+                            Add-UniqueSteamPath -Paths $paths -Path $candidate
+                        }
+
+                        foreach ($cmdName in @("steamcmd", "steamcmd.exe")) {
+                            try {
+                                $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+                                if ($cmd -and $cmd.Source) {
+                                    Add-UniqueSteamPath -Paths $paths -Path (Split-Path -Parent ([string]$cmd.Source))
+                                }
+                            }
+                            catch {}
+                        }
+
+                        return $paths.ToArray()
+                    }
+
+                    function Get-SteamLibraryRoots {
+                        $paths = [System.Collections.Generic.List[string]]::new()
+                        foreach ($root in @(Get-SteamInstallRoots)) {
+                            if ([string]::IsNullOrWhiteSpace($root)) { continue }
+                            if (Test-Path -LiteralPath (Join-Path $root "steamapps")) {
+                                Add-UniqueSteamPath -Paths $paths -Path $root
+                            }
+
+                            $libraryFile = Join-Path $root "steamapps\libraryfolders.vdf"
+                            if (-not (Test-Path -LiteralPath $libraryFile)) { continue }
+
+                            $libraryText = Get-Content -LiteralPath $libraryFile -Raw -ErrorAction SilentlyContinue
+                            if ([string]::IsNullOrWhiteSpace($libraryText)) { continue }
+
+                            foreach ($match in [regex]::Matches($libraryText, '"path"\s+"([^"]+)"')) {
+                                Add-UniqueSteamPath -Paths $paths -Path (ConvertFrom-SteamVdfPath $match.Groups[1].Value)
+                            }
+                            foreach ($match in [regex]::Matches($libraryText, '"\d+"\s+"([^"]+)"')) {
+                                $candidate = ConvertFrom-SteamVdfPath $match.Groups[1].Value
+                                if ($candidate -match '^[A-Za-z]:\\|^\\\\') {
+                                    Add-UniqueSteamPath -Paths $paths -Path $candidate
+                                }
+                            }
+                        }
+
+                        return $paths.ToArray()
+                    }
+
+                    $seenAppIds = @{}
+                    $manifestCount = 0
+                    $pendingCount = 0
+
+                    try {
+                        $libraryRoots = @(Get-SteamLibraryRoots)
+                        if ($libraryRoots.Count -eq 0) {
+                            Write-Output "LOG:Steam scan skipped: no Steam library folders were found."
+                            return
+                        }
+
+                        foreach ($libraryRoot in $libraryRoots) {
+                            $steamApps = Join-Path $libraryRoot "steamapps"
+                            if (-not (Test-Path -LiteralPath $steamApps)) { continue }
+
+                            foreach ($manifest in @(Get-ChildItem -LiteralPath $steamApps -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+                                $manifestCount++
+                                $text = Get-Content -LiteralPath $manifest.FullName -Raw -ErrorAction SilentlyContinue
+                                if ([string]::IsNullOrWhiteSpace($text)) { continue }
+
+                                $appId = Get-SteamManifestValue -Text $text -Key "appid"
+                                if ([string]::IsNullOrWhiteSpace($appId)) {
+                                    $appId = [regex]::Match($manifest.BaseName, '\d+').Value
+                                }
+                                if ([string]::IsNullOrWhiteSpace($appId)) { continue }
+                                if ($seenAppIds.ContainsKey($appId)) { continue }
+                                $seenAppIds[$appId] = $true
+
+                                $name = Get-SteamManifestValue -Text $text -Key "name"
+                                if ([string]::IsNullOrWhiteSpace($name)) { $name = "Steam App $appId" }
+                                if ($IgnoreList -and ($IgnoreList -contains $name -or $IgnoreList -contains $appId)) { continue }
+
+                                $stateFlags = Get-SteamManifestNumber -Text $text -Key "StateFlags"
+                                $bytesToDownload = Get-SteamManifestNumber -Text $text -Key "BytesToDownload"
+                                $bytesDownloaded = Get-SteamManifestNumber -Text $text -Key "BytesDownloaded"
+                                $bytesToStage = Get-SteamManifestNumber -Text $text -Key "BytesToStage"
+                                $bytesStaged = Get-SteamManifestNumber -Text $text -Key "BytesStaged"
+                                $buildId = Get-SteamManifestValue -Text $text -Key "buildid"
+                                $targetBuildId = Get-SteamManifestValue -Text $text -Key "TargetBuildID"
+                                $installDir = ConvertFrom-SteamVdfPath (Get-SteamManifestValue -Text $text -Key "installdir")
+
+                                $downloadRemaining = [Math]::Max([long]0, $bytesToDownload - $bytesDownloaded)
+                                $stageRemaining = [Math]::Max([long]0, $bytesToStage - $bytesStaged)
+                                $hasTargetBuild = (-not [string]::IsNullOrWhiteSpace($targetBuildId) -and $targetBuildId -ne "0" -and $targetBuildId -ne $buildId)
+                                $needsAttention = (
+                                    ($stateFlags -ne 0 -and $stateFlags -ne 4) -or
+                                    $downloadRemaining -gt 0 -or
+                                    $stageRemaining -gt 0 -or
+                                    $hasTargetBuild
+                                )
+
+                                if (-not $needsAttention) { continue }
+
+                                $pendingCount++
+                                $versionText = if (-not [string]::IsNullOrWhiteSpace($buildId) -and $buildId -ne "0") { "Build $buildId" } else { "State $stateFlags" }
+                                $availableText = "Steam pending"
+                                if ($hasTargetBuild) {
+                                    $availableText = "Build $targetBuildId"
+                                }
+                                elseif ($downloadRemaining -gt 0) {
+                                    $availableText = "{0:N1} MB pending" -f ($downloadRemaining / 1MB)
+                                }
+                                elseif ($stageRemaining -gt 0) {
+                                    $availableText = "{0:N1} MB staging" -f ($stageRemaining / 1MB)
+                                }
+                                elseif ($stateFlags -ne 4) {
+                                    $availableText = "State $stateFlags"
+                                }
+
+                                [PSCustomObject]@{
+                                    Source       = "steam"
+                                    Name         = $name
+                                    Id           = $appId
+                                    Version      = $versionText
+                                    Available    = $availableText
+                                    LibraryPath  = $libraryRoot
+                                    InstallDir   = $installDir
+                                    ManifestPath = $manifest.FullName
+                                }
+                            }
+                        }
+
+                        if ($pendingCount -eq 0) {
+                            Write-Output "LOG:Steam scan found $manifestCount installed Steam app manifest(s), with no manifest-marked pending updates."
+                        }
+                        else {
+                            Write-Output "LOG:Steam scan found $pendingCount manifest-marked pending Steam update(s)."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Steam scan failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
     
         # --- Start the result collection timer (already defined earlier in script) ---
         $script:ScanTimer.Start()
@@ -22047,7 +23229,7 @@ $btnWingetFind.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo") 
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
         }
 
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
