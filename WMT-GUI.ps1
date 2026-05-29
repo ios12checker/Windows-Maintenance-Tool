@@ -4015,67 +4015,92 @@ function Start-UpdateCheckBackground {
     $localVersionStr = $script:AppVersion
     $runningAsExe = [bool]$script:WmtIsCompiledExe
     $scriptPathForUpdate = if ($runningAsExe) { $null } else { $script:WmtScriptPath }
-    $localScriptHash = ""
-    $localScriptLastWriteUtc = $null
-    try {
-        if ($scriptPathForUpdate -and (Test-Path $scriptPathForUpdate)) {
-            $localScriptHash = (Get-FileHash -Path $scriptPathForUpdate -Algorithm SHA256).Hash
-            $localScriptLastWriteUtc = (Get-Item -Path $scriptPathForUpdate).LastWriteTimeUtc
-        }
-    }
-    catch {}
 
     # 2. Start Background Thread (Runspace)
     $script:UpdateRunspace = [PowerShell]::Create().AddScript({
-            param($CurrentVer)
+            param($CurrentVer, $IsExe)
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         
-            $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = "" }
+            $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = ""; ExeDownloadUrl = "" }
 
             try {
-                $time = Get-Date -Format "yyyyMMddHHmmss"
-                $url = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/main/WMT-GUI.ps1?t=$time"
-            
-                # Shorter timeout for UI responsiveness
-                $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
-                $content = $req.Content
-                $jobRes.Content = $content
-                try {
-                    $lm = $req.Headers["Last-Modified"]
-                    if ($lm) {
-                        $jobRes.RemoteLastModifiedUtc = ([DateTime]::Parse($lm)).ToUniversalTime().ToString("o")
+                if ($IsExe) {
+                    # For EXE: Check GitHub releases API
+                    $url = "https://api.github.com/repos/ios12checker/Windows-Maintenance-Tool/releases/latest"
+                    $req = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 10
+                    
+                    if ($req -and $req.tag_name) {
+                        # Parse tag_name (format: v5, v6, v5.9, etc.)
+                        $tagName = $req.tag_name
+                        # Remove leading 'v' if present
+                        $versionStr = $tagName -replace '^v', ''
+                        $jobRes.RemoteVersion = $versionStr
+                        
+                        # Look for EXE in release assets
+                        if ($req.assets -and $req.assets.Count -gt 0) {
+                            $exeAsset = $req.assets | Where-Object { $_.name -match '\.exe$' } | Select-Object -First 1
+                            if ($exeAsset) {
+                                $jobRes.ExeDownloadUrl = $exeAsset.browser_download_url
+                            }
+                        }
+                        
+                        if ($jobRes.ExeDownloadUrl) {
+                            $jobRes.Status = "Success"
+                        }
+                        else {
+                            $jobRes.Error = "Release found but no EXE asset found."
+                        }
+                    }
+                    else {
+                        $jobRes.Error = "No release found or missing tag_name."
                     }
                 }
-                catch {}
-                $sha = [System.Security.Cryptography.SHA256]::Create()
-                try {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content)
-                    $hashBytes = $sha.ComputeHash($bytes)
-                    $jobRes.RemoteHash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
-                }
-                finally {
-                    $sha.Dispose()
-                }
-
-                $versionPattern = '(\d+(?:\.\d+){0,3})'
-                $appVersionRegex = '\$AppVersion\s*=\s*[^\d\r\n]*(\d+(?:\.\d+){0,3})'
-                if ($content -match $appVersionRegex) {
-                    $jobRes.RemoteVersion = $matches[1]
-                    $jobRes.Status = "Success"
-                }
-                elseif ($content -match ("Windows Maintenance Tool.*v{0}" -f $versionPattern)) {
-                    $jobRes.RemoteVersion = $matches[1]
-                    $jobRes.Status = "Success"
-                }
                 else {
-                    $jobRes.Error = "Version string not found."
+                    # For Script: Download and parse WMT-GUI.ps1
+                    $time = Get-Date -Format "yyyyMMddHHmmss"
+                    $url = "https://raw.githubusercontent.com/ios12checker/Windows-Maintenance-Tool/main/WMT-GUI.ps1?t=$time"
+                
+                    # Shorter timeout for UI responsiveness
+                    $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
+                    $content = $req.Content
+                    $jobRes.Content = $content
+                    try {
+                        $lm = $req.Headers["Last-Modified"]
+                        if ($lm) {
+                            $jobRes.RemoteLastModifiedUtc = ([DateTime]::Parse($lm)).ToUniversalTime().ToString("o")
+                        }
+                    }
+                    catch {}
+                    $sha = [System.Security.Cryptography.SHA256]::Create()
+                    try {
+                        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content)
+                        $hashBytes = $sha.ComputeHash($bytes)
+                        $jobRes.RemoteHash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
+                    }
+                    finally {
+                        $sha.Dispose()
+                    }
+
+                    $versionPattern = '(\d+(?:\.\d+){0,3})'
+                    $appVersionRegex = '\$AppVersion\s*=\s*[^\d\r\n]*(\d+(?:\.\d+){0,3})'
+                    if ($content -match $appVersionRegex) {
+                        $jobRes.RemoteVersion = $matches[1]
+                        $jobRes.Status = "Success"
+                    }
+                    elseif ($content -match ("Windows Maintenance Tool.*v{0}" -f $versionPattern)) {
+                        $jobRes.RemoteVersion = $matches[1]
+                        $jobRes.Status = "Success"
+                    }
+                    else {
+                        $jobRes.Error = "Version string not found."
+                    }
                 }
             }
             catch {
                 $jobRes.Error = $_.Exception.Message
             }
             return $jobRes
-        }).AddArgument($localVersionStr)
+        }).AddArgument($localVersionStr).AddArgument($runningAsExe)
 
     $script:UpdateAsyncResult = $script:UpdateRunspace.BeginInvoke()
 
@@ -4114,42 +4139,74 @@ function Start-UpdateCheckBackground {
                         $remoteVerText = [string]$jobResult.RemoteVersion
                         $localVer = ConvertTo-WmtVersion $localVerText
                         $remoteVer = ConvertTo-WmtVersion $remoteVerText
-                        $remoteSeemsNewer = $true
-                        try {
-                            if ($jobResult.RemoteLastModifiedUtc -and $localScriptLastWriteUtc) {
-                                $remoteLastUtc = [DateTime]::Parse([string]$jobResult.RemoteLastModifiedUtc).ToUniversalTime()
-                                if ($remoteLastUtc -le $localScriptLastWriteUtc) { $remoteSeemsNewer = $false }
-                            }
-                        }
-                        catch {}
-                        $isContentPatch = ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and $remoteSeemsNewer)
-                    
+                        
                         if ($lb) { 
                             $lb.AppendText("[UPDATE] Local: v$localVerText | Remote: v$remoteVerText`n")
-                            if ($isContentPatch) { $lb.AppendText("[UPDATE] Same version but newer script content detected.`n") }
-                            elseif ($remoteVer -eq $localVer -and $localScriptHash -and $jobResult.RemoteHash -and ($localScriptHash -ne $jobResult.RemoteHash) -and -not $remoteSeemsNewer) {
-                                $lb.AppendText("[UPDATE] Local script appears newer than remote; skipping patch prompt.`n")
-                            }
                             $lb.ScrollToEnd()
                         }
 
-                        if ($remoteVer -gt $localVer -or $isContentPatch) {
+                        if ($remoteVer -gt $localVer) {
                             if ($lb) {
-                                if ($remoteVer -gt $localVer) { $lb.AppendText(" -> Update Available!`n") }
-                                else { $lb.AppendText(" -> Patch Update Available (same version).`n") }
+                                $lb.AppendText(" -> Update Available!`n")
                                 $lb.ScrollToEnd()
                             }
 
                             if ($runningAsExe) {
                                 if ($lb) {
-                                    $lb.AppendText("[UPDATE] EXE build detected. Opening Releases is required for updates.`n")
+                                    $lb.AppendText("[UPDATE] Newer EXE release available. Prompting user...`n")
                                     $lb.ScrollToEnd()
                                 }
                                 $window.Dispatcher.Invoke([Action] {
-                                        $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nThis EXE build cannot replace itself with the raw PowerShell script. Open the Releases page to download the latest EXE?"
+                                        $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to download and install the update now?"
                                         $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                                         if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
-                                            Start-Process "https://github.com/ios12checker/Windows-Maintenance-Tool/releases"
+                                            try {
+                                                $downloadUrl = [string]$jobResult.ExeDownloadUrl
+                                                if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
+                                                    throw "No download URL found for EXE."
+                                                }
+
+                                                if ($lb) { $lb.AppendText("[UPDATE] Downloading new EXE from: $downloadUrl`n"); $lb.ScrollToEnd() }
+                                                
+                                                # Create temp file for download
+                                                $tempExe = "$env:TEMP\WMT-GUI-Update-$([System.Guid]::NewGuid()).exe"
+                                                Invoke-WebRequest -Uri $downloadUrl -OutFile $tempExe -TimeoutSec 60 | Out-Null
+                                                
+                                                if (-not (Test-Path $tempExe)) {
+                                                    throw "Failed to download update file."
+                                                }
+
+                                                $fileSize = (Get-Item $tempExe).Length
+                                                if ($fileSize -lt 1MB) {
+                                                    throw "Downloaded file is suspiciously small ($fileSize bytes). Update may have failed."
+                                                }
+
+                                                if ($lb) { $lb.AppendText("[UPDATE] Download complete. Preparing update...`n"); $lb.ScrollToEnd() }
+                                                
+                                                # Create backup of current EXE
+                                                $currentExe = [string]$script:WmtProcessPath
+                                                $backupExe = "$currentExe.backup"
+                                                Copy-Item -Path $currentExe -Destination $backupExe -Force
+                                                
+                                                if ($lb) { $lb.AppendText("[UPDATE] Backup created at: $backupExe`n"); $lb.ScrollToEnd() }
+                                                
+                                                # Replace current EXE with new one
+                                                Copy-Item -Path $tempExe -Destination $currentExe -Force
+                                                Remove-Item -Path $tempExe -Force -ErrorAction SilentlyContinue
+                                                
+                                                if ($lb) { $lb.AppendText("[UPDATE] Update installed successfully. Restarting...`n"); $lb.ScrollToEnd() }
+                                                
+                                                # Restart with new EXE
+                                                [System.Windows.MessageBox]::Show("Update installed successfully! The application will restart with the new version.", "Update Complete", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                                                Start-Process -FilePath $currentExe -WorkingDirectory (Split-Path -Parent $currentExe)
+                                                $window.Close()
+                                            }
+                                            catch {
+                                                $errMsg = "Update failed: $($_.Exception.Message)"
+                                                if ($lb) { $lb.AppendText("[UPDATE] ERROR: $errMsg`n"); $lb.ScrollToEnd() }
+                                                
+                                                [System.Windows.MessageBox]::Show("$errMsg`n`nPlease download the update manually from the Releases page.", "Update Failed", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+                                            }
                                         }
                                     })
                                 return
@@ -4157,12 +4214,7 @@ function Start-UpdateCheckBackground {
                         
                             # Use Dispatcher to show dialog on UI thread
                             $window.Dispatcher.Invoke([Action] {
-                                    $msg = if ($remoteVer -gt $localVer) {
-                                        "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to update now?"
-                                    }
-                                    else {
-                                        "A script patch is available for your current version (v$localVerText).`n`nThis updates fixes without changing the version number.`n`nDo you want to update now?"
-                                    }
+                                    $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to update now?"
                                     $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                             
                                     if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
