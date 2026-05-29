@@ -8821,11 +8821,11 @@ function Show-RegistryCleaner {
     $dg.ItemsSource = $registryRows
 
     $dg.Add_KeyDown({
-            param($sender, $e)
+            param($s, $e)
 
             if ([string]$e.Key -notin @("Return", "Enter")) { return }
 
-            $selectedRows = @($sender.SelectedItems | Where-Object { $_ })
+            $selectedRows = @($s.SelectedItems | Where-Object { $_ })
             if ($selectedRows.Count -eq 0) { return }
 
             foreach ($row in $selectedRows) {
@@ -8834,7 +8834,7 @@ function Show-RegistryCleaner {
                 }
             }
 
-            $sender.Items.Refresh()
+            $s.Items.Refresh()
             $e.Handled = $true
         })
 
@@ -20615,7 +20615,7 @@ cargo --version
 
         if ([string]::IsNullOrWhiteSpace($body)) { return "" }
 
-return @"
+        return @"
 `$ErrorActionPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
 function Update-WmtProviderPathEnvironment {
