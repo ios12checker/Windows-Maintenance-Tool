@@ -94,8 +94,8 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     }
     catch {
         try {
-            Add-Type -AssemblyName System.Windows.Forms
-            [System.Windows.Forms.MessageBox]::Show("Failed to restart Windows Maintenance Tool as administrator.`r`n`r`n$($_.Exception.Message)", "WMT Launch Error", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+            Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+            [System.Windows.MessageBox]::Show("Failed to restart Windows Maintenance Tool as administrator.`r`n`r`n$($_.Exception.Message)", "WMT Launch Error", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
         }
         catch {}
     }
@@ -122,8 +122,7 @@ if ([Environment]::OSVersion.Version.Major -ge 6) {
     try { [Win32Dpi]::SetProcessDPIAware() | Out-Null } catch {}
 }
 
-Add-Type -AssemblyName PresentationFramework, System.Windows.Forms, System.Drawing, Microsoft.VisualBasic
-[System.Windows.Forms.Application]::EnableVisualStyles()
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Data
 
 # OPTIMIZATION: Define Token Manipulator globally once (Prevents "Type already exists" errors)
 if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Type) {
@@ -195,7 +194,7 @@ function Invoke-UiCommand {
         $Msg = "Processing...", 
         [object[]]$ArgumentList = @()
     )
-    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+    Set-WmtBusyCursor -Busy
     Write-GuiLog $Msg
     try { 
         # Pass arguments to the scriptblock using splatting
@@ -206,30 +205,7 @@ function Invoke-UiCommand {
     catch { 
         Write-GuiLog "ERROR: $($_.Exception.Message)" 
     }
-    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
-}
-
-function Set-WmtDoubleBuffered {
-    param(
-        [System.Windows.Forms.Control]$Control,
-        [switch]$Children
-    )
-    if (-not $Control) { return }
-
-    try {
-        if (-not $script:WmtDoubleBufferedProperty) {
-            $script:WmtDoubleBufferedProperty = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
-        }
-        $prop = $script:WmtDoubleBufferedProperty
-        if ($prop) { $prop.SetValue($Control, $true, $null) }
-    }
-    catch {}
-
-    if ($Children) {
-        foreach ($child in $Control.Controls) {
-            Set-WmtDoubleBuffered -Control $child -Children
-        }
-    }
+    Set-WmtBusyCursor
 }
 
 function Enable-WmtWpfItemsVirtualization {
@@ -338,121 +314,6 @@ function New-WmtVirtualRows {
     $rows = [System.Collections.ArrayList]::new()
     foreach ($item in @($Items)) { [void]$rows.Add($item) }
     return , $rows
-}
-
-function Get-WmtVirtualGridRows {
-    param([System.Windows.Forms.DataGridView]$Grid)
-    if (-not $Grid -or -not $Grid.Tag -or -not $Grid.Tag.PSObject.Properties["VirtualRows"]) {
-        return $null
-    }
-    return , $Grid.Tag.VirtualRows
-}
-
-function Reset-WmtVirtualGridRowCount {
-    param([System.Windows.Forms.DataGridView]$Grid)
-    $rows = Get-WmtVirtualGridRows -Grid $Grid
-    if (-not $Grid -or $null -eq $rows) { return }
-    $Grid.RowCount = $rows.Count
-    $Grid.ClearSelection()
-    $Grid.Refresh() 
-}
-
-function Remove-WmtVirtualGridRowsAt {
-    param(
-        [System.Windows.Forms.DataGridView]$Grid,
-        [int[]]$Indices
-    )
-    $rows = Get-WmtVirtualGridRows -Grid $Grid
-    if (-not $Grid -or $null -eq $rows -or $null -eq $Indices -or $Indices.Count -eq 0) { return }
-    foreach ($index in ($Indices | Sort-Object -Descending)) {
-        if ($index -ge 0 -and $index -lt $rows.Count) {
-            $rows.RemoveAt($index)
-        }
-    }
-    Reset-WmtVirtualGridRowCount -Grid $Grid
-}
-
-function Set-WmtVirtualGridSort {
-    param(
-        [System.Windows.Forms.DataGridView]$Grid,
-        [string]$ColumnName
-    )
-    $rows = Get-WmtVirtualGridRows -Grid $Grid
-    if (-not $Grid -or -not $Grid.Tag -or $null -eq $rows -or $rows.Count -le 1 -or [string]::IsNullOrWhiteSpace($ColumnName)) { return }
-
-    $descending = if ($Grid.Tag.SortColumn -eq $ColumnName) { -not [bool]$Grid.Tag.SortDescending } else { $false }
-    $sorted = @($rows | Sort-Object -Property $ColumnName -Descending:$descending)
-    $rows.Clear()
-    foreach ($item in $sorted) { [void]$rows.Add($item) }
-    $Grid.Tag.SortColumn = $ColumnName
-    $Grid.Tag.SortDescending = $descending
-    $Grid.Refresh()
-}
-
-function Initialize-WmtVirtualDataGrid {
-    param(
-        [System.Windows.Forms.DataGridView]$Grid,
-        [System.Collections.IList]$Rows,
-        [switch]$EnableSort
-    )
-    if (-not $Grid) { return }
-    if (-not $Rows) { $Rows = [System.Collections.ArrayList]::new() }
-
-    Set-WmtDoubleBuffered -Control $Grid
-    $Grid.VirtualMode = $true
-    $Grid.Tag = [PSCustomObject]@{
-        VirtualRows    = $Rows
-        SortColumn     = $null
-        SortDescending = $false
-    }
-
-    $Grid.Add_CellValueNeeded({
-            param($s, $e)
-            $state = $s.Tag
-            if (-not $state -or -not $state.VirtualRows) { return }
-            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
-            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
-
-            $row = $state.VirtualRows[$e.RowIndex]
-            $name = $s.Columns[$e.ColumnIndex].Name
-            if ($row -is [System.Collections.IDictionary] -and $row.Contains($name)) {
-                $e.Value = $row[$name]
-                return
-            }
-            $prop = $row.PSObject.Properties[$name]
-            if ($prop) { $e.Value = $prop.Value }
-        })
-
-    $Grid.Add_CellValuePushed({
-            param($s, $e)
-            $state = $s.Tag
-            if (-not $state -or -not $state.VirtualRows) { return }
-            if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $state.VirtualRows.Count) { return }
-            if ($e.ColumnIndex -lt 0 -or $e.ColumnIndex -ge $s.Columns.Count) { return }
-
-            $row = $state.VirtualRows[$e.RowIndex]
-            $name = $s.Columns[$e.ColumnIndex].Name
-            if ($row -is [System.Collections.IDictionary]) {
-                $row[$name] = $e.Value
-                return
-            }
-            $prop = $row.PSObject.Properties[$name]
-            if ($prop) { $prop.Value = $e.Value }
-        })
-
-    if ($EnableSort) {
-        foreach ($col in $Grid.Columns) {
-            try { $col.SortMode = [System.Windows.Forms.DataGridViewColumnSortMode]::Programmatic } catch {}
-        }
-        $Grid.Add_ColumnHeaderMouseClick({
-                param($s, $e)
-                if ($e.ColumnIndex -ge 0 -and $e.ColumnIndex -lt $s.Columns.Count) {
-                    Set-WmtVirtualGridSort -Grid $s -ColumnName $s.Columns[$e.ColumnIndex].Name
-                }
-            })
-    }
-
-    $Grid.RowCount = $Rows.Count
 }
 
 function Update-TweakButtonStates {
@@ -2652,6 +2513,201 @@ function Show-WmtMessageBox {
     return [System.Windows.MessageBox]::Show($Message, $Title, $Button, $Image)
 }
 
+function Set-WmtBusyCursor {
+    param([switch]$Busy)
+
+    try {
+        [System.Windows.Input.Mouse]::OverrideCursor = if ($Busy) { [System.Windows.Input.Cursors]::Wait } else { $null }
+    }
+    catch {}
+}
+
+function New-WmtWindowFromXaml {
+    param(
+        [Parameter(Mandatory = $true)][string]$Title,
+        [Parameter(Mandatory = $true)][string]$ContentXaml,
+        [double]$Width = 640,
+        [double]$Height = 420,
+        [double]$MinWidth = 0,
+        [double]$MinHeight = 0,
+        [switch]$NoResize,
+        [switch]$NoOwner
+    )
+
+    $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
+    $resizeMode = if ($NoResize) { "NoResize" } else { "CanResize" }
+    $minWidthText = if ($MinWidth -gt 0) { " MinWidth=`"$MinWidth`"" } else { "" }
+    $minHeightText = if ($MinHeight -gt 0) { " MinHeight=`"$MinHeight`"" } else { "" }
+    [xml]$windowXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$escapedTitle" Width="$Width" Height="$Height"$minWidthText$minHeightText
+        ResizeMode="$resizeMode" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+$ContentXaml
+</Window>
+"@
+
+    $reader = [System.Xml.XmlNodeReader]::new($windowXaml)
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $dialog
+    if (-not $NoOwner) { Set-WmtWindowOwner -Child $dialog }
+    return $dialog
+}
+
+function New-WmtWindowFromFullXaml {
+    param(
+        [Parameter(Mandatory = $true)]$Xaml,
+        [switch]$NoOwner
+    )
+
+    $xamlDoc = if ($Xaml -is [System.Xml.XmlDocument]) { $Xaml } else { [xml]([string]$Xaml) }
+    $reader = [System.Xml.XmlNodeReader]::new($xamlDoc)
+    $dialog = [Windows.Markup.XamlReader]::Load($reader)
+    Add-WmtThemeResources -Element $dialog
+    if (-not $NoOwner) { Set-WmtWindowOwner -Child $dialog }
+    return $dialog
+}
+
+function Show-WmtInputDialog {
+    param(
+        [string]$Title,
+        [string]$Prompt,
+        [string]$DefaultValue = "",
+        [switch]$ReadOnly
+    )
+
+    $content = @'
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Name="lblPrompt" TextWrapping="Wrap" Margin="0,0,0,10"/>
+        <TextBox Name="txtValue" Grid.Row="1" Height="34" VerticalContentAlignment="Center"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+            <Button Name="btnCancel" Content="Cancel" Width="94" IsCancel="True" Margin="0,0,8,0"/>
+            <Button Name="btnOk" Content="OK" Width="94" IsDefault="True" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+        </StackPanel>
+    </Grid>
+'@
+    $dialog = New-WmtWindowFromXaml -Title $Title -ContentXaml $content -Width 460 -Height 190 -MinWidth 380 -MinHeight 170 -NoResize
+    $lblPrompt = $dialog.FindName("lblPrompt")
+    $txtValue = $dialog.FindName("txtValue")
+    $btnOk = $dialog.FindName("btnOk")
+    $btnCancel = $dialog.FindName("btnCancel")
+
+    $lblPrompt.Text = $Prompt
+    $txtValue.Text = $DefaultValue
+    $txtValue.IsReadOnly = [bool]$ReadOnly
+    $result = @{ Value = $null }
+    $btnOk.Add_Click({
+            $result.Value = [string]$txtValue.Text
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+    $btnCancel.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dialog.Add_ContentRendered({
+            $txtValue.Focus() | Out-Null
+            $txtValue.SelectAll()
+        }.GetNewClosure())
+
+    $dialog.ShowDialog() | Out-Null
+    return $result.Value
+}
+
+function Select-WmtFolder {
+    param(
+        [string]$Description = "Select folder",
+        [string]$InitialDirectory = ""
+    )
+
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $root = if (-not [string]::IsNullOrWhiteSpace($InitialDirectory) -and (Test-Path -LiteralPath $InitialDirectory)) { $InitialDirectory } else { 0 }
+        $folder = $shell.BrowseForFolder(0, $Description, 0, $root)
+        if ($folder -and $folder.Self) { return [string]$folder.Self.Path }
+    }
+    catch {}
+    finally {
+        try { if ($shell) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {}
+    }
+    return $null
+}
+
+function New-WmtDataTable {
+    param(
+        [string[]]$Columns,
+        [object[]]$Rows = @()
+    )
+
+    $table = [System.Data.DataTable]::new()
+    foreach ($column in $Columns) { [void]$table.Columns.Add($column) }
+    foreach ($item in @($Rows)) {
+        $row = $table.NewRow()
+        foreach ($column in $Columns) {
+            $value = $null
+            if ($item -is [System.Data.DataRow]) {
+                if ($item.Table.Columns.Contains($column)) { $value = $item[$column] }
+            }
+            elseif ($item -is [System.Collections.IDictionary]) {
+                if ($item.Contains($column)) { $value = $item[$column] }
+            }
+            else {
+                $prop = $item.PSObject.Properties[$column]
+                if ($prop) { $value = $prop.Value }
+            }
+            $row[$column] = if ($null -eq $value) { "" } else { [string]$value }
+        }
+        [void]$table.Rows.Add($row)
+    }
+    return $table
+}
+
+function Get-WmtDataGridSelectedRows {
+    param([System.Windows.Controls.DataGrid]$DataGrid)
+
+    $rows = @()
+    if (-not $DataGrid) { return $rows }
+    foreach ($item in @($DataGrid.SelectedItems)) {
+        if ($item -is [System.Data.DataRowView]) { $rows += $item.Row }
+        else { $rows += $item }
+    }
+    return $rows
+}
+
+function Set-WmtDataGridColumns {
+    param(
+        [System.Windows.Controls.DataGrid]$DataGrid,
+        [string[]]$Columns,
+        [hashtable]$Widths = @{},
+        [string[]]$Hidden = @()
+    )
+
+    if (-not $DataGrid) { return }
+    $DataGrid.AutoGenerateColumns = $false
+    $DataGrid.Columns.Clear()
+    foreach ($column in $Columns) {
+        $col = [System.Windows.Controls.DataGridTextColumn]::new()
+        $col.Header = $column
+        $col.Binding = [System.Windows.Data.Binding]::new($column)
+        $col.IsReadOnly = $true
+        if ($Widths -and $Widths.ContainsKey($column)) {
+            $widthValue = $Widths[$column]
+            if ([string]$widthValue -eq "*") {
+                $col.Width = [System.Windows.Controls.DataGridLength]::new(1, [System.Windows.Controls.DataGridLengthUnitType]::Star)
+            }
+            else {
+                $col.Width = [double]$widthValue
+            }
+        }
+        [void]$DataGrid.Columns.Add($col)
+        if ($Hidden -contains $column) { $col.Visibility = [System.Windows.Visibility]::Collapsed }
+    }
+}
+
 function Get-WmtThemeHex {
     param(
         [string]$Key,
@@ -2695,143 +2751,6 @@ function Get-WmtThemeHex {
     if ($darkFallback.ContainsKey($resourceKey)) { return $darkFallback[$resourceKey] }
     if ($Key -match "^#([0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$") { return $Key }
     return $Fallback
-}
-
-function Get-WmtThemeColor {
-    param(
-        [string]$Key,
-        [string]$Fallback = "#8B949E"
-    )
-
-    try { return [System.Drawing.ColorTranslator]::FromHtml((Get-WmtThemeHex -Key $Key -Fallback $Fallback)) }
-    catch { return [System.Drawing.ColorTranslator]::FromHtml($Fallback) }
-}
-
-function Set-WmtWinFormsGridTheme {
-    param([System.Windows.Forms.DataGridView]$Grid)
-
-    if (-not $Grid) { return }
-    $bg = Get-WmtThemeColor "BgDark"
-    $panel = Get-WmtThemeColor "BgPanel"
-    $hover = Get-WmtThemeColor "BgHover"
-    $border = Get-WmtThemeColor "BorderBrush"
-    $text = Get-WmtThemeColor "TextPrimary"
-    $muted = Get-WmtThemeColor "TextSecondary"
-    $accent = Get-WmtThemeColor "Accent"
-    $accentText = Get-WmtThemeColor "AccentText"
-
-    $Grid.BackgroundColor = $bg
-    $Grid.ForeColor = $text
-    $Grid.GridColor = $border
-    $Grid.EnableHeadersVisualStyles = $false
-    $Grid.ColumnHeadersDefaultCellStyle.BackColor = $panel
-    $Grid.ColumnHeadersDefaultCellStyle.ForeColor = $text
-    $Grid.DefaultCellStyle.BackColor = $bg
-    $Grid.DefaultCellStyle.ForeColor = $text
-    $Grid.DefaultCellStyle.SelectionBackColor = $accent
-    $Grid.DefaultCellStyle.SelectionForeColor = $accentText
-    $Grid.AlternatingRowsDefaultCellStyle.BackColor = $panel
-    $Grid.RowHeadersDefaultCellStyle.BackColor = $panel
-    $Grid.RowHeadersDefaultCellStyle.ForeColor = $muted
-    $Grid.RowHeadersDefaultCellStyle.SelectionBackColor = $accent
-    $Grid.RowHeadersDefaultCellStyle.SelectionForeColor = $accentText
-    $Grid.ColumnHeadersDefaultCellStyle.SelectionBackColor = $hover
-    $Grid.ColumnHeadersDefaultCellStyle.SelectionForeColor = $text
-}
-
-function Set-WmtWinFormsButtonTheme {
-    param(
-        [System.Windows.Forms.Button]$Button,
-        [ValidateSet("Standard", "Primary", "Success", "Danger", "Warning")]
-        [string]$Role = "Standard"
-    )
-
-    if (-not $Button) { return }
-    $bgKey = switch ($Role) {
-        "Primary" { "Accent" }
-        "Success" { "Success" }
-        "Danger" { "Danger" }
-        "Warning" { "Warning" }
-        default { "BgElevated" }
-    }
-    $fgKey = switch ($Role) {
-        "Primary" { "AccentText" }
-        "Success" { "SuccessText" }
-        "Danger" { "DangerText" }
-        "Warning" { "WarningText" }
-        default { "TextPrimary" }
-    }
-
-    $Button.FlatStyle = [System.Windows.Forms.FlatStyle]::Flat
-    $Button.BackColor = Get-WmtThemeColor $bgKey
-    $Button.ForeColor = Get-WmtThemeColor $fgKey
-    $Button.FlatAppearance.BorderSize = 1
-    $Button.FlatAppearance.BorderColor = Get-WmtThemeColor "BorderBrush"
-    $hoverKey = if ($Role -eq "Standard") { "BgHover" } else { "${bgKey}Hover" }
-    $Button.FlatAppearance.MouseOverBackColor = Get-WmtThemeColor $hoverKey (Get-WmtThemeHex $bgKey)
-}
-
-function Set-WmtWinFormsContextMenuTheme {
-    param([System.Windows.Forms.ContextMenuStrip]$Menu)
-
-    if (-not $Menu) { return }
-    $Menu.BackColor = Get-WmtThemeColor "BgElevated"
-    $Menu.ForeColor = Get-WmtThemeColor "TextPrimary"
-    foreach ($item in $Menu.Items) {
-        try {
-            if ($item -is [System.Windows.Forms.ToolStripSeparator]) { continue }
-            $item.BackColor = $Menu.BackColor
-            $item.ForeColor = $Menu.ForeColor
-        }
-        catch {}
-    }
-}
-
-function Set-WmtWinFormsTheme {
-    param([System.Windows.Forms.Control]$Control)
-
-    if (-not $Control) { return }
-
-    $bg = Get-WmtThemeColor "BgDark"
-    $panel = Get-WmtThemeColor "BgPanel"
-    $elevated = Get-WmtThemeColor "BgElevated"
-    $text = Get-WmtThemeColor "TextPrimary"
-    $secondary = Get-WmtThemeColor "TextSecondary"
-
-    if ($Control -is [System.Windows.Forms.Form]) {
-        $Control.BackColor = $bg
-        $Control.ForeColor = $text
-    }
-    elseif ($Control -is [System.Windows.Forms.Panel] -or $Control -is [System.Windows.Forms.FlowLayoutPanel]) {
-        $Control.BackColor = $panel
-        $Control.ForeColor = $text
-    }
-    elseif ($Control -is [System.Windows.Forms.DataGridView]) {
-        Set-WmtWinFormsGridTheme -Grid $Control
-    }
-    elseif ($Control -is [System.Windows.Forms.Button]) {
-        Set-WmtWinFormsButtonTheme -Button $Control
-    }
-    elseif ($Control -is [System.Windows.Forms.TextBox] -or $Control -is [System.Windows.Forms.RichTextBox] -or $Control -is [System.Windows.Forms.ListBox] -or $Control -is [System.Windows.Forms.ComboBox]) {
-        $Control.BackColor = $elevated
-        $Control.ForeColor = $text
-    }
-    elseif ($Control -is [System.Windows.Forms.CheckBox] -or $Control -is [System.Windows.Forms.RadioButton]) {
-        $Control.ForeColor = $text
-        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
-        try { $Control.UseVisualStyleBackColor = $false } catch {}
-    }
-    elseif ($Control -is [System.Windows.Forms.Label]) {
-        $Control.ForeColor = $secondary
-        if ($Control.Parent) { $Control.BackColor = $Control.Parent.BackColor }
-    }
-    else {
-        try { $Control.ForeColor = $text } catch {}
-    }
-
-    foreach ($child in @($Control.Controls)) {
-        Set-WmtWinFormsTheme -Control $child
-    }
 }
 
 function New-WmtStorageTextBlock {
@@ -3295,10 +3214,7 @@ function Show-TextDialog {
 '@
 
     try {
-        $reader = [System.Xml.XmlNodeReader]::new($textDialogXaml)
-        $dialog = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $dialog
-        Set-WmtWindowOwner -Child $dialog
+        $dialog = New-WmtWindowFromFullXaml -Xaml $textDialogXaml
         $dialog.Title = $Title
 
         $txtOutput = $dialog.FindName("txtOutput")
@@ -3454,7 +3370,7 @@ function Show-WingetPackageManifest {
         $lblWingetStatus.Visibility = "Visible"
     }
 
-    [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
+    Set-WmtBusyCursor -Busy
     try {
         $result = Get-WingetManifestText -Item $Item
         if (-not $result.Success) {
@@ -3469,7 +3385,7 @@ function Show-WingetPackageManifest {
         Show-TextDialog -Title "App Manifest - $name" -Text "$header`r`n$separator`r`n`r`n$($result.Text)"
     }
     finally {
-        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+        Set-WmtBusyCursor
         if ($lblWingetStatus) {
             $lblWingetStatus.Text = "Ready"
             $lblWingetStatus.Visibility = "Hidden"
@@ -3926,8 +3842,8 @@ function Start-XboxClean {
 function Start-GpeditInstall {
     # Check for User Confirmation
     $msg = "Install Local Group Policy Editor?`n`nThis enables the Group Policy Editor (gpedit.msc) on Windows Home editions by installing the built-in system packages.`n`nContinue?"
-    $res = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Install", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
-    if ($res -eq "No") { return }
+    $res = Show-WmtMessageBox -Message $msg -Title "Confirm Install" -Button YesNo -Image Question
+    if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     Invoke-UiCommand {
         $packageRoot = Join-Path $env:SystemRoot "servicing\\Packages"
@@ -4449,16 +4365,12 @@ function Show-CustomDnsDialog {
 '@
 
     try {
-        $reader = New-Object System.Xml.XmlNodeReader $customDnsXaml
-        $dialog = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $dialog
+        $dialog = New-WmtWindowFromFullXaml -Xaml $customDnsXaml
     }
     catch {
         Write-GuiLog "Failed to open custom DNS dialog: $($_.Exception.Message)"
         return $null
     }
-
-    try { if ($window) { $dialog.Owner = $window } } catch {}
 
     $txtDnsServers = $dialog.FindName("txtDnsServers")
     $chkRegisterDoh = $dialog.FindName("chkRegisterDoh")
@@ -4868,10 +4780,7 @@ function Show-HostsEditor {
 '@
 
     try {
-        $reader = [System.Xml.XmlNodeReader]::new($hostsEditorXaml)
-        $dialog = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $dialog
-        Set-WmtWindowOwner -Child $dialog
+        $dialog = New-WmtWindowFromFullXaml -Xaml $hostsEditorXaml
     }
     catch {
         Write-GuiLog "Failed to open Hosts editor: $($_.Exception.Message)"
@@ -5912,831 +5821,9 @@ function Get-Winapp2Rules {
 }
     
 function Show-AdvancedCleanupSelection {
-    $currentSettings = Get-WmtSettings
-    $savedStates = $currentSettings.TempCleanup
-    $isWinapp2Enabled = $currentSettings.LoadWinapp2
-    $isCleanerMlEnabled = $currentSettings.LoadCleanerML
-
-    # --- FORM SETUP ---
-    $form = New-Object System.Windows.Forms.Form
-    $form.Text = "Advanced Cleanup Selection"
-    $workArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $formWidth = [Math]::Min(650, [Math]::Max(560, $workArea.Width - 60))
-    $formHeight = [Math]::Min(850, [Math]::Max(520, $workArea.Height - 80))
-    $form.Size = New-Object System.Drawing.Size($formWidth, $formHeight)
-    $form.MinimumSize = New-Object System.Drawing.Size(560, 520)
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = 'Sizable'
-    $form.MaximizeBox = $true
-    $form.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $form.ForeColor = "White"
-
-    # TOP PANEL
-    $topPanel = New-Object System.Windows.Forms.Panel
-    $topPanel.Dock = "Top"; $topPanel.Height = 78
-    $topPanel.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
-    Set-WmtDoubleBuffered -Control $topPanel
-
-    $chkToggleWinapp2 = New-Object System.Windows.Forms.CheckBox
-    $chkToggleWinapp2.Text = "Winapp2.ini rules"
-    $chkToggleWinapp2.Size = "170, 24"; $chkToggleWinapp2.Location = "15, 8"
-    $chkToggleWinapp2.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $chkToggleWinapp2.ForeColor = "White"
-    $chkToggleWinapp2.BackColor = $topPanel.BackColor
-    $chkToggleWinapp2.UseVisualStyleBackColor = $false
-    $chkToggleWinapp2.Checked = $isWinapp2Enabled
-    $tt = New-Object System.Windows.Forms.ToolTip
-    $tt.SetToolTip($chkToggleWinapp2, "Enables 1000+ extra rules from Winapp2.ini")
-    $topPanel.Controls.Add($chkToggleWinapp2)
-
-    $chkToggleCleanerML = New-Object System.Windows.Forms.CheckBox
-    $chkToggleCleanerML.Text = "BleachBit CleanerML"
-    $chkToggleCleanerML.Size = "190, 24"; $chkToggleCleanerML.Location = "15, 40"
-    $chkToggleCleanerML.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $chkToggleCleanerML.ForeColor = "White"
-    $chkToggleCleanerML.BackColor = $topPanel.BackColor
-    $chkToggleCleanerML.UseVisualStyleBackColor = $false
-    $chkToggleCleanerML.Checked = $isCleanerMlEnabled
-    $tt.SetToolTip($chkToggleCleanerML, "Loads BleachBit XML cleaners for broader app coverage.")
-    $topPanel.Controls.Add($chkToggleCleanerML)
-
-    $txtSearch = New-Object System.Windows.Forms.TextBox
-    $txtSearch.Size = "200, 25"; $txtSearch.Location = "420, 26"
-    $txtSearch.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-    $txtSearch.ForeColor = "White"
-    $txtSearch.BorderStyle = "FixedSingle"
-    $txtSearch.Anchor = "Top, Right"
-    $topPanel.Controls.Add($txtSearch)
-
-    $lblSearch = New-Object System.Windows.Forms.Label
-    $lblSearch.Text = "Search:"; $lblSearch.AutoSize = $true
-    $lblSearch.Location = "370, 29"; $lblSearch.Anchor = "Top, Right"
-    $lblSearch.ForeColor = "White"
-    $lblSearch.BackColor = $topPanel.BackColor
-    $topPanel.Controls.Add($lblSearch)
-
-    $layoutTopPanel = {
-        $txtSearch.Left = [Math]::Max(240, $topPanel.ClientSize.Width - $txtSearch.Width - 20)
-        $lblSearch.Left = [Math]::Max(170, $txtSearch.Left - $lblSearch.PreferredWidth - 8)
-    }
-    $topPanel.Add_SizeChanged({ & $layoutTopPanel })
-    & $layoutTopPanel
-
-    # BOTTOM PANEL
-    $btnPanel = New-Object System.Windows.Forms.Panel
-    $btnPanel.Dock = "Bottom"; $btnPanel.Height = 60
-    $btnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
-    Set-WmtDoubleBuffered -Control $btnPanel
-
-    $btnClean = New-Object System.Windows.Forms.Button
-    $btnClean.Text = "Clean Selected"; $btnClean.Size = "120, 35"
-    $btnClean.Location = "490, 12"; $btnClean.BackColor = "SeaGreen"
-    $btnClean.ForeColor = "White"; $btnClean.FlatStyle = "Flat"
-    $btnClean.Anchor = "Top, Right"; $btnClean.DialogResult = "None"
-    $btnPanel.Controls.Add($btnClean)
-
-    $btnAnalyze = New-Object System.Windows.Forms.Button
-    $btnAnalyze.Text = "Analyze"; $btnAnalyze.Size = "100, 35"
-    $btnAnalyze.Location = "380, 12"; $btnAnalyze.BackColor = "SteelBlue"
-    $btnAnalyze.ForeColor = "White"; $btnAnalyze.FlatStyle = "Flat"
-    $btnAnalyze.Anchor = "Top, Right"; $btnAnalyze.DialogResult = "None"
-    $tt.SetToolTip($btnAnalyze, "Preview files that will be deleted without removing them.")
-    $btnPanel.Controls.Add($btnAnalyze)
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Cancel"; $btnCancel.Size = "90, 35"
-    $btnCancel.Location = "280, 12"; $btnCancel.BackColor = "DimGray"
-    $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = "Cancel"; $btnCancel.Anchor = "Top, Right"
-    $btnPanel.Controls.Add($btnCancel)
-
-    $btnEventLogs = New-Object System.Windows.Forms.Button
-    $btnEventLogs.Text = "Clear Event Logs"; $btnEventLogs.Size = "120, 35"
-    $btnEventLogs.Top = 12; $btnEventLogs.BackColor = "Goldenrod"
-    $btnEventLogs.ForeColor = "White"; $btnEventLogs.FlatStyle = "Flat"
-    $btnEventLogs.Anchor = "Top, Right"
-    $btnPanel.Controls.Add($btnEventLogs)
-
-    $layoutButtonPanel = {
-        $btnClean.Left = [Math]::Max(0, $btnPanel.ClientSize.Width - $btnClean.Width - 20)
-        $btnAnalyze.Left = [Math]::Max(0, $btnClean.Left - $btnAnalyze.Width - 10)
-        $btnCancel.Left = [Math]::Max(0, $btnAnalyze.Left - $btnCancel.Width - 10)
-        $btnEventLogs.Left = [Math]::Max(0, $btnCancel.Left - $btnEventLogs.Width - 10)
-    }
-    $btnPanel.Add_SizeChanged({ & $layoutButtonPanel })
-    & $layoutButtonPanel
-
-    # MAIN CONTENT PANEL
-    $mainPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-    $mainPanel.FlowDirection = "TopDown"; $mainPanel.WrapContents = $false
-    $mainPanel.AutoScroll = $true
-    $mainPanel.Dock = "None"
-    $mainPanel.Anchor = "Top, Bottom, Left, Right"
-    $mainPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $mainPanel.Padding = New-Object System.Windows.Forms.Padding(5, 10, 0, 0)
-
-    Set-WmtDoubleBuffered -Control $mainPanel
-
-    # Keep the scrollable rules region explicitly bounded between the fixed
-    # header and footer. Extra bottom padding made the flow content taller, so
-    # the last community rules could still appear below the visible frame.
-    $layoutAdvancedCleanerPanels = {
-        if ($form.IsDisposed) { return }
-
-        $topPanel.Left = 0
-        $topPanel.Top = 0
-        $topPanel.Width = $form.ClientSize.Width
-
-        $btnPanel.Left = 0
-        $btnPanel.Width = $form.ClientSize.Width
-        $btnPanel.Top = [Math]::Max($topPanel.Bottom, $form.ClientSize.Height - $btnPanel.Height)
-
-        $mainPanel.Left = 0
-        $mainPanel.Top = $topPanel.Bottom
-        $mainPanel.Width = $form.ClientSize.Width
-        $mainPanel.Height = [Math]::Max(0, $btnPanel.Top - $mainPanel.Top)
-    }
-
-    $form.Controls.Add($mainPanel)
-    $form.Controls.Add($btnPanel)
-    $form.Controls.Add($topPanel)
-    $form.Add_SizeChanged({ & $layoutAdvancedCleanerPanels }.GetNewClosure())
-    & $layoutAdvancedCleanerPanels
-    $topPanel.BringToFront()
-    $btnPanel.BringToFront()
-
-    # Keep FlowLayoutPanel's scroll range accurate after community rules are
-    # loaded. Nested AutoSize FlowLayoutPanels can otherwise report a scroll
-    # extent that is a few controls too short, which makes the last options
-    # look like they are rendered under the footer buttons.
-    $updateAdvancedCleanerScrollExtent = {
-        if ($form.IsDisposed -or $mainPanel.IsDisposed) { return }
-
-        foreach ($ctrl in $mainPanel.Controls) {
-            if ($ctrl.Tag -eq 'HEADER') {
-                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 28)
-            }
-            elseif ($ctrl.Tag -eq 'FLOW') {
-                $ctrl.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
-            }
-        }
-
-        $mainPanel.PerformLayout()
-
-        $contentBottom = 0
-        foreach ($ctrl in $mainPanel.Controls) {
-            $bottom = $ctrl.Bottom + $ctrl.Margin.Bottom
-            if ($bottom -gt $contentBottom) { $contentBottom = $bottom }
-        }
-
-        # A small scroll tail lets the final checkbox clear the viewport edge
-        # without increasing the visible frame or overlapping the button panel.
-        $mainPanel.AutoScrollMinSize = New-Object System.Drawing.Size(0, ($contentBottom + 18))
-    }
-
-    $mainPanel.Add_SizeChanged({ & $updateAdvancedCleanerScrollExtent }.GetNewClosure())
-    Set-WmtWinFormsTheme -Control $form
-    Set-WmtWinFormsButtonTheme -Button $btnClean -Role Success
-    Set-WmtWinFormsButtonTheme -Button $btnAnalyze -Role Primary
-    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
-    Set-WmtWinFormsButtonTheme -Button $btnEventLogs -Role Warning
-
-    # --- INTERNAL RULES (static) ---
-    $internalRules = @(
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Temporary Files"; Key = "TempFiles"; Desc = "User and System Temp"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Recycle Bin"; Key = "RecycleBin"; Desc = "Empties Recycle Bin"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "Error Logs (WER)"; Key = "WER"; Desc = "Crash dumps"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Windows"; Name = "DNS Cache"; Key = "DNS"; Desc = "Network cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Thumbnail / Thumbs Cache"; Key = "Thumbnails"; Desc = "Explorer thumbcache_*.db thumbnail cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Deep Scan: Thumbs.db"; Key = "ThumbsDb"; Desc = "Finds scattered Thumbs.db files under your user profile. Can be slow."; IsInternal = $true; DefaultChecked = $false }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Recent Items"; Key = "Recent"; Desc = "Recent files list"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "System"; AppGroup = "Explorer"; Name = "Run History"; Key = "RunMRU"; Desc = "Run dialog history"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Google Chrome"; Name = "Cache (Internal)"; Key = "Chrome"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Microsoft Edge"; Name = "Cache (Internal)"; Key = "Edge"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Mozilla Firefox"; Name = "Cache (Internal)"; Key = "Firefox"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Brave"; Name = "Cache (Internal)"; Key = "Brave"; Desc = "Standard Cache"; IsInternal = $true }
-        [PSCustomObject]@{ Section = "Browsers / Internet"; AppGroup = "Opera"; Name = "Cache (Internal)"; Key = "Opera"; Desc = "Standard Cache"; IsInternal = $true }
-    )
-
-    $global:checkboxes = @{}
-    $global:sections = @()
-    $cleanupBackColor = Get-WmtThemeColor "BgDark"
-    $cleanupHeaderColor = Get-WmtThemeColor "BgPanel"
-    $cleanupTextColor = Get-WmtThemeColor "TextPrimary"
-    $cleanupCommunityTextColor = Get-WmtThemeColor "Accent"
-
-    $sectionOrder = @{
-        "System"              = 0
-        "Browsers / Internet" = 1
-        "Productivity"        = 2
-        "Internet & Chat"     = 3
-        "Games"               = 4
-        "Applications"        = 5
-    }
-
-    $preferredGroupOrder = @{
-        "System|Windows"                      = 0
-        "System|Explorer"                     = 1
-        "System|Windows Update"               = 2
-        "System|Windows Logs"                 = 3
-        "Browsers / Internet|Google Chrome"   = 0
-        "Browsers / Internet|Microsoft Edge"  = 1
-        "Browsers / Internet|Mozilla Firefox" = 2
-        "Browsers / Internet|Brave"           = 3
-        "Browsers / Internet|Opera"           = 4
-        "Productivity|Microsoft Office"       = 0
-        "Productivity|Microsoft Outlook"      = 1
-        "Productivity|Microsoft PowerToys"    = 2
-        "Productivity|Adobe"                  = 3
-        "Internet & Chat|Discord"             = 0
-        "Internet & Chat|Spotify"             = 1
-        "Games|Steam"                         = 0
-        "Games|Epic Games"                    = 1
-        "Games|Xbox"                          = 2
-    }
-
-    $normalizeCleanerName = {
-        param($Text)
-
-        $name = ([string]$Text).Trim().Trim(" *")
-        $name = $name -replace "\s+", " "
-
-        if ($name -eq ".Thumbnails") { return "Thumbnail / Thumbs Cache" }
-        return $name
-    }.GetNewClosure()
-
-    $getCleanerDisplayGroup = {
-        param($item)
-
-        $rawGroup = ([string]$item.AppGroup).Trim()
-        $name = & $normalizeCleanerName $item.Name
-
-        if ([bool]$item.IsInternal) {
-            if (-not [string]::IsNullOrWhiteSpace($rawGroup)) { return $rawGroup }
-            return "Windows"
-        }
-
-        switch -Regex ($name) {
-            "^(Google Chrome|Chrome)\b" { return "Google Chrome" }
-            "^(Microsoft Edge|Edge)\b" { return "Microsoft Edge" }
-            "^(Mozilla Firefox|Firefox)\b" { return "Mozilla Firefox" }
-            "^Brave\b" { return "Brave" }
-            "^Opera\b" { return "Opera" }
-            "^SeaMonkey\b" { return "SeaMonkey" }
-            "^Microsoft\s+Office\b|^Office\b" { return "Microsoft Office" }
-            "^Microsoft\s+Outlook\b|^Outlook\b" { return "Microsoft Outlook" }
-            "^Microsoft\s+PowerToys\b|^PowerToys\b" { return "Microsoft PowerToys" }
-            "^Adobe\b|Flash Player" { return "Adobe" }
-            "^Steam\b" { return "Steam" }
-            "^Epic Games\b|^Epic\b|Fortnite" { return "Epic Games" }
-            "^Xbox\b|Minecraft|Roblox" { return "Xbox" }
-            "^Discord\b" { return "Discord" }
-            "^Spotify\b" { return "Spotify" }
-            "^NVIDIA\b" { return "NVIDIA" }
-            "^AMD\b" { return "AMD" }
-            "^Windows Update\b" { return "Windows Update" }
-            "^Windows Logs\b|Event Logs|Event Viewer|Error Reporting" { return "Windows Logs" }
-            "^Windows\b|^Microsoft Store\b|^Microsoft\s+Windows\b" { return "Windows" }
-        }
-
-        if (-not [string]::IsNullOrWhiteSpace($rawGroup) -and $rawGroup -ne "General") {
-            if ($rawGroup -eq "Epic") { return "Epic Games" }
-            return $rawGroup
-        }
-
-        return "Other Apps"
-    }.GetNewClosure()
-
-    $getCleanerDisplayName = {
-        param($item)
-
-        $itemKey = if ($item.Key) { [string]$item.Key } else { [string]$item.ID }
-        if ($itemKey -eq "Thumbnails") { return "Thumbnail / Thumbs Cache" }
-
-        $name = & $normalizeCleanerName $item.Name
-        if (-not [bool]$item.IsInternal) {
-            $displayGroup = & $getCleanerDisplayGroup $item
-            if (-not [string]::IsNullOrWhiteSpace($displayGroup) -and $displayGroup -ne "Other Apps") {
-                $name = ($name -replace ("^" + [regex]::Escape($displayGroup) + "\s*[-:]?\s*"), "").Trim()
-            }
-        }
-
-        if ([string]::IsNullOrWhiteSpace($name)) { return "General Cleanup" }
-        return $name
-    }.GetNewClosure()
-
-    $getCleanerDisplaySection = {
-        param($item)
-
-        $rawSection = ([string]$item.Section).Trim()
-        $name = & $normalizeCleanerName $item.Name
-        $group = & $getCleanerDisplayGroup $item
-
-        if ([bool]$item.IsInternal) {
-            if (-not [string]::IsNullOrWhiteSpace($rawSection)) { return $rawSection }
-            return "System"
-        }
-
-        if ($group -in @("Google Chrome", "Microsoft Edge", "Mozilla Firefox", "Brave", "Opera", "SeaMonkey")) {
-            return "Browsers / Internet"
-        }
-        if ($group -in @("Discord", "Spotify")) { return "Internet & Chat" }
-        if ($group -in @("Steam", "Epic Games", "Xbox") -or $rawSection -eq "Games") { return "Games" }
-        if ($group -in @("Microsoft Office", "Microsoft Outlook", "Microsoft PowerToys", "Adobe")) { return "Productivity" }
-        if ($rawSection -in @("System", "Browsers / Internet", "Productivity", "Internet & Chat", "Games", "Applications")) {
-            return $rawSection
-        }
-        if ($name -match "(?i)\b(Outlook|Office|PowerToys|Adobe)\b") { return "Productivity" }
-        if ($name -match "(?i)\b(Chrome|Edge|Firefox|Brave|Opera|SeaMonkey|Browser)\b") { return "Browsers / Internet" }
-        if ($name -match "(?i)\b(Discord|Spotify|Slack|Telegram|WhatsApp|Signal|Zoom)\b") { return "Internet & Chat" }
-        if ($name -match "(?i)\b(Steam|Epic Games|Fortnite|Xbox|Minecraft|Roblox)\b") { return "Games" }
-
-        return "Applications"
-    }.GetNewClosure()
-
-    $getCleanerSectionOrder = {
-        param($section)
-
-        $sectionName = [string]$section
-        if ($sectionOrder.ContainsKey($sectionName)) { return [int]$sectionOrder[$sectionName] }
-        return 99
-    }.GetNewClosure()
-
-    $getCleanerGroupOrder = {
-        param($item)
-
-        $section = & $getCleanerDisplaySection $item
-        $group = & $getCleanerDisplayGroup $item
-        $key = "$section|$group"
-        if ($preferredGroupOrder.ContainsKey($key)) { return [int]$preferredGroupOrder[$key] }
-        return 50
-    }.GetNewClosure()
-
-    $applyCleanerSearch = {
-        if ($form.IsDisposed -or $mainPanel.IsDisposed) { return }
-
-        $q = $txtSearch.Text.ToLowerInvariant()
-        $mainPanel.SuspendLayout()
-        try {
-            for ($i = 0; $i -lt $mainPanel.Controls.Count; $i++) {
-                $ctrl = $mainPanel.Controls[$i]
-                if ($ctrl.Tag -ne "FLOW") { continue }
-
-                $hasVisibleChildren = $false
-                $currentGroupHeader = $null
-                $currentGroupHasVisibleChildren = $false
-                foreach ($child in $ctrl.Controls) {
-                    if ($child.Tag -eq "GROUPHEADER") {
-                        if ($currentGroupHeader) {
-                            $currentGroupHeader.Visible = ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
-                        }
-                        $currentGroupHeader = $child
-                        $currentGroupHasVisibleChildren = $false
-                        $child.Visible = ($q.Length -eq 0)
-                    }
-                    elseif ($child -is [System.Windows.Forms.CheckBox]) {
-                        $searchText = if ([string]::IsNullOrWhiteSpace($child.AccessibleDescription)) {
-                            $child.Text.ToLowerInvariant()
-                        }
-                        else {
-                            $child.AccessibleDescription
-                        }
-
-                        if ($searchText.Contains($q)) {
-                            $child.Visible = $true
-                            $hasVisibleChildren = $true
-                            $currentGroupHasVisibleChildren = $true
-                        }
-                        else {
-                            $child.Visible = $false
-                        }
-                    }
-                }
-                if ($currentGroupHeader) {
-                    $currentGroupHeader.Visible = ($q.Length -eq 0 -or $currentGroupHasVisibleChildren)
-                }
-                $ctrl.Visible = $hasVisibleChildren
-                if ($i -gt 0) { $mainPanel.Controls[$i - 1].Visible = $hasVisibleChildren }
-            }
-        }
-        finally {
-            $mainPanel.ResumeLayout($true)
-            & $updateAdvancedCleanerScrollExtent
-        }
-    }.GetNewClosure()
-
-    # ------------------------------------------------
-    # Render helper – rebuilds the entire panel from a rule list,
-    # preserving previous checkbox states
-    # ------------------------------------------------
-    $RenderAllRules = {
-        param($allRules)
-
-        $mainPanel.SuspendLayout()
-        try {
-            $mainPanel.Controls.Clear()
-
-            # Preserve current checkbox states
-            $prevStates = @{}
-            foreach ($k in $global:checkboxes.Keys) {
-                $prevStates[$k] = $global:checkboxes[$k].Checked
-            }
-            $global:checkboxes.Clear()
-            $global:sections = @()
-
-            $grouped = $allRules |
-            Group-Object -Property { & $getCleanerDisplaySection $_ } |
-            Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
-            $controlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
-
-            foreach ($group in $grouped) {
-                $sec = $group.Name
-
-                $secPanel = New-Object System.Windows.Forms.Panel
-                $secPanel.Size = New-Object System.Drawing.Size(([Math]::Max(200, $mainPanel.ClientSize.Width - 28)), 35); $secPanel.Margin = "5, 10, 0, 0"
-                $secPanel.BackColor = $cleanupHeaderColor
-                $secPanel.Tag = "HEADER"
-                Set-WmtDoubleBuffered -Control $secPanel
-
-                $secChk = New-Object System.Windows.Forms.CheckBox
-                $secChk.Text = $sec
-                $secChk.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
-                $secChk.ForeColor = Get-WmtThemeColor "Accent"
-                $secChk.BackColor = $cleanupHeaderColor
-                $secChk.UseVisualStyleBackColor = $false
-                $secChk.AutoSize = $true; $secChk.Location = "5, 5"
-                $secPanel.Controls.Add($secChk)
-
-                $controlsToAdd.Add($secPanel)
-                $global:sections += $secPanel
-
-                $itemFlow = New-Object System.Windows.Forms.FlowLayoutPanel
-                $itemFlow.FlowDirection = "TopDown"
-                $itemFlow.WrapContents = $false
-                $itemFlow.AutoScroll = $false
-                $itemFlow.AutoSize = $true
-                $itemFlow.AutoSizeMode = [System.Windows.Forms.AutoSizeMode]::GrowAndShrink
-                $itemFlow.Width = [Math]::Max(200, $mainPanel.ClientSize.Width - 56)
-                $itemFlow.Margin = "25, 0, 0, 0"; $itemFlow.Tag = "FLOW"
-                $itemFlow.BackColor = $cleanupBackColor
-                Set-WmtDoubleBuffered -Control $itemFlow
-
-                $secItems = $group.Group | Sort-Object `
-                @{ Expression = { & $getCleanerGroupOrder $_ } }, `
-                @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
-                @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
-                @{ Expression = { & $getCleanerDisplayName $_ } }
-                $childChecks = @()
-                $currentGroup = $null
-                $isSecChecked = $true
-                $flowControlsToAdd = [System.Collections.Generic.List[System.Windows.Forms.Control]]::new()
-
-                foreach ($item in $secItems) {
-                    $displayGroup = & $getCleanerDisplayGroup $item
-                    if ($displayGroup -ne $currentGroup) {
-                        $currentGroup = $displayGroup
-                        if (-not [string]::IsNullOrWhiteSpace($displayGroup) -and $displayGroup -ne $sec) {
-                            $grpLbl = New-Object System.Windows.Forms.Label
-                            $grpLbl.Text = $currentGroup
-                            $grpLbl.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-                            $grpLbl.ForeColor = Get-WmtThemeColor "TextSecondary"
-                            $grpLbl.BackColor = $cleanupBackColor
-                            $grpLbl.AutoSize = $true; $grpLbl.Margin = "0, 10, 0, 2"
-                            $grpLbl.Tag = "GROUPHEADER"
-                            $flowControlsToAdd.Add($grpLbl)
-                        }
-                    }
-
-                    $itemKey = if ($item.Key) { $item.Key } else { $item.ID }
-                    $displayName = & $getCleanerDisplayName $item
-                    $chk = New-Object System.Windows.Forms.CheckBox
-                    $chk.ForeColor = $cleanupTextColor
-
-                    if ($item.IsInternal) {
-                        $chk.Text = $displayName
-                    }
-                    elseif ($item.IsCleanerML) {
-                        $chk.Text = "$displayName (CleanerML)"
-                        $chk.ForeColor = $cleanupCommunityTextColor
-                    }
-                    else {
-                        $chk.Text = "$displayName (winapp2.ini)"
-                        $chk.ForeColor = $cleanupCommunityTextColor
-                    }
-
-                    $chk.BackColor = $cleanupBackColor
-                    $chk.UseVisualStyleBackColor = $false
-                    $chk.AutoSize = $true; $chk.Margin = "10, 0, 0, 2"
-                    $chk.Tag = if ($item.IsInternal) { $itemKey } else { $item }
-                    $searchParts = [System.Collections.Generic.List[string]]::new()
-                    foreach ($part in @($chk.Text, $displayName, $displayGroup, $itemKey, $item.Name, $item.Desc, $item.AppGroup, $item.Section)) {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$part)) { $searchParts.Add([string]$part) }
-                    }
-                    if ($itemKey -eq "Thumbnails") {
-                        $searchParts.AddRange([string[]]@("thumbs", "thumbcache", "thumbcache_*.db", "thumbs.db"))
-                    }
-                    elseif ($itemKey -eq "ThumbsDb") {
-                        $searchParts.AddRange([string[]]@("thumbs", "thumbnail", "thumbs.db", "deep scan"))
-                    }
-                    elseif (-not $item.IsInternal -and $item.Paths) {
-                        foreach ($pathRule in $item.Paths) {
-                            if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Path)) { $searchParts.Add([string]$pathRule.Path) }
-                            if (-not [string]::IsNullOrWhiteSpace([string]$pathRule.Pattern)) { $searchParts.Add([string]$pathRule.Pattern) }
-                        }
-                    }
-                    $chk.AccessibleDescription = ($searchParts -join " ").ToLowerInvariant()
-
-                    # Restore previous state or use default
-                    if ($prevStates.ContainsKey($itemKey)) {
-                        $chk.Checked = $prevStates[$itemKey]
-                    }
-                    elseif ($savedStates.ContainsKey($itemKey)) {
-                        $chk.Checked = $savedStates[$itemKey]
-                    }
-                    else {
-                        if ($item.PSObject.Properties["DefaultChecked"]) {
-                            $chk.Checked = [bool]$item.DefaultChecked
-                        }
-                        else {
-                            $chk.Checked = ($item.IsInternal -eq $true)
-                        }
-                    }
-
-                    if (-not $chk.Checked) { $isSecChecked = $false }
-                    if ($item.Desc) { $tt.SetToolTip($chk, $item.Desc) }
-
-                    $flowControlsToAdd.Add($chk)
-                    $global:checkboxes[$itemKey] = $chk
-                    $childChecks += $chk
-                }
-
-                $itemFlow.Controls.AddRange($flowControlsToAdd.ToArray())
-                $secChk.Checked = $isSecChecked
-
-                $secChk.Add_CheckedChanged({
-                        param($s, $e)
-                        $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
-                        foreach ($c in $childChecks) {
-                            if (-not $filterActive -or ($c.Visible -and $c.Parent -and $c.Parent.Visible)) {
-                                $c.Checked = $s.Checked
-                            }
-                        }
-                    }.GetNewClosure())
-
-                $controlsToAdd.Add($itemFlow)
-            }
-
-            $mainPanel.Controls.AddRange($controlsToAdd.ToArray())
-        }
-        finally {
-            $mainPanel.ResumeLayout($true)
-            & $updateAdvancedCleanerScrollExtent
-            if ($form.IsHandleCreated) {
-                $null = $form.BeginInvoke([System.Action] { & $updateAdvancedCleanerScrollExtent })
-            }
-            & $applyCleanerSearch
-            $mainPanel.Invalidate()
-        }
-    }
-
-    $externalRuleState = @{
-        Winapp2   = @()
-        CleanerML = @()
-    }
-
-    $renderCurrentCleanerRules = {
-        $combined = @($internalRules)
-        if ($externalRuleState.Winapp2) { $combined += @($externalRuleState.Winapp2) }
-        if ($externalRuleState.CleanerML) { $combined += @($externalRuleState.CleanerML) }
-        & $RenderAllRules -allRules $combined
-    }.GetNewClosure()
-
-    # Instant render of internal rules only
-    & $renderCurrentCleanerRules
-
-    $loadExternalCleanerRules = {
-        param(
-            [switch]$ForceWinapp2Download,
-            [switch]$ForceCleanerMlDownload
-        )
-
-        $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "Loading cleaner rules..."; $lbl.ForeColor = Get-WmtThemeColor "Warning"
-        $lbl.BackColor = $cleanupBackColor
-        $lbl.AutoSize = $true; $lbl.Margin = "10,0,0,0"
-        $mainPanel.Controls.Add($lbl)
-        $mainPanel.Refresh()
-        [System.Windows.Forms.Application]::DoEvents()
-        $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-
-        try {
-            if ($chkToggleWinapp2.Checked) {
-                $lbl.Text = "Loading Winapp2 rules..."
-                $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-                $cachePath = Join-Path (Get-DataPath) "winapp2_cache.json"
-                $shouldDownload = $ForceWinapp2Download -or ((-not (Test-Path $iniPath)) -and (-not (Test-Path $cachePath)))
-                $externalRuleState.Winapp2 = @(Get-Winapp2Rules -Download:$shouldDownload)
-            }
-            else {
-                $externalRuleState.Winapp2 = @()
-            }
-
-            if ($chkToggleCleanerML.Checked) {
-                $lbl.Text = "Loading BleachBit CleanerML..."
-                $hasLocalCleanerMl = ((Get-WmtBleachBitCleanerXmlDirectories).Count -gt 0)
-                $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
-                $shouldDownloadCleanerMl = $ForceCleanerMlDownload -or ((-not $hasLocalCleanerMl) -and (-not (Test-Path $cachePath)))
-                $externalRuleState.CleanerML = @(Get-BleachBitCleanerMlRules -Download:$shouldDownloadCleanerMl)
-            }
-            else {
-                $externalRuleState.CleanerML = @()
-            }
-
-            & $renderCurrentCleanerRules
-        }
-        catch {
-            Write-GuiLog "Cleaner rules warning: $($_.Exception.Message)"
-            & $renderCurrentCleanerRules
-        }
-        finally {
-            $form.Cursor = [System.Windows.Forms.Cursors]::Default
-            $mainPanel.Controls.Remove($lbl)
-        }
-    }.GetNewClosure()
-
-    # Load saved external rule sets once the form is visible. Activated is a
-    # fallback for hosts that miss Shown.
-    $communityLoadState = @{ Started = $false }
-    $loadCommunityRulesIfEnabled = {
-        if ($communityLoadState.Started -or $form.IsDisposed -or (-not $chkToggleWinapp2.Checked -and -not $chkToggleCleanerML.Checked)) { return }
-        $communityLoadState.Started = $true
-        [System.Windows.Forms.Application]::DoEvents()
-        & $loadExternalCleanerRules
-    }.GetNewClosure()
-
-    $form.Add_Shown({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
-    $form.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
-
-    # Toggle handlers
-    $chkToggleWinapp2.Add_Click({
-            $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-            Save-WmtSettings -Settings $currentSettings
-
-            $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
-            $forceDownload = $chkToggleWinapp2.Checked -and (-not (Test-Path $iniPath))
-            & $loadExternalCleanerRules -ForceWinapp2Download:$forceDownload
-        })
-
-    $chkToggleCleanerML.Add_Click({
-            $currentSettings.LoadCleanerML = $chkToggleCleanerML.Checked
-            Save-WmtSettings -Settings $currentSettings
-
-            $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
-            $forceDownload = $chkToggleCleanerML.Checked -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0) -and (-not (Test-Path $cachePath))
-            & $loadExternalCleanerRules -ForceCleanerMlDownload:$forceDownload
-        })
-
-    $searchDelayTimer = New-Object System.Windows.Forms.Timer
-    $searchDelayTimer.Interval = 250
-    $searchDelayTimer.Add_Tick({
-            $searchDelayTimer.Stop()
-            & $applyCleanerSearch
-        }.GetNewClosure())
-    $form.Add_FormClosed({
-            try {
-                $searchDelayTimer.Stop()
-                $searchDelayTimer.Dispose()
-            }
-            catch {}
-        }.GetNewClosure())
-
-    # Search logic
-    $txtSearch.Add_TextChanged({
-            $searchDelayTimer.Stop()
-            $searchDelayTimer.Start()
-        })
-
-    $selectionState = @{ Result = $null }
-
-    $getSelectedCleanerItems = {
-        $selectedItems = [System.Collections.Generic.List[object]]::new()
-        $filterActive = -not [string]::IsNullOrWhiteSpace($txtSearch.Text)
-        foreach ($key in $global:checkboxes.Keys) {
-            $cb = $global:checkboxes[$key]
-            $isVisibleForAction = (-not $filterActive) -or ($cb.Visible -and $cb.Parent -and $cb.Parent.Visible)
-            if ($cb.Checked -and $isVisibleForAction) { $selectedItems.Add($cb.Tag) }
-        }
-        return , $selectedItems
-    }.GetNewClosure()
-
-    $submitCleanupSelection = {
-        param(
-            [string]$Action,
-            [System.Windows.Forms.DialogResult]$Result
-        )
-
-        $searchDelayTimer.Stop()
-        & $applyCleanerSearch
-
-        $selectedItems = & $getSelectedCleanerItems
-        if ($selectedItems.Count -le 0) {
-            $message = if ([string]::IsNullOrWhiteSpace($txtSearch.Text)) {
-                "Select at least one cleaner first."
-            }
-            else {
-                "No visible checked cleaners match the current search. Clear the search or check a visible cleaner."
-            }
-            [System.Windows.Forms.MessageBox]::Show(
-                $message,
-                "No Cleaners Selected",
-                [System.Windows.Forms.MessageBoxButtons]::OK,
-                [System.Windows.Forms.MessageBoxIcon]::Information
-            ) | Out-Null
-            return
-        }
-
-        foreach ($key in $global:checkboxes.Keys) {
-            $currentSettings.TempCleanup[$key] = $global:checkboxes[$key].Checked
-        }
-        $currentSettings.LoadWinapp2 = $chkToggleWinapp2.Checked
-        $currentSettings.LoadCleanerML = $chkToggleCleanerML.Checked
-        Save-WmtSettings -Settings $currentSettings
-
-        $selectionState.Result = [PSCustomObject]@{
-            Action = $Action
-            Items  = $selectedItems.ToArray()
-        }
-        $form.DialogResult = $Result
-        $form.Close()
-    }.GetNewClosure()
-
-    $btnClean.Add_Click({ & $submitCleanupSelection "Clean" ([System.Windows.Forms.DialogResult]::OK) }.GetNewClosure())
-    $btnAnalyze.Add_Click({ & $submitCleanupSelection "Analyze" ([System.Windows.Forms.DialogResult]::Yes) }.GetNewClosure())
-
-    $form.AcceptButton = $btnClean
-    $form.CancelButton = $btnCancel
-
-    # Event Logs handler
-    $btnEventLogs.Add_Click({
-            $confirm = [System.Windows.Forms.MessageBox]::Show(
-                "Clear all Windows Event Logs?`n`nThis safely flushes all registered Event Logs on your system.`n`nWARNING: This process can take several minutes to complete.",
-                "Confirm Clear Logs",
-                [System.Windows.Forms.MessageBoxButtons]::YesNo,
-                [System.Windows.Forms.MessageBoxIcon]::Warning
-            )
-            if ($confirm -eq "Yes") {
-                $form.Cursor = [System.Windows.Forms.Cursors]::WaitCursor
-                $btnEventLogs.Enabled = $false
-                $btnEventLogs.Text = "Clearing..."
-
-                $script:EventLogRunspace = [PowerShell]::Create().AddScript({
-                        $logs = wevtutil el
-                        $cleared = 0
-                        foreach ($log in $logs) {
-                            wevtutil cl "$log" 2>$null
-                            $cleared++
-                        }
-                        return $cleared
-                    })
-                $script:EventLogAsyncResult = $script:EventLogRunspace.BeginInvoke()
-
-                $script:EventLogTimer = New-Object System.Windows.Threading.DispatcherTimer
-                $script:EventLogTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-                $script:EventLogTimer.Add_Tick({
-                        if ($script:EventLogAsyncResult.IsCompleted) {
-                            $script:EventLogTimer.Stop()
-                            $form.Cursor = [System.Windows.Forms.Cursors]::Default
-                            $btnEventLogs.Enabled = $true
-                            $btnEventLogs.Text = "Clear Event Logs"
-                            try {
-                                $clearedCount = $script:EventLogRunspace.EndInvoke($script:EventLogAsyncResult)
-                                if ($clearedCount -is [System.Collections.ObjectModel.Collection[PSObject]]) {
-                                    $clearedCount = $clearedCount[0]
-                                }
-                                [System.Windows.Forms.MessageBox]::Show(
-                                    "Successfully processed $clearedCount Event Logs.",
-                                    "Success", "OK", "Information"
-                                )
-                            }
-                            catch {
-                                [System.Windows.Forms.MessageBox]::Show(
-                                    "Error: $($_.Exception.Message)", "Error", "OK", "Error"
-                                )
-                            }
-                            $script:EventLogRunspace.Dispose()
-                        }
-                    })
-                $script:EventLogTimer.Start()
-            }
-        })
-
-    $guiResult = $form.ShowDialog()
-
-    if ($guiResult -in @('OK', 'Yes')) {
-        return $selectionState.Result
-    }
-    return $null
+    Show-WmtAdvancedCleanupSelectionWpf
 }
+
 
 function Show-WmtAdvancedCleanupSelectionWpf {
     $currentSettings = Get-WmtSettings
@@ -6795,10 +5882,7 @@ function Show-WmtAdvancedCleanupSelectionWpf {
 '@
 
     try {
-        $reader = [System.Xml.XmlNodeReader]::new($cleanupSelectionXaml)
-        $dialog = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $dialog
-        Set-WmtWindowOwner -Child $dialog
+        $dialog = New-WmtWindowFromFullXaml -Xaml $cleanupSelectionXaml
         $workArea = [System.Windows.SystemParameters]::WorkArea
         $dialog.Width = [Math]::Min(720, [Math]::Max(620, $workArea.Width - 80))
         $dialog.Height = [Math]::Min(820, [Math]::Max(540, $workArea.Height - 80))
@@ -7026,8 +6110,8 @@ function Show-WmtAdvancedCleanupSelectionWpf {
         $sectionEntries.Clear()
 
         $grouped = $allRules |
-            Group-Object -Property { & $getCleanerDisplaySection $_ } |
-            Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
+        Group-Object -Property { & $getCleanerDisplaySection $_ } |
+        Sort-Object @{ Expression = { & $getCleanerSectionOrder $_.Name } }, Name
 
         foreach ($group in $grouped) {
             $sec = $group.Name
@@ -7051,10 +6135,10 @@ function Show-WmtAdvancedCleanupSelectionWpf {
             $flow.Margin = "16,0,0,4"
 
             $secItems = $group.Group | Sort-Object `
-                @{ Expression = { & $getCleanerGroupOrder $_ } }, `
-                @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
-                @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
-                @{ Expression = { & $getCleanerDisplayName $_ } }
+            @{ Expression = { & $getCleanerGroupOrder $_ } }, `
+            @{ Expression = { & $getCleanerDisplayGroup $_ } }, `
+            @{ Expression = { if ([bool]$_.IsInternal) { 0 } else { 1 } } }, `
+            @{ Expression = { & $getCleanerDisplayName $_ } }
 
             $childChecks = [System.Collections.Generic.List[object]]::new()
             $currentGroup = $null
@@ -7407,10 +6491,7 @@ function Show-WmtCleanupPreviewWpf {
 </Window>
 '@
 
-    $reader = [System.Xml.XmlNodeReader]::new($cleanupPreviewXaml)
-    $previewWindow = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $previewWindow
-    Set-WmtWindowOwner -Child $previewWindow
+    $previewWindow = New-WmtWindowFromFullXaml -Xaml $cleanupPreviewXaml
 
     $dg = $previewWindow.FindName("dgPreview")
     $chkHideProtected = $previewWindow.FindName("chkHideProtected")
@@ -7572,9 +6653,7 @@ function Show-WmtCleanupPreviewWpf {
     </Grid>
 </Window>
 '@
-        $reader = [System.Xml.XmlNodeReader]::new($deleteProgressXaml)
-        $deleteWindow = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $deleteWindow
+        $deleteWindow = New-WmtWindowFromFullXaml -Xaml $deleteProgressXaml -NoOwner
         try { $deleteWindow.Owner = $previewWindow } catch {}
         $deleteWindow.Title = $ActionTitle
         $deleteLabel = $deleteWindow.FindName("deleteLabel")
@@ -7877,10 +6956,7 @@ function Invoke-TempCleanup {
     </Grid>
 </Window>
 '@
-    $reader = [System.Xml.XmlNodeReader]::new($cleanupProgressXaml)
-    $pForm = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $pForm
-    Set-WmtWindowOwner -Child $pForm
+    $pForm = New-WmtWindowFromFullXaml -Xaml $cleanupProgressXaml
     $pForm.Title = if ($isAnalyze) { "Analyzing System..." } else { "Deep Cleaning System" }
     $pLabel = $pForm.FindName("pLabel")
     $pStatus = $pForm.FindName("pStatus")
@@ -8028,7 +7104,7 @@ function Invoke-TempCleanup {
     # --- HELPER: ROBUST CLEANER ---
     function Invoke-RobustClean {
         param($Path, $Pattern = "*", $Recurse = $true, $RuleName = "System File")
-        
+
         $Path = [Environment]::ExpandEnvironmentVariables($Path)
         $pathHasWildcard = ($Path -match '[\*\?]')
         if (-not $pathHasWildcard -and -not (Test-Path -LiteralPath $Path)) { return }
@@ -8759,7 +7835,7 @@ function Invoke-TempCleanup {
         "Opera"      = "Opera Cache"
         "OperaGX"    = "Opera GX Cache"
     }
-    
+
     $usedOutOfProcessAnalyze = $false
     if ($isAnalyze) {
         $scanTasks = @(New-WmtAnalyzeScanTasks -Items $selections)
@@ -8781,10 +7857,10 @@ function Invoke-TempCleanup {
                 if ($progressState.Closed) { break }
 
                 $startBytes = $stats.Bytes
-            
+
                 $stats.Progress += $ruleWeight
                 $pBar.Value = [Math]::Min(100, [int]$stats.Progress)
-            
+
                 $itemName = if ($item -is [string]) {
                     if ($internalRuleDisplayNames.ContainsKey($item)) { $internalRuleDisplayNames[$item] } else { $item }
                 }
@@ -8810,11 +7886,11 @@ function Invoke-TempCleanup {
                 # --- C. INTERNAL RULES ---
                 else {
                     switch ($item) {
-                        "TempFiles" { 
+                        "TempFiles" {
                             Invoke-RobustClean $env:TEMP -RuleName $itemName
                             Invoke-RobustClean "$env:SystemRoot\Temp" -RuleName $itemName
                         }
-                        "RecycleBin" { 
+                        "RecycleBin" {
                             try {
                                 $shell = New-Object -ComObject Shell.Application
                                 $bin = $shell.Namespace(0xA)
@@ -8902,670 +7978,7 @@ function Invoke-TempCleanup {
             Show-WmtCleanupPreviewWpf -PreviewList $previewList -FinalTotalFormatted $finalTotalFormatted
             return
 
-            $gridForm = New-Object System.Windows.Forms.Form
-            $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total)"
-            $gridForm.Size = "800,650"
-            $gridForm.StartPosition = "CenterScreen"
-            $gridForm.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-            $gridForm.ForeColor = "White"
-            $gridForm.ShowIcon = $false
-            
-            # --- 1. BOTTOM BUTTON PANEL ---
-            $gridBtnPanel = New-Object System.Windows.Forms.Panel
-            $gridBtnPanel.Dock = "Bottom"
-            $gridBtnPanel.Height = 55
-            $gridBtnPanel.BackColor = [System.Drawing.Color]::FromArgb(25, 25, 25)
 
-            $gridTip = New-Object System.Windows.Forms.ToolTip
-            $chkHideProtected = New-Object System.Windows.Forms.CheckBox
-            $chkHideProtected.Text = "Hide protected"
-            $chkHideProtected.AutoSize = $true
-            $chkHideProtected.Location = "15, 18"
-            $chkHideProtected.ForeColor = "Khaki"
-            $chkHideProtected.BackColor = $gridBtnPanel.BackColor
-            $chkHideProtected.UseVisualStyleBackColor = $false
-            $gridTip.SetToolTip($chkHideProtected, "Hide files that are system-owned, locked, access denied, or marked with the System attribute.")
-
-            $btnCleanSelected = New-Object System.Windows.Forms.Button
-            $btnCleanSelected.Text = "Clean Selected"
-            $btnCleanSelected.Size = "120, 32"
-            $btnCleanSelected.Anchor = "Top, Right"
-            $btnCleanSelected.BackColor = "SteelBlue"
-            $btnCleanSelected.ForeColor = "White"
-            $btnCleanSelected.FlatStyle = "Flat"
-
-            $btnCleanAll = New-Object System.Windows.Forms.Button
-            $btnCleanAll.Text = "Clean All"
-            $btnCleanAll.Size = "100, 32"
-            $btnCleanAll.Anchor = "Top, Right"
-            $btnCleanAll.BackColor = "IndianRed"
-            $btnCleanAll.ForeColor = "White"
-            $btnCleanAll.FlatStyle = "Flat"
-
-            $btnClose = New-Object System.Windows.Forms.Button
-            $btnClose.Text = "Close"
-            $btnClose.Size = "80, 32"
-            $btnClose.Anchor = "Top, Right"
-            $btnClose.BackColor = "DimGray"
-            $btnClose.ForeColor = "White"
-            $btnClose.FlatStyle = "Flat"
-
-            $layoutGridButtons = {
-                $btnClose.Left = [Math]::Max(0, $gridBtnPanel.ClientSize.Width - $btnClose.Width - 15)
-                $btnCleanAll.Left = [Math]::Max(0, $btnClose.Left - $btnCleanAll.Width - 10)
-                $btnCleanSelected.Left = [Math]::Max(0, $btnCleanAll.Left - $btnCleanSelected.Width - 10)
-                
-                $topPadding = [math]::Round(($gridBtnPanel.Height - $btnClose.Height) / 2)
-                $btnCleanSelected.Top = $topPadding
-                $btnCleanAll.Top = $topPadding
-                $btnClose.Top = $topPadding
-            }
-            $gridBtnPanel.Add_SizeChanged({ & $layoutGridButtons })
-            & $layoutGridButtons 
-
-            $gridBtnPanel.Controls.Add($btnCleanSelected)
-            $gridBtnPanel.Controls.Add($btnCleanAll)
-            $gridBtnPanel.Controls.Add($btnClose)
-            $gridBtnPanel.Controls.Add($chkHideProtected)
-
-            # --- 2. THE DATA GRID ---
-            $grid = New-Object System.Windows.Forms.DataGridView
-            $grid.Dock = "Fill"
-            $grid.AllowUserToAddRows = $false
-            $grid.AllowUserToDeleteRows = $false
-            $grid.ReadOnly = $true
-            $grid.MultiSelect = $true
-            $grid.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-            $grid.BorderStyle = "None"
-            
-            $grid.EnableHeadersVisualStyles = $false
-            $grid.ColumnHeadersBorderStyle = "Single"
-            $grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-            $grid.ColumnHeadersDefaultCellStyle.ForeColor = "DeepSkyBlue"
-            $grid.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-            
-            $grid.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-            $grid.DefaultCellStyle.ForeColor = "LightGray"
-            $grid.DefaultCellStyle.SelectionBackColor = "SteelBlue"
-            $grid.DefaultCellStyle.SelectionForeColor = "White"
-            
-            $grid.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40)
-            
-            $grid.CellBorderStyle = "SingleHorizontal"
-            $grid.GridColor = [System.Drawing.Color]::FromArgb(60, 60, 60)
-            $grid.RowHeadersVisible = $false
-            $grid.SelectionMode = "FullRowSelect"
-
-            $grid.AutoSizeColumnsMode = [System.Windows.Forms.DataGridViewAutoSizeColumnsMode]::Fill
-            
-            [void]$grid.Columns.Add("RuleName", "RuleName")
-            [void]$grid.Columns.Add("Protection", "Status")
-            [void]$grid.Columns.Add("FilePath", "FilePath")
-            [void]$grid.Columns.Add("Size", "Size")
-            $previewItems = @(
-                foreach ($item in $previewList) {
-                    $isProtected = $false
-                    if ($item.PSObject.Properties["IsProtected"]) { $isProtected = [bool]$item.IsProtected }
-                    $protectionReason = ""
-                    if ($item.PSObject.Properties["ProtectionReason"]) { $protectionReason = [string]$item.ProtectionReason }
-                    if ($isProtected -and [string]::IsNullOrWhiteSpace($protectionReason)) { $protectionReason = "Protected / in use" }
-
-                    [PSCustomObject]@{
-                        RuleName         = $item.RuleName
-                        Protection       = if ($isProtected) { $protectionReason } else { "" }
-                        FilePath         = $item.FilePath
-                        Size             = [long]$item.RawBytes
-                        IsProtected      = $isProtected
-                        ProtectionReason = $protectionReason
-                    }
-                }
-            )
-            $allPreviewRows = New-WmtVirtualRows -Items $previewItems
-            $previewRows = New-WmtVirtualRows -Items $previewItems
-            $protectedPreviewCount = @($previewItems | Where-Object { [bool]$_.IsProtected }).Count
-            if ($protectedPreviewCount -gt 0) {
-                $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total, $protectedPreviewCount protected/in use)"
-                Write-GuiLog "Analysis flagged $protectedPreviewCount protected or in-use item(s)."
-            }
-            Initialize-WmtVirtualDataGrid -Grid $grid -Rows $previewRows -EnableSort
-
-            $formatPreviewBytes = {
-                param([int64]$Bytes)
-                if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
-                if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-                if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
-                return "$Bytes B"
-            }.GetNewClosure()
-            
-            # --- THE MAGIC VISUAL TRICK ---
-            # This intercepts the drawing of the grid. If it sees a number in the "Size" column, 
-            # it instantly formats it into KB/MB visually, but the raw numbers stay underneath for sorting!
-            $grid.Add_CellFormatting({
-                    param($s, $e)
-                    if ($e.RowIndex -ge 0 -and $e.ColumnIndex -ge 0 -and $null -ne $e.Value) {
-                        if ($e.RowIndex -lt $previewRows.Count) {
-                            $rowData = $previewRows[$e.RowIndex]
-                            if ($rowData -and [bool]$rowData.IsProtected) {
-                                $e.CellStyle.BackColor = [System.Drawing.Color]::FromArgb(64, 54, 18)
-                                $e.CellStyle.ForeColor = [System.Drawing.Color]::Khaki
-                                $e.CellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(120, 92, 24)
-                                $e.CellStyle.SelectionForeColor = [System.Drawing.Color]::White
-                            }
-                        }
-
-                        if ($grid.Columns[$e.ColumnIndex].Name -eq "Size") {
-                            $e.Value = & $formatPreviewBytes ([int64]$e.Value)
-                            $e.FormattingApplied = $true
-                        }
-                    }
-                }.GetNewClosure())
-
-            $grid.Add_CellToolTipTextNeeded({
-                    param($s, $e)
-                    if ($e.RowIndex -lt 0 -or $e.RowIndex -ge $previewRows.Count) { return }
-                    $rowData = $previewRows[$e.RowIndex]
-                    if ($rowData -and [bool]$rowData.IsProtected) {
-                        $e.ToolTipText = "Protected / in use: $($rowData.ProtectionReason)"
-                    }
-                }.GetNewClosure())
-
-            # Lock the side columns to exactly fit their contents + headers
-            $grid.Columns["RuleName"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
-            $grid.Columns["Protection"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
-            $grid.Columns["Size"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::AllCells
-            # Force FilePath to soak up 100% of the remaining space
-            $grid.Columns["FilePath"].AutoSizeMode = [System.Windows.Forms.DataGridViewAutoSizeColumnMode]::Fill
-
-            # --- 3. CONTEXT MENU ---
-            $ctxMenu = New-Object System.Windows.Forms.ContextMenuStrip
-            $ctxMenu.BackColor = [System.Drawing.Color]::FromArgb(45, 45, 48)
-            $ctxMenu.ForeColor = "White"
-            $ctxMenu.ShowImageMargin = $false 
-            $ctxMenu.ShowCheckMargin = $false 
-
-            $menuOpen = $ctxMenu.Items.Add("Go to file [Open folder]")
-            $menuDelete = $ctxMenu.Items.Add("Delete file")
-
-            $menuOpen.Add_Click({
-                    if ($grid.SelectedRows.Count -gt 0) {
-                        $rowIndex = $grid.SelectedRows[0].Index
-                        if ($rowIndex -lt 0 -or $rowIndex -ge $previewRows.Count) { return }
-                        $path = $previewRows[$rowIndex].FilePath
-                        if (Test-Path -LiteralPath $path) {
-                            Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
-                        }
-                    }
-                })
-
-            $grid.ContextMenuStrip = $ctxMenu
-
-            $grid.Add_CellMouseDown({
-                    param($s, $e)
-                    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Right -and $e.RowIndex -ge 0) {
-                        if (-not $grid.Rows[$e.RowIndex].Selected) {
-                            $grid.ClearSelection()
-                            $grid.Rows[$e.RowIndex].Selected = $true
-                        }
-                    }
-                })
-
-            $refreshPreviewFilter = {
-                $previewRows.Clear()
-
-                foreach ($row in @($allPreviewRows)) {
-                    if ($chkHideProtected.Checked -and [bool]$row.IsProtected) { continue }
-                    [void]$previewRows.Add($row)
-                }
-
-                Reset-WmtVirtualGridRowCount -Grid $grid
-
-                $protectedRemaining = @($allPreviewRows | Where-Object { [bool]$_.IsProtected }).Count
-                $hiddenProtected = if ($chkHideProtected.Checked) { $protectedRemaining } else { 0 }
-
-                if ($protectedRemaining -gt 0) {
-                    $suffix = "$protectedRemaining protected/in use"
-                    if ($hiddenProtected -gt 0) { $suffix += ", $hiddenProtected hidden" }
-                    $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total, $suffix)"
-                }
-                else {
-                    $gridForm.Text = "Cleanup Analysis Preview ($finalTotalFormatted Total)"
-                }
-
-                $hasRows = ($previewRows.Count -gt 0)
-                $btnCleanSelected.Enabled = $hasRows
-                $btnCleanAll.Enabled = $hasRows
-                $menuDelete.Enabled = $hasRows
-            }.GetNewClosure()
-
-            $removePreviewRowsByIndices = {
-                param([int[]]$Indices)
-
-                if (-not $Indices -or $Indices.Count -eq 0) { return }
-
-                $rowsToRemove = [System.Collections.Generic.List[object]]::new()
-                foreach ($idx in ($Indices | Sort-Object -Unique)) {
-                    if ($idx -ge 0 -and $idx -lt $previewRows.Count) {
-                        [void]$rowsToRemove.Add($previewRows[$idx])
-                    }
-                }
-
-                foreach ($rowToRemove in @($rowsToRemove.ToArray())) {
-                    for ($i = $allPreviewRows.Count - 1; $i -ge 0; $i--) {
-                        if ([object]::ReferenceEquals($allPreviewRows[$i], $rowToRemove)) {
-                            $allPreviewRows.RemoveAt($i)
-                            break
-                        }
-                    }
-                }
-
-                & $refreshPreviewFilter
-            }.GetNewClosure()
-
-            $chkHideProtected.Add_CheckedChanged({ & $refreshPreviewFilter }.GetNewClosure())
-            
-            # --- 4. ACTION LOGIC (BUTTONS) ---
-            $btnClose.Add_Click({ $gridForm.Close() })
-
-            $invokePreviewDeletion = {
-                param(
-                    [object[]]$Targets,
-                    [string]$ActionTitle
-                )
-
-                $formatDeleteBytes = {
-                    param([int64]$Bytes)
-                    if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
-                    if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
-                    if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
-                    return "$Bytes B"
-                }.GetNewClosure()
-
-                $deleteTargets = [System.Collections.Generic.List[object]]::new()
-                $seenIndices = @{}
-
-                foreach ($target in @($Targets)) {
-                    if (-not $target) { continue }
-                    try { $idx = [int]$target.Index } catch { continue }
-                    if ($idx -lt 0 -or $idx -ge $previewRows.Count -or $seenIndices.ContainsKey($idx)) { continue }
-
-                    $item = $previewRows[$idx]
-                    [void]$deleteTargets.Add([PSCustomObject]@{
-                            Index    = $idx
-                            FilePath = [string]$item.FilePath
-                            Size     = [int64]$item.Size
-                        })
-                    $seenIndices[$idx] = $true
-                }
-
-                if ($deleteTargets.Count -eq 0) { return }
-
-                $targetArray = $deleteTargets.ToArray()
-                $completedIndices = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-                $failedPaths = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-                $deleteState = [hashtable]::Synchronized(@{
-                        Total            = $targetArray.Count
-                        Processed        = 0
-                        Deleted          = 0
-                        Missing          = 0
-                        Failed           = 0
-                        Bytes            = [int64]0
-                        Current          = ""
-                        Cancel           = $false
-                        IsCompleted      = $false
-                        Error            = ""
-                        CompletedIndices = $completedIndices
-                        FailedPaths      = $failedPaths
-                    })
-
-                $deleteForm = New-Object System.Windows.Forms.Form
-                $deleteForm.Text = $ActionTitle
-                $deleteForm.Size = "540,180"
-                $deleteForm.StartPosition = "CenterParent"
-                $deleteForm.ControlBox = $false
-                $deleteForm.FormBorderStyle = "FixedDialog"
-                $deleteForm.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-                $deleteForm.ForeColor = "White"
-
-                $deleteLabel = New-Object System.Windows.Forms.Label
-                $deleteLabel.Location = "20,15"; $deleteLabel.Size = "490,20"
-                $deleteLabel.Text = "Preparing deletion..."
-                $deleteForm.Controls.Add($deleteLabel)
-
-                $deleteCurrent = New-Object System.Windows.Forms.Label
-                $deleteCurrent.Location = "20,40"; $deleteCurrent.Size = "490,20"
-                $deleteCurrent.ForeColor = "Gray"
-                $deleteCurrent.AutoEllipsis = $true
-                $deleteCurrent.Text = "Starting worker..."
-                $deleteForm.Controls.Add($deleteCurrent)
-
-                $deleteProgress = New-Object System.Windows.Forms.ProgressBar
-                $deleteProgress.Location = "20,70"; $deleteProgress.Size = "490,20"
-                $deleteProgress.Minimum = 0
-                $deleteProgress.Maximum = [Math]::Max(1, $targetArray.Count)
-                $deleteProgress.Value = 0
-                $deleteForm.Controls.Add($deleteProgress)
-
-                $btnCancelDelete = New-Object System.Windows.Forms.Button
-                $btnCancelDelete.Text = "Cancel"
-                $btnCancelDelete.Size = "90, 30"
-                $btnCancelDelete.Location = "420,105"
-                $btnCancelDelete.Anchor = "Bottom, Right"
-                $deleteForm.Controls.Add($btnCancelDelete)
-
-                Set-WmtWinFormsTheme -Control $deleteForm
-                Set-WmtWinFormsButtonTheme -Button $btnCancelDelete -Role Standard
-
-                $worker = @{
-                    PowerShell = $null
-                    Runspace   = $null
-                    Async      = $null
-                    Ended      = $false
-                }
-
-                $disposeWorker = {
-                    try {
-                        if ($worker.PowerShell) {
-                            $worker.PowerShell.Dispose()
-                        }
-                    }
-                    catch {}
-                    try {
-                        if ($worker.Runspace) {
-                            $worker.Runspace.Close()
-                            $worker.Runspace.Dispose()
-                        }
-                    }
-                    catch {}
-                    $worker.PowerShell = $null
-                    $worker.Runspace = $null
-                    $worker.Async = $null
-                }.GetNewClosure()
-
-                try {
-                    $runspace = [runspacefactory]::CreateRunspace()
-                    $runspace.ThreadOptions = "ReuseThread"
-                    $runspace.Open()
-
-                    $ps = [PowerShell]::Create()
-                    $ps.Runspace = $runspace
-                    [void]$ps.AddScript({
-                            param([object[]]$Targets, [hashtable]$State)
-
-                            $ErrorActionPreference = "SilentlyContinue"
-
-                            try {
-                                foreach ($target in @($Targets)) {
-                                    if ([bool]$State["Cancel"]) { break }
-
-                                    $path = [string]$target.FilePath
-                                    $idx = [int]$target.Index
-                                    $bytes = [int64]0
-                                    try { $bytes = [int64]$target.Size } catch {}
-
-                                    $State["Current"] = $path
-
-                                    try {
-                                        if ([string]::IsNullOrWhiteSpace($path)) {
-                                            [void]$State["CompletedIndices"].Add($idx)
-                                            $State["Missing"] = ([int]$State["Missing"]) + 1
-                                            continue
-                                        }
-
-                                        if (Test-Path -LiteralPath $path) {
-                                            $itemInfo = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-                                            if ($itemInfo -and -not $itemInfo.PSIsContainer) {
-                                                try { $itemInfo.Attributes = [System.IO.FileAttributes]::Normal } catch {}
-                                            }
-
-                                            Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction Stop
-                                            $State["Deleted"] = ([int]$State["Deleted"]) + 1
-                                            $State["Bytes"] = ([int64]$State["Bytes"]) + $bytes
-                                        }
-                                        else {
-                                            $State["Missing"] = ([int]$State["Missing"]) + 1
-                                        }
-
-                                        [void]$State["CompletedIndices"].Add($idx)
-                                    }
-                                    catch {
-                                        $State["Failed"] = ([int]$State["Failed"]) + 1
-                                        if (-not [string]::IsNullOrWhiteSpace($path)) {
-                                            [void]$State["FailedPaths"].Add($path)
-                                        }
-                                    }
-                                    finally {
-                                        $State["Processed"] = ([int]$State["Processed"]) + 1
-                                    }
-                                }
-                            }
-                            catch {
-                                $State["Error"] = $_.Exception.Message
-                            }
-                            finally {
-                                $State["IsCompleted"] = $true
-                            }
-                        }).AddArgument($targetArray).AddArgument($deleteState)
-
-                    $worker.PowerShell = $ps
-                    $worker.Runspace = $runspace
-                    $worker.Async = $ps.BeginInvoke()
-                }
-                catch {
-                    & $disposeWorker
-                    [System.Windows.Forms.MessageBox]::Show(
-                        "Could not start cleanup worker.`n$($_.Exception.Message)",
-                        "Cleanup Error",
-                        [System.Windows.Forms.MessageBoxButtons]::OK,
-                        [System.Windows.Forms.MessageBoxIcon]::Error
-                    ) | Out-Null
-                    return
-                }
-
-                $btnCleanSelected.Enabled = $false
-                $btnCleanAll.Enabled = $false
-                $menuDelete.Enabled = $false
-
-                $btnCancelDelete.Add_Click({
-                        $deleteState["Cancel"] = $true
-                        $btnCancelDelete.Enabled = $false
-                        $deleteCurrent.Text = "Stopping after the current item..."
-                    }.GetNewClosure())
-
-                $deleteTimer = New-Object System.Windows.Forms.Timer
-                $deleteTimer.Interval = 150
-                $deleteTimer.Add_Tick({
-                        try {
-                            $total = [Math]::Max(1, [int]$deleteState["Total"])
-                            $processed = [Math]::Max(0, [int]$deleteState["Processed"])
-                            $deleted = [Math]::Max(0, [int]$deleteState["Deleted"])
-                            $missing = [Math]::Max(0, [int]$deleteState["Missing"])
-                            $failed = [Math]::Max(0, [int]$deleteState["Failed"])
-                            $bytes = [int64]$deleteState["Bytes"]
-                            $currentPath = [string]$deleteState["Current"]
-                            $freed = & $formatDeleteBytes $bytes
-
-                            $deleteProgress.Value = [Math]::Min($deleteProgress.Maximum, $processed)
-                            $deleteLabel.Text = "$processed/$total processed | Deleted: $deleted | Failed: $failed | Recovered: $freed"
-
-                            if ([bool]$deleteState["Cancel"] -and -not [bool]$deleteState["IsCompleted"]) {
-                                $deleteCurrent.Text = "Stopping after the current item..."
-                            }
-                            elseif ($missing -gt 0) {
-                                $deleteCurrent.Text = "Current: $currentPath  ($missing already missing)"
-                            }
-                            else {
-                                $deleteCurrent.Text = "Current: $currentPath"
-                            }
-
-                            if ([bool]$deleteState["IsCompleted"] -or ($worker.Async -and $worker.Async.IsCompleted)) {
-                                $deleteTimer.Stop()
-                                try {
-                                    if ($worker.Async -and -not $worker.Ended) {
-                                        [void]$worker.PowerShell.EndInvoke($worker.Async)
-                                        $worker.Ended = $true
-                                    }
-                                }
-                                catch {
-                                    if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
-                                        $deleteState["Error"] = $_.Exception.Message
-                                    }
-                                }
-                                $deleteForm.Close()
-                            }
-                        }
-                        catch {
-                            $deleteState["Error"] = $_.Exception.Message
-                            $deleteTimer.Stop()
-                            $deleteForm.Close()
-                        }
-                    }.GetNewClosure())
-
-                try {
-                    $deleteForm.Add_Shown({ $deleteTimer.Start() }.GetNewClosure())
-                    $deleteForm.ShowDialog($gridForm) | Out-Null
-                }
-                finally {
-                    try { $deleteTimer.Stop(); $deleteTimer.Dispose() } catch {}
-                    try {
-                        if ($worker.Async -and $worker.Async.IsCompleted -and -not $worker.Ended) {
-                            [void]$worker.PowerShell.EndInvoke($worker.Async)
-                            $worker.Ended = $true
-                        }
-                    }
-                    catch {
-                        if ([string]::IsNullOrWhiteSpace([string]$deleteState["Error"])) {
-                            $deleteState["Error"] = $_.Exception.Message
-                        }
-                    }
-                    & $disposeWorker
-                    try { $deleteForm.Dispose() } catch {}
-                }
-
-                $indicesToRemove = @($deleteState["CompletedIndices"] | ForEach-Object { [int]$_ })
-                $markedFailedRows = $false
-                $failedLookup = @{}
-                foreach ($failedPath in @($deleteState["FailedPaths"])) {
-                    if (-not [string]::IsNullOrWhiteSpace([string]$failedPath)) {
-                        $failedLookup[[string]$failedPath] = $true
-                    }
-                }
-
-                if ($failedLookup.Count -gt 0) {
-                    foreach ($row in @($allPreviewRows)) {
-                        if ($row -and $failedLookup.ContainsKey([string]$row.FilePath)) {
-                            $row.IsProtected = $true
-                            $row.ProtectionReason = "Delete failed"
-                            $row.Protection = "Delete failed"
-                            $markedFailedRows = $true
-                        }
-                    }
-                }
-
-                if ($indicesToRemove.Count -gt 0) {
-                    & $removePreviewRowsByIndices -Indices ([int[]]$indicesToRemove)
-                }
-                elseif ($markedFailedRows) {
-                    & $refreshPreviewFilter
-                }
-
-                $btnCleanSelected.Enabled = ($previewRows.Count -gt 0)
-                $btnCleanAll.Enabled = ($previewRows.Count -gt 0)
-                $menuDelete.Enabled = ($previewRows.Count -gt 0)
-
-                $finalFreed = & $formatDeleteBytes ([int64]$deleteState["Bytes"])
-                $finalDeleted = [int]$deleteState["Deleted"]
-                $finalMissing = [int]$deleteState["Missing"]
-                $finalFailed = [int]$deleteState["Failed"]
-                $wasCanceled = [bool]$deleteState["Cancel"]
-                $workerError = [string]$deleteState["Error"]
-
-                if ($finalFailed -gt 0) {
-                    Write-GuiLog "Preview cleanup completed with $finalFailed failure(s). Recovered: $finalFreed"
-                    foreach ($failedPath in @($deleteState["FailedPaths"] | Select-Object -First 5)) {
-                        Write-GuiLog "Failed to delete from Analyze: $failedPath"
-                    }
-                }
-                elseif ($wasCanceled) {
-                    Write-GuiLog "Preview cleanup canceled. Recovered: $finalFreed"
-                }
-                else {
-                    Write-GuiLog "Preview cleanup finished. Recovered: $finalFreed"
-                }
-
-                $resultText = if ($wasCanceled) {
-                    "Cleanup canceled.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
-                }
-                else {
-                    "Cleanup complete.`n`nDeleted: $finalDeleted`nAlready missing: $finalMissing`nFailed: $finalFailed`nRecovered: $finalFreed"
-                }
-
-                if (-not [string]::IsNullOrWhiteSpace($workerError)) {
-                    $resultText += "`n`nWorker note: $workerError"
-                }
-
-                $icon = if ($finalFailed -gt 0 -or -not [string]::IsNullOrWhiteSpace($workerError)) {
-                    [System.Windows.Forms.MessageBoxIcon]::Warning
-                }
-                else {
-                    [System.Windows.Forms.MessageBoxIcon]::Information
-                }
-
-                [System.Windows.Forms.MessageBox]::Show(
-                    $resultText,
-                    "Cleanup Results",
-                    [System.Windows.Forms.MessageBoxButtons]::OK,
-                    $icon
-                ) | Out-Null
-            }.GetNewClosure()
-
-            $btnCleanSelected.Add_Click({
-                    if ($grid.SelectedRows.Count -eq 0) { return }
-                    $targets = @(
-                        foreach ($row in @($grid.SelectedRows)) {
-                            [PSCustomObject]@{ Index = $row.Index }
-                        }
-                    )
-                    & $invokePreviewDeletion -Targets $targets -ActionTitle "Cleaning Selected Items"
-                })
-
-            $menuDelete.Add_Click({
-                    if ($grid.SelectedRows.Count -gt 0) {
-                        $targets = @(
-                            foreach ($row in @($grid.SelectedRows)) {
-                                [PSCustomObject]@{ Index = $row.Index }
-                            }
-                        )
-                        & $invokePreviewDeletion -Targets $targets -ActionTitle "Deleting Preview Items"
-                    }
-                })
-
-            $btnCleanAll.Add_Click({
-                    if ($previewRows.Count -eq 0) { return }
-            
-                    $confirm = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?", "Confirm Clean All", "YesNo", "Warning")
-                    if ($confirm -eq "Yes") {
-                        $targets = @(
-                            for ($i = 0; $i -lt $previewRows.Count; $i++) {
-                                [PSCustomObject]@{ Index = $i }
-                            }
-                        )
-                        & $invokePreviewDeletion -Targets $targets -ActionTitle "Cleaning All Preview Items"
-                    }
-                })
-            
-            # --- 5. FORM ASSEMBLY ---
-            $gridForm.Controls.Add($gridBtnPanel)
-            $gridForm.Controls.Add($grid)
-            $gridBtnPanel.SendToBack() 
-            $grid.BringToFront()       
-
-            Set-WmtWinFormsTheme -Control $gridForm
-            $chkHideProtected.ForeColor = [System.Drawing.Color]::Khaki
-            Set-WmtWinFormsButtonTheme -Button $btnCleanSelected -Role Primary
-            Set-WmtWinFormsButtonTheme -Button $btnCleanAll -Role Danger
-            Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
-            Set-WmtWinFormsContextMenuTheme -Menu $ctxMenu
-            $gridForm.ShowDialog() | Out-Null
         }
         else {
             Show-WmtMessageBox -Message "No files found to clean." -Title "Analysis Results" -Image Information | Out-Null
@@ -9679,10 +8092,7 @@ function Show-RegScanSelection {
 </Window>
 '@
 
-    $reader = New-Object System.Xml.XmlNodeReader $regScanXaml
-    $dialog = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $dialog
-    Set-WmtWindowOwner -Child $dialog
+    $dialog = New-WmtWindowFromFullXaml -Xaml $regScanXaml
 
     $pnlChecks = $dialog.FindName("pnlChecks")
     $btnBackupHKLM = $dialog.FindName("btnBackupHKLM")
@@ -9894,10 +8304,7 @@ function Show-RegistryCleaner {
 </Window>
 '@
 
-    $reader = New-Object System.Xml.XmlNodeReader $registryCleanerXaml
-    $dialog = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $dialog
-    Set-WmtWindowOwner -Child $dialog
+    $dialog = New-WmtWindowFromFullXaml -Xaml $registryCleanerXaml
 
     $lblStatus = $dialog.FindName("lblStatus")
     $dg = $dialog.FindName("dgRegistry")
@@ -9944,19 +8351,19 @@ function Show-RegistryCleaner {
                 $details = "Review only; not selected by default. $details"
             }
             [PSCustomObject]@{
-                Check     = $autoSelected
-                Problem   = $item.Problem
-                Data      = $item.Data
-                Key       = $item.DisplayKey
-                FullPath  = $item.RegPath
-                ValueName = $item.ValueName
-                FixAction = $fixAction
-                Risk      = $risk
-                Confidence = $confidence
+                Check         = $autoSelected
+                Problem       = $item.Problem
+                Data          = $item.Data
+                Key           = $item.DisplayKey
+                FullPath      = $item.RegPath
+                ValueName     = $item.ValueName
+                FixAction     = $fixAction
+                Risk          = $risk
+                Confidence    = $confidence
                 DefaultAction = if ($autoSelected) { "Selected" } else { "Review" }
-                Type      = $item.Type
-                NewData   = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
-                Details   = $details
+                Type          = $item.Type
+                NewData       = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
+                Details       = $details
             }
         }
     )
@@ -10004,12 +8411,12 @@ function Show-RegistryCleaner {
                         continue
                     }
                     [void]$toFix.Add([PSCustomObject]@{
-                        RegPath    = $row.FullPath
-                        ValueName  = $row.ValueName
-                        Type       = $row.Type
-                        DisplayKey = $row.Key
-                        NewData    = $row.NewData
-                    })
+                            RegPath    = $row.FullPath
+                            ValueName  = $row.ValueName
+                            Type       = $row.Type
+                            DisplayKey = $row.Key
+                            NewData    = $row.NewData
+                        })
                 }
             }
 
@@ -10421,10 +8828,7 @@ function Show-SafetyDialog {
 </Window>
 '@
 
-    $reader = [System.Xml.XmlNodeReader]::new($safetyXaml)
-    $dialog = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $dialog
-    Set-WmtWindowOwner -Child $dialog
+    $dialog = New-WmtWindowFromFullXaml -Xaml $safetyXaml
 
     $dialog.FindName("lblMessage").Text = "You are about to apply $Count selected registry cleanup action(s).`n`nWMT creates a .reg backup first. Value cleanup is usually low risk; key deletion and review-selected items carry more risk."
     $dialog.Tag = "Cancel"
@@ -10578,22 +8982,19 @@ function Invoke-RegistryTask {
     </Grid>
 </Window>
 '@
-        $reader = [System.Xml.XmlNodeReader]::new($registryProgressXaml)
-        $pForm = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $pForm
-        Set-WmtWindowOwner -Child $pForm
+        $pForm = New-WmtWindowFromFullXaml -Xaml $registryProgressXaml
         $pLabel = $pForm.FindName("pLabel")
         $pBar = $pForm.FindName("pBar")
         $btnCancelScan = $pForm.FindName("btnCancelScan")
 
         # Shared Data for Thread
         $syncHash = [hashtable]::Synchronized(@{
-                Findings    = [System.Collections.ArrayList]::new()
-                Status      = "Starting..."
-                Progress    = 0
-                IsCompleted = $false
+                Findings        = [System.Collections.ArrayList]::new()
+                Status          = "Starting..."
+                Progress        = 0
+                IsCompleted     = $false
                 CancelRequested = $false
-                Error       = $null
+                Error           = $null
             })
 
         $btnCancelScan.Add_Click({
@@ -12974,16 +11375,16 @@ function Invoke-RegistryTask {
                                 }
                             }
                         }
-                    
+
                         $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
                         if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (see log for paths that could not be removed)" }
                         $finalMsg += "`n`nBackup: $bkFile"
-                        [System.Windows.Forms.MessageBox]::Show($finalMsg, "Result", "OK", "Information") | Out-Null
-                    
+                        Show-WmtMessageBox -Message $finalMsg -Title "Result" -Image Information | Out-Null
+
                     } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir
                 }
             }.GetNewClosure())
-        
+
         $timer.Start()
     }
 }
@@ -13185,7 +11586,6 @@ function Start-DriveBenchmark {
     Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
     Add-Type -AssemblyName PresentationCore -ErrorAction SilentlyContinue
     Add-Type -AssemblyName WindowsBase -ErrorAction SilentlyContinue
-    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
 
     if ($launcherButton) {
         $launcherButton.IsEnabled = $false
@@ -13450,11 +11850,11 @@ function Start-DriveBenchmark {
     Set-DbButtonStyle $exportBtn
 
     $exportBtn.Add_Click({
-            $dialog = New-Object System.Windows.Forms.SaveFileDialog
+            $dialog = [Microsoft.Win32.SaveFileDialog]::new()
             $dialog.Filter = "Text Files (*.txt)|*.txt|All Files (*.*)|*.*"
             $dialog.FileName = "WMT_DriveBenchmark_Results.txt"
 
-            if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            if ($dialog.ShowDialog() -eq $true) {
                 try {
                     [System.IO.File]::WriteAllText($dialog.FileName, $logBox.Text, [System.Text.Encoding]::UTF8)
                     Write-GuiLog "[Storage Benchmark] Exported results to $($dialog.FileName)"
@@ -13516,7 +11916,7 @@ function Start-DriveBenchmark {
             $cmbSize.IsEnabled = $true
         }
         $btnRun.IsEnabled = $true
-        
+
         Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgPanel"
         Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
         Set-WmtThemedBrush -Object $cmbDrive -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
@@ -14031,11 +12431,11 @@ namespace Wmt {
 
                 uint access = isWrite ? (GENERIC_READ | GENERIC_WRITE) : GENERIC_READ;
                 uint share = isWrite ? 0 : (FILE_SHARE_READ | FILE_SHARE_WRITE);
-                
+
                 // --- THE BUG FIX IS HERE ---
                 // We pass 'false' for writeThrough so the SSD can use its DRAM/SLC hardware caches normally.
                 handle = OpenNativeFile(path, access, OPEN_EXISTING, isRandom, false, share, true);
-                
+
                 completionPort = CreateIoCompletionPort(handle, IntPtr.Zero, UIntPtr.Zero, 1);
 
                 Random random = isRandom ? new Random(Environment.TickCount) : null;
@@ -14043,14 +12443,14 @@ namespace Wmt {
                 int issued = 0;
                 long nextSequentialBlock = 0;
                 System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot> slotByOverlapped = new System.Collections.Generic.Dictionary<IntPtr, NativeIoSlot>(queueDepth);
-                
+
                 Stopwatch stopwatch = new Stopwatch();
                 stopwatch.Start();
 
                 for (int i = 0; i < queueDepth && issued < operationLimit && (!timedRun || stopwatch.Elapsed.TotalSeconds < durationSeconds); i++) {
                     long blockIndex = isRandom ? random.Next((int)blockCount) : (nextSequentialBlock++ % blockCount);
                     long offset = blockIndex * blockSize;
-                    
+
                     Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedInternalOffset, IntPtr.Zero);
                     Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedInternalHighOffset, IntPtr.Zero);
                     Marshal.WriteInt32(slots[i].Overlapped, OverlappedOffsetOffset, unchecked((int)(offset & 0xFFFFFFFFL)));
@@ -14058,9 +12458,9 @@ namespace Wmt {
                     Marshal.WriteIntPtr(slots[i].Overlapped, OverlappedEventOffset, IntPtr.Zero);
 
                     uint ignored;
-                    bool ok = isWrite ? WriteFile(handle, slots[i].Buffer, (uint)blockSize, out ignored, slots[i].Overlapped) 
+                    bool ok = isWrite ? WriteFile(handle, slots[i].Buffer, (uint)blockSize, out ignored, slots[i].Overlapped)
                                       : ReadFile(handle, slots[i].Buffer, (uint)blockSize, out ignored, slots[i].Overlapped);
-                    
+
                     int code = Marshal.GetLastWin32Error();
                     if (!ok && code != ERROR_IO_PENDING) throw new Win32Exception(code, "IO Error");
 
@@ -14094,9 +12494,9 @@ namespace Wmt {
                                 Marshal.WriteInt32(slot.Overlapped, OverlappedOffsetHighOffset, unchecked((int)((offset >> 32) & 0xFFFFFFFFL)));
 
                                 uint ignored;
-                                bool ok = isWrite ? WriteFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped) 
+                                bool ok = isWrite ? WriteFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped)
                                                   : ReadFile(handle, slot.Buffer, (uint)blockSize, out ignored, slot.Overlapped);
-                                
+
                                 int code = Marshal.GetLastWin32Error();
                                 if (!ok && code != ERROR_IO_PENDING) throw new Win32Exception(code, "IO Error");
                                 issued++;
@@ -14129,7 +12529,7 @@ namespace Wmt {
                         $folder = [System.IO.Path]::Combine($root, "WMT_Benchmark_Data")
                         $file = [System.IO.Path]::Combine($folder, "wmt_io_test_{0}.dat" -f ([guid]::NewGuid().ToString("N")))
 
-                        $seqBufferSize = 2MB  
+                        $seqBufferSize = 2MB
                         $randomBlockSize = 4KB
                         $targetBytes = [int64]$FileSizeMb * 1MB
 
@@ -14154,7 +12554,7 @@ namespace Wmt {
                             catch {}
 
                             Add-Line ("  Test file: {0}" -f $file)
-                            
+
                             Set-BenchmarkStatus "Allocating test file on $DriveLetter`..." $BaseProgress
                             [Wmt.NativeDiskBenchmark]::PrepareFile($file, $targetBytes)
 
@@ -14248,7 +12648,7 @@ namespace Wmt {
                             Test-Cancelled
                             $driveLetter = $driveInfo.Name.Substring(0, 1)
                             $driveLabel = if ([string]::IsNullOrWhiteSpace($driveInfo.VolumeLabel)) { "(No label)" } else { $driveInfo.VolumeLabel }
-                            
+
                             $driveHardware = $null
                             if ($driveHardwareMap.ContainsKey($driveLetter)) { $driveHardware = [string]$driveHardwareMap[$driveLetter] }
                             $driveDisplayName = if ([string]::IsNullOrWhiteSpace($driveHardware)) { "{0}: {1}" -f $driveLetter, $driveLabel } else { "{0}: {1} - {2}" -f $driveLetter, $driveLabel, $driveHardware }
@@ -14355,1080 +12755,182 @@ function Test-ShortcutTargetIsSpecial {
 }
 
 function Show-BrokenShortcuts {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Broken Shortcut Manager"
-    $f.Size = New-Object System.Drawing.Size(1220, 720)
-    $f.MinimumSize = New-Object System.Drawing.Size(1100, 620)
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $f.ForeColor = "White"
-
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Fill"
-    $dg.BackgroundColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $dg.ForeColor = "Black"
-    $dg.AutoSizeColumnsMode = "Fill"
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $true
-    $dg.ReadOnly = $true
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.BorderStyle = "None"
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(50, 50, 50)
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersHeight = 35
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(0, 122, 204)
-    $dg.DefaultCellStyle.SelectionForeColor = "White"
-    Set-WmtDoubleBuffered -Control $dg
-
-    $statusPanel = New-Object System.Windows.Forms.Panel
-    $statusPanel.Dock = "Bottom"
-    $statusPanel.Height = 38
-    $statusPanel.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-
-    $progress = New-Object System.Windows.Forms.ProgressBar
-    $progress.Location = New-Object System.Drawing.Point(18, 10)
-    $progress.Size = New-Object System.Drawing.Size(145, 16)
-    $progress.Style = [System.Windows.Forms.ProgressBarStyle]::Marquee
-    $progress.MarqueeAnimationSpeed = 25
-    $progress.Visible = $false
-    $statusPanel.Controls.Add($progress)
-
-    $lblStatus = New-Object System.Windows.Forms.Label
-    $lblStatus.Text = "Ready."
-    $lblStatus.ForeColor = "Yellow"
-    $lblStatus.AutoSize = $false
-    $lblStatus.Location = New-Object System.Drawing.Point(178, 9)
-    $lblStatus.Size = New-Object System.Drawing.Size(980, 20)
-    $lblStatus.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-    $statusPanel.Controls.Add($lblStatus)
-
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 82
-    $pnl.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-
-    $btnDelete = New-Object System.Windows.Forms.Button
-    $btnDelete.Text = "Delete Now"
-    $btnDelete.Location = New-Object System.Drawing.Point(18, 20)
-    $btnDelete.Size = New-Object System.Drawing.Size(110, 35)
-    $btnDelete.BackColor = "Firebrick"; $btnDelete.ForeColor = "White"; $btnDelete.FlatStyle = "Flat"
-    $pnl.Controls.Add($btnDelete)
-
-    $btnRescan = New-Object System.Windows.Forms.Button
-    $btnRescan.Text = "Rescan"
-    $btnRescan.Location = New-Object System.Drawing.Point(148, 20)
-    $btnRescan.Size = New-Object System.Drawing.Size(90, 35)
-    $btnRescan.BackColor = "DimGray"; $btnRescan.ForeColor = "White"; $btnRescan.FlatStyle = "Flat"
-    $pnl.Controls.Add($btnRescan)
-
-    $btnStop = New-Object System.Windows.Forms.Button
-    $btnStop.Text = "Stop"
-    $btnStop.Location = New-Object System.Drawing.Point(248, 20)
-    $btnStop.Size = New-Object System.Drawing.Size(80, 35)
-    $btnStop.BackColor = "DimGray"; $btnStop.ForeColor = "White"; $btnStop.FlatStyle = "Flat"
-    $btnStop.Enabled = $false
-    $pnl.Controls.Add($btnStop)
-
-    $lblInfo = New-Object System.Windows.Forms.Label
-    $lblInfo.Text = "Right-click rows for Browse, Deep Search, copy, or open location."
-    $lblInfo.AutoSize = $false
-    $lblInfo.ForeColor = "Gray"
-    $lblInfo.Location = New-Object System.Drawing.Point(346, 27)
-    $lblInfo.Size = New-Object System.Drawing.Size(420, 20)
-    $pnl.Controls.Add($lblInfo)
-
-    $btnApply = New-Object System.Windows.Forms.Button
-    $btnApply.Text = "Apply Fixes"
-    $btnApply.Size = New-Object System.Drawing.Size(130, 35)
-    $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"
-    $btnApply.DialogResult = [System.Windows.Forms.DialogResult]::OK
-    $pnl.Controls.Add($btnApply)
-
-    $btnCancel = New-Object System.Windows.Forms.Button
-    $btnCancel.Text = "Close"
-    $btnCancel.Size = New-Object System.Drawing.Size(90, 35)
-    $btnCancel.BackColor = "DimGray"; $btnCancel.ForeColor = "White"; $btnCancel.FlatStyle = "Flat"
-    $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-    $pnl.Controls.Add($btnCancel)
-
-    $layoutButtons = {
-        $btnCancel.Left = [Math]::Max(980, $pnl.ClientSize.Width - 108)
-        $btnCancel.Top = 20
-        $btnApply.Left = $btnCancel.Left - 142
-        $btnApply.Top = 20
-        $lblInfo.Width = [Math]::Max(120, $btnApply.Left - $lblInfo.Left - 16)
-    }.GetNewClosure()
-    $pnl.Add_Resize($layoutButtons)
-
-    $f.Controls.Add($dg)
-    $f.Controls.Add($statusPanel)
-    $f.Controls.Add($pnl)
-    $f.AcceptButton = $btnApply
-    $f.CancelButton = $btnCancel
-
-    $newShortcutTable = {
-        $dt = New-Object System.Data.DataTable
-        foreach ($col in @("Shortcut", "Location", "Action", "Details", "BrokenTarget", "NewTarget", "FullPath")) {
-            [void]$dt.Columns.Add($col)
-        }
-        return $dt
-    }.GetNewClosure()
-
-    $configureGridColumns = {
-        if (-not $dg.Columns -or $dg.Columns.Count -eq 0) { return }
-        if ($dg.Columns["FullPath"]) { $dg.Columns["FullPath"].Visible = $false }
-        if ($dg.Columns["Location"]) { $dg.Columns["Location"].HeaderText = "Location"; $dg.Columns["Location"].FillWeight = 18 }
-        if ($dg.Columns["Shortcut"]) { $dg.Columns["Shortcut"].FillWeight = 13 }
-        if ($dg.Columns["Action"]) { $dg.Columns["Action"].FillWeight = 7 }
-        if ($dg.Columns["Details"]) { $dg.Columns["Details"].FillWeight = 17 }
-        if ($dg.Columns["BrokenTarget"]) { $dg.Columns["BrokenTarget"].HeaderText = "Broken Target"; $dg.Columns["BrokenTarget"].FillWeight = 24 }
-        if ($dg.Columns["NewTarget"]) { $dg.Columns["NewTarget"].HeaderText = "New Target"; $dg.Columns["NewTarget"].FillWeight = 24 }
-    }.GetNewClosure()
-
-    $colorGridRow = {
-        param($GridRow)
-        if (-not $GridRow -or $GridRow.IsNewRow) { return }
-        $action = [string]$GridRow.Cells["Action"].Value
-        if ($action -eq "Fix") {
-            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Success"
-        }
-        elseif ($action -eq "None") {
-            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "Warning"
-        }
-        else {
-            $GridRow.DefaultCellStyle.ForeColor = Get-WmtThemeColor "TextPrimary"
-        }
-    }.GetNewClosure()
-
-    $setGridRowAction = {
-        param($GridRow, [string]$Action, [string]$Details, [string]$NewTarget)
-        if (-not $GridRow -or $GridRow.IsNewRow) { return }
-        $GridRow.Cells["Action"].Value = $Action
-        $GridRow.Cells["Details"].Value = $Details
-        $GridRow.Cells["NewTarget"].Value = if ($null -eq $NewTarget) { "" } else { $NewTarget }
-        & $colorGridRow $GridRow
-    }.GetNewClosure()
-
-    $getSelectedGridRows = {
-        return @($dg.SelectedRows | Where-Object { $_ -and -not $_.IsNewRow })
-    }.GetNewClosure()
-
-    $scanState = [hashtable]::Synchronized(@{
-            Results     = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
-            Status      = "Ready."
-            Current     = ""
-            Root        = ""
-            Scanned     = 0
-            Found       = 0
-            Skipped     = 0
-            Roots       = 0
-            IsRunning   = $false
-            IsCompleted = $false
-            Error       = ""
-            Cancel      = $false
-        })
-    $scanWorker = @{ PowerShell = $null; Runspace = $null; Async = $null }
-    $scanTimer = New-Object System.Windows.Forms.Timer
-    $scanTimer.Interval = 180
-
-    $searchState = [hashtable]::Synchronized(@{
-            Status      = "Ready."
-            Current     = ""
-            FoundPath   = ""
-            IsRunning   = $false
-            IsCompleted = $false
-            Error       = ""
-            Cancel      = $false
-        })
-    $searchWorker = @{ PowerShell = $null; Runspace = $null; Async = $null; Row = $null; SearchName = "" }
-    $searchTimer = New-Object System.Windows.Forms.Timer
-    $searchTimer.Interval = 180
-
-    $isBusy = { return ([bool]$scanState["IsRunning"] -or [bool]$searchState["IsRunning"]) }.GetNewClosure()
-
-    $refreshButtons = {
-        $busy = & $isBusy
-        $hasRows = ($dg.Rows.Count -gt 0)
-        $hasSelection = ((& $getSelectedGridRows).Count -gt 0)
-        $hasAction = $false
-        if ($hasRows) {
-            foreach ($row in $dg.Rows) {
-                if (-not $row -or $row.IsNewRow) { continue }
-                $action = [string]$row.Cells["Action"].Value
-                if ($action -eq "Fix") { $hasAction = $true; break }
-            }
-        }
-        $btnApply.Enabled = (-not $busy -and $hasAction)
-        $btnDelete.Enabled = (-not $busy -and $hasSelection)
-        $btnRescan.Enabled = -not $busy
-        $btnStop.Enabled = $busy
-        $progress.Visible = $busy
-        if ($busy) { [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor }
-        else { [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default }
-    }.GetNewClosure()
-
-    $bindScanResults = {
-        $dt = & $newShortcutTable
-        foreach ($item in @($scanState["Results"])) {
-            if (-not $item) { continue }
-            $row = $dt.NewRow()
-            $row["Shortcut"] = [string]$item.Shortcut
-            $row["Location"] = [string]$item.Location
-            $row["Action"] = [string]$item.Action
-            $row["Details"] = [string]$item.Details
-            $row["BrokenTarget"] = [string]$item.BrokenTarget
-            $row["NewTarget"] = [string]$item.NewTarget
-            $row["FullPath"] = [string]$item.FullPath
-            [void]$dt.Rows.Add($row)
-        }
-        $dg.DataSource = $dt
-        & $configureGridColumns
-        $dg.ClearSelection()
-        for ($i = 0; $i -lt $dg.Rows.Count; $i++) {
-            $row = $dg.Rows[$i]
-            & $colorGridRow $row
-            if ([string]$row.Cells["Action"].Value -eq "Fix") { $row.Selected = $true }
-        }
-        & $refreshButtons
-    }.GetNewClosure()
-
-    $disposeScanWorker = {
-        try { if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Dispose() } } catch {}
-        try { if ($scanWorker.Runspace) { $scanWorker.Runspace.Close(); $scanWorker.Runspace.Dispose() } } catch {}
-        $scanWorker.PowerShell = $null
-        $scanWorker.Runspace = $null
-        $scanWorker.Async = $null
-    }.GetNewClosure()
-
-    $disposeSearchWorker = {
-        try { if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Dispose() } } catch {}
-        try { if ($searchWorker.Runspace) { $searchWorker.Runspace.Close(); $searchWorker.Runspace.Dispose() } } catch {}
-        $searchWorker.PowerShell = $null
-        $searchWorker.Runspace = $null
-        $searchWorker.Async = $null
-        $searchWorker.Row = $null
-        $searchWorker.SearchName = ""
-    }.GetNewClosure()
-
-    $stopActiveWork = {
-        if ($scanState["IsRunning"]) {
-            $scanState["Cancel"] = $true
-            $scanState["Status"] = "Stopping shortcut scan..."
-            try { if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Stop() } } catch {}
-        }
-        if ($searchState["IsRunning"]) {
-            $searchState["Cancel"] = $true
-            $searchState["Status"] = "Stopping deep search..."
-            try { if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Stop() } } catch {}
-        }
-        & $refreshButtons
-    }.GetNewClosure()
-
-    $startScan = {
-        if (& $isBusy) { return }
-
-        & $disposeScanWorker
-        $scanState["Results"].Clear()
-        $scanState["Status"] = "Preparing shortcut scan..."
-        $scanState["Current"] = ""
-        $scanState["Root"] = ""
-        $scanState["Scanned"] = 0
-        $scanState["Found"] = 0
-        $scanState["Skipped"] = 0
-        $scanState["Roots"] = 0
-        $scanState["IsRunning"] = $true
-        $scanState["IsCompleted"] = $false
-        $scanState["Error"] = ""
-        $scanState["Cancel"] = $false
-
-        $dg.DataSource = & $newShortcutTable
-        & $configureGridColumns
-        $lblStatus.Text = "Scanning shortcuts..."
-        $f.Text = "Broken Shortcut Manager - Scanning..."
-        & $refreshButtons
-
-        try {
-            $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
-            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Expand-ShortcutTarget", ${function:Expand-ShortcutTarget}.ToString()))
-            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Test-ShortcutTargetIsSpecial", ${function:Test-ShortcutTargetIsSpecial}.ToString()))
-            $runspace = [runspacefactory]::CreateRunspace($iss)
-            $runspace.ApartmentState = "STA"
-            $runspace.ThreadOptions = "ReuseThread"
-            $runspace.Open()
-
-            $ps = [PowerShell]::Create()
-            $ps.Runspace = $runspace
-            [void]$ps.AddScript({
-                    param($State)
-                    $ErrorActionPreference = "SilentlyContinue"
-
-                    function Set-ScanStatus {
-                        param([string]$Text)
-                        $State["Status"] = $Text
-                    }
-
-                    function Test-ScanCancelled {
-                        return [bool]$State["Cancel"]
-                    }
-
-                    function Add-ShortcutRoot {
-                        param($Roots, $Seen, [string]$Path)
-                        if ([string]::IsNullOrWhiteSpace($Path)) { return }
-                        try {
-                            $expanded = [System.Environment]::ExpandEnvironmentVariables($Path)
-                            if (-not [System.IO.Directory]::Exists($expanded)) { return }
-                            $full = ([System.IO.DirectoryInfo]::new($expanded)).FullName.TrimEnd("\")
-                            $key = $full.ToUpperInvariant()
-                            if (-not $Seen.ContainsKey($key)) {
-                                $Seen[$key] = $true
-                                [void]$Roots.Add($full)
-                            }
-                        }
-                        catch {}
-                    }
-
-                    function Get-ShortcutScanRoots {
-                        $roots = [System.Collections.ArrayList]::new()
-                        $seen = @{}
-
-                        foreach ($name in @("CommonStartMenu", "StartMenu", "CommonPrograms", "Programs", "CommonDesktopDirectory", "DesktopDirectory", "Desktop")) {
-                            try {
-                                $folder = [System.Enum]::Parse([System.Environment+SpecialFolder], $name)
-                                Add-ShortcutRoot -Roots $roots -Seen $seen -Path ([System.Environment]::GetFolderPath($folder))
-                            }
-                            catch {}
-                        }
-
-                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:ProgramData\Microsoft\Windows\Start Menu"
-                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:APPDATA\Microsoft\Windows\Start Menu"
-                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:USERPROFILE\Desktop"
-                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "$env:PUBLIC\Desktop"
-                        Add-ShortcutRoot -Roots $roots -Seen $seen -Path "C:\Users\Public\Desktop"
-
-                        foreach ($oneDriveRoot in @($env:OneDrive, $env:OneDriveConsumer, $env:OneDriveCommercial)) {
-                            if (-not [string]::IsNullOrWhiteSpace($oneDriveRoot)) {
-                                Add-ShortcutRoot -Roots $roots -Seen $seen -Path (Join-Path $oneDriveRoot "Desktop")
-                            }
-                        }
-
-                        $filtered = [System.Collections.ArrayList]::new()
-                        foreach ($root in @($roots | Sort-Object { $_.Length })) {
-                            $isNested = $false
-                            foreach ($parent in @($filtered)) {
-                                $parentPrefix = $parent.TrimEnd("\") + "\"
-                                if ($root.Length -gt $parent.Length -and $root.StartsWith($parentPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-                                    $isNested = $true
-                                    break
-                                }
-                            }
-                            if (-not $isNested) { [void]$filtered.Add($root) }
-                        }
-
-                        return @($filtered)
-                    }
-
-                    function Get-EnumeratedShortcutFiles {
-                        param(
-                            [string]$Path,
-                            [string]$Filter = "*.lnk",
-                            [switch]$Recurse
-                        )
-                        if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
-
-                        if (-not $Recurse) {
-                            try {
-                                foreach ($file in [System.IO.Directory]::EnumerateFiles($Path, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
-                                    if (Test-ScanCancelled) { return }
-                                    $file
-                                }
-                            }
-                            catch {}
-                            return
-                        }
-
-                        $pending = [System.Collections.Generic.Stack[string]]::new()
-                        $pending.Push($Path)
-                        while ($pending.Count -gt 0) {
-                            if (Test-ScanCancelled) { return }
-                            $dir = $pending.Pop()
-                            $State["Current"] = $dir
-
-                            try {
-                                foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
-                                    if (Test-ScanCancelled) { return }
-                                    $file
-                                }
-                            }
-                            catch {}
-
-                            try {
-                                foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
-                                    if (Test-ScanCancelled) { return }
-                                    $pending.Push($child)
-                                }
-                            }
-                            catch {}
-                        }
-                    }
-
-                    function Test-ShortcutTargetExists {
-                        param([string]$Target)
-                        $expanded = Expand-ShortcutTarget $Target
-                        if ([string]::IsNullOrWhiteSpace($expanded)) { return $false }
-                        try { return ([System.IO.File]::Exists($expanded) -or [System.IO.Directory]::Exists($expanded)) }
-                        catch { return $false }
-                    }
-
-                    function Get-ShortcutGuessName {
-                        param([string]$Target, [string]$BaseName)
-                        try {
-                            $expanded = Expand-ShortcutTarget $Target
-                            if (-not [string]::IsNullOrWhiteSpace($expanded)) {
-                                $leaf = [System.IO.Path]::GetFileName($expanded)
-                                if (-not [string]::IsNullOrWhiteSpace($leaf)) { return $leaf }
-                            }
-                        }
-                        catch {}
-                        return "$BaseName.exe"
-                    }
-
-                    function Find-AppPathTarget {
-                        param([string]$FileName)
-                        if ([string]::IsNullOrWhiteSpace($FileName) -or $FileName -notmatch '\.exe$') { return $null }
-                        $views = @([Microsoft.Win32.RegistryView]::Default, [Microsoft.Win32.RegistryView]::Registry64, [Microsoft.Win32.RegistryView]::Registry32)
-                        $hives = @([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryHive]::LocalMachine)
-
-                        foreach ($hive in $hives) {
-                            foreach ($view in $views) {
-                                $baseKey = $null; $appKey = $null
-                                try {
-                                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, $view)
-                                    $appKey = $baseKey.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$FileName")
-                                    if ($appKey) {
-                                        $value = [string]$appKey.GetValue("")
-                                        $expanded = Expand-ShortcutTarget $value
-                                        if (-not [string]::IsNullOrWhiteSpace($expanded) -and [System.IO.File]::Exists($expanded)) {
-                                            return $expanded
-                                        }
-                                    }
-                                }
-                                catch {}
-                                finally {
-                                    try { if ($appKey) { $appKey.Close() } } catch {}
-                                    try { if ($baseKey) { $baseKey.Close() } } catch {}
-                                }
-                            }
-                        }
-                        return $null
-                    }
-
-                    function Find-PathTarget {
-                        param([string]$FileName)
-                        if ([string]::IsNullOrWhiteSpace($FileName) -or $FileName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { return $null }
-                        foreach ($dir in @(([string]$env:Path).Split(";"))) {
-                            if ([string]::IsNullOrWhiteSpace($dir)) { continue }
-                            try {
-                                $candidate = Join-Path ([System.Environment]::ExpandEnvironmentVariables($dir.Trim())) $FileName
-                                if ([System.IO.File]::Exists($candidate)) { return $candidate }
-                            }
-                            catch {}
-                        }
-                        return $null
-                    }
-
-                    $knownFixes = @{
-                        "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
-                        "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
-                        "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
-                        "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
-                        "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
-                    }
-
-                    $peerTargetCache = @{}
-                    $shell = $null
-
-                    function Get-PeerShortcutTargets {
-                        param([string]$Directory)
-                        if ([string]::IsNullOrWhiteSpace($Directory) -or -not [System.IO.Directory]::Exists($Directory)) { return @() }
-                        $key = $Directory.ToUpperInvariant()
-                        if ($peerTargetCache.ContainsKey($key)) { return @($peerTargetCache[$key]) }
-
-                        $targets = [System.Collections.ArrayList]::new()
-                        foreach ($peerPath in Get-EnumeratedShortcutFiles -Path $Directory -Filter "*.lnk") {
-                            if (Test-ScanCancelled) { break }
-                            try {
-                                $peerShortcut = $shell.CreateShortcut($peerPath)
-                                $peerTarget = [string]$peerShortcut.TargetPath
-                                if (Test-ShortcutTargetIsSpecial $peerTarget) { continue }
-                                $expanded = Expand-ShortcutTarget $peerTarget
-                                if (Test-ShortcutTargetExists $expanded) {
-                                    $parent = [System.IO.Path]::GetDirectoryName($expanded)
-                                    if (-not [string]::IsNullOrWhiteSpace($parent)) {
-                                        [void]$targets.Add([PSCustomObject]@{ Target = $expanded; Parent = $parent })
-                                    }
-                                }
-                            }
-                            catch {}
-                        }
-
-                        $peerTargetCache[$key] = @($targets)
-                        return @($targets)
-                    }
-
-                    try {
-                        Set-ScanStatus "Finding shortcut folders..."
-                        $roots = @(Get-ShortcutScanRoots)
-                        $State["Roots"] = $roots.Count
-                        if ($roots.Count -eq 0) {
-                            Set-ScanStatus "No shortcut folders were found."
-                            return
-                        }
-
-                        $shell = New-Object -ComObject WScript.Shell
-
-                        foreach ($root in $roots) {
-                            if (Test-ScanCancelled) { break }
-                            $State["Root"] = $root
-                            Set-ScanStatus "Scanning $root"
-
-                            foreach ($lnkPath in Get-EnumeratedShortcutFiles -Path $root -Filter "*.lnk" -Recurse) {
-                                if (Test-ScanCancelled) { break }
-                                $State["Current"] = $lnkPath
-                                $State["Scanned"] = [int]$State["Scanned"] + 1
-
-                                try { $shortcutFile = [System.IO.FileInfo]::new($lnkPath) } catch { $State["Skipped"] = [int]$State["Skipped"] + 1; continue }
-
-                                try {
-                                    $sc = $shell.CreateShortcut($lnkPath)
-                                    $target = [string]$sc.TargetPath
-                                }
-                                catch {
-                                    $State["Skipped"] = [int]$State["Skipped"] + 1
-                                    continue
-                                }
-
-                                if (Test-ShortcutTargetIsSpecial $target) {
-                                    $State["Skipped"] = [int]$State["Skipped"] + 1
-                                    continue
-                                }
-
-                                if (Test-ShortcutTargetExists $target) { continue }
-
-                                $action = "None"
-                                $details = "Review Needed"
-                                $newTarget = ""
-                                $baseName = $shortcutFile.BaseName
-                                $guessName = Get-ShortcutGuessName -Target $target -BaseName $baseName
-
-                                if ($knownFixes.ContainsKey($baseName)) {
-                                    $action = "Fix"
-                                    $details = "Restore System Path"
-                                    $newTarget = $knownFixes[$baseName]
-                                }
-                                else {
-                                    $appPath = Find-AppPathTarget -FileName $guessName
-                                    if ($appPath) {
-                                        $action = "Fix"
-                                        $details = "App Paths: $([System.IO.Path]::GetDirectoryName($appPath))"
-                                        $newTarget = $appPath
-                                    }
-
-                                    if (-not $newTarget) {
-                                        foreach ($peer in Get-PeerShortcutTargets -Directory $shortcutFile.DirectoryName) {
-                                            try {
-                                                $candidate = Join-Path $peer.Parent $guessName
-                                                if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
-                                                    $action = "Fix"
-                                                    $details = "Nearby shortcut: $($peer.Parent)"
-                                                    $newTarget = $candidate
-                                                    break
-                                                }
-                                            }
-                                            catch {}
-                                        }
-                                    }
-
-                                    if (-not $newTarget) {
-                                        $pathTarget = Find-PathTarget -FileName $guessName
-                                        if ($pathTarget) {
-                                            $action = "Fix"
-                                            $details = "PATH: $([System.IO.Path]::GetDirectoryName($pathTarget))"
-                                            $newTarget = $pathTarget
-                                        }
-                                    }
-                                }
-
-                                [void]$State["Results"].Add([PSCustomObject]@{
-                                        Shortcut     = $shortcutFile.Name
-                                        Location     = $shortcutFile.DirectoryName
-                                        Action       = $action
-                                        Details      = $details
-                                        BrokenTarget = $target
-                                        NewTarget    = $newTarget
-                                        FullPath     = $lnkPath
-                                    })
-                                $State["Found"] = [int]$State["Results"].Count
-                            }
-                        }
-
-                        if (Test-ScanCancelled) {
-                            Set-ScanStatus "Scan stopped. Found $($State["Found"]) broken shortcut(s)."
-                        }
-                        else {
-                            Set-ScanStatus "Scan complete. Found $($State["Found"]) broken shortcut(s)."
-                        }
-                    }
-                    catch {
-                        $State["Error"] = $_.Exception.Message
-                        Set-ScanStatus "Scan failed: $($_.Exception.Message)"
-                    }
-                    finally {
-                        try { if ($shell) { [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {}
-                        $State["IsRunning"] = $false
-                        $State["IsCompleted"] = $true
-                    }
-                }).AddArgument($scanState)
-
-            $scanWorker.PowerShell = $ps
-            $scanWorker.Runspace = $runspace
-            $scanWorker.Async = $ps.BeginInvoke()
-            $scanTimer.Start()
-        }
-        catch {
-            $scanState["IsRunning"] = $false
-            $scanState["IsCompleted"] = $true
-            $scanState["Error"] = $_.Exception.Message
-            $scanState["Status"] = "Failed to start scan: $($_.Exception.Message)"
-            $lblStatus.Text = [string]$scanState["Status"]
-            & $disposeScanWorker
-            & $refreshButtons
-        }
-    }.GetNewClosure()
-
-    $scanTimer.Add_Tick({
-            $lblStatus.Text = "{0}  Scanned: {1}  Found: {2}  Skipped: {3}" -f $scanState["Status"], $scanState["Scanned"], $scanState["Found"], $scanState["Skipped"]
-            if (-not $scanWorker.Async -or -not $scanWorker.Async.IsCompleted) { return }
-
-            $scanTimer.Stop()
-            try {
-                [void]$scanWorker.PowerShell.EndInvoke($scanWorker.Async)
-            }
-            catch {
-                if (-not $scanState["Cancel"]) {
-                    $scanState["Error"] = $_.Exception.Message
-                    $scanState["Status"] = "Scan failed: $($_.Exception.Message)"
-                }
-            }
-            $scanState["IsRunning"] = $false
-            $scanState["IsCompleted"] = $true
-            if ($scanState["Cancel"] -and [string]$scanState["Status"] -eq "Stopping shortcut scan...") {
-                $scanState["Status"] = "Scan stopped. Found $($scanState["Found"]) broken shortcut(s)."
-            }
-
-            $f.Text = "Broken Shortcut Manager"
-            $lblStatus.Text = [string]$scanState["Status"]
-            & $bindScanResults
-            & $disposeScanWorker
-            & $refreshButtons
-
-            if (-not $scanState["Cancel"] -and -not $scanState["Error"] -and [int]$scanState["Found"] -eq 0) {
-                [System.Windows.Forms.MessageBox]::Show("Scan complete. No broken shortcuts found.", "All Clean", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            }
-            elseif ($scanState["Error"]) {
-                [System.Windows.Forms.MessageBox]::Show("Shortcut scan failed:`n$($scanState["Error"])", "Scan Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-            }
-        }.GetNewClosure())
-
-    $startDeepSearch = {
-        param($GridRow)
-        if (& $isBusy) { return }
-        if (-not $GridRow -or $GridRow.IsNewRow) { return }
-
-        $brokenTarget = [string]$GridRow.Cells["BrokenTarget"].Value
-        $shortcutName = [string]$GridRow.Cells["Shortcut"].Value
-        $searchName = ""
-        try {
-            if (-not [string]::IsNullOrWhiteSpace($brokenTarget)) {
-                $searchName = [System.IO.Path]::GetFileName([System.Environment]::ExpandEnvironmentVariables($brokenTarget))
-            }
-        }
-        catch {}
-        if ([string]::IsNullOrWhiteSpace($searchName)) {
-            $searchName = [System.IO.Path]::GetFileNameWithoutExtension($shortcutName) + ".exe"
-        }
-        try {
-            if ($searchName.IndexOfAny([System.IO.Path]::GetInvalidFileNameChars()) -ge 0) { throw "Invalid file name." }
-        }
-        catch {
-            [System.Windows.Forms.MessageBox]::Show("Could not derive a safe file name to search for from this shortcut.", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-            return
-        }
-
-        $warnMsg = "This will scan all fixed local drives for:`n`n'$searchName'`n`nThe search runs in the background and can be stopped with the Stop button.`n`nDo you want to continue?"
-        $res = [System.Windows.Forms.MessageBox]::Show($warnMsg, "Deep Search", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        if ($res -ne "Yes") { return }
-
-        & $disposeSearchWorker
-        $searchState["Status"] = "Preparing deep search for '$searchName'..."
-        $searchState["Current"] = ""
-        $searchState["FoundPath"] = ""
-        $searchState["Error"] = ""
-        $searchState["Cancel"] = $false
-        $searchState["IsRunning"] = $true
-        $searchState["IsCompleted"] = $false
-        $searchWorker.Row = $GridRow
-        $searchWorker.SearchName = $searchName
-        $lblStatus.Text = [string]$searchState["Status"]
-        & $refreshButtons
-
-        try {
-            $runspace = [runspacefactory]::CreateRunspace()
-            $runspace.ApartmentState = "MTA"
-            $runspace.ThreadOptions = "ReuseThread"
-            $runspace.Open()
-
-            $ps = [PowerShell]::Create()
-            $ps.Runspace = $runspace
-            [void]$ps.AddScript({
-                    param($State, [string]$SearchName)
-                    $ErrorActionPreference = "SilentlyContinue"
-
-                    function Test-SearchCancelled { return [bool]$State["Cancel"] }
-
-                    function Get-SearchFiles {
-                        param([string]$Path, [string]$Filter)
-                        if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
-                        $pending = [System.Collections.Generic.Stack[string]]::new()
-                        $pending.Push($Path)
-                        while ($pending.Count -gt 0) {
-                            if (Test-SearchCancelled) { return }
-                            $dir = $pending.Pop()
-                            $State["Current"] = $dir
-                            try {
-                                foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
-                                    if (Test-SearchCancelled) { return }
-                                    $file
-                                }
-                            }
-                            catch {}
-                            try {
-                                foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
-                                    if (Test-SearchCancelled) { return }
-                                    $pending.Push($child)
-                                }
-                            }
-                            catch {}
-                        }
-                    }
-
-                    try {
-                        $State["Status"] = "Deep searching for '$SearchName'..."
-                        foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
-                            if (Test-SearchCancelled) { break }
-                            if ($drive.DriveType -ne [System.IO.DriveType]::Fixed -or -not $drive.IsReady) { continue }
-                            $State["Status"] = "Searching $($drive.RootDirectory.FullName) for '$SearchName'..."
-                            foreach ($candidate in Get-SearchFiles -Path $drive.RootDirectory.FullName -Filter $SearchName) {
-                                if (Test-SearchCancelled) { break }
-                                try {
-                                    if ([System.String]::Equals([System.IO.Path]::GetFileName($candidate), $SearchName, [System.StringComparison]::OrdinalIgnoreCase)) {
-                                        $State["FoundPath"] = $candidate
-                                        break
-                                    }
-                                }
-                                catch {}
-                            }
-                            if ($State["FoundPath"]) { break }
-                        }
-
-                        if (Test-SearchCancelled) {
-                            $State["Status"] = "Deep search stopped."
-                        }
-                        elseif ($State["FoundPath"]) {
-                            $State["Status"] = "Found: $($State["FoundPath"])"
-                        }
-                        else {
-                            $State["Status"] = "Deep search finished. No matching file found."
-                        }
-                    }
-                    catch {
-                        $State["Error"] = $_.Exception.Message
-                        $State["Status"] = "Deep search failed: $($_.Exception.Message)"
-                    }
-                    finally {
-                        $State["IsRunning"] = $false
-                        $State["IsCompleted"] = $true
-                    }
-                }).AddArgument($searchState).AddArgument($searchName)
-
-            $searchWorker.PowerShell = $ps
-            $searchWorker.Runspace = $runspace
-            $searchWorker.Async = $ps.BeginInvoke()
-            $searchTimer.Start()
-        }
-        catch {
-            $searchState["IsRunning"] = $false
-            $searchState["IsCompleted"] = $true
-            $searchState["Error"] = $_.Exception.Message
-            $searchState["Status"] = "Failed to start deep search: $($_.Exception.Message)"
-            $lblStatus.Text = [string]$searchState["Status"]
-            & $disposeSearchWorker
-            & $refreshButtons
-        }
-    }.GetNewClosure()
-
-    $searchTimer.Add_Tick({
-            $lblStatus.Text = [string]$searchState["Status"]
-            if ($searchState["Current"]) {
-                $lblStatus.Text = "{0}  Current: {1}" -f $searchState["Status"], $searchState["Current"]
-            }
-            if (-not $searchWorker.Async -or -not $searchWorker.Async.IsCompleted) { return }
-
-            $searchTimer.Stop()
-            try {
-                [void]$searchWorker.PowerShell.EndInvoke($searchWorker.Async)
-            }
-            catch {
-                if (-not $searchState["Cancel"]) {
-                    $searchState["Error"] = $_.Exception.Message
-                    $searchState["Status"] = "Deep search failed: $($_.Exception.Message)"
-                }
-            }
-            $searchState["IsRunning"] = $false
-            $searchState["IsCompleted"] = $true
-            if ($searchState["Cancel"] -and [string]$searchState["Status"] -eq "Stopping deep search...") {
-                $searchState["Status"] = "Deep search stopped."
-            }
-
-            $targetRow = $searchWorker.Row
-            if (-not $searchState["Cancel"] -and -not $searchState["Error"] -and $searchState["FoundPath"] -and $targetRow -and -not $targetRow.IsNewRow) {
-                & $setGridRowAction $targetRow "Fix" "Deep Search: $($searchState["FoundPath"])" ([string]$searchState["FoundPath"])
-                $targetRow.Selected = $true
-                [System.Windows.Forms.MessageBox]::Show("File found!`n`n$($searchState["FoundPath"])", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-            }
-            elseif (-not $searchState["Cancel"] -and -not $searchState["Error"]) {
-                [System.Windows.Forms.MessageBox]::Show("Could not find '$($searchWorker.SearchName)' on any fixed local drive.", "Deep Search", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-            }
-            elseif ($searchState["Error"]) {
-                [System.Windows.Forms.MessageBox]::Show("Deep search failed:`n$($searchState["Error"])", "Deep Search Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-            }
-
-            $lblStatus.Text = [string]$searchState["Status"]
-            & $disposeSearchWorker
-            & $refreshButtons
-        }.GetNewClosure())
-
-    $deleteSelectedNow = {
-        $rows = & $getSelectedGridRows
-        $count = $rows.Count
-        if ($count -eq 0) { return }
-
-        $res = [System.Windows.Forms.MessageBox]::Show("Permanently delete $count selected shortcut(s)?`n`nThis action is immediate.", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-        if ($res -ne "Yes") { return }
-
-        $deletedCount = 0
-        $failedCount = 0
-        $dataRowsToRemove = @()
-
-        foreach ($row in $rows) {
-            $path = [string]$row.Cells["FullPath"].Value
-            try {
-                if (-not [string]::IsNullOrWhiteSpace($path) -and [System.IO.File]::Exists($path)) {
-                    Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-                }
-                if ($row.DataBoundItem -and $row.DataBoundItem.Row) { $dataRowsToRemove += $row.DataBoundItem.Row }
-                else { $dg.Rows.Remove($row) }
-                $deletedCount++
-            }
-            catch {
-                $failedCount++
-                [System.Windows.Forms.MessageBox]::Show("Could not delete: $path`n$($_.Exception.Message)", "Delete Failed", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-            }
-        }
-
-        foreach ($dataRow in $dataRowsToRemove) {
-            try { $dataRow.Delete() } catch {}
-        }
-        try {
-            if ($dg.DataSource -is [System.Data.DataTable]) { $dg.DataSource.AcceptChanges() }
-        }
-        catch {}
-
-        if ($failedCount -eq 0) { $lblStatus.Text = "Deleted $deletedCount shortcut(s)." }
-        else { $lblStatus.Text = "Deleted $deletedCount shortcut(s); $failedCount failed." }
-        & $refreshButtons
-    }.GetNewClosure()
-
-    $browseSelectedTarget = {
-        $rows = & $getSelectedGridRows
-        if ($rows.Count -ne 1) { return }
-        $row = $rows[0]
-        $dlg = New-Object System.Windows.Forms.OpenFileDialog
-        $dlg.Filter = "Executables (*.exe)|*.exe|All Files (*.*)|*.*"
-        try {
-            $brokenTarget = [System.Environment]::ExpandEnvironmentVariables([string]$row.Cells["BrokenTarget"].Value)
-            $parent = [System.IO.Path]::GetDirectoryName($brokenTarget)
-            if (-not [string]::IsNullOrWhiteSpace($parent) -and [System.IO.Directory]::Exists($parent)) { $dlg.InitialDirectory = $parent }
-        }
-        catch {}
-
-        if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            & $setGridRowAction $row "Fix" "Manual fix: $($dlg.FileName)" $dlg.FileName
-            $lblStatus.Text = "Manual fix selected for $($row.Cells["Shortcut"].Value)."
-        }
-        try { $dlg.Dispose() } catch {}
-        & $refreshButtons
-    }.GetNewClosure()
-
-    $copyCellText = {
-        param([string]$ColumnName)
-        $rows = & $getSelectedGridRows
-        if ($rows.Count -lt 1 -or -not $dg.Columns[$ColumnName]) { return }
-        $values = @()
-        foreach ($row in $rows) {
-            $value = [string]$row.Cells[$ColumnName].Value
-            if (-not [string]::IsNullOrWhiteSpace($value)) { $values += $value }
-        }
-        if ($values.Count -gt 0) {
-            try {
-                [System.Windows.Forms.Clipboard]::SetText(($values -join [Environment]::NewLine))
-                $lblStatus.Text = "Copied $($values.Count) value(s)."
-            }
-            catch {
-                [System.Windows.Forms.MessageBox]::Show("Could not copy to clipboard:`n$($_.Exception.Message)", "Clipboard", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-            }
-        }
-    }.GetNewClosure()
-
-    $openSelectedLocation = {
-        $rows = & $getSelectedGridRows
-        if ($rows.Count -ne 1) { return }
-        $path = [string]$rows[0].Cells["FullPath"].Value
-        if ([string]::IsNullOrWhiteSpace($path)) { return }
-        try {
-            if ([System.IO.File]::Exists($path)) {
-                Start-Process -FilePath explorer.exe -ArgumentList "/select,`"$path`""
-            }
-            else {
-                $parent = [System.IO.Path]::GetDirectoryName($path)
-                if ([System.IO.Directory]::Exists($parent)) { Start-Process -FilePath explorer.exe -ArgumentList "`"$parent`"" }
-            }
-        }
-        catch {
-            [System.Windows.Forms.MessageBox]::Show("Could not open shortcut location:`n$($_.Exception.Message)", "Open Location", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-        }
-    }.GetNewClosure()
-
-    $ctx = New-Object System.Windows.Forms.ContextMenuStrip
-    $itemBrowse = $ctx.Items.Add("Browse for target...")
-    $itemBrowse.Add_Click({ & $browseSelectedTarget }.GetNewClosure())
-
-    $itemDeep = $ctx.Items.Add("Deep Search (all fixed drives)")
-    $itemDeep.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
-    $itemDeep.Add_Click({
-            $rows = & $getSelectedGridRows
-            if ($rows.Count -eq 1) { & $startDeepSearch $rows[0] }
-        }.GetNewClosure())
-
-    [void]$ctx.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-
-    $itemUnmark = $ctx.Items.Add("Unmark / Cancel Action")
-    $itemUnmark.Add_Click({
-            foreach ($row in (& $getSelectedGridRows)) {
-                & $setGridRowAction $row "None" "Review Needed" ""
-            }
-            $lblStatus.Text = "Cleared selected action(s)."
-            & $refreshButtons
-        }.GetNewClosure())
-
-    [void]$ctx.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
-
-    $itemOpenLocation = $ctx.Items.Add("Open shortcut location")
-    $itemOpenLocation.Add_Click({ & $openSelectedLocation }.GetNewClosure())
-
-    $itemCopyShortcut = $ctx.Items.Add("Copy shortcut path")
-    $itemCopyShortcut.Add_Click({ & $copyCellText "FullPath" }.GetNewClosure())
-
-    $itemCopyBroken = $ctx.Items.Add("Copy broken target")
-    $itemCopyBroken.Add_Click({ & $copyCellText "BrokenTarget" }.GetNewClosure())
-
-    $itemCopyNew = $ctx.Items.Add("Copy new target")
-    $itemCopyNew.Add_Click({ & $copyCellText "NewTarget" }.GetNewClosure())
-
-    $ctx.Add_Opening({
-            $rows = & $getSelectedGridRows
-            $single = ($rows.Count -eq 1)
-            $any = ($rows.Count -gt 0)
-            $busy = & $isBusy
-            $itemBrowse.Enabled = ($single -and -not $busy)
-            $itemDeep.Enabled = ($single -and -not $busy)
-            $itemUnmark.Enabled = ($any -and -not $busy)
-            $itemOpenLocation.Enabled = ($single -and -not $busy)
-            $itemCopyShortcut.Enabled = $any
-            $itemCopyBroken.Enabled = $any
-            $itemCopyNew.Enabled = $any
-        }.GetNewClosure())
-    $dg.ContextMenuStrip = $ctx
-
-    $btnDelete.Add_Click({ & $deleteSelectedNow }.GetNewClosure())
-    $btnRescan.Add_Click({ & $startScan }.GetNewClosure())
-    $btnStop.Add_Click({ & $stopActiveWork }.GetNewClosure())
-    $dg.Add_SelectionChanged({ & $refreshButtons }.GetNewClosure())
-
-    $f.Add_Shown({
-            & $layoutButtons
-            & $startScan
-        }.GetNewClosure())
-
-    $cleanupWorkers = {
-        try { $scanTimer.Stop() } catch {}
-        try { $searchTimer.Stop() } catch {}
-        try { $scanState["Cancel"] = $true; if ($scanWorker.PowerShell) { $scanWorker.PowerShell.Stop() } } catch {}
-        try { $searchState["Cancel"] = $true; if ($searchWorker.PowerShell) { $searchWorker.PowerShell.Stop() } } catch {}
-        & $disposeScanWorker
-        & $disposeSearchWorker
-        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
-    }.GetNewClosure()
-    $f.Add_FormClosed({ & $cleanupWorkers }.GetNewClosure())
-
-    $dg.DataSource = & $newShortcutTable
-    & $configureGridColumns
-    & $refreshButtons
-
-    Set-WmtWinFormsTheme -Control $f
-    $lblStatus.ForeColor = Get-WmtThemeColor "Warning"
-    $lblInfo.ForeColor = Get-WmtThemeColor "TextSecondary"
-    Set-WmtWinFormsButtonTheme -Button $btnDelete -Role Danger
-    Set-WmtWinFormsButtonTheme -Button $btnRescan -Role Primary
-    Set-WmtWinFormsButtonTheme -Button $btnStop -Role Warning
-    Set-WmtWinFormsButtonTheme -Button $btnApply -Role Success
-    Set-WmtWinFormsButtonTheme -Button $btnCancel -Role Standard
-    Set-WmtWinFormsContextMenuTheme -Menu $ctx
-    $itemDeep.ForeColor = Get-WmtThemeColor "Accent"
-    if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $finalList = @()
-        foreach ($row in $dg.Rows) {
-            if (-not $row -or $row.IsNewRow) { continue }
-            $finalList += [PSCustomObject]@{
-                Shortcut     = [string]$row.Cells["Shortcut"].Value
-                Folder       = [string]$row.Cells["Location"].Value
-                Location     = [string]$row.Cells["Location"].Value
-                Action       = [string]$row.Cells["Action"].Value
-                Details      = [string]$row.Cells["Details"].Value
-                BrokenTarget = [string]$row.Cells["BrokenTarget"].Value
-                NewTarget    = [string]$row.Cells["NewTarget"].Value
-                FullPath     = [string]$row.Cells["FullPath"].Value
-            }
-        }
-        return $finalList
+    $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <DataGrid Name="dgShortcuts" IsReadOnly="True" SelectionMode="Extended" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        <TextBlock Name="lblStatus" Grid.Row="1" Text="Ready." Foreground="{DynamicResource Warning}" Margin="0,10,0,0"/>
+        <WrapPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnDelete" Content="Delete Now" MinWidth="106" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,8"/>
+            <Button Name="btnBrowse" Content="Browse" MinWidth="92" Margin="0,0,8,8"/>
+            <Button Name="btnRescan" Content="Rescan" MinWidth="92" Margin="0,0,8,8"/>
+            <Button Name="btnApply" Content="Apply Fixes" MinWidth="112" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
+            <Button Name="btnClose" Content="Close" Width="92" IsCancel="True" Margin="0,0,8,8"/>
+        </WrapPanel>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Broken Shortcut Manager" -ContentXaml $content -Width 1220 -Height 720 -MinWidth 940 -MinHeight 560
+    $dg = $dialog.FindName("dgShortcuts")
+    $lblStatus = $dialog.FindName("lblStatus")
+    $btnDelete = $dialog.FindName("btnDelete")
+    $btnBrowse = $dialog.FindName("btnBrowse")
+    $btnRescan = $dialog.FindName("btnRescan")
+    $btnApply = $dialog.FindName("btnApply")
+    $btnClose = $dialog.FindName("btnClose")
+
+    $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
+    $dg.ItemsSource = $rows
+    Set-WmtDataGridColumns -DataGrid $dg -Columns @("Shortcut", "Location", "Action", "Details", "BrokenTarget", "NewTarget", "FullPath") -Widths @{ Shortcut = 150; Location = 210; Action = 90; Details = 180; BrokenTarget = "*"; NewTarget = "*" } -Hidden @("FullPath")
+    $knownFixes = @{
+        "This PC"       = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+        "My Computer"   = "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"
+        "Recycle Bin"   = "::{645FF040-5081-101B-9F08-00AA002F954E}"
+        "Control Panel" = "::{21EC2020-3AEA-1069-A2DD-08002B30309D}"
+        "Documents"     = "::{450D8FBA-AD25-11D0-98A8-0800361B1103}"
     }
-    return $null
+
+    $getRoots = {
+        $roots = [System.Collections.Generic.List[string]]::new()
+        $seen = @{}
+        $paths = @(
+            [Environment]::GetFolderPath('CommonStartMenu'),
+            [Environment]::GetFolderPath('StartMenu'),
+            [Environment]::GetFolderPath('CommonDesktopDirectory'),
+            [Environment]::GetFolderPath('DesktopDirectory'),
+            "$env:ProgramData\Microsoft\Windows\Start Menu",
+            "$env:APPDATA\Microsoft\Windows\Start Menu",
+            "$env:USERPROFILE\Desktop",
+            "$env:PUBLIC\Desktop"
+        )
+        foreach ($pathItem in $paths) {
+            if ([string]::IsNullOrWhiteSpace($pathItem) -or -not (Test-Path -LiteralPath $pathItem)) { continue }
+            $full = ([System.IO.DirectoryInfo]::new($pathItem)).FullName.TrimEnd("\")
+            $key = $full.ToUpperInvariant()
+            if (-not $seen.ContainsKey($key)) { $seen[$key] = $true; [void]$roots.Add($full) }
+        }
+        return @($roots)
+    }.GetNewClosure()
+
+    $findAppTarget = {
+        param([string]$FileName)
+        if ([string]::IsNullOrWhiteSpace($FileName) -or $FileName -notmatch '\.exe$') { return $null }
+        foreach ($hive in @([Microsoft.Win32.RegistryHive]::CurrentUser, [Microsoft.Win32.RegistryHive]::LocalMachine)) {
+            $base = $null
+            $key = $null
+            try {
+                $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey($hive, [Microsoft.Win32.RegistryView]::Default)
+                $key = $base.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$FileName")
+                if ($key) {
+                    $candidate = Expand-ShortcutTarget ([string]$key.GetValue(""))
+                    if ([System.IO.File]::Exists($candidate)) { return $candidate }
+                }
+            }
+            catch {}
+            finally {
+                try { if ($key) { $key.Close() } } catch {}
+                try { if ($base) { $base.Close() } } catch {}
+            }
+        }
+        foreach ($dir in @(([string]$env:Path).Split(";"))) {
+            try {
+                $candidate = Join-Path ([Environment]::ExpandEnvironmentVariables($dir.Trim())) $FileName
+                if ([System.IO.File]::Exists($candidate)) { return $candidate }
+            }
+            catch {}
+        }
+        return $null
+    }.GetNewClosure()
+
+    $scan = {
+        $rows.Clear()
+        $lblStatus.Text = "Scanning shortcuts..."
+        Set-WmtBusyCursor -Busy
+        $shell = $null
+        $scanned = 0
+        try {
+            $shell = New-Object -ComObject WScript.Shell
+            foreach ($root in & $getRoots) {
+                $lblStatus.Text = "Scanning $root"
+                Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                foreach ($lnk in @(Get-ChildItem -LiteralPath $root -Filter *.lnk -Recurse -Force -ErrorAction SilentlyContinue)) {
+                    $scanned++
+                    try {
+                        $sc = $shell.CreateShortcut($lnk.FullName)
+                        $target = [string]$sc.TargetPath
+                        if (Test-ShortcutTargetIsSpecial $target) { continue }
+                        $expanded = Expand-ShortcutTarget $target
+                        if ([System.IO.File]::Exists($expanded) -or [System.IO.Directory]::Exists($expanded)) { continue }
+                        $action = "None"
+                        $details = "Review Needed"
+                        $newTarget = ""
+                        if ($knownFixes.ContainsKey($lnk.BaseName)) {
+                            $action = "Fix"; $details = "Restore System Path"; $newTarget = $knownFixes[$lnk.BaseName]
+                        }
+                        else {
+                            $guess = [System.IO.Path]::GetFileName($expanded)
+                            if ([string]::IsNullOrWhiteSpace($guess)) { $guess = "$($lnk.BaseName).exe" }
+                            $candidate = & $findAppTarget $guess
+                            if ($candidate) { $action = "Fix"; $details = "Located installed app"; $newTarget = $candidate }
+                        }
+                        [void]$rows.Add([PSCustomObject]@{
+                                Shortcut = $lnk.Name; Location = $lnk.DirectoryName; Action = $action; Details = $details
+                                BrokenTarget = $target; NewTarget = $newTarget; FullPath = $lnk.FullName
+                            })
+                    }
+                    catch {}
+                }
+            }
+            $lblStatus.Text = "Scan complete. Scanned $scanned shortcut(s); found $($rows.Count)."
+            if ($rows.Count -eq 0) { Show-WmtMessageBox -Owner $dialog -Message "Scan complete. No broken shortcuts found." -Title "All Clean" -Image Information | Out-Null }
+        }
+        catch {
+            Show-WmtMessageBox -Owner $dialog -Message "Shortcut scan failed:`n$($_.Exception.Message)" -Title "Scan Failed" -Image Error | Out-Null
+        }
+        finally {
+            try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {}
+            Set-WmtBusyCursor
+        }
+    }.GetNewClosure()
+
+    $selected = { @($dg.SelectedItems | Where-Object { $_ }) }.GetNewClosure()
+    $btnBrowse.Add_Click({
+            $item = (& $selected | Select-Object -First 1)
+            if (-not $item) { return }
+            $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+            $dlg.Filter = "Programs|*.exe;*.bat;*.cmd;*.lnk|All Files|*.*"
+            if ($dlg.ShowDialog() -eq $true) {
+                $item.Action = "Fix"
+                $item.Details = "Manual Browse"
+                $item.NewTarget = $dlg.FileName
+                $dg.Items.Refresh()
+            }
+        }.GetNewClosure())
+    $btnDelete.Add_Click({
+            $items = & $selected
+            if ($items.Count -eq 0) { return }
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Permanently delete $($items.Count) selected shortcut(s)?`n`nThis action is immediate." -Title "Confirm Delete" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            foreach ($item in $items) {
+                try { Remove-Item -LiteralPath ([string]$item.FullPath) -Force -ErrorAction Stop }
+                catch { Show-WmtMessageBox -Owner $dialog -Message "Could not delete: $($item.FullPath)`n$($_.Exception.Message)" -Title "Delete Failed" -Image Error | Out-Null }
+                [void]$rows.Remove($item)
+            }
+        }.GetNewClosure())
+
+    $state = @{ Result = $null }
+    $btnRescan.Add_Click({ & $scan }.GetNewClosure())
+    $btnApply.Add_Click({ $state.Result = @($rows); $dialog.DialogResult = $true }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dg.Add_MouseDoubleClick({
+            $item = (& $selected | Select-Object -First 1)
+            if ($item) {
+                Show-TextDialog -Title "Shortcut Details" -Text ("Shortcut: {0}`r`nLocation: {1}`r`nAction: {2}`r`nDetails: {3}`r`nBrokenTarget: {4}`r`nNewTarget: {5}`r`nFullPath: {6}" -f $item.Shortcut, $item.Location, $item.Action, $item.Details, $item.BrokenTarget, $item.NewTarget, $item.FullPath)
+            }
+        }.GetNewClosure())
+    $dialog.Add_ContentRendered({ & $scan }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
+    return $state.Result
 }
+
 function Invoke-ShortcutFix {
     $items = Show-BrokenShortcuts
     if (-not $items -or $items.Count -eq 0) { return }
@@ -15436,16 +12938,16 @@ function Invoke-ShortcutFix {
     $toFix = @($items | Where-Object { $_.Action -eq "Fix" -and -not [string]::IsNullOrWhiteSpace([string]$_.FullPath) -and -not [string]::IsNullOrWhiteSpace([string]$_.NewTarget) })
 
     if ($toFix.Count -eq 0) {
-        [System.Windows.Forms.MessageBox]::Show("No fixes were selected.`n`n(Tip: right-click a row to Browse or Deep Search. Use Delete Now to remove shortcuts immediately.)", "No Action", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+        Show-WmtMessageBox -Message "No fixes were selected.`n`nUse Browse to pick a replacement target, or Delete Now to remove shortcuts immediately." -Title "No Action" -Image Information | Out-Null
         return
     }
 
     $msg = "You are about to fix $($toFix.Count) shortcut(s)."
     $msg += "`nAre you sure you want to continue?"
 
-    $confirm = [System.Windows.Forms.MessageBox]::Show($msg, "Confirm Actions", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    $confirm = Show-WmtMessageBox -Message $msg -Title "Confirm Actions" -Button YesNo -Image Warning
     
-    if ($confirm -ne "Yes") { return }
+    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     Invoke-UiCommand {
         param($toFix)
@@ -15493,9 +12995,9 @@ function Invoke-FirewallExport {
 }
 
 function Invoke-FirewallImport {
-    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
     $dlg.Filter = "Windows Firewall Policy (*.wfw)|*.wfw"
-    if ($dlg.ShowDialog() -ne "OK") { return }
+    if ($dlg.ShowDialog() -ne $true) { return }
     $file = $dlg.FileName
     Invoke-UiCommand { param($file) netsh advfirewall import "$file" } "Importing firewall rules..." -ArgumentList $file
 }
@@ -15522,420 +13024,207 @@ function Invoke-DriverReport {
 }
 
 function Invoke-ExportDrivers {
-    # 1. Write to the bottom left (Activity Log) that it's running
-    Write-GuiLog "Starting Driver Export Tool in a new window..."
+    Write-GuiLog "Starting Driver Export Tool..."
+    $dataPath = try { Get-DataPath } catch { Join-Path $env:PUBLIC "WMT_Exports" }
 
-    # 2. Grab WMT data path
-    $wmtPath = try { Get-DataPath } catch { Join-Path $env:PUBLIC "WMT_Exports" }
-
-    # 3. Create the script block for the new visible window
-    $code = @"
-`$DataPath = "$wmtPath"
-"@ + @'
-
-$Host.UI.RawUI.WindowTitle = "Driver Export Tool - Background Process"
-Write-Host "Initializing Driver Export Tool GUI..." -ForegroundColor Cyan
-
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-[System.Windows.Forms.Application]::EnableVisualStyles()
-
-function Set-LocalDoubleBuffered {
-    param([System.Windows.Forms.Control]$Control)
-    if (-not $Control) { return }
+    Set-WmtBusyCursor -Busy
     try {
-        $prop = [System.Windows.Forms.Control].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'Instance, NonPublic')
-        if ($prop) { $prop.SetValue($Control, $true, $null) }
-    }
-    catch {}
-}
+        $drivers = @()
+        foreach ($d in @(Get-WindowsDriver -Online -All | Where-Object { $_.Inbox -eq $false })) {
+            $classProbe = "$($d.ClassName) $($d.ProviderName)".ToLowerInvariant()
+            $class = "Other"
+            if ($classProbe -match "display|graphics|nvidia|amd|intel.*graphics") { $class = "Display" }
+            elseif ($classProbe -match "net|network|wifi|ethernet|realtek|broadcom|intel.*network") { $class = "Network" }
+            elseif ($classProbe -match "audio|sound") { $class = "Audio" }
+            elseif ($classProbe -match "storage|sata|nvme|raid|disk") { $class = "Storage" }
+            elseif ($classProbe -match "usb") { $class = "USB" }
+            elseif ($classProbe -match "print") { $class = "Printer" }
+            elseif ($classProbe -match "system|chipset|acpi") { $class = "System" }
 
-# ============================================================
-# FAST NATIVE SCAN
-# ============================================================
-Write-Host "Scanning for 3rd-party drivers..." -ForegroundColor Yellow
-$sysDrivers = Get-WindowsDriver -Online -All | Where-Object { $_.Inbox -eq $false }
-$drivers = @()
-
-foreach ($d in $sysDrivers) {
-    $c = "$($d.ClassName) $($d.ProviderName)".ToLower()
-    $norm = "Other"
-    
-    if ($c -match "display|graphics|nvidia|amd|intel.*graphics") { $norm = "Display" }
-    elseif ($c -match "net|network|wifi|ethernet|realtek|broadcom|intel.*network") { $norm = "Network" }
-    elseif ($c -match "audio|sound") { $norm = "Audio" }
-    elseif ($c -match "storage|sata|nvme|raid|disk") { $norm = "Storage" }
-    elseif ($c -match "usb") { $norm = "USB" }
-    elseif ($c -match "print") { $norm = "Printer" }
-    elseif ($c -match "system|chipset|acpi") { $norm = "System" }
-
-    $dateString = if ($d.Date) { $d.Date.ToString("yyyy-MM-dd") } else { "" }
-
-    $drivers += [pscustomobject]@{
-        PublishedName = $d.Driver
-        OriginalName  = $d.OriginalFileName
-        Class         = $norm
-        Provider      = $d.ProviderName
-        Version       = $d.Version
-        Date          = $dateString
-    }
-}
-
-if (-not $drivers -or $drivers.Count -eq 0) {
-    [System.Windows.Forms.MessageBox]::Show("No 3rd-party drivers found to export.", "Info") | Out-Null
-    exit
-}
-
-# ============================================================
-# GUI SETUP & THEMING
-# ============================================================
-$form = New-Object System.Windows.Forms.Form
-$form.Text = "Driver Export Tool"
-$form.ClientSize = New-Object System.Drawing.Size(900, 680)
-$form.StartPosition = "CenterScreen"
-
-# --- Z-Order Trick: Pop to front, then allow backgrounding ---
-$form.Add_Shown({
-    $form.TopMost = $true
-    $form.TopMost = $false
-    $form.Activate()
-})
-
-# Main Theme Colors
-$form.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0D1117")
-$form.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
-
-$tree = New-Object System.Windows.Forms.TreeView
-$tree.Size = "250,580"
-$tree.Location = "10,40"
-$tree.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
-$tree.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
-$tree.BorderStyle = "FixedSingle"
-Set-LocalDoubleBuffered $tree
-$form.Controls.Add($tree)
-
-$list = New-Object System.Windows.Forms.ListView
-$list.Size = "620,580"
-$list.Location = "270,40"
-$list.View = "Details"
-$list.CheckBoxes = $true
-$list.FullRowSelect = $true
-$list.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
-$list.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
-$list.BorderStyle = "FixedSingle"
-Set-LocalDoubleBuffered $list
-
-$list.Columns.Add("Driver", 250)
-$list.Columns.Add("Provider", 150)
-$list.Columns.Add("Version", 100)
-$list.Columns.Add("Date", 80)
-$form.Controls.Add($list)
-
-$txtSearch = New-Object System.Windows.Forms.TextBox
-$txtSearch.Location = "270,10"
-$txtSearch.Width = 300
-$txtSearch.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#161B22")
-$txtSearch.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
-$txtSearch.BorderStyle = "FixedSingle"
-$form.Controls.Add($txtSearch)
-
-$groups = $drivers | Group-Object Class | Sort-Object Name
-$root = $tree.Nodes.Add("All ($($drivers.Count))")
-
-foreach ($g in $groups) {
-    $n = $root.Nodes.Add("$($g.Name) ($($g.Count))")
-    $n.Tag = $g.Name
-}
-$root.Expand()
-
-function Update-List {
-    $list.BeginUpdate()
-    try {
-        $list.Items.Clear()
-        $filter = $tree.SelectedNode.Tag
-        $search = $txtSearch.Text.ToLower()
-
-        $filtered = $drivers
-        if ($filter) { $filtered = $filtered | Where-Object { $_.Class -eq $filter } }
-        if ($search) { $filtered = $filtered | Where-Object { $_.OriginalName -and $_.OriginalName.ToLower().Contains($search) } }
-
-        foreach ($d in $filtered) {
-            $rawName = if ($d.OriginalName) { $d.OriginalName } else { $d.PublishedName }
-            $cleanName = Split-Path $rawName -Leaf
-
-            $item = $list.Items.Add($cleanName)
-            $item.SubItems.Add($d.Provider)
-            $item.SubItems.Add($d.Version)
-            $item.SubItems.Add($d.Date)
-            $item.Tag = $d
+            $drivers += [PSCustomObject]@{
+                PublishedName = [string]$d.Driver
+                OriginalName  = [string]$d.OriginalFileName
+                Class         = $class
+                Provider      = [string]$d.ProviderName
+                Version       = [string]$d.Version
+                Date          = if ($d.Date) { $d.Date.ToString("yyyy-MM-dd") } else { "" }
+            }
         }
     }
-    finally {
-        $list.EndUpdate()
-    }
-}
+    finally { Set-WmtBusyCursor }
 
-$tree.Add_AfterSelect({ Update-List })
-$txtSearch.Add_TextChanged({ Update-List })
-Update-List
-
-$statusLabel = New-Object System.Windows.Forms.Label
-$statusLabel.Text = "Ready"
-$statusLabel.Location = "10,635"
-$statusLabel.AutoSize = $true
-$statusLabel.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#58A6FF") # Accent Blue
-$statusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
-$form.Controls.Add($statusLabel)
-
-# Helper function for buttons
-function Set-BtnStyle($b, $bgHex, $fgHex) {
-    $b.FlatStyle = "Flat"
-    $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($bgHex)
-    $b.ForeColor = [System.Drawing.ColorTranslator]::FromHtml($fgHex)
-    $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#30363D")
-}
-
-$btnExportSel = New-Object System.Windows.Forms.Button
-$btnExportSel.Text = "Export Selected"
-$btnExportSel.Location = "620,635"
-$btnExportSel.Size = "130, 30"
-Set-BtnStyle $btnExportSel "#238636" "#FFFFFF" # Success Green
-$form.Controls.Add($btnExportSel)
-
-$btnExportAll = New-Object System.Windows.Forms.Button
-$btnExportAll.Text = "Export All"
-$btnExportAll.Location = "760,635"
-$btnExportAll.Size = "130, 30"
-Set-BtnStyle $btnExportAll "#21262D" "#E6EDF3" # Standard Action Button
-$form.Controls.Add($btnExportAll)
-
-# ============================================================
-# EXPORT LOGIC (Reusable Block)
-# ============================================================
-$DoExport = {
-    param($driversToExport)
-
-    $statusLabel.Text = "Running..."
-    Write-Host "Starting export of $($driversToExport.Count) driver(s)..." -ForegroundColor Cyan
-    [System.Windows.Forms.Application]::DoEvents()
-
-    $form.Enabled = $false
-    $exportPath = Join-Path $DataPath "Drivers_Backup_$(Get-Date -Format yyyyMMdd_HHmm)"
-    New-Item -ItemType Directory -Path $exportPath -Force | Out-Null
-
-    $pForm = New-Object System.Windows.Forms.Form
-    $pForm.Text = "Exporting..."
-    $pForm.Size = "400,120"
-    $pForm.StartPosition = "CenterParent"
-    $pForm.ControlBox = $false
-    $pForm.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#0D1117")
-    $pForm.ForeColor = [System.Drawing.ColorTranslator]::FromHtml("#E6EDF3")
-    
-    $bar = New-Object System.Windows.Forms.ProgressBar
-    $bar.Dock = "Top"
-    $bar.Maximum = $driversToExport.Count
-    $pForm.Controls.Add($bar)
-
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Dock = "Fill"
-    $lbl.TextAlign = "MiddleCenter"
-    $lbl.Text = "Initializing export..."
-    $pForm.Controls.Add($lbl)
-
-    # Parenting the progress form to our main form
-    $pForm.Show($form)
-    [System.Windows.Forms.Application]::DoEvents()
-
-    $done = 0
-
-    foreach ($drv in $driversToExport) {
-        $dir = Join-Path $exportPath $drv.Class
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
-        
-        Write-Host "Exporting $($drv.PublishedName) to $dir" -ForegroundColor Green
-        
-        $process = Start-Process pnputil -ArgumentList "/export-driver", $drv.PublishedName, "`"$dir`"" -WindowStyle Normal -PassThru
-        
-        while (-not $process.HasExited) {
-            [System.Windows.Forms.Application]::DoEvents()
-            Start-Sleep -Milliseconds 50
-        }
-
-        $done++
-        $lbl.Text = "Exporting... $done / $($driversToExport.Count) drivers complete"
-        $bar.Value = $done
-        [System.Windows.Forms.Application]::DoEvents() 
+    if (-not $drivers -or $drivers.Count -eq 0) {
+        Show-WmtMessageBox -Message "No 3rd-party drivers found to export." -Title "Driver Export Tool" -Image Information | Out-Null
+        return
     }
 
-    $pForm.Close()
-    
-    $statusLabel.Text = "Done!"
-    $form.Enabled = $true
-    [System.Windows.Forms.Application]::DoEvents()
+    $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid Grid.Row="0" Margin="0,0,0,12">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <TextBlock Text="Class" Foreground="{DynamicResource TextSecondary}"/>
+            <TextBox Name="txtSearch" Grid.Column="1" Height="34" VerticalContentAlignment="Center"/>
+        </Grid>
+        <Grid Grid.Row="1">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="220"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+            <ListBox Name="lstClasses"/>
+            <DataGrid Name="dgDrivers" Grid.Column="2" IsReadOnly="True" SelectionMode="Extended" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        </Grid>
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <TextBlock Name="lblStatus" Text="Ready" VerticalAlignment="Center" Foreground="{DynamicResource Accent}"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Name="btnExportSel" Content="Export Selected" MinWidth="128" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+                <Button Name="btnExportAll" Content="Export All" MinWidth="104" Margin="0,0,8,0"/>
+                <Button Name="btnClose" Content="Close" Width="90" IsCancel="True"/>
+            </StackPanel>
+        </Grid>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Driver Export Tool" -ContentXaml $content -Width 940 -Height 680 -MinWidth 760 -MinHeight 520
+    $lstClasses = $dialog.FindName("lstClasses")
+    $txtSearch = $dialog.FindName("txtSearch")
+    $dg = $dialog.FindName("dgDrivers")
+    $lblStatus = $dialog.FindName("lblStatus")
+    $btnExportSel = $dialog.FindName("btnExportSel")
+    $btnExportAll = $dialog.FindName("btnExportAll")
+    $btnClose = $dialog.FindName("btnClose")
 
-    Write-Host "Export complete!" -ForegroundColor Cyan
-    
-    # Passing $form as the first argument ensures the MessageBox stays explicitly on top of our GUI!
-    [System.Windows.Forms.MessageBox]::Show($form, "Export Complete!`n`nSaved to:`n$exportPath", "Success") | Out-Null
-}
+    Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date", "Class") -Widths @{ PublishedName = 130; OriginalName = "*"; Provider = 160; Version = 110; Date = 90; Class = 90 }
+    $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
+    $dg.ItemsSource = $rows
 
-# --- Button Actions ---
-$btnExportSel.Add_Click({
-    try {
-        $selected = @()
-        foreach ($i in $list.Items) {
-            if ($i.Checked) { $selected += $i.Tag }
+    $classes = @([PSCustomObject]@{ Display = "All ($($drivers.Count))"; Class = "" })
+    $classes += @($drivers | Group-Object Class | Sort-Object Name | ForEach-Object { [PSCustomObject]@{ Display = "$($_.Name) ($($_.Count))"; Class = $_.Name } })
+    $lstClasses.DisplayMemberPath = "Display"
+    $lstClasses.ItemsSource = $classes
+    $lstClasses.SelectedIndex = 0
+
+    $refresh = {
+        $rows.Clear()
+        $selectedClass = if ($lstClasses.SelectedItem) { [string]$lstClasses.SelectedItem.Class } else { "" }
+        $search = ([string]$txtSearch.Text).Trim().ToLowerInvariant()
+        foreach ($d in @($drivers)) {
+            if ($selectedClass -and $d.Class -ne $selectedClass) { continue }
+            $haystack = "$($d.PublishedName) $($d.OriginalName) $($d.Provider) $($d.Version)".ToLowerInvariant()
+            if ($search -and -not $haystack.Contains($search)) { continue }
+            [void]$rows.Add($d)
         }
-        
-        if ($selected.Count -eq 0) {
-            # Passed $form to parent the warning popup
-            [System.Windows.Forms.MessageBox]::Show($form, "Please select at least one driver to export.", "Warning") | Out-Null
+        $lblStatus.Text = "$($rows.Count) shown / $($drivers.Count) drivers"
+    }.GetNewClosure()
+
+    $exportDrivers = {
+        param([object[]]$DriversToExport)
+        $targets = @($DriversToExport | Where-Object { $_ })
+        if ($targets.Count -eq 0) {
+            Show-WmtMessageBox -Owner $dialog -Message "Please select at least one driver to export." -Title "Driver Export Tool" -Image Warning | Out-Null
             return
         }
-        
-        & $DoExport -driversToExport $selected
-    } catch {
-        $statusLabel.Text = "Error"
-        Write-Host "Error during export: $($_.Exception.Message)" -ForegroundColor Red
-        # Passed $form to parent the error popup
-        [System.Windows.Forms.MessageBox]::Show($form, "An error occurred during export:`n`n$($_.Exception.Message)", "Error") | Out-Null
-        $form.Enabled = $true
-    }
-})
 
-$btnExportAll.Add_Click({
-    try {
-        & $DoExport -driversToExport $drivers
-    } catch {
-        $statusLabel.Text = "Error"
-        Write-Host "Error during export: $($_.Exception.Message)" -ForegroundColor Red
-        # Passed $form to parent the error popup
-        [System.Windows.Forms.MessageBox]::Show($form, "An error occurred during export:`n`n$($_.Exception.Message)", "Error") | Out-Null
-        $form.Enabled = $true
-    }
-})
+        $exportPath = Join-Path $dataPath "Drivers_Backup_$(Get-Date -Format yyyyMMdd_HHmm)"
+        New-Item -ItemType Directory -Path $exportPath -Force | Out-Null
+        Set-WmtBusyCursor -Busy
+        $dialog.IsEnabled = $false
+        try {
+            $done = 0
+            foreach ($drv in $targets) {
+                $done++
+                $lblStatus.Text = "Exporting $done / $($targets.Count): $($drv.PublishedName)"
+                Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                $dir = Join-Path $exportPath $drv.Class
+                if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+                $process = Start-Process pnputil -ArgumentList "/export-driver", $drv.PublishedName, "`"$dir`"" -NoNewWindow -Wait -PassThru
+                if ($process.ExitCode -ne 0) { Write-GuiLog "Driver export failed for $($drv.PublishedName) (exit $($process.ExitCode))." }
+            }
+            $lblStatus.Text = "Done"
+            Show-WmtMessageBox -Owner $dialog -Message "Export Complete!`n`nSaved to:`n$exportPath" -Title "Success" -Image Information | Out-Null
+        }
+        catch {
+            $lblStatus.Text = "Error"
+            Show-WmtMessageBox -Owner $dialog -Message "An error occurred during export:`n`n$($_.Exception.Message)" -Title "Error" -Image Error | Out-Null
+        }
+        finally {
+            $dialog.IsEnabled = $true
+            Set-WmtBusyCursor
+        }
+    }.GetNewClosure()
 
-Write-Host "Launching GUI..." -ForegroundColor Green
-$form.ShowDialog() | Out-Null
-'@
-
-    # 4. Launch in a highly visible, interactive PowerShell window
-    $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($code))
-    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Normal -EncodedCommand $encoded"
+    $lstClasses.Add_SelectionChanged({ & $refresh }.GetNewClosure())
+    $txtSearch.Add_TextChanged({ & $refresh }.GetNewClosure())
+    $btnExportSel.Add_Click({ & $exportDrivers -DriversToExport @($dg.SelectedItems) }.GetNewClosure())
+    $btnExportAll.Add_Click({ & $exportDrivers -DriversToExport @($drivers) }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    & $refresh
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 function Show-GhostDevicesDialog {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Ghost Devices"
-    $f.Size = "800, 500"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.ForeColor = [System.Drawing.Color]::White
+    $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DataGrid Name="dgGhost" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnRefresh" Content="Refresh" Width="104" Margin="0,0,8,0" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+            <Button Name="btnRemoveSel" Content="Remove Selected" MinWidth="132" Margin="0,0,8,0" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}"/>
+            <Button Name="btnRemoveAll" Content="Remove All" Width="108" Margin="0,0,8,0" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}"/>
+            <Button Name="btnClose" Content="Close" Width="90" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Ghost Devices" -ContentXaml $content -Width 840 -Height 520 -MinWidth 680 -MinHeight 420
+    $dg = $dialog.FindName("dgGhost")
+    $btnRefresh = $dialog.FindName("btnRefresh")
+    $btnRemoveSel = $dialog.FindName("btnRemoveSel")
+    $btnRemoveAll = $dialog.FindName("btnRemoveAll")
+    $btnClose = $dialog.FindName("btnClose")
 
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"
-    $dg.Height = 380
-    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.ForeColor = [System.Drawing.Color]::White
-    $dg.AutoSizeColumnsMode = "Fill"
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $true
-    $dg.ReadOnly = $true
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.BorderStyle = "None"
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $dg.ColumnHeadersHeight = 28
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
-    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
-    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
-    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
-    Set-WmtDoubleBuffered -Control $dg
-    $f.Controls.Add($dg)
+    $items = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
+    $dg.ItemsSource = $items
+    Set-WmtDataGridColumns -DataGrid $dg -Columns @("InstanceId", "Class", "FriendlyName") -Widths @{ InstanceId = "*"; Class = 120; FriendlyName = 260 }
 
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 80
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnl)
-
-    function New-GDButton($text, $x, $color = $null) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text
-        $b.Left = $x; $b.Top = 20; $b.Width = 120; $b.Height = 35
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
-        $b.ForeColor = [System.Drawing.Color]::White
-        if ($color) {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($color)
-            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
-        }
-        else {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
-        }
-        $pnl.Controls.Add($b); return $b
-    }
-
-    $btnRefresh = New-GDButton "Refresh" 20
-    $btnRemoveSel = New-GDButton "Remove Selected" 160 "#802020"
-    $btnRemoveAll = New-GDButton "Remove All" 320 "#A04040"
-    $btnClose = New-GDButton "Close" 480
-
-    $Load = {
-        $items = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Unknown' }
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("InstanceId")
-        $dt.Columns.Add("Class")
-        $dt.Columns.Add("FriendlyName")
-        foreach ($d in $items) {
-            $r = $dt.NewRow()
-            $r["InstanceId"] = $d.InstanceId
-            $r["Class"] = $d.Class
-            $r["FriendlyName"] = $d.FriendlyName
-            $dt.Rows.Add($r)
-        }
-        $dg.DataSource = $dt
-        $dg.ClearSelection()
-        if (-not $items -or $items.Count -eq 0) {
-            [System.Windows.MessageBox]::Show("No hidden/ghost devices found.", "Ghost Devices", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-        }
-    }
-
-    $btnRefresh.Add_Click({ & $Load })
-    $btnRemoveSel.Add_Click({
-            if ($dg.SelectedRows.Count -eq 0) { return }
-            foreach ($row in $dg.SelectedRows) {
-                $id = $row.Cells["InstanceId"].Value
-                if ($id) { pnputil /remove-device $id | Out-Null }
+    $load = {
+        $items.Clear()
+        Set-WmtBusyCursor -Busy
+        try {
+            foreach ($d in @(Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq 'Unknown' })) {
+                [void]$items.Add([PSCustomObject]@{
+                        InstanceId   = [string]$d.InstanceId
+                        Class        = [string]$d.Class
+                        FriendlyName = [string]$d.FriendlyName
+                    })
             }
-            & $Load
-        })
-    $btnRemoveAll.Add_Click({
-            if ($dg.Rows.Count -eq 0) { return }
-            foreach ($row in $dg.Rows) {
-                $id = $row.Cells["InstanceId"].Value
-                if ($id) { pnputil /remove-device $id | Out-Null }
+            if ($items.Count -eq 0) {
+                Show-WmtMessageBox -Owner $dialog -Message "No hidden/ghost devices found." -Title "Ghost Devices" -Image Information | Out-Null
             }
-            & $Load
-        })
-    $btnClose.Add_Click({ $f.Close() })
+        }
+        finally { Set-WmtBusyCursor }
+    }.GetNewClosure()
 
-    Set-WmtWinFormsTheme -Control $f
-    Set-WmtWinFormsButtonTheme -Button $btnRefresh -Role Primary
-    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
-    Set-WmtWinFormsButtonTheme -Button $btnRemoveAll -Role Danger
-    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
-    & $Load
-    $f.ShowDialog() | Out-Null
+    $removeRows = {
+        param([object[]]$Rows)
+        foreach ($row in @($Rows)) {
+            $id = [string]$row.InstanceId
+            if (-not [string]::IsNullOrWhiteSpace($id)) { pnputil /remove-device $id | Out-Null }
+        }
+        & $load
+    }.GetNewClosure()
+
+    $btnRefresh.Add_Click({ & $load }.GetNewClosure())
+    $btnRemoveSel.Add_Click({ & $removeRows -Rows @($dg.SelectedItems) }.GetNewClosure())
+    $btnRemoveAll.Add_Click({ & $removeRows -Rows @($items) }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dialog.Add_ContentRendered({ & $load }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 function Invoke-DriverUpdates {
     param([bool]$Enable)
@@ -15964,376 +13253,216 @@ function Invoke-DeviceMetadata {
 }
 
 function Show-DriverCleanupDialog {
-    # 1. SCANNING PHASE
     $rawOutput = pnputil.exe /enum-drivers 2>&1
     $drivers = @()
     $current = $null
 
     foreach ($line in $rawOutput) {
         $line = $line.ToString().Trim()
-        
-        if ($line.Contains(":")) {
-            $parts = $line -split ":", 2
-            $key = $parts[0].Trim()
-            $val = $parts[1].Trim()
-            
-            # 1. Check for Published Name (Start of new driver block)
-            if ($val -match '^(oem\d+\.inf)$') {
-                if ($current) { $drivers += [PSCustomObject]$current }
-                $current = [ordered]@{ 
-                    PublishedName = $val
-                    OriginalName  = $null
-                    Provider      = "Unknown"
-                    Version       = [Version]"0.0.0.0"
-                    DisplayVer    = "Unknown"
-                    SortDate      = [DateTime]::MinValue
-                    DisplayDate   = "Unknown"
-                }
-            }
-            elseif ($current) {
-                # 2. Parse by Label with Regex Extraction
-                if ($key -match "Original Name") {
-                    if ($val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
-                }
-                elseif ($key -match "Provider") {
-                    $current.Provider = $val
-                }
-                elseif ($key -match "Version") {
-                    # EXTRACT Version Number (e.g. 2.2.0.134)
-                    if ($val -match '(\d+(\.\d+){1,3})') {
-                        $vStr = $matches[1]
-                        $current.DisplayVer = $vStr
-                        try { $current.Version = [Version]$vStr } catch {}
-                    }
-                    else {
-                        $current.DisplayVer = $val 
-                    }
+        if (-not $line.Contains(":")) { continue }
 
-                    # Check if line ALSO contains a Date
-                    if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})') {
-                        $dStr = $matches[1]
-                        if ($dStr -as [DateTime]) {
-                            $current.DisplayDate = $dStr
-                            $current.SortDate = [DateTime]$dStr
-                        }
-                    }
-                }
-                elseif ($key -match "Date") {
-                    if ($val -as [DateTime]) {
-                        $current.DisplayDate = $val
-                        $current.SortDate = [DateTime]$val
-                    }
-                    elseif ($val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})') {
-                        $dStr = $matches[1]
-                        $current.DisplayDate = $dStr
-                        if ($dStr -as [DateTime]) { $current.SortDate = [DateTime]$dStr }
-                    }
-                }
-                # 3. Fallback
-                elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') {
-                    $current.OriginalName = $val
-                }
-            }   
+        $parts = $line -split ":", 2
+        $key = $parts[0].Trim()
+        $val = $parts[1].Trim()
+        if ($val -match '^(oem\d+\.inf)$') {
+            if ($current) { $drivers += [PSCustomObject]$current }
+            $current = [ordered]@{
+                PublishedName = $val
+                OriginalName  = $null
+                Provider      = "Unknown"
+                Version       = [Version]"0.0.0.0"
+                DisplayVer    = "Unknown"
+                SortDate      = [DateTime]::MinValue
+                DisplayDate   = "Unknown"
+            }
+            continue
         }
+
+        if (-not $current) { continue }
+        if ($key -match "Original Name" -and $val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
+        elseif ($key -match "Provider") { $current.Provider = $val }
+        elseif ($key -match "Version") {
+            if ($val -match '(\d+(\.\d+){1,3})') {
+                $current.DisplayVer = $matches[1]
+                try { $current.Version = [Version]$matches[1] } catch {}
+            }
+            else { $current.DisplayVer = $val }
+            if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) {
+                $current.DisplayDate = $matches[1]
+                $current.SortDate = [DateTime]$matches[1]
+            }
+        }
+        elseif ($key -match "Date") {
+            if ($val -as [DateTime]) { $current.DisplayDate = $val; $current.SortDate = [DateTime]$val }
+            elseif ($val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) { $current.DisplayDate = $matches[1]; $current.SortDate = [DateTime]$matches[1] }
+        }
+        elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') { $current.OriginalName = $val }
     }
     if ($current) { $drivers += [PSCustomObject]$current }
 
-    # 2. FILTERING DUPLICATES
-    $grouped = $drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName
     $toDelete = @()
-
-    foreach ($group in $grouped) {
-        if ($group.Count -gt 1) {
-            $sorted = $group.Group | Sort-Object SortDate, Version -Descending
-            $toDelete += $sorted | Select-Object -Skip 1
-        }
+    foreach ($group in @($drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
+        if ($group.Count -gt 1) { $toDelete += @($group.Group | Sort-Object SortDate, Version -Descending | Select-Object -Skip 1) }
     }
 
     if (-not $toDelete -or $toDelete.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("Driver store is already clean. No duplicates found.", "Clean Old Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+        Show-WmtMessageBox -Message "Driver store is already clean. No duplicates found." -Title "Clean Old Drivers" -Image Information | Out-Null
         return
     }
 
-    # 3. GUI SETUP (THEMED)
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Clean Old Drivers"
-    $f.Size = "950, 600"
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.ForeColor = [System.Drawing.Color]::White
-    
-    # Initialize ToolTip provider
-    $tip = New-Object System.Windows.Forms.ToolTip
-    $tip.AutoPopDelay = 5000
-    $tip.InitialDelay = 500
-    $tip.ReshowDelay = 500
-    $tip.ShowAlways = $true
+    $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DataGrid Name="dgDrivers" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        <Grid Grid.Row="1" Margin="0,12,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                <Button Name="btnRemoveAll" Content="Remove All" MinWidth="116" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+                <Button Name="btnRemoveSel" Content="Remove Selected" MinWidth="140" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}"/>
+            </StackPanel>
+            <Button Name="btnClose" Content="Close" Width="90" HorizontalAlignment="Right" IsCancel="True"/>
+        </Grid>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Clean Old Drivers" -ContentXaml $content -Width 960 -Height 620 -MinWidth 760 -MinHeight 480
+    $dg = $dialog.FindName("dgDrivers")
+    $btnRemoveAll = $dialog.FindName("btnRemoveAll")
+    $btnRemoveSel = $dialog.FindName("btnRemoveSel")
+    $btnClose = $dialog.FindName("btnClose")
 
-    # --- LAYOUT FIX: PANEL FIRST (Dock Bottom) --- 
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 60 # Reduced height for cleaner look
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    
-    # Draw a subtle top border on the panel
-    $pnl.Add_Paint({
-            param($s, $e) # Renamed from $sender to $s
-            $pen = New-Object System.Drawing.Pen((Get-WmtThemeColor "BorderBrush"), 1)
-            $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
-        })
-    $f.Controls.Add($pnl)
+    $currentList = [System.Collections.Generic.List[object]]::new()
+    foreach ($item in @($toDelete)) { [void]$currentList.Add($item) }
+    $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
+    $dg.ItemsSource = $rows
+    Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date") -Widths @{ PublishedName = 120; OriginalName = "*"; Provider = 180; Version = 120; Date = 110 }
 
-    # --- GRID SECOND (Dock Fill) ---
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Fill" 
-    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.ForeColor = [System.Drawing.Color]::White
-    $dg.AutoSizeColumnsMode = "Fill"
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $true
-    $dg.ReadOnly = $true
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.BorderStyle = "None"
-    $dg.CellBorderStyle = "SingleHorizontal"
-    
-    # Header Styling
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 6)
-    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $dg.ColumnHeadersHeight = 35
-    
-    # Row Styling
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
-    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
-    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
-    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
-    Set-WmtDoubleBuffered -Control $dg
-    
-    $f.Controls.Add($dg)
-    $dg.BringToFront() # Ensures grid fills the remaining space above the panel
-
-    # Helper for Themed Buttons with Tooltips AND Anchor support
-    function New-DrvBtn($text, $x, $color = $null, $tooltipText = "", $anchor = "Top, Left") {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text
-        $b.Left = $x
-        $b.Top = 12 # Vertically centered in 60px panel
-        $b.Width = 160
-        $b.Height = 35
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.Anchor = $anchor
-        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
-        $b.ForeColor = [System.Drawing.Color]::White
-        if ($color) {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($color)
-            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
+    $loadGrid = {
+        $rows.Clear()
+        foreach ($d in @($currentList.ToArray())) {
+            [void]$rows.Add([PSCustomObject]@{
+                    PublishedName = [string]$d.PublishedName
+                    OriginalName  = [string]$d.OriginalName
+                    Provider      = [string]$d.Provider
+                    Version       = [string]$d.DisplayVer
+                    Date          = [string]$d.DisplayDate
+                    Source        = $d
+                })
         }
-        else {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
-        }
-        
-        if ($tooltipText) {
-            $tip.SetToolTip($b, $tooltipText)
-        }
+        $dialog.Title = "Clean Old Drivers ($($rows.Count) duplicate package(s))"
+    }.GetNewClosure()
 
-        $pnl.Controls.Add($b); return $b
-    }
+    $chooseCleanupMode = {
+        param([int]$Count)
+        $choiceContent = @"
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Name="lblPrompt" TextWrapping="Wrap"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+            <Button Name="btnBackup" Content="Backup and Clean" MinWidth="132" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+            <Button Name="btnNoBackup" Content="Clean Only" MinWidth="112" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,0"/>
+            <Button Name="btnCancel" Content="Cancel" Width="92" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+"@
+        $choice = New-WmtWindowFromXaml -Title "Confirm Driver Cleanup" -ContentXaml $choiceContent -Width 470 -Height 170 -NoResize
+        try { $choice.Owner = $dialog } catch {}
+        $choice.FindName("lblPrompt").Text = "You are about to remove $Count driver package(s). How would you like to proceed?"
+        $state = @{ Result = "Cancel" }
+        $choice.FindName("btnBackup").Add_Click({ $state.Result = "Backup"; $choice.DialogResult = $true }.GetNewClosure())
+        $choice.FindName("btnNoBackup").Add_Click({ $state.Result = "NoBackup"; $choice.DialogResult = $true }.GetNewClosure())
+        $choice.FindName("btnCancel").Add_Click({ $choice.Close() }.GetNewClosure())
+        $choice.ShowDialog() | Out-Null
+        return $state.Result
+    }.GetNewClosure()
 
-    # --- CHANGED: Renamed "Remove (Options...)" to "Remove All" ---
-    $btnBackupClean = New-DrvBtn "Remove All" 20 "#006600" "Select removal options (Backup vs No Backup) for ALL duplicates."
-    
-    $btnRemoveSel = New-DrvBtn "Remove Selected" 190 "#802020" "Removes only the currently highlighted driver(s) from the list."
-    
-    # Place Close button aligned to the Right
-    $closeX = $pnl.Width - 180
-    $btnClose = New-DrvBtn "Close" $closeX $null "Close this window." "Top, Right"
+    $doRemove = {
+        param([object[]]$Items, [bool]$CloseWindow)
+        $itemsToRemove = @($Items | ForEach-Object { if ($_.PSObject.Properties["Source"]) { $_.Source } else { $_ } })
+        if ($itemsToRemove.Count -eq 0) { return }
 
-    # 4. DATA BINDING
-    $script:CurrentList = $toDelete
+        $mode = & $chooseCleanupMode -Count $itemsToRemove.Count
+        if ($mode -eq "Cancel") { return }
 
-    $LoadGrid = {
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("PublishedName")
-        $dt.Columns.Add("OriginalName")
-        $dt.Columns.Add("Provider")
-        $dt.Columns.Add("Version")
-        $dt.Columns.Add("Date")
-
-        foreach ($d in $script:CurrentList) {
-            $r = $dt.NewRow()
-            $r["PublishedName"] = $d.PublishedName
-            $r["OriginalName"] = $d.OriginalName
-            $r["Provider"] = $d.Provider
-            $r["Version"] = $d.DisplayVer
-            $r["Date"] = $d.DisplayDate
-            $dt.Rows.Add($r)
-        }
-        $dg.DataSource = $dt
-        $dg.ClearSelection()
-    }
-
-    # 5. ACTION LOGIC
-    $DoRemove = {
-        param($items, $CloseWindow)
-        
-        if (-not $items -or $items.Count -eq 0) { return }
-        $count = $items.Count
-        
-        # --- NEW CUSTOM CONFIRMATION DIALOG ---
-        $cf = New-Object System.Windows.Forms.Form
-        $cf.Text = "Confirm Driver Cleanup"
-        $cf.Size = "450, 240"
-        $cf.StartPosition = "CenterParent"
-        $cf.FormBorderStyle = "FixedDialog"
-        $cf.ControlBox = $false
-        $cf.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-        $cf.ForeColor = "White"
-
-        $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "You are about to remove $count driver(s).`n`nHow would you like to proceed?"
-        $lbl.Location = "20, 20"; $lbl.Size = "400, 50"; $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 10)
-        $cf.Controls.Add($lbl)
-
-        $bBackup = New-Object System.Windows.Forms.Button
-        $bBackup.Text = "Backup && Clean"
-        $bBackup.DialogResult = "Yes"
-        $bBackup.Location = "20, 90"; $bBackup.Width = 130; $bBackup.Height = 35
-        $bBackup.BackColor = "SeaGreen"; $bBackup.ForeColor = "White"; $bBackup.FlatStyle = "Flat"
-        $cf.Controls.Add($bBackup)
-
-        $bNoBackup = New-Object System.Windows.Forms.Button
-        $bNoBackup.Text = "Clean (No Backup)"
-        $bNoBackup.DialogResult = "No"
-        $bNoBackup.Location = "160, 90"; $bNoBackup.Width = 130; $bNoBackup.Height = 35
-        $bNoBackup.BackColor = "IndianRed"; $bNoBackup.ForeColor = "White"; $bNoBackup.FlatStyle = "Flat"
-        $cf.Controls.Add($bNoBackup)
-
-        $bCancel = New-Object System.Windows.Forms.Button
-        $bCancel.Text = "Cancel"
-        $bCancel.DialogResult = "Cancel"
-        $bCancel.Location = "300, 90"; $bCancel.Width = 110; $bCancel.Height = 35
-        $bCancel.BackColor = "DimGray"; $bCancel.ForeColor = "White"; $bCancel.FlatStyle = "Flat"
-        $cf.Controls.Add($bCancel)
-
-        Set-WmtWinFormsTheme -Control $cf
-        $lbl.ForeColor = Get-WmtThemeColor "TextPrimary"
-        Set-WmtWinFormsButtonTheme -Button $bBackup -Role Success
-        Set-WmtWinFormsButtonTheme -Button $bNoBackup -Role Danger
-        Set-WmtWinFormsButtonTheme -Button $bCancel -Role Standard
-        $result = $cf.ShowDialog()
-        
-        if ($result -eq "Cancel") { return }
-
-        # A. BACKUP (Only if Yes selected)
+        Set-WmtBusyCursor -Busy
         $backupCount = 0
-        $timestamp = Get-Date -f 'yyyyMMdd_HHmm'
+        $timestamp = Get-Date -Format 'yyyyMMdd_HHmm'
         $mainBkPath = Join-Path (Get-DataPath) "Drivers_Backup_$timestamp"
-
-        if ($result -eq "Yes") {
-            if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
-            
-            $prog = 1
-            foreach ($item in $items) {
-                $f.Text = "Backing up ($prog/$count): $($item.OriginalName)..."
-                $f.Update()
-                
-                $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
-                $drvPath = Join-Path $mainBkPath $folderName
-                New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
-
-                $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, """$drvPath""" -NoNewWindow -Wait -PassThru
-                if ($proc.ExitCode -eq 0) { $backupCount++ }
-                $prog++
-            }
-        }
-
-        $f.Text = "Processing Deletions..."
-        $f.Update()
-
-        # B. DELETION
-        $deleted = 0
-        $failed = 0
-        
-        foreach ($item in $items) {
-            $name = $item.PublishedName
-            
-            $p = New-Object System.Diagnostics.Process
-            $p.StartInfo.FileName = "pnputil.exe"
-            $p.StartInfo.Arguments = "/delete-driver $name /uninstall"
-            $p.StartInfo.RedirectStandardOutput = $true
-            $p.StartInfo.RedirectStandardError = $true
-            $p.StartInfo.UseShellExecute = $false
-            $p.StartInfo.CreateNoWindow = $true
-            $p.Start() | Out-Null
-            $stdOut = $p.StandardOutput.ReadToEnd()
-            $stdErr = $p.StandardError.ReadToEnd()
-            $p.WaitForExit()
-            
-            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) {
-                $deleted++
-            }
-            else {
-                # Force Prompt
-                $fullLog = "$stdOut`n$stdErr".Trim()
-                $warnMsg = "Driver: $($item.OriginalName) ($name)`n`nError:`n$fullLog`n`nForce Delete?"
-                $forceDec = [System.Windows.MessageBox]::Show($warnMsg, "Deletion Failed", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Error)
-                
-                if ($forceDec -eq "Yes") {
-                    $procForce = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
-                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+        try {
+            if ($mode -eq "Backup") {
+                if (-not (Test-Path $mainBkPath)) { New-Item -Path $mainBkPath -ItemType Directory -Force | Out-Null }
+                $i = 1
+                foreach ($item in $itemsToRemove) {
+                    $dialog.Title = "Backing up ($i/$($itemsToRemove.Count)): $($item.OriginalName)..."
+                    Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                    $folderName = if ($item.OriginalName) { $item.OriginalName } else { $item.PublishedName }
+                    $drvPath = Join-Path $mainBkPath $folderName
+                    New-Item -Path $drvPath -ItemType Directory -Force | Out-Null
+                    $proc = Start-Process pnputil.exe -ArgumentList "/export-driver", $item.PublishedName, "`"$drvPath`"" -NoNewWindow -Wait -PassThru
+                    if ($proc.ExitCode -eq 0) { $backupCount++ }
+                    $i++
                 }
+            }
+
+            $deleted = 0
+            $failed = 0
+            foreach ($item in $itemsToRemove) {
+                $name = [string]$item.PublishedName
+                $dialog.Title = "Removing $name..."
+                Invoke-WmtDispatcherPump -Dispatcher $dialog.Dispatcher
+                $p = [System.Diagnostics.Process]::new()
+                $p.StartInfo.FileName = "pnputil.exe"
+                $p.StartInfo.Arguments = "/delete-driver $name /uninstall"
+                $p.StartInfo.RedirectStandardOutput = $true
+                $p.StartInfo.RedirectStandardError = $true
+                $p.StartInfo.UseShellExecute = $false
+                $p.StartInfo.CreateNoWindow = $true
+                $p.Start() | Out-Null
+                $stdOut = $p.StandardOutput.ReadToEnd()
+                $stdErr = $p.StandardError.ReadToEnd()
+                $p.WaitForExit()
+                if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $deleted++ }
                 else {
-                    $failed++
+                    $warnMsg = "Driver: $($item.OriginalName) ($name)`n`nError:`n$($stdOut)`n$($stdErr)`n`nForce delete?"
+                    if ((Show-WmtMessageBox -Owner $dialog -Message $warnMsg -Title "Deletion Failed" -Button YesNo -Image Error) -eq [System.Windows.MessageBoxResult]::Yes) {
+                        $procForce = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
+                        if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+                    }
+                    else { $failed++ }
                 }
             }
-        }
 
-        # C. REPORT & REFRESH
-        $resMsg = "Done.`nDeleted: $deleted"
-        if ($result -eq "Yes") { $resMsg += "`nBackups: $backupCount`nPath: $mainBkPath" }
-        
-        [System.Windows.MessageBox]::Show($resMsg, "Result", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            $resMsg = "Done.`nDeleted: $deleted`nFailed: $failed"
+            if ($mode -eq "Backup") { $resMsg += "`nBackups: $backupCount`nPath: $mainBkPath" }
+            Show-WmtMessageBox -Owner $dialog -Message $resMsg -Title "Result" -Image Information | Out-Null
 
-        if ($deleted -gt 0) {
-            # Remove deleted items from the current list
-            $script:CurrentList = $script:CurrentList | Where-Object { 
-                $obj = $_; -not ($items | Where-Object { $_.PublishedName -eq $obj.PublishedName })
+            if ($deleted -gt 0) {
+                foreach ($item in $itemsToRemove) {
+                    for ($idx = $currentList.Count - 1; $idx -ge 0; $idx--) {
+                        if ($currentList[$idx].PublishedName -eq $item.PublishedName) { $currentList.RemoveAt($idx) }
+                    }
+                }
+                & $loadGrid
             }
-            $dg.DataSource = $null
-            $LoadGrid.Invoke()
         }
-        
-        $f.Text = "Clean Old Drivers"
-        if ($CloseWindow) { $f.Close() }
-    }
+        finally {
+            $dialog.Title = "Clean Old Drivers"
+            Set-WmtBusyCursor
+        }
+        if ($CloseWindow) { $dialog.Close() }
+    }.GetNewClosure()
 
-    $btnBackupClean.Add_Click({ $DoRemove.Invoke($script:CurrentList, $true) })
-    $btnRemoveSel.Add_Click({
-            if ($dg.SelectedRows.Count -eq 0) { return }
-            $selected = @()
-            foreach ($row in $dg.SelectedRows) {
-                $pub = $row.Cells["PublishedName"].Value
-                $match = $script:CurrentList | Where-Object { $_.PublishedName -eq $pub } | Select-Object -First 1
-                if ($match) { $selected += $match }
-            }
-            $DoRemove.Invoke($selected, $false)
-        })
-    $btnClose.Add_Click({ $f.Close() })
-
-    Set-WmtWinFormsTheme -Control $f
-    Set-WmtWinFormsButtonTheme -Button $btnBackupClean -Role Success
-    Set-WmtWinFormsButtonTheme -Button $btnRemoveSel -Role Danger
-    Set-WmtWinFormsButtonTheme -Button $btnClose -Role Standard
-    $LoadGrid.Invoke()
-    $f.ShowDialog() | Out-Null
+    $btnRemoveAll.Add_Click({ & $doRemove -Items @($currentList.ToArray()) -CloseWindow $true }.GetNewClosure())
+    $btnRemoveSel.Add_Click({ & $doRemove -Items @($dg.SelectedItems) -CloseWindow $false }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    & $loadGrid
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 # --- RESTORE DRIVERS ---
 function Invoke-RestoreDrivers {
@@ -16346,110 +13475,61 @@ function Invoke-RestoreDrivers {
 
     $selectedPath = $null
     if ($backups -and $backups.Count -gt 0) {
-        $backups = $backups | Sort-Object LastWriteTime -Descending
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = "Select Driver Backup"
-        $form.Size = "600,400"
-        $form.StartPosition = "CenterScreen"
-        $form.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-        $form.ForeColor = "White"
-
-        $lst = New-Object System.Windows.Forms.ListBox
-        $lst.Dock = "Top"
-        $lst.Height = 280
-        $lst.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-        $lst.ForeColor = "White"
-        $lst.BorderStyle = "FixedSingle"
-        Set-WmtDoubleBuffered -Control $lst
-        $items = @()
-        foreach ($b in $backups) {
-            $items += [PSCustomObject]@{
-                Name    = $b.Name
-                Path    = $b.FullName
-                Display = "{0}  (modified {1})" -f $b.Name, $b.LastWriteTime
-            }
-        }
-        $lst.DisplayMember = "Display"
-        $lst.ValueMember = "Path"
-        $lst.DataSource = $items
-        $form.Controls.Add($lst)
-
-        $pnl = New-Object System.Windows.Forms.Panel
-        $pnl.Dock = "Bottom"
-        $pnl.Height = 60
-        $pnl.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30)
-        $form.Controls.Add($pnl)
-
-        $btnUse = New-Object System.Windows.Forms.Button
-        $btnUse.Text = "Use Selected"
-        $btnUse.Left = 20; $btnUse.Top = 15; $btnUse.Width = 140
-        $btnUse.BackColor = "SeaGreen"; $btnUse.ForeColor = "White"
-        $btnUse.FlatStyle = "Flat"
-        $btnUse.Add_Click({
-                if ($lst.SelectedItem) {
-                    $form.Tag = $lst.SelectedItem.Path
-                    $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-                    $form.Close()
+        $items = @($backups | Sort-Object LastWriteTime -Descending | ForEach-Object {
+                [PSCustomObject]@{
+                    Name    = $_.Name
+                    Path    = $_.FullName
+                    Display = "{0}  (modified {1})" -f $_.Name, $_.LastWriteTime
                 }
             })
-        $pnl.Controls.Add($btnUse)
 
-        $btnBrowse = New-Object System.Windows.Forms.Button
-        $btnBrowse.Text = "Browse..."
-        $btnBrowse.Left = 180; $btnBrowse.Top = 15; $btnBrowse.Width = 120
-        $btnBrowse.BackColor = "DimGray"; $btnBrowse.ForeColor = "White"
-        $btnBrowse.FlatStyle = "Flat"
-        $btnBrowse.Add_Click({
-                $form.Tag = "BROWSE"
-                $form.DialogResult = [System.Windows.Forms.DialogResult]::Retry
-                $form.Close()
-            })
-        $pnl.Controls.Add($btnBrowse)
-
-        $btnCancel = New-Object System.Windows.Forms.Button
-        $btnCancel.Text = "Cancel"
-        $btnCancel.Left = 320; $btnCancel.Top = 15; $btnCancel.Width = 120
-        $btnCancel.BackColor = "Gray"; $btnCancel.ForeColor = "White"
-        $btnCancel.FlatStyle = "Flat"
-        $btnCancel.Add_Click({
-                $form.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-                $form.Close()
-            })
-        $pnl.Controls.Add($btnCancel)
-
-        $res = $form.ShowDialog()
-        if ($res -eq [System.Windows.Forms.DialogResult]::OK -and $form.Tag) {
-            $selectedPath = $form.Tag
-        }
-        elseif ($res -eq [System.Windows.Forms.DialogResult]::Retry) {
-            # fall through to browse
-            $selectedPath = $null
-        }
-        else {
-            return
-        }
+        $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <ListBox Name="lstBackups" DisplayMemberPath="Display"/>
+        <StackPanel Grid.Row="1" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnUse" Content="Use Selected" MinWidth="118" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+            <Button Name="btnBrowse" Content="Browse" Width="96" Margin="0,0,8,0"/>
+            <Button Name="btnCancel" Content="Cancel" Width="96" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+"@
+        $dialog = New-WmtWindowFromXaml -Title "Select Driver Backup" -ContentXaml $content -Width 640 -Height 420 -MinWidth 520 -MinHeight 340
+        $lstBackups = $dialog.FindName("lstBackups")
+        $btnUse = $dialog.FindName("btnUse")
+        $btnBrowse = $dialog.FindName("btnBrowse")
+        $btnCancel = $dialog.FindName("btnCancel")
+        $lstBackups.ItemsSource = $items
+        if ($items.Count -gt 0) { $lstBackups.SelectedIndex = 0 }
+        $dialogState = @{ Browse = $false; Selected = $null }
+        $btnUse.Add_Click({ if ($lstBackups.SelectedItem) { $dialogState.Selected = [string]$lstBackups.SelectedItem.Path; $dialog.DialogResult = $true } }.GetNewClosure())
+        $btnBrowse.Add_Click({ $dialogState.Browse = $true; $dialog.DialogResult = $true }.GetNewClosure())
+        $btnCancel.Add_Click({ $dialog.Close() }.GetNewClosure())
+        $dialog.ShowDialog() | Out-Null
+        if ($dialogState.Selected) { $selectedPath = $dialogState.Selected }
+        elseif (-not $dialogState.Browse) { return }
     }
 
     if (-not $selectedPath) {
-        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dlg.Description = "Select DriverBackup folder"
-        if (Test-Path $dataPath) { $dlg.SelectedPath = $dataPath }
-        if ($dlg.ShowDialog() -ne "OK") { return }
-        $selectedPath = $dlg.SelectedPath
+        $selectedPath = Select-WmtFolder -Description "Select DriverBackup folder" -InitialDirectory $dataPath
+        if ([string]::IsNullOrWhiteSpace($selectedPath)) { return }
     }
 
     Invoke-UiCommand {
         param($Path)
         if (-not (Test-Path $Path)) {
             Write-Output "Restore failed: path not found $Path"
-            [System.Windows.MessageBox]::Show("Restore failed: path not found.`n$Path", "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            Show-WmtMessageBox -Message "Restore failed: path not found.`n$Path" -Title "Restore Drivers" -Image Error | Out-Null
             return
         }
 
         $firstInf = Find-WmtFirstEnumeratedFile -Path $Path -Filter "*.inf"
         if (-not $firstInf) {
             Write-Output "Restore aborted: no INF files found in $Path"
-            [System.Windows.MessageBox]::Show("No INF files found in:`n$Path", "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+            Show-WmtMessageBox -Message "No INF files found in:`n$Path" -Title "Restore Drivers" -Image Warning | Out-Null
             return
         }
 
@@ -16458,16 +13538,16 @@ function Invoke-RestoreDrivers {
         Write-Output $output
         if ($code -eq 0 -or $code -eq 3010) {
             Write-Output "Drivers restored from $Path"
-            [System.Windows.MessageBox]::Show("Drivers restored from:`n$Path", "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            Show-WmtMessageBox -Message "Drivers restored from:`n$Path" -Title "Restore Drivers" -Image Information | Out-Null
         }
         else {
             Write-Output "Restore failed (exit $code)."
             $msg = "Restore failed (exit $code)." + "`n`nOutput:`n" + ($output | Out-String)
-            [System.Windows.MessageBox]::Show($msg, "Restore Drivers", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            Show-WmtMessageBox -Message $msg -Title "Restore Drivers" -Image Error | Out-Null
         }
-        # CHANGE IS HERE: Passing the argument explicitly
     } "Restoring drivers..." -ArgumentList $selectedPath
 }
+
 
 # --- UPDATE / REPORT TOOLS ---
 function Invoke-WindowsUpdateRepairFull {
@@ -16488,10 +13568,9 @@ function Invoke-WindowsUpdateRepairFull {
 }
 
 function Invoke-SystemReports {
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Select output folder for system reports"
-    if ($dlg.ShowDialog() -ne "OK") { return }
-    $outdir = Join-Path $dlg.SelectedPath ("SystemReports_{0}" -f (Get-Date -Format "yyyy-MM-dd_HHmm"))
+    $selectedFolder = Select-WmtFolder -Description "Select output folder for system reports" -InitialDirectory (Get-DataPath)
+    if ([string]::IsNullOrWhiteSpace($selectedFolder)) { return }
+    $outdir = Join-Path $selectedFolder ("SystemReports_{0}" -f (Get-Date -Format "yyyy-MM-dd_HHmm"))
     if (-not (Test-Path $outdir)) { New-Item -ItemType Directory -Path $outdir | Out-Null }
     
     Invoke-UiCommand {
@@ -16577,7 +13656,7 @@ function Set-DotNetRollForward {
 }
 
 function Invoke-MASActivation {
-    $masInput = [Microsoft.VisualBasic.Interaction]::InputBox("Type YES, I UNDERSTAND to download and run MAS from massgrave.dev", "MAS Activation Confirmation", "")
+    $masInput = Show-WmtInputDialog -Title "MAS Activation Confirmation" -Prompt "Type YES, I UNDERSTAND to download and run MAS from massgrave.dev"
     if ($masInput -ne "YES, I UNDERSTAND") { return }
     Invoke-UiCommand {
         $scriptContent = Invoke-RestMethod -Uri "https://get.activated.win"
@@ -16587,80 +13666,75 @@ function Invoke-MASActivation {
 }
 
 function Show-ContextMenuBuilder {
-    # Ensure libraries are loaded
-    Add-Type -AssemblyName System.Windows.Forms
-    Add-Type -AssemblyName System.Drawing
+    $content = @"
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <TextBlock Grid.Row="0" Text="This replaces the 'Set as desktop background' command with your custom top-level Windows 11 context menu action." Foreground="{DynamicResource Warning}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+        <StackPanel Grid.Row="1" Margin="0,0,0,10">
+            <TextBlock Text="Menu Name" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,4"/>
+            <TextBox Name="txtName" Height="34" VerticalContentAlignment="Center"/>
+        </StackPanel>
+        <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="Command" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,4"/>
+                <TextBox Name="txtCmd" Height="34" VerticalContentAlignment="Center"/>
+            </StackPanel>
+            <Button Name="btnBrowseCmd" Grid.Column="1" Content="Browse" Width="88" Margin="8,22,0,0"/>
+        </Grid>
+        <Grid Grid.Row="3" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel>
+                <TextBlock Text="Icon Path" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,4"/>
+                <TextBox Name="txtIcon" Height="34" VerticalContentAlignment="Center"/>
+            </StackPanel>
+            <Button Name="btnBrowseIcon" Grid.Column="1" Content="Browse" Width="88" Margin="8,22,0,0"/>
+        </Grid>
+        <TextBlock Grid.Row="4" Text="Hint: use &quot;%1&quot; for the selected file." Foreground="{DynamicResource TextMuted}" Margin="0,0,0,16"/>
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnRemove" Content="Remove from Menu" MinWidth="142" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}" Margin="0,0,8,0"/>
+            <Button Name="btnClose" Content="Cancel" Width="92" IsCancel="True" Margin="0,0,8,0"/>
+            <Button Name="btnApply" Content="Apply to Menu" MinWidth="124" IsDefault="True" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}"/>
+        </StackPanel>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Custom Context Menu Builder" -ContentXaml $content -Width 640 -Height 430 -MinWidth 560 -MinHeight 390 -NoResize
+    $txtName = $dialog.FindName("txtName")
+    $txtCmd = $dialog.FindName("txtCmd")
+    $txtIcon = $dialog.FindName("txtIcon")
+    $btnBrowseCmd = $dialog.FindName("btnBrowseCmd")
+    $btnBrowseIcon = $dialog.FindName("btnBrowseIcon")
+    $btnApply = $dialog.FindName("btnApply")
+    $btnRemove = $dialog.FindName("btnRemove")
+    $btnClose = $dialog.FindName("btnClose")
 
-    # --- SETUP FORM ---
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Custom Context Menu Builder"
-    $f.Size = New-Object System.Drawing.Size(600, 420) # Increased height for description
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-    $f.ForeColor = "White"
-    $f.FormBorderStyle = "FixedDialog"
-    $f.MaximizeBox = $false
-
-    # --- HEADER / WARNING ---
-    $lblWarn = New-Object System.Windows.Forms.Label
-    $lblWarn.Text = "NOTE: This tool replaces the 'Set as desktop background' option to force your custom action into the top-level Windows 11 menu."
-    $lblWarn.Location = "20, 10"; $lblWarn.Size = "540, 40"
-    $lblWarn.ForeColor = "Yellow" # Highlight the warning
-    $lblWarn.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $f.Controls.Add($lblWarn)
-
-    # --- UI INPUTS ---
-    $lbl1 = New-Object System.Windows.Forms.Label; $lbl1.Text = "Menu Name:"; $lbl1.Location = "20, 50"; $lbl1.ForeColor = "LightGray"; $lbl1.AutoSize = $true; $f.Controls.Add($lbl1)
-    
-    $txtName = New-Object System.Windows.Forms.TextBox; $txtName.Location = "20, 75"; $txtName.Width = 540; 
-    $txtName.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtName.ForeColor = "White"
-    $txtName.Text = "Take Ownership" # DEFAULT VALUE
-    $f.Controls.Add($txtName)
-
-    $lbl2 = New-Object System.Windows.Forms.Label; $lbl2.Text = "Command:"; $lbl2.Location = "20, 115"; $lbl2.ForeColor = "LightGray"; $lbl2.AutoSize = $true; $f.Controls.Add($lbl2)
-    
-    $txtCmd = New-Object System.Windows.Forms.TextBox; $txtCmd.Location = "20, 140"; $txtCmd.Width = 450; 
-    $txtCmd.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtCmd.ForeColor = "White"
-    # DEFAULT COMMAND (Take Ownership)
+    $txtName.Text = "Take Ownership"
     $txtCmd.Text = 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f \"%1\" /r /d y && icacls \"%1\" /grant administrators:F /t'' -Verb runAs"'
-    $f.Controls.Add($txtCmd)
-    
-    $btnBrowseCmd = New-Object System.Windows.Forms.Button; $btnBrowseCmd.Text = "Browse..."; $btnBrowseCmd.Location = "480, 138"; $btnBrowseCmd.Width = 80; $btnBrowseCmd.BackColor = "DimGray"; $btnBrowseCmd.ForeColor = "White"; $btnBrowseCmd.FlatStyle = "Flat"; $f.Controls.Add($btnBrowseCmd)
-
-    $lbl3 = New-Object System.Windows.Forms.Label; $lbl3.Text = "Icon Path (Optional):"; $lbl3.Location = "20, 180"; $lbl3.ForeColor = "LightGray"; $lbl3.AutoSize = $true; $f.Controls.Add($lbl3)
-    
-    $txtIcon = New-Object System.Windows.Forms.TextBox; $txtIcon.Location = "20, 205"; $txtIcon.Width = 450; 
-    $txtIcon.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $txtIcon.ForeColor = "White"
-    $txtIcon.Text = "imageres.dll,-78" # DEFAULT ICON (Shield)
-    $f.Controls.Add($txtIcon)
-    
-    $btnBrowseIcon = New-Object System.Windows.Forms.Button; $btnBrowseIcon.Text = "Browse..."; $btnBrowseIcon.Location = "480, 203"; $btnBrowseIcon.Width = 80; $btnBrowseIcon.BackColor = "DimGray"; $btnBrowseIcon.ForeColor = "White"; $btnBrowseIcon.FlatStyle = "Flat"; $f.Controls.Add($btnBrowseIcon)
-
-    $lblHint = New-Object System.Windows.Forms.Label; $lblHint.Text = "Hint: Use `"%1`" for the selected file.`nExample: `"C:\Apps\App.exe`" `"%1`""; $lblHint.Location = "20, 240"; $lblHint.AutoSize = $true; $lblHint.ForeColor = "Gray"; $f.Controls.Add($lblHint)
-
-    # --- BUTTONS ---
-    $btnApply = New-Object System.Windows.Forms.Button; $btnApply.Text = "Apply to Menu"; $btnApply.Location = "20, 290"; $btnApply.Width = 160; $btnApply.Height = 35; $btnApply.BackColor = "SeaGreen"; $btnApply.ForeColor = "White"; $btnApply.FlatStyle = "Flat"; $f.Controls.Add($btnApply)
-    
-    $btnRemove = New-Object System.Windows.Forms.Button; $btnRemove.Text = "Remove from Menu"; $btnRemove.Location = "200, 290"; $btnRemove.Width = 160; $btnRemove.Height = 35; $btnRemove.BackColor = "IndianRed"; $btnRemove.ForeColor = "White"; $btnRemove.FlatStyle = "Flat"; $f.Controls.Add($btnRemove)
-    
-    $btnClose = New-Object System.Windows.Forms.Button; $btnClose.Text = "Cancel"; $btnClose.Location = "460, 290"; $btnClose.Width = 100; $btnClose.Height = 35; $btnClose.BackColor = "DimGray"; $btnClose.ForeColor = "White"; $btnClose.FlatStyle = "Flat"; $f.Controls.Add($btnClose)
-
-    # --- LOGIC ---
-    $f.AcceptButton = $btnApply 
-    $f.CancelButton = $btnClose
+    $txtIcon.Text = "imageres.dll,-78"
 
     $btnBrowseCmd.Add_Click({
-            $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = "Programs|*.exe;*.bat;*.cmd|All Files|*.*"
-            if ($dlg.ShowDialog() -eq "OK") { $txtCmd.Text = "`"$($dlg.FileName)`" `"%1`"" }
-        })
+            $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+            $dlg.Filter = "Programs|*.exe;*.bat;*.cmd|All Files|*.*"
+            if ($dlg.ShowDialog() -eq $true) { $txtCmd.Text = "`"$($dlg.FileName)`" `"%1`"" }
+        }.GetNewClosure())
     $btnBrowseIcon.Add_Click({
-            $dlg = New-Object System.Windows.Forms.OpenFileDialog; $dlg.Filter = "Icons|*.ico;*.exe;*.dll|All Files|*.*"
-            if ($dlg.ShowDialog() -eq "OK") { $txtIcon.Text = $dlg.FileName }
-        })
+            $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+            $dlg.Filter = "Icons|*.ico;*.exe;*.dll|All Files|*.*"
+            if ($dlg.ShowDialog() -eq $true) { $txtIcon.Text = $dlg.FileName }
+        }.GetNewClosure())
 
     $btnApply.Add_Click({
-            if ([string]::IsNullOrWhiteSpace($txtName.Text) -or [string]::IsNullOrWhiteSpace($txtCmd.Text)) { [System.Windows.Forms.MessageBox]::Show("Name and Command are required."); return }
-        
+            if ([string]::IsNullOrWhiteSpace($txtName.Text) -or [string]::IsNullOrWhiteSpace($txtCmd.Text)) {
+                Show-WmtMessageBox -Owner $dialog -Message "Name and Command are required." -Title "Custom Context Menu" -Image Warning | Out-Null
+                return
+            }
             $targets = @("HKCU:\Software\Classes\*\shell\SetDesktopWallpaper", "HKCU:\Software\Classes\Directory\shell\SetDesktopWallpaper")
             try {
                 foreach ($key in $targets) {
@@ -16668,55 +13742,85 @@ function Show-ContextMenuBuilder {
                     Set-ItemProperty -LiteralPath $key -Name "MUIVerb" -Value $txtName.Text
                     Set-ItemProperty -LiteralPath $key -Name "MultiSelectModel" -Value "Player"
                     if (-not [string]::IsNullOrWhiteSpace($txtIcon.Text)) { Set-ItemProperty -LiteralPath $key -Name "Icon" -Value $txtIcon.Text }
-                
                     $cmdKey = Join-Path $key "command"
                     if (-not (Test-Path -LiteralPath $cmdKey)) { New-Item -Path $cmdKey -Force | Out-Null }
                     Set-Item -LiteralPath $cmdKey -Value $txtCmd.Text
                 }
-                [System.Windows.Forms.MessageBox]::Show("Context Menu updated successfully!", "Success", "OK", "Information")
-                $f.Close()
+                Show-WmtMessageBox -Owner $dialog -Message "Context Menu updated successfully!" -Title "Success" -Image Information | Out-Null
+                $dialog.Close()
             }
-            catch { [System.Windows.Forms.MessageBox]::Show($_.Exception.Message) }
-        })
+            catch { Show-WmtMessageBox -Owner $dialog -Message $_.Exception.Message -Title "Context Menu Error" -Image Error | Out-Null }
+        }.GetNewClosure())
 
     $btnRemove.Add_Click({
-            if ([System.Windows.Forms.MessageBox]::Show("Remove the custom menu item?", "Confirm", "YesNo") -eq "Yes") {
-                $targets = @("HKCU:\Software\Classes\*\shell\SetDesktopWallpaper", "HKCU:\Software\Classes\Directory\shell\SetDesktopWallpaper")
-                foreach ($key in $targets) { if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue } }
-                [System.Windows.Forms.MessageBox]::Show("Item removed.", "Success")
-                $f.Close()
-            }
-        })
-    
-    $btnClose.Add_Click({ $f.Close() })
-    $f.ShowDialog() | Out-Null
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Remove the custom menu item?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            $targets = @("HKCU:\Software\Classes\*\shell\SetDesktopWallpaper", "HKCU:\Software\Classes\Directory\shell\SetDesktopWallpaper")
+            foreach ($key in $targets) { if (Test-Path -LiteralPath $key) { Remove-Item -LiteralPath $key -Recurse -Force -ErrorAction SilentlyContinue } }
+            Show-WmtMessageBox -Owner $dialog -Message "Item removed." -Title "Success" -Image Information | Out-Null
+            $dialog.Close()
+        }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 # --- FIREWALL RULE DIALOG ---
 function Show-RuleDialog {
-    param($Title, $RuleObj = $null) 
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = $Title; $f.Size = "450, 450"; $f.StartPosition = "CenterScreen"; $f.BackColor = [System.Drawing.Color]::FromArgb(40, 40, 40); $f.ForeColor = "White"
-    function New-Input {
-        param($L, $Y, $V = "", $Opts = $null)
-        $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = $L; $lbl.Top = $Y; $lbl.Left = 20; $lbl.AutoSize = $true; $f.Controls.Add($lbl)
-        if ($Opts) { $c = New-Object System.Windows.Forms.ComboBox; $c.DropDownStyle = "DropDownList"; foreach ($opt in $Opts) { [void]$c.Items.Add($opt) }; if ($V) { $c.SelectedItem = $V }else { $c.SelectedIndex = 0 } } 
-        else { $c = New-Object System.Windows.Forms.TextBox; $c.Text = $V }
-        $c.Top = $Y + 20; $c.Left = 20; $c.Width = 380; $c.BackColor = [System.Drawing.Color]::FromArgb(60, 60, 60); $c.ForeColor = "White"; $f.Controls.Add($c); return $c
-    }
-    $vName = ""; $vDir = "Inbound"; $vAct = "Block"; $vProt = "TCP"; $vPort = ""
-    if ($RuleObj) { $vName = $RuleObj.DisplayName; $vDir = $RuleObj.Direction; $vAct = $RuleObj.Action; $vProt = $RuleObj.Protocol; $vPort = $RuleObj.LocalPort }
-    $iName = New-Input "Rule Name" 10 $vName
-    if ($RuleObj) { $iName.ReadOnly = $true; $iName.BackColor = [System.Drawing.Color]::FromArgb(30, 30, 30) }
-    $iDir = New-Input "Direction" 60 $vDir @("Inbound", "Outbound")
-    $iAct = New-Input "Action" 110 $vAct @("Allow", "Block")
-    $iProt = New-Input "Protocol" 160 $vProt @("TCP", "UDP", "Any")
-    $iPort = New-Input "Local Port (e.g. 80)" 210 $vPort
-    $btn = New-Object System.Windows.Forms.Button; $btn.Text = "Save"; $btn.Top = 300; $btn.Left = 20; $btn.Width = 380; $btn.Height = 40; $btn.BackColor = "SeaGreen"; $btn.ForeColor = "White"; $btn.DialogResult = "OK"; $f.Controls.Add($btn)
-    $tip = New-Object System.Windows.Forms.ToolTip; $tip.SetToolTip($btn, "Confirm and save this firewall rule")
-    if ($f.ShowDialog() -eq "OK") { return @{ Name = $iName.Text; Direction = $iDir.SelectedItem; Action = $iAct.SelectedItem; Protocol = $iProt.SelectedItem; Port = $iPort.Text } }
-    return $null
+    param($Title, $RuleObj = $null)
+
+    $content = @"
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <StackPanel Grid.Row="0" Margin="0,0,0,10"><TextBlock Text="Rule Name" Foreground="{DynamicResource TextSecondary}"/><TextBox Name="txtName" Height="34" VerticalContentAlignment="Center"/></StackPanel>
+        <StackPanel Grid.Row="1" Margin="0,0,0,10"><TextBlock Text="Direction" Foreground="{DynamicResource TextSecondary}"/><ComboBox Name="cmbDirection" Height="34"/></StackPanel>
+        <StackPanel Grid.Row="2" Margin="0,0,0,10"><TextBlock Text="Action" Foreground="{DynamicResource TextSecondary}"/><ComboBox Name="cmbAction" Height="34"/></StackPanel>
+        <StackPanel Grid.Row="3" Margin="0,0,0,10"><TextBlock Text="Protocol" Foreground="{DynamicResource TextSecondary}"/><ComboBox Name="cmbProtocol" Height="34"/></StackPanel>
+        <StackPanel Grid.Row="4" Margin="0,0,0,14"><TextBlock Text="Local Port" Foreground="{DynamicResource TextSecondary}"/><TextBox Name="txtPort" Height="34" VerticalContentAlignment="Center"/></StackPanel>
+        <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnCancel" Content="Cancel" Width="92" IsCancel="True" Margin="0,0,8,0"/>
+            <Button Name="btnSave" Content="Save" Width="110" IsDefault="True" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}"/>
+        </StackPanel>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title $Title -ContentXaml $content -Width 460 -Height 440 -MinWidth 400 -MinHeight 410 -NoResize
+    $txtName = $dialog.FindName("txtName")
+    $cmbDirection = $dialog.FindName("cmbDirection")
+    $cmbAction = $dialog.FindName("cmbAction")
+    $cmbProtocol = $dialog.FindName("cmbProtocol")
+    $txtPort = $dialog.FindName("txtPort")
+    $btnSave = $dialog.FindName("btnSave")
+    $btnCancel = $dialog.FindName("btnCancel")
+
+    foreach ($item in @("Inbound", "Outbound")) { [void]$cmbDirection.Items.Add($item) }
+    foreach ($item in @("Allow", "Block")) { [void]$cmbAction.Items.Add($item) }
+    foreach ($item in @("TCP", "UDP", "Any")) { [void]$cmbProtocol.Items.Add($item) }
+
+    $txtName.Text = if ($RuleObj) { [string]$RuleObj.DisplayName } else { "" }
+    $cmbDirection.SelectedItem = if ($RuleObj) { [string]$RuleObj.Direction } else { "Inbound" }
+    $cmbAction.SelectedItem = if ($RuleObj) { [string]$RuleObj.Action } else { "Block" }
+    $cmbProtocol.SelectedItem = if ($RuleObj) { [string]$RuleObj.Protocol } else { "TCP" }
+    $txtPort.Text = if ($RuleObj) { [string]$RuleObj.LocalPort } else { "" }
+    if ($RuleObj) { $txtName.IsReadOnly = $true }
+
+    $state = @{ Result = $null }
+    $btnSave.Add_Click({
+            $state.Result = @{
+                Name      = [string]$txtName.Text
+                Direction = [string]$cmbDirection.SelectedItem
+                Action    = [string]$cmbAction.SelectedItem
+                Protocol  = [string]$cmbProtocol.SelectedItem
+                Port      = [string]$txtPort.Text
+            }
+            $dialog.DialogResult = $true
+        }.GetNewClosure())
+    $btnCancel.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
+    return $state.Result
 }
+
 
 # --- WINRE STATUS CHECK ---
 function Invoke-WinREStatusCheck {
@@ -16795,21 +13899,16 @@ function Invoke-WinREStatusCheck {
         $msg = ($summary -join "`r`n")
         Write-Output $msg
 
-        $icon = if ($warnings.Count -eq 0) { 
-            [System.Windows.Forms.MessageBoxIcon]::Information 
+        $icon = if ($warnings.Count -eq 0) {
+            [System.Windows.MessageBoxImage]::Information
         }
-        else { 
-            [System.Windows.Forms.MessageBoxIcon]::Warning 
+        else {
+            [System.Windows.MessageBoxImage]::Warning
         }
 
-        $res = [System.Windows.Forms.MessageBox]::Show(
-            "$headline`r`n`r`n$msg`r`n`r`nShow technical details?",
-            "WinRE Status",
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            $icon
-        )
+        $res = Show-WmtMessageBox -Message "$headline`r`n`r`n$msg`r`n`r`nShow technical details?" -Title "WinRE Status" -Button YesNo -Image $icon
 
-        if ($res -eq [System.Windows.Forms.DialogResult]::Yes) {
+        if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
             Show-TextDialog -Title "WinRE Technical Details" -Text $text
         }
     } "Checking WinRE status..."
@@ -16932,1041 +14031,456 @@ Start-Sleep -Seconds 8
 
 # --- SYSTEM RESTORE MANAGER ---
 function Show-SystemRestoreManager {
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "System Restore Manager"
-    $f.Size = "980, 620" # Slightly taller to fit the new button row
-    $f.StartPosition = "CenterScreen"
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.ForeColor = [System.Drawing.Color]::White
+    $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <DataGrid Name="dgRestore" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
+        <Grid Grid.Row="1" Margin="0,12,0,0">
+            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+            <TextBlock Name="lblStatus" Text="Restore points: loading..." Foreground="{DynamicResource TextSecondary}"/>
+            <WrapPanel Grid.Row="1" Margin="0,10,0,0">
+                <Button Name="btnRefresh" Content="Refresh" MinWidth="104" Margin="0,0,8,8"/>
+                <Button Name="btnEnable" Content="Enable Protection" MinWidth="136" Margin="0,0,8,8" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+                <Button Name="btnDisable" Content="Disable Protection" MinWidth="140" Margin="0,0,8,8" Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}"/>
+                <Button Name="btnCreate" Content="Create Point" MinWidth="116" Margin="0,0,8,8" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}"/>
+                <Button Name="btnDelete" Content="Delete Selected" MinWidth="132" Margin="0,0,8,8" Background="{DynamicResource Danger}" Foreground="{DynamicResource DangerText}"/>
+                <Button Name="btnRestore" Content="Restore Selected" MinWidth="138" Margin="0,0,8,8" Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}"/>
+                <Button Name="btnOpenUi" Content="Open Restore UI" MinWidth="128" Margin="0,0,8,8"/>
+                <Button Name="btnClose" Content="Close" Width="92" IsCancel="True" Margin="0,0,8,8"/>
+            </WrapPanel>
+        </Grid>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "System Restore Manager" -ContentXaml $content -Width 1000 -Height 640 -MinWidth 780 -MinHeight 520
+    $dg = $dialog.FindName("dgRestore")
+    $lblStatus = $dialog.FindName("lblStatus")
+    $btnRefresh = $dialog.FindName("btnRefresh")
+    $btnEnable = $dialog.FindName("btnEnable")
+    $btnDisable = $dialog.FindName("btnDisable")
+    $btnCreate = $dialog.FindName("btnCreate")
+    $btnDelete = $dialog.FindName("btnDelete")
+    $btnRestore = $dialog.FindName("btnRestore")
+    $btnOpenUi = $dialog.FindName("btnOpenUi")
+    $btnClose = $dialog.FindName("btnClose")
 
-    $dg = New-Object System.Windows.Forms.DataGridView
-    $dg.Dock = "Top"
-    $dg.Height = 440
-    $dg.BackgroundColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.ForeColor = [System.Drawing.Color]::White
-    $dg.AutoSizeColumnsMode = "Fill"
-    $dg.SelectionMode = "FullRowSelect"
-    $dg.MultiSelect = $true
-    $dg.ReadOnly = $true
-    $dg.RowHeadersVisible = $false
-    $dg.AllowUserToAddRows = $false
-    $dg.BorderStyle = "None"
-    $dg.EnableHeadersVisualStyles = $false
-    $dg.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-    $dg.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 4)
-    $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-    $dg.ColumnHeadersHeight = 32
-    $dg.DefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $dg.DefaultCellStyle.ForeColor = [System.Drawing.Color]::White
-    $dg.DefaultCellStyle.SelectionBackColor = [System.Drawing.ColorTranslator]::FromHtml("#007ACC")
-    $dg.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::White
-    $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#252526")
-    $dg.GridColor = [System.Drawing.ColorTranslator]::FromHtml("#333333")
-    Set-WmtDoubleBuffered -Control $dg
-    $f.Controls.Add($dg)
+    Set-WmtDataGridColumns -DataGrid $dg -Columns @("SequenceNumber", "Description", "Type", "Created", "RawTime") -Widths @{ SequenceNumber = 120; Description = "*"; Type = 120; Created = 170 } -Hidden @("RawTime")
 
-    $pnl = New-Object System.Windows.Forms.Panel
-    $pnl.Dock = "Bottom"
-    $pnl.Height = 130 # Increased height for two rows of buttons
-    $pnl.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1E1E1E")
-    $f.Controls.Add($pnl)
-
-    $lbl = New-Object System.Windows.Forms.Label
-    $lbl.Text = "Restore points: loading..."
-    $lbl.AutoSize = $true
-    $lbl.Left = 20
-    $lbl.Top = 8
-    $lbl.ForeColor = [System.Drawing.Color]::LightGray
-    $pnl.Controls.Add($lbl)
-
-    # Updated to accept a $y parameter for rows
-    function New-RestoreBtn($text, $x, $y, $color = $null) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text
-        $b.Left = $x; $b.Top = $y; $b.Width = 145; $b.Height = 38
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.FlatAppearance.BorderColor = [System.Drawing.ColorTranslator]::FromHtml("#444444")
-        $b.ForeColor = [System.Drawing.Color]::White
-        if ($color) {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($color)
-            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
-        }
-        else {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#2D2D30")
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#3E3E42")
-        }
-        $pnl.Controls.Add($b)
-        return $b
-    }
-
-    # --- ROW 1 ---
-    $btnRefresh = New-RestoreBtn "Refresh" 20 35
-    $btnEnable = New-RestoreBtn "Enable Protection" 180 35 "#004080"
-    $btnDisable = New-RestoreBtn "Disable Protection" 340 35 "#804000"
-    $btnCreate = New-RestoreBtn "Create Point" 500 35 "#006600"
-    $btnDelete = New-RestoreBtn "Delete Selected" 660 35 "#802020"
-    
-    # --- ROW 2 ---
-    $btnRestore = New-RestoreBtn "Restore Selected" 20 80 "#A06000"
-    $btnOpenUi = New-RestoreBtn "Open Restore UI" 180 80
-    $btnClose = New-RestoreBtn "Close" 800 80
-
-    $script:RestorePointRows = @()
-
-    $LoadRestorePoints = {
-        $list = @()
-        try {
-            $list = Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending
-        }
-        catch {}
-
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("SequenceNumber")
-        $dt.Columns.Add("Description")
-        $dt.Columns.Add("Type")
-        $dt.Columns.Add("Created")
-        $dt.Columns.Add("RawTime")
-
+    $loadRestorePoints = {
+        $table = New-WmtDataTable -Columns @("SequenceNumber", "Description", "Type", "Created", "RawTime")
+        try { $list = @(Get-ComputerRestorePoint | Sort-Object SequenceNumber -Descending) } catch { $list = @() }
         foreach ($rp in $list) {
             $created = $rp.CreationTime
             try { $created = [System.Management.ManagementDateTimeConverter]::ToDateTime($rp.CreationTime) } catch {}
-            $r = $dt.NewRow()
-            $r["SequenceNumber"] = $rp.SequenceNumber
-            $r["Description"] = $rp.Description
-            $r["Type"] = $rp.EventType
-            $r["Created"] = $created
-            $r["RawTime"] = $rp.CreationTime
-            $dt.Rows.Add($r)
+            $row = $table.NewRow()
+            $row["SequenceNumber"] = [string]$rp.SequenceNumber
+            $row["Description"] = [string]$rp.Description
+            $row["Type"] = [string]$rp.EventType
+            $row["Created"] = [string]$created
+            $row["RawTime"] = [string]$rp.CreationTime
+            [void]$table.Rows.Add($row)
         }
+        $dg.ItemsSource = $table.DefaultView
+        $lblStatus.Text = "Restore points: $($table.Rows.Count)"
+    }.GetNewClosure()
 
-        $dg.DataSource = $dt
-        if ($dg.Columns["RawTime"]) { $dg.Columns["RawTime"].Visible = $false }
-        $dg.ClearSelection()
-        $lbl.Text = "Restore points: $($dt.Rows.Count)"
-    }
+    $getSelectedRows = { @(Get-WmtDataGridSelectedRows -DataGrid $dg) }.GetNewClosure()
 
-    # BUTTON LOGIC
-
-    $btnRefresh.Add_Click({ & $LoadRestorePoints })
-    
+    $btnRefresh.Add_Click({ & $loadRestorePoints }.GetNewClosure())
     $btnEnable.Add_Click({
             try {
                 Enable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
-                [System.Windows.Forms.MessageBox]::Show("System Restore has been ENABLED on $env:SystemDrive.", "Success", "OK", "Information") | Out-Null
-                & $LoadRestorePoints
+                Show-WmtMessageBox -Owner $dialog -Message "System Restore has been ENABLED on $env:SystemDrive." -Title "Success" -Image Information | Out-Null
+                & $loadRestorePoints
             }
-            catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to enable protection.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
-            }
-        })
-
+            catch { Show-WmtMessageBox -Owner $dialog -Message "Failed to enable protection.`n$($_.Exception.Message)" -Title "Error" -Image Error | Out-Null }
+        }.GetNewClosure())
     $btnDisable.Add_Click({
-            $res = [System.Windows.Forms.MessageBox]::Show("Are you sure you want to disable System Restore on $env:SystemDrive?`n`nWARNING: This will immediately delete ALL existing restore points.", "Confirm Disable", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($res -ne "Yes") { return }
+            $res = Show-WmtMessageBox -Owner $dialog -Message "Are you sure you want to disable System Restore on $env:SystemDrive?`n`nWARNING: This will immediately delete ALL existing restore points." -Title "Confirm Disable" -Button YesNo -Image Warning
+            if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
             try {
                 Disable-ComputerRestore -Drive "$env:SystemDrive\" -ErrorAction Stop
-                [System.Windows.Forms.MessageBox]::Show("System Restore has been DISABLED.", "Success", "OK", "Information") | Out-Null
-                & $LoadRestorePoints
+                Show-WmtMessageBox -Owner $dialog -Message "System Restore has been DISABLED." -Title "Success" -Image Information | Out-Null
+                & $loadRestorePoints
             }
-            catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to disable protection.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
-            }
-        })
-
+            catch { Show-WmtMessageBox -Owner $dialog -Message "Failed to disable protection.`n$($_.Exception.Message)" -Title "Error" -Image Error | Out-Null }
+        }.GetNewClosure())
     $btnCreate.Add_Click({
-            $desc = [Microsoft.VisualBasic.Interaction]::InputBox("Description for the restore point:", "Create Restore Point", "WMT Manual Restore Point")
+            $desc = Show-WmtInputDialog -Title "Create Restore Point" -Prompt "Description for the restore point:" -DefaultValue "WMT Manual Restore Point"
             if ([string]::IsNullOrWhiteSpace($desc)) { return }
             try {
                 Checkpoint-Computer -Description $desc -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop | Out-Null
-                [System.Windows.Forms.MessageBox]::Show("Restore point created successfully.", "Success", "OK", "Information") | Out-Null
+                Show-WmtMessageBox -Owner $dialog -Message "Restore point created successfully." -Title "Success" -Image Information | Out-Null
             }
-            catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to create restore point.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
-            }
-            & $LoadRestorePoints
-        })
-
+            catch { Show-WmtMessageBox -Owner $dialog -Message "Failed to create restore point.`n$($_.Exception.Message)" -Title "Error" -Image Error | Out-Null }
+            & $loadRestorePoints
+        }.GetNewClosure())
     $btnDelete.Add_Click({
-            if ($dg.SelectedRows.Count -eq 0) { return }
-            $count = $dg.SelectedRows.Count
-            $res = [System.Windows.Forms.MessageBox]::Show("Delete $count selected restore point(s)?", "Confirm Delete", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($res -ne "Yes") { return }
-
-            $ok = 0
-            $fail = 0
-        
+            $selected = & $getSelectedRows
+            if ($selected.Count -eq 0) { return }
+            if ((Show-WmtMessageBox -Owner $dialog -Message "Delete $($selected.Count) selected restore point(s)?" -Title "Confirm Delete" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
             if (-not ([System.Management.Automation.PSTypeName]'Win32.SysRestoreAPI').Type) {
                 $apiCode = '[DllImport("srclient.dll")] public static extern int SRRemoveRestorePoint(int index);'
                 Add-Type -MemberDefinition $apiCode -Name "SysRestoreAPI" -Namespace "Win32" -ErrorAction SilentlyContinue
             }
-
-            foreach ($row in $dg.SelectedRows) {
-                $seq = 0
-                try { $seq = [int]$row.Cells["SequenceNumber"].Value } catch {}
+            $ok = 0; $fail = 0
+            foreach ($row in $selected) {
+                try { $seq = [int]$row["SequenceNumber"] } catch { $seq = 0 }
                 if ($seq -le 0) { $fail++; continue }
-            
                 try {
                     $ret = [Win32.SysRestoreAPI]::SRRemoveRestorePoint($seq)
-                    if ($ret -eq 0) { 
-                        $ok++ 
-                    }
-                    else { 
-                        $fail++
-                        [System.Windows.Forms.MessageBox]::Show("Deletion failed for Sequence $seq. Windows Error Code: $ret", "Error Details")
-                    }
+                    if ($ret -eq 0) { $ok++ } else { $fail++; Show-WmtMessageBox -Owner $dialog -Message "Deletion failed for Sequence $seq. Windows Error Code: $ret" -Title "Error Details" -Image Error | Out-Null }
                 }
-                catch { 
-                    $fail++
-                    [System.Windows.Forms.MessageBox]::Show("Exception for Sequence ${seq}: $($_.Exception.Message)", "Error Details")
-                }
+                catch { $fail++; Show-WmtMessageBox -Owner $dialog -Message "Exception for Sequence ${seq}: $($_.Exception.Message)" -Title "Error Details" -Image Error | Out-Null }
             }
-        
-            [System.Windows.Forms.MessageBox]::Show("Deleted: $ok`nFailed: $fail", "Deletion Complete", "OK", "Information") | Out-Null
-            & $LoadRestorePoints
-        })
-
+            Show-WmtMessageBox -Owner $dialog -Message "Deleted: $ok`nFailed: $fail" -Title "Deletion Complete" -Image Information | Out-Null
+            & $loadRestorePoints
+        }.GetNewClosure())
     $btnRestore.Add_Click({
-            if ($dg.SelectedRows.Count -ne 1) {
-                [System.Windows.Forms.MessageBox]::Show("Please select exactly ONE restore point to restore.", "Notice", "OK", "Warning") | Out-Null
-                return
-            }
-
-            $seq = 0
-            try { $seq = [int]$dg.SelectedRows[0].Cells["SequenceNumber"].Value } catch {}
+            $selected = & $getSelectedRows
+            if ($selected.Count -ne 1) { Show-WmtMessageBox -Owner $dialog -Message "Please select exactly ONE restore point to restore." -Title "Notice" -Image Warning | Out-Null; return }
+            try { $seq = [int]$selected[0]["SequenceNumber"] } catch { $seq = 0 }
             if ($seq -le 0) { return }
+            $res = Show-WmtMessageBox -Owner $dialog -Message "WARNING: This will restore your system to Sequence $seq and RESTART your computer immediately.`n`nPlease save all open work before proceeding.`n`nProceed with System Restore?" -Title "Confirm Restore" -Button YesNo -Image Warning
+            if ($res -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            try { Restore-Computer -RestorePoint $seq -Confirm:$false }
+            catch { Show-WmtMessageBox -Owner $dialog -Message "Failed to initialize restore.`n$($_.Exception.Message)" -Title "Error" -Image Error | Out-Null }
+        }.GetNewClosure())
+    $btnOpenUi.Add_Click({ Start-Process "rstrui.exe" }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
 
-            $res = [System.Windows.Forms.MessageBox]::Show("WARNING: This will restore your system to Sequence $seq and RESTART your computer immediately.`n`nPlease save all open work before proceeding.`n`nProceed with System Restore?", "Confirm Restore", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning)
-            if ($res -ne "Yes") { return }
-
-            try {
-                Restore-Computer -RestorePoint $seq -Confirm:$false
-            }
-            catch {
-                [System.Windows.Forms.MessageBox]::Show("Failed to initialize restore.`n$($_.Exception.Message)", "Error", "OK", "Error") | Out-Null
-            }
-        })
-    
-    $btnOpenUi.Add_Click({ Start-Process "rstrui.exe" })
-    $btnClose.Add_Click({ $f.Close() })
-
-    & $LoadRestorePoints
-    $f.ShowDialog() | Out-Null
+    & $loadRestorePoints
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 # --- STARTUP MANAGER (Windows / Tasks / Context Menu / Services) ---
 function Show-StartupManager {
     param([string]$DefaultTab = "Windows")
-    $f = New-Object System.Windows.Forms.Form
-    $f.Text = "Startup Manager"
-    $f.Size = "1220, 720"
-    $f.MinimumSize = "1020,600"
-    $f.StartPosition = "CenterScreen"
-    $f.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-    $f.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#1A1C21")
-    $f.ForeColor = [System.Drawing.Color]::White
 
-    $clrBg = [System.Drawing.ColorTranslator]::FromHtml("#1A1C21")
-    $clrPanel = [System.Drawing.ColorTranslator]::FromHtml("#202329")
-    $clrElev = [System.Drawing.ColorTranslator]::FromHtml("#252932")
-    $clrLine = [System.Drawing.ColorTranslator]::FromHtml("#2F3540")
-    $clrText = [System.Drawing.Color]::White
-    $clrTextMuted = [System.Drawing.ColorTranslator]::FromHtml("#A7AFBA")
-    $clrAccent = [System.Drawing.ColorTranslator]::FromHtml("#00B7FF")
-    $clrSel = [System.Drawing.ColorTranslator]::FromHtml("#0095E0")
+    $content = @"
+    <Grid Margin="14">
+        <TabControl Name="tabStartup"/>
+    </Grid>
+"@
+    $dialog = New-WmtWindowFromXaml -Title "Startup Manager" -ContentXaml $content -Width 1220 -Height 720 -MinWidth 960 -MinHeight 560
+    $tabControl = $dialog.FindName("tabStartup")
+    $tabs = @{}
 
-    # --- 1. HEADER PANEL ---
-    $tabHeader = New-Object System.Windows.Forms.Panel
-    $tabHeader.Dock = "Top"
-    $tabHeader.Height = 44
-    $tabHeader.BackColor = $clrBg
-    $f.Controls.Add($tabHeader)
-
-    # --- 2. MAIN CONTAINER ---
-    $mainContainer = New-Object System.Windows.Forms.Panel
-    $mainContainer.Dock = "Fill"
-    $mainContainer.BackColor = $clrBg
-    $f.Controls.Add($mainContainer)
-    $mainContainer.BringToFront()
-    
-    $views = @{}
-
-    # --- RIGHT-CLICK ROW SELECTION FIX ---
-    $RowSelectOnRightClick = {
-        param($eventSender, $e)
-        if ($e.Button -eq 'Right') {
-            $hit = $eventSender.HitTest($e.X, $e.Y)
-            if ($hit.Type -eq 'Cell') {
-                if (-not $eventSender.Rows[$hit.RowIndex].Selected) {
-                    $eventSender.ClearSelection()
-                    $eventSender.Rows[$hit.RowIndex].Selected = $true
-                }
-            }
+    function New-WmtStartupButton {
+        param([string]$Text, [string]$Role = "Standard")
+        $button = [System.Windows.Controls.Button]::new()
+        $button.Content = $Text
+        $button.MinWidth = 92
+        $button.Margin = [System.Windows.Thickness]::new(0, 0, 8, 8)
+        if ($Role -eq "Success") {
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Success"
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "SuccessText"
         }
+        elseif ($Role -eq "Danger") {
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Danger"
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "DangerText"
+        }
+        elseif ($Role -eq "Warning") {
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Warning"
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "WarningText"
+        }
+        elseif ($Role -eq "Primary") {
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "Accent"
+            Set-WmtThemedBrush -Object $button -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "AccentText"
+        }
+        return $button
     }
 
-    # --- 3. NAVIGATION LOGIC ---
-    function Switch-View([string]$title, [System.Windows.Forms.Button]$btn) {
-        if ($views.ContainsKey($title)) {
-            $views[$title].BringToFront()
+    function New-WmtStartupTab {
+        param([string]$Header)
+        $tab = [System.Windows.Controls.TabItem]::new()
+        $tab.Header = $Header
+        $root = [System.Windows.Controls.Grid]::new()
+        $root.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
+        foreach ($h in @("Auto", "*", "Auto")) {
+            $row = [System.Windows.Controls.RowDefinition]::new()
+            $row.Height = if ($h -eq "*") { [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) } else { [System.Windows.GridLength]::Auto }
+            [void]$root.RowDefinitions.Add($row)
         }
-        foreach ($ctrl in $tabHeader.Controls) {
-            if ($ctrl -is [System.Windows.Forms.Button]) {
-                $ctrl.BackColor = $clrPanel
-                $ctrl.ForeColor = $clrTextMuted
-                $ctrl.FlatAppearance.BorderColor = $clrLine
-            }
-        }
-        if ($btn) {
-            $btn.BackColor = $clrElev
-            $btn.ForeColor = $clrText
-            $btn.FlatAppearance.BorderColor = $clrAccent
-        }
-        & $LoadTabOnDemand $title $false
+
+        $top = [System.Windows.Controls.Grid]::new()
+        $top.Margin = [System.Windows.Thickness]::new(0, 0, 0, 10)
+        $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
+        $top.ColumnDefinitions.Add([System.Windows.Controls.ColumnDefinition]::new()) | Out-Null
+        $top.ColumnDefinitions[0].Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star)
+        $top.ColumnDefinitions[1].Width = [System.Windows.GridLength]::Auto
+        $search = [System.Windows.Controls.TextBox]::new()
+        $search.Height = 34
+        $search.VerticalContentAlignment = [System.Windows.VerticalAlignment]::Center
+        $search.ToolTip = "Search"
+        [void]$top.Children.Add($search)
+        $count = [System.Windows.Controls.TextBlock]::new()
+        $count.Margin = [System.Windows.Thickness]::new(12, 7, 0, 0)
+        Set-WmtThemedBrush -Object $count -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
+        [System.Windows.Controls.Grid]::SetColumn($count, 1)
+        [void]$top.Children.Add($count)
+        [System.Windows.Controls.Grid]::SetRow($top, 0)
+        [void]$root.Children.Add($top)
+
+        $grid = [System.Windows.Controls.DataGrid]::new()
+        $grid.IsReadOnly = $true
+        $grid.CanUserAddRows = $false
+        $grid.CanUserDeleteRows = $false
+        $grid.SelectionMode = [System.Windows.Controls.DataGridSelectionMode]::Extended
+        $grid.AlternationCount = 2
+        [System.Windows.Controls.Grid]::SetRow($grid, 1)
+        [void]$root.Children.Add($grid)
+
+        $buttons = [System.Windows.Controls.WrapPanel]::new()
+        $buttons.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+        $buttons.Margin = [System.Windows.Thickness]::new(0, 12, 0, 0)
+        [System.Windows.Controls.Grid]::SetRow($buttons, 2)
+        [void]$root.Children.Add($buttons)
+
+        $tab.Content = $root
+        [void]$tabControl.Items.Add($tab)
+        $obj = [PSCustomObject]@{ Header = $Header; Tab = $tab; Grid = $grid; SearchBox = $search; CountLabel = $count; Buttons = $buttons; Meta = $null }
+        $tabs[$Header] = $obj
+        return $obj
     }
 
-    function New-TabBtn($text, $x) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text
-        $b.Left = $x; $b.Top = 6; $b.Width = 160; $b.Height = 32
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.FlatAppearance.BorderColor = $clrLine
-        $b.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9)
-        $b.BackColor = $clrPanel
-        $b.ForeColor = $clrTextMuted
-        $b.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $b.Add_Click({ Switch-View $this.Text $this })
-        $tabHeader.Controls.Add($b)
-        return $b
-    }
-
-    $btnWinTab = New-TabBtn "Windows" 14
-    $btnTaskTab = New-TabBtn "Scheduled Tasks" 180
-    $btnCtxTab = New-TabBtn "Context Menu" 346
-    $btnSvcTab = New-TabBtn "Services" 512
-
-    # --- 4. VIEW FACTORY ---
-    function New-TabPage([string]$title) {
-        $tp = New-Object System.Windows.Forms.Panel
-        $tp.Dock = "Fill"
-        $tp.BackColor = $clrBg
-        $tp.ForeColor = $clrText
-        $tp.Padding = New-Object System.Windows.Forms.Padding(0, 4, 0, 0)
-        
-        $views[$title] = $tp
-        $mainContainer.Controls.Add($tp)
-
-        $top = New-Object System.Windows.Forms.Panel
-        $top.Dock = "Top"
-        $top.Height = 48
-        $top.BackColor = $clrPanel
-        $tp.Controls.Add($top)
-
-        $topLine = New-Object System.Windows.Forms.Panel
-        $topLine.Dock = "Bottom"
-        $topLine.Height = 1
-        $topLine.BackColor = $clrLine
-        $top.Controls.Add($topLine)
-
-        $lblSearch = New-Object System.Windows.Forms.Label
-        $lblSearch.Text = "Search:"
-        $lblSearch.Left = 14
-        $lblSearch.Top = 16
-        $lblSearch.AutoSize = $true
-        $lblSearch.ForeColor = $clrText
-        $lblSearch.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 9)
-        $top.Controls.Add($lblSearch)
-
-        $txtSearch = New-Object System.Windows.Forms.TextBox
-        $txtSearch.Left = 70
-        $txtSearch.Top = 11
-        $txtSearch.Width = 360
-        $txtSearch.BorderStyle = "FixedSingle"
-        $txtSearch.BackColor = $clrBg
-        $txtSearch.ForeColor = $clrText
-        $txtSearch.Anchor = "Top, Left"
-        $top.Controls.Add($txtSearch)
-
-        $btnClear = New-Object System.Windows.Forms.Button
-        $btnClear.Text = "Clear"
-        $btnClear.Left = 438
-        $btnClear.Top = 10
-        $btnClear.Width = 70
-        $btnClear.Height = 26
-        $btnClear.FlatStyle = "Flat"
-        $btnClear.FlatAppearance.BorderSize = 1
-        $btnClear.FlatAppearance.BorderColor = $clrLine
-        $btnClear.BackColor = $clrElev
-        $btnClear.ForeColor = $clrText
-        $btnClear.Anchor = "Top, Left"
-        $btnClear.Add_Click({ $txtSearch.Text = "" })
-        $top.Controls.Add($btnClear)
-
-        $lblCount = New-Object System.Windows.Forms.Label
-        $lblCount.Text = "0 items"
-        $lblCount.AutoSize = $true
-        $lblCount.Left = 520
-        $lblCount.Top = 16
-        $lblCount.ForeColor = $clrTextMuted
-        $lblCount.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-        $top.Controls.Add($lblCount)
-
-        $pnl = New-Object System.Windows.Forms.Panel
-        $pnl.Dock = "Bottom"
-        $pnl.Height = 74
-        $pnl.BackColor = $clrPanel
-        $tp.Controls.Add($pnl)
-
-        $botLine = New-Object System.Windows.Forms.Panel
-        $botLine.Dock = "Top"
-        $botLine.Height = 1
-        $botLine.BackColor = $clrLine
-        $pnl.Controls.Add($botLine)
-
-        $dg = New-Object System.Windows.Forms.DataGridView
-        $dg.Dock = "Fill"
-        $dg.AutoSizeColumnsMode = "Fill"
-        $dg.AutoGenerateColumns = $true
-        $dg.ColumnHeadersVisible = $true
-        $dg.ColumnHeadersHeightSizeMode = [System.Windows.Forms.DataGridViewColumnHeadersHeightSizeMode]::DisableResizing
-        $dg.SelectionMode = "FullRowSelect"
-        $dg.MultiSelect = $true
-        $dg.ReadOnly = $true
-        $dg.AllowUserToAddRows = $false
-        $dg.CellBorderStyle = "SingleHorizontal"
-        $dg.RowTemplate.Height = 27
-        
-        $dg.BackgroundColor = $clrBg 
-        $dg.BorderStyle = [System.Windows.Forms.BorderStyle]::None
-        
-        $dg.DefaultCellStyle.BackColor = $clrBg
-        $dg.DefaultCellStyle.ForeColor = $clrText
-        $dg.DefaultCellStyle.SelectionBackColor = $clrSel
-        $dg.DefaultCellStyle.SelectionForeColor = $clrText
-        
-        $dg.EnableHeadersVisualStyles = $false
-        $dg.ColumnHeadersDefaultCellStyle.BackColor = $clrPanel
-        $dg.ColumnHeadersDefaultCellStyle.ForeColor = $clrTextMuted
-        $dg.ColumnHeadersBorderStyle = [System.Windows.Forms.DataGridViewHeaderBorderStyle]::Single
-        $dg.ColumnHeadersDefaultCellStyle.Padding = (New-Object System.Windows.Forms.Padding 5)
-        $dg.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI Semibold", 8.5)
-        $dg.ColumnHeadersHeight = 34
-        
-        $dg.RowHeadersVisible = $false
-        $dg.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.ColorTranslator]::FromHtml("#202329")
-        $dg.GridColor = $clrLine
-        Set-WmtDoubleBuffered -Control $dg
-        
-        $dg.Add_MouseDown($RowSelectOnRightClick)
-
-        $tp.Controls.Add($dg)
-        $dg.BringToFront()
-
-        $dg.Add_CellFormatting({
-                param($eventSender, $e)
-                if ($null -ne $e.Value) {
-                    $val = $e.Value.ToString().ToLower()
-                    if ($val -eq 'yes' -or $val -eq 'running' -or $val -eq 'ready' -or $val -eq 'automatic') {
-                        $e.CellStyle.ForeColor = [System.Drawing.Color]::LightGreen
-                    }
-                    elseif ($val -eq 'no' -or $val -eq 'stopped' -or $val -eq 'disabled') {
-                        $e.CellStyle.ForeColor = [System.Drawing.Color]::IndianRed
-                    }
-                    elseif ($val -eq 'manual') {
-                        $e.CellStyle.ForeColor = [System.Drawing.Color]::Yellow
-                    }
-                }
-            })
-
-        return [PSCustomObject]@{
-            Tab = $tp; Grid = $dg; Panel = $pnl; SearchBox = $txtSearch; CountLabel = $lblCount; ClearButton = $btnClear; Meta = $null
-        }
-    }
-
-    function New-StartupBtn($parent, $text, $x, $color = $null) {
-        $b = New-Object System.Windows.Forms.Button
-        $b.Text = $text
-        $b.Left = $x; $b.Top = 18; $b.Width = 108; $b.Height = 34
-        $b.FlatStyle = "Flat"
-        $b.FlatAppearance.BorderSize = 1
-        $b.FlatAppearance.BorderColor = $clrLine
-        $b.ForeColor = $clrText
-        if ($color) {
-            $b.BackColor = [System.Drawing.ColorTranslator]::FromHtml($color)
-            $b.FlatAppearance.MouseOverBackColor = [System.Windows.Forms.ControlPaint]::Light($b.BackColor)
-        }
-        else {
-            $b.BackColor = $clrElev
-            $b.FlatAppearance.MouseOverBackColor = [System.Drawing.ColorTranslator]::FromHtml("#323844")
-        }
-        $parent.Controls.Add($b)
-        return $b
-    }
-
-    function Add-GridContextMenu {
-        param([System.Windows.Forms.DataGridView]$Grid, [System.Windows.Forms.Button[]]$Buttons)
-        $cms = New-Object System.Windows.Forms.ContextMenuStrip
-        $cms.BackColor = $clrElev
-        $cms.ForeColor = $clrText
-        $cms.ShowImageMargin = $false
-        $cms.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-
-        foreach ($btn in $Buttons) {
-            $item = $cms.Items.Add($btn.Text)
-            $item.Tag = $btn 
-            $item.Add_Click({
-                    $this.Tag.PerformClick()
-                })
-        }
-        $Grid.ContextMenuStrip = $cms
-    }
-
-    function Show-StartupRowDetails {
-        param([System.Windows.Forms.DataGridView]$Grid, [string]$Title = "Details")
-        if (-not $Grid -or $Grid.SelectedRows.Count -eq 0) { return }
-        $row = $Grid.SelectedRows[0]
-        $lines = New-Object System.Collections.Generic.List[string]
-        foreach ($col in $Grid.Columns) {
-            $name = $col.Name
-            $val = ""
-            try { $val = "$($row.Cells[$name].Value)" } catch { $val = "" }
-            if ([string]::IsNullOrWhiteSpace($val)) { continue }
-            [void]$lines.Add(("{0}: {1}" -f $name, $val))
-        }
-        if ($lines.Count -eq 0) { return }
-        Show-TextDialog -Title $Title -Text ($lines -join "`r`n")
-    }
-
-    function Set-TabData {
-        param($TabObj, [System.Data.DataTable]$DataTable, [string[]]$SearchColumns)
-        $bs = New-Object System.Windows.Forms.BindingSource
-        $bs.DataSource = $DataTable
-        $TabObj.Grid.DataSource = $bs
-        $TabObj.Meta = [PSCustomObject]@{ Table = $DataTable; Binding = $bs; SearchColumns = $SearchColumns }
+    function Set-WmtStartupTabData {
+        param($TabObj, [System.Data.DataTable]$DataTable, [string[]]$SearchColumns, [string[]]$Hidden = @(), [hashtable]$Widths = @{})
+        $TabObj.Grid.ItemsSource = $DataTable.DefaultView
+        Set-WmtDataGridColumns -DataGrid $TabObj.Grid -Columns @($DataTable.Columns | ForEach-Object { $_.ColumnName }) -Widths $Widths -Hidden $Hidden
+        $TabObj.Meta = [PSCustomObject]@{ Table = $DataTable; View = $DataTable.DefaultView; SearchColumns = $SearchColumns }
         $TabObj.CountLabel.Text = "$($DataTable.Rows.Count) items"
     }
 
-    function Update-TabFilter {
+    function Update-WmtStartupTabFilter {
         param($TabObj)
         if (-not $TabObj -or -not $TabObj.Meta) { return }
-        $meta = $TabObj.Meta
         $q = $TabObj.SearchBox.Text.Trim()
-        
         if ([string]::IsNullOrWhiteSpace($q)) {
-            $meta.Binding.RemoveFilter()
-            $TabObj.CountLabel.Text = "$($meta.Table.Rows.Count) items"
+            $TabObj.Meta.View.RowFilter = ""
+            $TabObj.CountLabel.Text = "$($TabObj.Meta.Table.Rows.Count) items"
             return
         }
         $safe = $q.Replace("'", "''").Replace("[", "[[]").Replace("%", "[%]").Replace("*", "[*]")
         $clauses = @()
-        foreach ($col in $meta.SearchColumns) {
-            if ($meta.Table.Columns.Contains($col)) {
-                $clauses += "CONVERT([$col], 'System.String') LIKE '%$safe%'"
-            }
+        foreach ($col in $TabObj.Meta.SearchColumns) {
+            if ($TabObj.Meta.Table.Columns.Contains($col)) { $clauses += "CONVERT([$col], 'System.String') LIKE '%$safe%'" }
         }
-        if ($clauses.Count -gt 0) {
-            try {
-                $meta.Binding.Filter = ($clauses -join " OR ")
-                $TabObj.CountLabel.Text = "$($meta.Binding.Count) shown / $($meta.Table.Rows.Count) total"
-            }
-            catch {
-                $meta.Binding.RemoveFilter()
-                $TabObj.CountLabel.Text = "$($meta.Table.Rows.Count) items"
-            }
+        try { $TabObj.Meta.View.RowFilter = ($clauses -join " OR ") } catch { $TabObj.Meta.View.RowFilter = "" }
+        $TabObj.CountLabel.Text = "$($TabObj.Meta.View.Count) shown / $($TabObj.Meta.Table.Rows.Count) total"
+    }
+
+    function Show-WmtStartupRowDetails {
+        param($TabObj, [string]$Title)
+        $row = Get-WmtDataGridSelectedRows -DataGrid $TabObj.Grid | Select-Object -First 1
+        if (-not $row) { return }
+        $lines = [System.Collections.Generic.List[string]]::new()
+        foreach ($col in $TabObj.Meta.Table.Columns) {
+            $name = $col.ColumnName
+            $val = [string]$row[$name]
+            if (-not [string]::IsNullOrWhiteSpace($val)) { [void]$lines.Add("{0}: {1}" -f $name, $val) }
         }
+        if ($lines.Count -gt 0) { Show-TextDialog -Title $Title -Text ($lines -join "`r`n") }
+    }
+
+    function Remove-WmtDataRows {
+        param($TabObj, [object[]]$Rows)
+        foreach ($row in @($Rows)) { try { $row.Delete() } catch {} }
+        $TabObj.Meta.Table.AcceptChanges()
+        Update-WmtStartupTabFilter -TabObj $TabObj
     }
 
     function Get-StartupApprovedState {
         param([string]$Type, [string]$RootPath, [string]$ValueName)
-        $approvedPath = ""
-        
-        if ($Type -eq "Registry") {
-            # Route 32-bit Run keys to the native Run32 StartupApproved location
-            if ($RootPath -match "(?i)WOW6432Node") {
-                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            else {
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
-            }
+        $approvedPath = if ($Type -eq "Registry") {
+            if ($RootPath -match "(?i)WOW6432Node") { $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32" }
+            else { $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run" }
         }
         else {
-            if ($RootPath -match "(?i)Roaming") {
-                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
-            else {
-                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
+            if ($RootPath -match "(?i)Roaming") { "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder" }
+            else { "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder" }
         }
-    
         if ($approvedPath -and (Test-Path $approvedPath)) {
             $val = Get-ItemProperty -Path $approvedPath -ErrorAction SilentlyContinue
-            if ($null -ne $val.$ValueName) {
-                return ($val.$ValueName[0] % 2 -eq 0)
-            }
+            if ($null -ne $val.$ValueName) { return ($val.$ValueName[0] % 2 -eq 0) }
         }
         return $true
     }
-    
-    function Get-RegRunEntries([string]$Path, [string]$Scope) {
-        $items = @()
-        if (-not (Test-Path $Path)) { return $items }
-        
-        $props = Get-ItemProperty -Path $Path -ErrorAction SilentlyContinue
-        if (-not $props) { return $items }
-        
-        foreach ($p in $props.PSObject.Properties) {
-            if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
-            
-            $isEnabled = Get-StartupApprovedState -Type "Registry" -RootPath $Path -ValueName $p.Name
-            
-            $items += [PSCustomObject]@{
-                Name = $p.Name; Command = "$($p.Value)"; Location = $Path; EntryType = "Registry"
-                Scope = $Scope; Enabled = $isEnabled; ItemPath = $Path; ValueName = $p.Name; RootRunPath = $Path
-            }
-        }
-        return $items
-    }
-    
-    function Get-StartupFolderEntries([string]$Path, [string]$Scope) {
-        $items = @()
-        if (-not (Test-Path $Path)) { return $items }
-        
-        foreach ($filePath in Get-WmtEnumeratedFiles -Path $Path) {
-            $file = [System.IO.FileInfo]::new($filePath)
-            $isEnabled = Get-StartupApprovedState -Type "StartupFolder" -RootPath $Path -ValueName $file.Name
-            
-            $items += [PSCustomObject]@{
-                Name = $file.BaseName; Command = $file.FullName; Location = $Path; EntryType = "StartupFolder"
-                Scope = $Scope; Enabled = $isEnabled; ItemPath = $file.FullName; ValueName = $file.Name; RootRunPath = $Path
-            }
-        }
-        return $items
-    }
-
-    # =========================================================================
-    # Tab 1: Windows Startup
-    # =========================================================================
-    $winTab = New-TabPage "Windows"
 
     function Set-StartupApprovedState {
         param([string]$Type, [string]$RootPath, [string]$ValueName, [bool]$Enable)
-        $approvedPath = ""
-        
-        if ($Type -eq "Registry") {
-            # Route 32-bit Run keys to the native Run32 StartupApproved location
-            if ($RootPath -match "(?i)WOW6432Node") {
-                $approvedPath = $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32"
-            }
-            else {
-                $approvedPath = $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run"
-            }
+        $approvedPath = if ($Type -eq "Registry") {
+            if ($RootPath -match "(?i)WOW6432Node") { $RootPath -replace "(?i)WOW6432Node\\", "" -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run32" }
+            else { $RootPath -replace "(?i)CurrentVersion\\Run", "CurrentVersion\Explorer\StartupApproved\Run" }
         }
         else {
-            if ($RootPath -match "(?i)Roaming") {
-                $approvedPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
-            else {
-                $approvedPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder"
-            }
+            if ($RootPath -match "(?i)Roaming") { "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder" }
+            else { "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\StartupFolder" }
         }
-
         if (-not (Test-Path $approvedPath)) { New-Item -Path $approvedPath -Force | Out-Null }
-
         $stateByte = if ($Enable) { [byte]0x02 } else { [byte]0x03 }
-        $timeBytes = [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
-        $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + $timeBytes
-
+        $payload = [byte[]]($stateByte, 0x00, 0x00, 0x00) + [BitConverter]::GetBytes([DateTime]::Now.ToFileTime())
         Set-ItemProperty -Path $approvedPath -Name $ValueName -Value $payload -Type Binary -ErrorAction SilentlyContinue
     }
 
-    $LoadWindowsStartup = {
-        $items = @()
-        $items += Get-RegRunEntries "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run" "Current User"
-        $items += Get-RegRunEntries "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run" "All Users"
-        $items += Get-RegRunEntries "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run" "All Users (32-bit)"
-        $items += Get-StartupFolderEntries "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup" "Current User"
-        $items += Get-StartupFolderEntries "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup" "All Users"
-        
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("Name"); $dt.Columns.Add("Enabled"); $dt.Columns.Add("Scope"); $dt.Columns.Add("Type")
-        $dt.Columns.Add("Command"); $dt.Columns.Add("Location"); $dt.Columns.Add("ItemPath")
-        $dt.Columns.Add("ValueName"); $dt.Columns.Add("RootRunPath")
+    $winTab = New-WmtStartupTab "Windows"
+    $taskTab = New-WmtStartupTab "Scheduled Tasks"
+    $ctxTab = New-WmtStartupTab "Context Menu"
+    $svcTab = New-WmtStartupTab "Services"
 
-        foreach ($i in $items) {
-            $r = $dt.NewRow()
-            $r["Name"] = $i.Name; $r["Enabled"] = if ($i.Enabled) { "Yes" } else { "No" }; $r["Scope"] = $i.Scope
-            $r["Type"] = $i.EntryType; $r["Command"] = $i.Command; $r["Location"] = $i.Location
-            $r["ItemPath"] = $i.ItemPath; $r["ValueName"] = $i.ValueName; $r["RootRunPath"] = $i.RootRunPath
-            $dt.Rows.Add($r)
-        }
-
-        Set-TabData -TabObj $winTab -DataTable $dt -SearchColumns @("Name", "Enabled", "Scope", "Type", "Command", "Location")
-        $winTab.Grid.AutoSizeColumnsMode = "Fill"
-        if ($winTab.Grid.Columns["Name"]) { $winTab.Grid.Columns["Name"].FillWeight = 44 }
-        if ($winTab.Grid.Columns["Enabled"]) { $winTab.Grid.Columns["Enabled"].FillWeight = 12 }
-        if ($winTab.Grid.Columns["Scope"]) { $winTab.Grid.Columns["Scope"].FillWeight = 24 }
-        if ($winTab.Grid.Columns["Type"]) { $winTab.Grid.Columns["Type"].FillWeight = 20 }
-        if ($winTab.Grid.Columns["ItemPath"]) { $winTab.Grid.Columns["ItemPath"].Visible = $false }
-        if ($winTab.Grid.Columns["ValueName"]) { $winTab.Grid.Columns["ValueName"].Visible = $false }
-        if ($winTab.Grid.Columns["RootRunPath"]) { $winTab.Grid.Columns["RootRunPath"].Visible = $false }
-        if ($winTab.Grid.Columns["Location"]) { $winTab.Grid.Columns["Location"].Visible = $false }
-        if ($winTab.Grid.Columns["Command"]) { $winTab.Grid.Columns["Command"].Visible = $false }
-        
-        Update-TabFilter -TabObj $winTab
-    }
-
-    $btnWinRefresh = New-StartupBtn $winTab.Panel "Refresh" 15
-    $btnWinDetails = New-StartupBtn $winTab.Panel "Details" 145
-    $btnWinEnable = New-StartupBtn $winTab.Panel "Enable" 275 "#1E6F43"
-    $btnWinDisable = New-StartupBtn $winTab.Panel "Disable" 405 "#8A6A00"
-    $btnWinDelete = New-StartupBtn $winTab.Panel "Delete" 535 "#7B2026"
-
-    Add-GridContextMenu -Grid $winTab.Grid -Buttons @($btnWinRefresh, $btnWinDetails, $btnWinEnable, $btnWinDisable, $btnWinDelete)
-
-    $winTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $winTab })
-    $btnWinDetails.Add_Click({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
-    $winTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $winTab.Grid -Title "Windows Startup Details" })
-
-    $btnWinEnable.Add_Click({
-            foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
-                Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $true
-                $row.DataBoundItem.Row["Enabled"] = "Yes"
-            }
-        })
-
-    $btnWinDisable.Add_Click({
-            foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"; $rootPath = "$($row.Cells["RootRunPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
-                Set-StartupApprovedState -Type $type -RootPath $rootPath -ValueName $valueName -Enable $false
-                $row.DataBoundItem.Row["Enabled"] = "No"
-            }
-        })
-
-    $btnWinDelete.Add_Click({
-            if ($winTab.Grid.SelectedRows.Count -eq 0) { return }
-            if ([System.Windows.Forms.MessageBox]::Show("Delete selected entries?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
-            
-            $rowsToDelete = @()
-            foreach ($row in $winTab.Grid.SelectedRows) {
-                $type = "$($row.Cells["Type"].Value)"; $itemPath = "$($row.Cells["ItemPath"].Value)"; $valueName = "$($row.Cells["ValueName"].Value)"
-                if ($type -eq "StartupFolder") { try { Remove-Item -LiteralPath $itemPath -Force -ErrorAction SilentlyContinue } catch {} } 
-                elseif ($type -eq "Registry" -and $itemPath -and $valueName) { try { Remove-ItemProperty -Path $itemPath -Name $valueName -ErrorAction SilentlyContinue } catch {} }
-                $rowsToDelete += $row.DataBoundItem.Row
-            }
-            foreach ($dr in $rowsToDelete) { $dr.Delete() }
-            $winTab.Meta.Table.AcceptChanges()
-            Update-TabFilter -TabObj $winTab
-        })
-
-    # =========================================================================
-    # Tab 2: Scheduled Tasks
-    # =========================================================================
-    $taskTab = New-TabPage "Scheduled Tasks"
-    $LoadScheduledTasks = {
-        $tasks = Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("TaskName"); $dt.Columns.Add("Path"); $dt.Columns.Add("State")
-        foreach ($t in $tasks) {
-            $r = $dt.NewRow(); $r["TaskName"] = $t.TaskName; $r["Path"] = $t.TaskPath; $r["State"] = "$($t.State)"
-            $dt.Rows.Add($r)
-        }
-        Set-TabData -TabObj $taskTab -DataTable $dt -SearchColumns @("TaskName", "Path", "State")
-        Update-TabFilter -TabObj $taskTab
-    }
-
-    $btnTaskRefresh = New-StartupBtn $taskTab.Panel "Refresh" 15
-    $btnTaskDetails = New-StartupBtn $taskTab.Panel "Details" 145
-    $btnTaskEnable = New-StartupBtn $taskTab.Panel "Enable" 275 "#1E6F43"
-    $btnTaskDisable = New-StartupBtn $taskTab.Panel "Disable" 405 "#8A6A00"
-    $btnTaskDelete = New-StartupBtn $taskTab.Panel "Delete" 535 "#7B2026"
-
-    Add-GridContextMenu -Grid $taskTab.Grid -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
-
-    $taskTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $taskTab })
-    $btnTaskDetails.Add_Click({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Task Details" })
-    $taskTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $taskTab.Grid -Title "Task Details" })
-
-    $btnTaskEnable.Add_Click({
-            foreach ($row in $taskTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
-                if ($name -and $path) { 
-                    Enable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["State"] = "Ready"
+    $loadWindows = {
+        $table = New-WmtDataTable -Columns @("Name", "Enabled", "Scope", "Type", "Command", "Location", "ItemPath", "ValueName", "RootRunPath")
+        foreach ($def in @(
+                @{ Path = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"; Scope = "Current User" },
+                @{ Path = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"; Scope = "All Users" },
+                @{ Path = "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Run"; Scope = "All Users (32-bit)" }
+            )) {
+            if (Test-Path $def.Path) {
+                $props = Get-ItemProperty -Path $def.Path -ErrorAction SilentlyContinue
+                foreach ($p in $props.PSObject.Properties) {
+                    if ($p.Name -in @("PSPath", "PSParentPath", "PSChildName", "PSDrive", "PSProvider")) { continue }
+                    $row = $table.NewRow()
+                    $row["Name"] = $p.Name; $row["Enabled"] = if (Get-StartupApprovedState "Registry" $def.Path $p.Name) { "Yes" } else { "No" }
+                    $row["Scope"] = $def.Scope; $row["Type"] = "Registry"; $row["Command"] = [string]$p.Value; $row["Location"] = $def.Path
+                    $row["ItemPath"] = $def.Path; $row["ValueName"] = $p.Name; $row["RootRunPath"] = $def.Path
+                    [void]$table.Rows.Add($row)
                 }
             }
-        })
-
-    $btnTaskDisable.Add_Click({
-            foreach ($row in $taskTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
-                if ($name -and $path) { 
-                    Disable-ScheduledTask -TaskName $name -TaskPath $path -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["State"] = "Disabled"
+        }
+        foreach ($def in @(
+                @{ Path = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"; Scope = "Current User" },
+                @{ Path = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Startup"; Scope = "All Users" }
+            )) {
+            if (Test-Path $def.Path) {
+                foreach ($filePath in Get-WmtEnumeratedFiles -Path $def.Path) {
+                    $file = [System.IO.FileInfo]::new($filePath)
+                    $row = $table.NewRow()
+                    $row["Name"] = $file.BaseName; $row["Enabled"] = if (Get-StartupApprovedState "StartupFolder" $def.Path $file.Name) { "Yes" } else { "No" }
+                    $row["Scope"] = $def.Scope; $row["Type"] = "StartupFolder"; $row["Command"] = $file.FullName; $row["Location"] = $def.Path
+                    $row["ItemPath"] = $file.FullName; $row["ValueName"] = $file.Name; $row["RootRunPath"] = $def.Path
+                    [void]$table.Rows.Add($row)
                 }
             }
-        })
-
-    $btnTaskDelete.Add_Click({
-            if ($taskTab.Grid.SelectedRows.Count -eq 0) { return }
-            if ([System.Windows.Forms.MessageBox]::Show("Delete selected tasks?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
-            
-            $rowsToDelete = @()
-            foreach ($row in $taskTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["TaskName"].Value)"; $path = "$($row.Cells["Path"].Value)"
-                if ($name -and $path) { Unregister-ScheduledTask -TaskName $name -TaskPath $path -Confirm:$false -ErrorAction SilentlyContinue }
-                $rowsToDelete += $row.DataBoundItem.Row
-            }
-            foreach ($dr in $rowsToDelete) { $dr.Delete() }
-            $taskTab.Meta.Table.AcceptChanges()
-            Update-TabFilter -TabObj $taskTab
-        })
-
-    # =========================================================================
-    # Tab 3: Context Menu
-    # =========================================================================
-    $ctxTab = New-TabPage "Context Menu"
-    
-    $LoadContextMenu = {
-        if (-not (Get-PSDrive HKCR -ErrorAction SilentlyContinue)) {
-            New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null
         }
+        Set-WmtStartupTabData $winTab $table @("Name", "Enabled", "Scope", "Type", "Command", "Location") @("Command", "Location", "ItemPath", "ValueName", "RootRunPath") @{ Name = "*"; Enabled = 80; Scope = 160; Type = 130 }
+        Update-WmtStartupTabFilter $winTab
+    }.GetNewClosure()
 
-        $items = @()
-        $roots = @(
-            @{ Path = "HKCR:\*\shell"; RootName = "All Files (*)" },
-            @{ Path = "HKCR:\Directory\shell"; RootName = "Directory" },
-            @{ Path = "HKCR:\Directory\Background\shell"; RootName = "Directory Background" },
-            @{ Path = "HKCR:\Drive\shell"; RootName = "Drive" }
-        )
-        
-        foreach ($r in $roots) {
-            if (-not (Test-Path -LiteralPath $r.Path -ErrorAction SilentlyContinue)) { continue }
-            
-            $subs = Get-ChildItem -LiteralPath $r.Path -ErrorAction SilentlyContinue
-            if (-not $subs) { continue }
+    $loadTasks = {
+        $table = New-WmtDataTable -Columns @("TaskName", "Path", "State")
+        foreach ($t in @(Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State)) {
+            $row = $table.NewRow(); $row["TaskName"] = $t.TaskName; $row["Path"] = $t.TaskPath; $row["State"] = [string]$t.State; [void]$table.Rows.Add($row)
+        }
+        Set-WmtStartupTabData $taskTab $table @("TaskName", "Path", "State") @() @{ TaskName = "*"; Path = 260; State = 120 }
+        Update-WmtStartupTabFilter $taskTab
+    }.GetNewClosure()
 
-            foreach ($s in $subs) {
-                $enabled = "Yes"
-                $disableProp = Get-ItemProperty -LiteralPath $s.PSPath -Name "LegacyDisable" -ErrorAction SilentlyContinue
-                if ($null -ne $disableProp) { $enabled = "No" }
-                
-                $items += [PSCustomObject]@{ Name = $s.PSChildName; Enabled = $enabled; Root = $r.RootName; Path = $s.PSPath; KeyName = $s.Name }
+    $loadContext = {
+        if (-not (Get-PSDrive HKCR -ErrorAction SilentlyContinue)) { New-PSDrive -Name HKCR -PSProvider Registry -Root HKEY_CLASSES_ROOT -ErrorAction SilentlyContinue | Out-Null }
+        $table = New-WmtDataTable -Columns @("Name", "Enabled", "Root", "Path", "KeyName")
+        foreach ($r in @(
+                @{ Path = "HKCR:\*\shell"; RootName = "All Files (*)" },
+                @{ Path = "HKCR:\Directory\shell"; RootName = "Directory" },
+                @{ Path = "HKCR:\Directory\Background\shell"; RootName = "Directory Background" },
+                @{ Path = "HKCR:\Drive\shell"; RootName = "Drive" }
+            )) {
+            foreach ($s in @(Get-ChildItem -LiteralPath $r.Path -ErrorAction SilentlyContinue)) {
+                $row = $table.NewRow()
+                $row["Name"] = $s.PSChildName
+                $row["Enabled"] = if ($null -ne (Get-ItemProperty -LiteralPath $s.PSPath -Name "LegacyDisable" -ErrorAction SilentlyContinue)) { "No" } else { "Yes" }
+                $row["Root"] = $r.RootName; $row["Path"] = $s.PSPath; $row["KeyName"] = $s.Name
+                [void]$table.Rows.Add($row)
             }
         }
-        
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("Name")
-        $dt.Columns.Add("Enabled")
-        $dt.Columns.Add("Root")
-        $dt.Columns.Add("Path")
-        $dt.Columns.Add("KeyName")
+        Set-WmtStartupTabData $ctxTab $table @("Name", "Enabled", "Root", "KeyName") @("Path", "KeyName") @{ Name = "*"; Enabled = 80; Root = 210 }
+        Update-WmtStartupTabFilter $ctxTab
+    }.GetNewClosure()
 
-        foreach ($i in $items) {
-            $r = $dt.NewRow()
-            $r["Name"] = "$($i.Name)"; $r["Enabled"] = "$($i.Enabled)"; $r["Root"] = "$($i.Root)"
-            $r["Path"] = "$($i.Path)"; $r["KeyName"] = "$($i.KeyName)"
-            $dt.Rows.Add($r)
-        }
-
-        Set-TabData -TabObj $ctxTab -DataTable $dt -SearchColumns @("Name", "Enabled", "Root", "KeyName")
-        
-        $ctxTab.Grid.AutoSizeColumnsMode = "Fill"
-        if ($ctxTab.Grid.Columns["Name"]) { $ctxTab.Grid.Columns["Name"].FillWeight = 68 }
-        if ($ctxTab.Grid.Columns["Enabled"]) { $ctxTab.Grid.Columns["Enabled"].FillWeight = 12 }
-        if ($ctxTab.Grid.Columns["Root"]) { $ctxTab.Grid.Columns["Root"].FillWeight = 20 }
-        if ($ctxTab.Grid.Columns["Path"]) { $ctxTab.Grid.Columns["Path"].Visible = $false }
-        if ($ctxTab.Grid.Columns["KeyName"]) { $ctxTab.Grid.Columns["KeyName"].Visible = $false }
-        
-        Update-TabFilter -TabObj $ctxTab
-    }
-
-    $btnCtxRefresh = New-StartupBtn $ctxTab.Panel "Refresh" 15
-    $btnCtxDetails = New-StartupBtn $ctxTab.Panel "Details" 145
-    $btnCtxEnable = New-StartupBtn $ctxTab.Panel "Enable" 275 "#1E6F43"
-    $btnCtxDisable = New-StartupBtn $ctxTab.Panel "Disable" 405 "#8A6A00"
-    $btnCtxDelete = New-StartupBtn $ctxTab.Panel "Delete" 535 "#7B2026"
-    
-    Add-GridContextMenu -Grid $ctxTab.Grid -Buttons @($btnCtxRefresh, $btnCtxDetails, $btnCtxEnable, $btnCtxDisable, $btnCtxDelete)
-
-    $ctxTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $ctxTab })
-    $btnCtxDetails.Add_Click({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
-    $ctxTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $ctxTab.Grid -Title "Context Menu Details" })
-
-    $btnCtxEnable.Add_Click({
-            foreach ($row in $ctxTab.Grid.SelectedRows) {
-                $path = "$($row.Cells["Path"].Value)"
-                if ($path -and (Test-Path -LiteralPath $path)) { 
-                    Remove-ItemProperty -LiteralPath $path -Name "LegacyDisable" -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["Enabled"] = "Yes"
-                }
-            }
-        })
-    
-    $btnCtxDisable.Add_Click({
-            foreach ($row in $ctxTab.Grid.SelectedRows) {
-                $path = "$($row.Cells["Path"].Value)"
-                if ($path -and (Test-Path -LiteralPath $path)) { 
-                    Set-ItemProperty -LiteralPath $path -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["Enabled"] = "No"
-                }
-            }
-        })
-    
-    $btnCtxDelete.Add_Click({
-            if ($ctxTab.Grid.SelectedRows.Count -eq 0) { return }
-            if ([System.Windows.Forms.MessageBox]::Show("Delete selected context menu entries?", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
-            
-            $rowsToDelete = @()
-            foreach ($row in $ctxTab.Grid.SelectedRows) {
-                $path = "$($row.Cells["Path"].Value)"
-                if ($path -and (Test-Path -LiteralPath $path)) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue }
-                $rowsToDelete += $row.DataBoundItem.Row
-            }
-            foreach ($dr in $rowsToDelete) { $dr.Delete() }
-            $ctxTab.Meta.Table.AcceptChanges()
-            Update-TabFilter -TabObj $ctxTab
-        })
-
-    # =========================================================================
-    # Tab 4: Services
-    # =========================================================================
-    $svcTab = New-TabPage "Services"
-    $LoadServices = {
-        $svcs = Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName
-        $dt = New-Object System.Data.DataTable
-        $dt.Columns.Add("Name"); $dt.Columns.Add("DisplayName"); $dt.Columns.Add("StartType"); $dt.Columns.Add("State")
-
-        foreach ($s in $svcs) {
+    $loadServices = {
+        $table = New-WmtDataTable -Columns @("Name", "DisplayName", "StartType", "State")
+        foreach ($s in @(Get-Service -ErrorAction SilentlyContinue | Sort-Object DisplayName)) {
             $startType = "Unknown"
             try {
-                $startRaw = (Get-ItemProperty -Path ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name Start -ErrorAction SilentlyContinue).Start
-                switch ($startRaw) {
-                    0 { $startType = "Boot" }
-                    1 { $startType = "System" }
-                    2 { $startType = "Automatic" }
-                    3 { $startType = "Manual" }
-                    4 { $startType = "Disabled" }
-                    default { if ($null -ne $startRaw) { $startType = "$startRaw" } }
+                switch ((Get-ItemProperty -Path ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $s.Name) -Name Start -ErrorAction SilentlyContinue).Start) {
+                    0 { $startType = "Boot" } 1 { $startType = "System" } 2 { $startType = "Automatic" } 3 { $startType = "Manual" } 4 { $startType = "Disabled" }
                 }
             }
             catch {}
-
-            $r = $dt.NewRow()
-            $r["Name"] = $s.Name; $r["DisplayName"] = $s.DisplayName; $r["StartType"] = $startType; $r["State"] = "$($s.Status)"
-            $dt.Rows.Add($r)
+            $row = $table.NewRow(); $row["Name"] = $s.Name; $row["DisplayName"] = $s.DisplayName; $row["StartType"] = $startType; $row["State"] = [string]$s.Status; [void]$table.Rows.Add($row)
         }
+        Set-WmtStartupTabData $svcTab $table @("Name", "DisplayName", "StartType", "State") @() @{ DisplayName = "*"; Name = 190; StartType = 110; State = 100 }
+        Update-WmtStartupTabFilter $svcTab
+    }.GetNewClosure()
 
-        Set-TabData -TabObj $svcTab -DataTable $dt -SearchColumns @("Name", "DisplayName", "StartType", "State")
-        $svcTab.Grid.AutoSizeColumnsMode = "Fill"
-        if ($svcTab.Grid.Columns["DisplayName"]) { $svcTab.Grid.Columns["DisplayName"].FillWeight = 56 }
-        if ($svcTab.Grid.Columns["Name"]) { $svcTab.Grid.Columns["Name"].FillWeight = 24 }
-        if ($svcTab.Grid.Columns["StartType"]) { $svcTab.Grid.Columns["StartType"].FillWeight = 10 }
-        if ($svcTab.Grid.Columns["State"]) { $svcTab.Grid.Columns["State"].FillWeight = 10 }
-        
-        Update-TabFilter -TabObj $svcTab
-    }
-
-    $btnSvcRefresh = New-StartupBtn $svcTab.Panel "Refresh" 15
-    $btnSvcDetails = New-StartupBtn $svcTab.Panel "Details" 145
-    $btnSvcEnable = New-StartupBtn $svcTab.Panel "Enable Auto" 275 "#1E6F43"
-    $btnSvcManual = New-StartupBtn $svcTab.Panel "Manual" 405 "#005A9E"  
-    $btnSvcDisable = New-StartupBtn $svcTab.Panel "Disable" 535 "#8A6A00"
-    $btnSvcDelete = New-StartupBtn $svcTab.Panel "Delete" 665 "#7B2026"
-
-    Add-GridContextMenu -Grid $svcTab.Grid -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
-
-    $svcTab.SearchBox.Add_TextChanged({ Update-TabFilter -TabObj $svcTab })
-    $btnSvcDetails.Add_Click({ Show-StartupRowDetails -Grid $svcTab.Grid -Title "Service Details" })
-    $svcTab.Grid.Add_CellDoubleClick({ Show-StartupRowDetails -Grid $svcTab.Grid -Title "Service Details" })
-
-    $btnSvcEnable.Add_Click({
-            foreach ($row in $svcTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["Name"].Value)"
-                if ($name) { 
-                    Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["StartType"] = "Automatic"
-                }
-            }
-        })
-
-    $btnSvcManual.Add_Click({
-            foreach ($row in $svcTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["Name"].Value)"
-                if ($name) { 
-                    Set-Service -Name $name -StartupType Manual -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["StartType"] = "Manual"
-                }
-            }
-        })
-
-    $btnSvcDisable.Add_Click({
-            foreach ($row in $svcTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["Name"].Value)"
-                if ($name) { 
-                    Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue 
-                    $row.DataBoundItem.Row["StartType"] = "Disabled"
-                }
-            }
-        })
-
-    $btnSvcDelete.Add_Click({
-            if ($svcTab.Grid.SelectedRows.Count -eq 0) { return }
-            if ([System.Windows.Forms.MessageBox]::Show("Delete selected services? This is risky.", "Confirm", [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Warning) -ne "Yes") { return }
-            
-            $rowsToDelete = @()
-            foreach ($row in $svcTab.Grid.SelectedRows) {
-                $name = "$($row.Cells["Name"].Value)"
-                if ($name) { sc.exe delete "$name" | Out-Null }
-                $rowsToDelete += $row.DataBoundItem.Row
-            }
-            foreach ($dr in $rowsToDelete) { $dr.Delete() }
-            $svcTab.Meta.Table.AcceptChanges()
-            Update-TabFilter -TabObj $svcTab
-        })
-
-    # --- 5. DATA LOADING LOGIC ---
-    $tabLoaded = @{ "Windows" = $false; "Scheduled Tasks" = $false; "Context Menu" = $false; "Services" = $false }
-
-    $LoadTabOnDemand = {
-        param([string]$TabName, [bool]$Force = $false)
-        if (-not $Force -and $tabLoaded.ContainsKey($TabName) -and $tabLoaded[$TabName]) { return }
-        [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::WaitCursor
-        try {
-            switch ($TabName) {
-                "Windows" { & $LoadWindowsStartup }
-                "Scheduled Tasks" { & $LoadScheduledTasks }
-                "Context Menu" { & $LoadContextMenu }
-                "Services" { & $LoadServices }
-            }
-            if ($tabLoaded.ContainsKey($TabName)) { $tabLoaded[$TabName] = $true }
-        }
-        catch {
-            [System.Windows.Forms.MessageBox]::Show("Failed to load tab '$TabName'.`n$($_.Exception.Message)", "Startup Manager", "OK", "Error") | Out-Null
-        }
-        finally {
-            [System.Windows.Forms.Cursor]::Current = [System.Windows.Forms.Cursors]::Default
+    function Add-Buttons {
+        param($Tab, [object[]]$Definitions)
+        foreach ($def in $Definitions) {
+            $button = New-WmtStartupButton -Text $def.Text -Role $def.Role
+            $button.Add_Click($def.Action)
+            [void]$Tab.Buttons.Children.Add($button)
         }
     }
 
-    $btnWinRefresh.Add_Click({ & $LoadTabOnDemand "Windows" $true })
-    $btnTaskRefresh.Add_Click({ & $LoadTabOnDemand "Scheduled Tasks" $true })
-    $btnCtxRefresh.Add_Click({ & $LoadTabOnDemand "Context Menu" $true })
-    $btnSvcRefresh.Add_Click({ & $LoadTabOnDemand "Services" $true })
+    foreach ($t in @($winTab, $taskTab, $ctxTab, $svcTab)) {
+        $t.SearchBox.Tag = $t
+        $t.Grid.Tag = $t
+        $t.SearchBox.Add_TextChanged({
+                param($eventSource, $e)
+                Update-WmtStartupTabFilter -TabObj $eventSource.Tag
+            }.GetNewClosure())
+        $t.Grid.Add_MouseDoubleClick({
+                param($eventSource, $e)
+                Show-WmtStartupRowDetails -TabObj $eventSource.Tag -Title "$($eventSource.Tag.Header) Details"
+            }.GetNewClosure())
+    }
 
-    $f.Add_Shown({
+    Add-Buttons $winTab @(
+        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadWindows }.GetNewClosure() },
+        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure() },
+        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $winTab.Grid) { Set-StartupApprovedState $r["Type"] $r["RootRunPath"] $r["ValueName"] $true; $r["Enabled"] = "Yes" } }.GetNewClosure() },
+        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $winTab.Grid) { Set-StartupApprovedState $r["Type"] $r["RootRunPath"] $r["ValueName"] $false; $r["Enabled"] = "No" } }.GetNewClosure() },
+        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $winTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { if ($r["Type"] -eq "StartupFolder") { Remove-Item -LiteralPath $r["ItemPath"] -Force -ErrorAction SilentlyContinue } elseif ($r["ItemPath"] -and $r["ValueName"]) { Remove-ItemProperty -Path $r["ItemPath"] -Name $r["ValueName"] -ErrorAction SilentlyContinue } }; Remove-WmtDataRows $winTab $sel }.GetNewClosure() }
+    )
+    Add-Buttons $taskTab @(
+        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadTasks }.GetNewClosure() },
+        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $taskTab "Task Details" }.GetNewClosure() },
+        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $taskTab.Grid) { Enable-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -ErrorAction SilentlyContinue; $r["State"] = "Ready" } }.GetNewClosure() },
+        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $taskTab.Grid) { Disable-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -ErrorAction SilentlyContinue; $r["State"] = "Disabled" } }.GetNewClosure() },
+        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $taskTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected tasks?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { Unregister-ScheduledTask -TaskName $r["TaskName"] -TaskPath $r["Path"] -Confirm:$false -ErrorAction SilentlyContinue }; Remove-WmtDataRows $taskTab $sel }.GetNewClosure() }
+    )
+    Add-Buttons $ctxTab @(
+        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadContext }.GetNewClosure() },
+        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $ctxTab "Context Menu Details" }.GetNewClosure() },
+        @{ Text = "Enable"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $ctxTab.Grid) { Remove-ItemProperty -LiteralPath $r["Path"] -Name "LegacyDisable" -ErrorAction SilentlyContinue; $r["Enabled"] = "Yes" } }.GetNewClosure() },
+        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $ctxTab.Grid) { Set-ItemProperty -LiteralPath $r["Path"] -Name "LegacyDisable" -Value "" -ErrorAction SilentlyContinue; $r["Enabled"] = "No" } }.GetNewClosure() },
+        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $ctxTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected context menu entries?" -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { Remove-Item -LiteralPath $r["Path"] -Recurse -Force -ErrorAction SilentlyContinue }; Remove-WmtDataRows $ctxTab $sel }.GetNewClosure() }
+    )
+    Add-Buttons $svcTab @(
+        @{ Text = "Refresh"; Role = "Primary"; Action = { & $loadServices }.GetNewClosure() },
+        @{ Text = "Details"; Role = "Standard"; Action = { Show-WmtStartupRowDetails $svcTab "Service Details" }.GetNewClosure() },
+        @{ Text = "Enable Auto"; Role = "Success"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Automatic -ErrorAction SilentlyContinue; $r["StartType"] = "Automatic" } }.GetNewClosure() },
+        @{ Text = "Manual"; Role = "Primary"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Manual -ErrorAction SilentlyContinue; $r["StartType"] = "Manual" } }.GetNewClosure() },
+        @{ Text = "Disable"; Role = "Warning"; Action = { foreach ($r in Get-WmtDataGridSelectedRows $svcTab.Grid) { Set-Service -Name $r["Name"] -StartupType Disabled -ErrorAction SilentlyContinue; $r["StartType"] = "Disabled" } }.GetNewClosure() },
+        @{ Text = "Delete"; Role = "Danger"; Action = { $sel = @(Get-WmtDataGridSelectedRows $svcTab.Grid); if ($sel.Count -eq 0) { return }; if ((Show-WmtMessageBox -Owner $dialog -Message "Delete selected services? This is risky." -Title "Confirm" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }; foreach ($r in $sel) { $serviceName = [string]$r["Name"]; if (-not [string]::IsNullOrWhiteSpace($serviceName)) { sc.exe delete $serviceName | Out-Null } }; Remove-WmtDataRows $svcTab $sel }.GetNewClosure() }
+    )
+
+    $dialog.Add_ContentRendered({
+            Set-WmtBusyCursor -Busy
+            try { & $loadWindows; & $loadTasks; & $loadContext; & $loadServices }
+            finally { Set-WmtBusyCursor }
             switch ($DefaultTab) {
-                "Scheduled Tasks" { Switch-View "Scheduled Tasks" $btnTaskTab }
-                "Context Menu" { Switch-View "Context Menu" $btnCtxTab }
-                "Services" { Switch-View "Services" $btnSvcTab }
-                default { Switch-View "Windows" $btnWinTab }
+                "Scheduled Tasks" { $tabControl.SelectedItem = $taskTab.Tab }
+                "Context Menu" { $tabControl.SelectedItem = $ctxTab.Tab }
+                "Services" { $tabControl.SelectedItem = $svcTab.Tab }
+                default { $tabControl.SelectedItem = $winTab.Tab }
             }
-        })
-
-    $f.ShowDialog() | Out-Null
+        }.GetNewClosure())
+    $dialog.ShowDialog() | Out-Null
 }
+
 
 # --- Tweaks Functions ---
 function Set-Hags {
@@ -19787,8 +16301,7 @@ function Set-WmtPowerSettingIndex {
 # ==========================================
 # 4. INIT & HELPERS
 # ==========================================
-$reader = (New-Object System.Xml.XmlNodeReader $xaml)
-$window = [Windows.Markup.XamlReader]::Load($reader)
+$window = New-WmtWindowFromFullXaml -Xaml $xaml -NoOwner
 $script:LogBox = $window.FindName("LogBox")
 $script:WmtControlCache = @{}
 
@@ -22862,9 +19375,7 @@ function Show-ProviderManager {
     </Grid>
 </Window>
 "@
-    $reader = (New-Object System.Xml.XmlNodeReader $pXaml)
-    $win = [Windows.Markup.XamlReader]::Load($reader)
-    Add-WmtThemeResources -Element $win
+    $win = New-WmtWindowFromFullXaml -Xaml $pXaml
 
     function Get-WinCtrl($name) { $win.FindName($name) }
     
@@ -23761,7 +20272,7 @@ $btnWingetIgnore.Add_Click({
         if ($selected.Count -eq 0) { return }
 
         $msg = "Ignore $($selected.Count) package(s)?`n`nThese updates will be hidden from future scans."
-        if ([System.Windows.Forms.MessageBox]::Show($msg, "Ignore Updates", "YesNo", "Question") -eq "Yes") {
+        if ((Show-WmtMessageBox -Message $msg -Title "Ignore Updates" -Button YesNo -Image Question) -eq [System.Windows.MessageBoxResult]::Yes) {
         
             # 1. Get fresh settings
             $settings = Get-WmtSettings
@@ -23799,112 +20310,61 @@ $btnWingetIgnore.Add_Click({
 
 # --- MANAGE IGNORED (UNIGNORE) ---
 $btnWingetUnignore.Add_Click({
-        # 1. READ SETTINGS (Direct & Simple)
         $jsonPath = Join-Path (Get-DataPath) "settings.json"
         $listItems = @()
 
         if (Test-Path $jsonPath) {
             try {
                 $json = Get-Content $jsonPath -Raw | ConvertFrom-Json
-                if ($json.WingetIgnore) {
-                    # Force array and string conversion immediately
-                    $listItems = @($json.WingetIgnore) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" }
-                }
+                if ($json.WingetIgnore) { $listItems = @($json.WingetIgnore) | ForEach-Object { "$_".Trim() } | Where-Object { $_ -ne "" } }
             }
             catch { Write-GuiLog "Error: $($_.Exception.Message)" }
         }
 
         if ($listItems.Count -eq 0) {
-            [System.Windows.Forms.MessageBox]::Show("No ignored packages found.", "Manage Ignored", "OK", "Information") | Out-Null
+            Show-WmtMessageBox -Message "No ignored packages found." -Title "Manage Ignored" -Image Information | Out-Null
             return
         }
 
-        # 2. UI SETUP
-        $f = New-Object System.Windows.Forms.Form
-        $f.Text = "Manage Ignored Updates"
-        $f.Size = "500, 400"
-        $f.StartPosition = "CenterScreen"
-        $f.BackColor = [System.Drawing.Color]::FromArgb(32, 32, 32)
-        $f.ForeColor = "White"
-
-        # 3. CONTROLS (Critical Order for Docking)
-        # Add Dock=Bottom/Top controls FIRST so they claim space. Add Dock=Fill LAST.
-
-        # -- Bottom Panel --
-        $pnl = New-Object System.Windows.Forms.Panel
-        $pnl.Dock = "Bottom"; $pnl.Height = 50
-        $f.Controls.Add($pnl)
-
-        # -- Top Label --
-        $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text = "Select packages to restore (Un-ignore):"
-        $lbl.Dock = "Top"; $lbl.Height = 30; $lbl.Padding = "10,10,0,0"
-        $f.Controls.Add($lbl)
-
-        # -- ListBox (Fill) --
-        $lb = New-Object System.Windows.Forms.ListBox
-        $lb.Dock = "Fill"
-        $lb.BackColor = [System.Drawing.Color]::FromArgb(20, 20, 20)
-        $lb.ForeColor = "White"
-        $lb.BorderStyle = "FixedSingle"
-        $lb.SelectionMode = "MultiExtended"
-        Set-WmtDoubleBuffered -Control $lb
-    
-        # Manual Add (Fail-safe)
-        $lb.BeginUpdate()
-        foreach ($item in $listItems) {
-            [void]$lb.Items.Add($item)
-        }
-        $lb.EndUpdate()
-    
-        $f.Controls.Add($lb)
-    
-        # CRITICAL: Ensure ListBox is at the 'top' of Z-order so it fills remaining space correctly
-        $lb.BringToFront()
-
-        # -- Buttons --
-        $btnRestore = New-Object System.Windows.Forms.Button
-        $btnRestore.Text = "Un-Ignore Selected"
-        $btnRestore.Size = "150, 30"; $btnRestore.Location = "20, 10"
-        $btnRestore.BackColor = "SeaGreen"; $btnRestore.ForeColor = "White"; $btnRestore.FlatStyle = "Flat"
-        $pnl.Controls.Add($btnRestore)
-
-        $btnClose = New-Object System.Windows.Forms.Button
-        $btnClose.Text = "Close"
-        $btnClose.Size = "100, 30"; $btnClose.Location = "360, 10"
-        $btnClose.BackColor = "DimGray"; $btnClose.ForeColor = "White"; $btnClose.FlatStyle = "Flat"
-        $btnClose.Add_Click({ $f.Close() })
-        $pnl.Controls.Add($btnClose)
-
-        # 4. ACTION
-        $script:RefreshNeeded = $false
+        $content = @"
+    <Grid Margin="16">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <TextBlock Text="Select packages to restore" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,10"/>
+        <ListBox Name="lbIgnored" Grid.Row="1" SelectionMode="Extended"/>
+        <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnRestore" Content="Un-ignore Selected" MinWidth="142" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"/>
+            <Button Name="btnClose" Content="Close" Width="92" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+"@
+        $dialog = New-WmtWindowFromXaml -Title "Manage Ignored Updates" -ContentXaml $content -Width 520 -Height 420 -MinWidth 440 -MinHeight 340
+        $lb = $dialog.FindName("lbIgnored")
+        $btnRestore = $dialog.FindName("btnRestore")
+        $btnClose = $dialog.FindName("btnClose")
+        foreach ($item in $listItems) { [void]$lb.Items.Add($item) }
+        $refreshNeeded = @{ Value = $false }
 
         $btnRestore.Add_Click({
                 $selected = @($lb.SelectedItems)
-                if ($selected.Count -gt 0) {
-                    # Read fresh, remove items, save
-                    $s = Get-WmtSettings
-                    $current = [System.Collections.ArrayList]@($s.WingetIgnore)
-            
-                    foreach ($item in $selected) {
-                        if ($current.Contains($item)) { $current.Remove($item) }
-                        $lb.Items.Remove($item)
-                    }
-            
-                    $s.WingetIgnore = $current.ToArray()
-                    Save-WmtSettings -Settings $s
-                    $script:RefreshNeeded = $true
+                if ($selected.Count -eq 0) { return }
+                $s = Get-WmtSettings
+                $current = [System.Collections.ArrayList]@($s.WingetIgnore)
+                foreach ($item in $selected) {
+                    if ($current.Contains($item)) { $current.Remove($item) }
+                    $lb.Items.Remove($item)
                 }
-            })
+                $s.WingetIgnore = $current.ToArray()
+                Save-WmtSettings -Settings $s
+                $refreshNeeded.Value = $true
+            }.GetNewClosure())
+        $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+        $dialog.ShowDialog() | Out-Null
 
-        $f.ShowDialog() | Out-Null
-    
-        if ($script:RefreshNeeded) {
+        if ($refreshNeeded.Value) {
             Write-GuiLog "List updated. Refreshing..."
             $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
         }
     })
-
 # --- LISTVIEW SORTING LOGIC ---
 $lstWinget = Get-Ctrl "lstWinget"
 $script:WingetSortChain = New-Object System.Collections.ArrayList
@@ -24352,7 +20812,7 @@ $btnWingetUninstall.Add_Click({
         if ($selected.Count -eq 0) { return }
 
         $msg = "Are you sure you want to uninstall $($selected.Count) application(s)?"
-        if ([System.Windows.Forms.MessageBox]::Show($msg, "Confirm", "YesNo", "Warning") -eq "Yes") {
+        if ((Show-WmtMessageBox -Message $msg -Title "Confirm" -Button YesNo -Image Warning) -eq [System.Windows.MessageBoxResult]::Yes) {
             & $Script:StartWingetAction -ListItems $selected -ActionName "Uninstall"
         }
     })
@@ -24495,9 +20955,9 @@ $btnHostsUpdate.Add_Click({ Invoke-HostsUpdate })
 $btnHostsEdit.Add_Click({ Show-HostsEditor })
 $btnHostsBackup.Add_Click({ Invoke-UiCommand { $dest = Join-Path (Get-DataPath) ("hosts_bk_{0}.bak" -f (Get-Date -Format "yyyyMMdd_HHmmss")); Copy-Item "$env:windir\System32\drivers\etc\hosts" $dest; "Backup saved to $dest" } "Backing up hosts file..." })
 $btnHostsRestore.Add_Click({
-        $o = New-Object System.Windows.Forms.OpenFileDialog
+        $o = [Microsoft.Win32.OpenFileDialog]::new()
         $o.Filter = "*.bak;*.txt|*.bak;*.txt"
-        if ($o.ShowDialog() -eq "OK") {
+        if ($o.ShowDialog() -eq $true) {
             $restoreFile = $o.FileName
             $res = [System.Windows.MessageBox]::Show("Restore hosts file from:`n$restoreFile`n`nThis will overwrite the current hosts file. Continue?", "Restore Hosts", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
             if ($res -ne "Yes") { return }
@@ -24544,7 +21004,7 @@ $mniCopyName.Header = "Copy Rule Name"
 $mniCopyName.Add_Click({
         if ($lstFw.SelectedItem) {
             try {
-                [System.Windows.Forms.Clipboard]::SetText($lstFw.SelectedItem.Name)
+                [System.Windows.Clipboard]::SetText($lstFw.SelectedItem.Name)
             }
             catch { 
                 # Fallback if clipboard is busy
@@ -24560,7 +21020,7 @@ $mniCopyPort.Add_Click({
             Initialize-FirewallRuleDetails -Rule $lstFw.SelectedItem -Synchronous
             $info = "$($lstFw.SelectedItem.Protocol) : $($lstFw.SelectedItem.LocalPort)"
             try {
-                [System.Windows.Forms.Clipboard]::SetText($info)
+                [System.Windows.Clipboard]::SetText($info)
             }
             catch {}
         }
@@ -24576,7 +21036,7 @@ $mniCopyAll.Add_Click({
             $rule = $lstFw.SelectedItem
             $text = "Name: $($rule.Name)`nEnabled: $($rule.Enabled)`nAction: $($rule.Action)`nDirection: $($rule.Direction)`nProtocol: $($rule.Protocol)`nPort: $($rule.LocalPort)"
             try {
-                [System.Windows.Forms.Clipboard]::SetText($text)
+                [System.Windows.Clipboard]::SetText($text)
             }
             catch {}
         }
@@ -25115,10 +21575,7 @@ $btnDotNetEnable.Add_Click({
     </Grid>
 </Window>
 '@
-        $reader = [System.Xml.XmlNodeReader]::new($rollForwardXaml)
-        $dialog = [Windows.Markup.XamlReader]::Load($reader)
-        Add-WmtThemeResources -Element $dialog
-        Set-WmtWindowOwner -Child $dialog
+        $dialog = New-WmtWindowFromFullXaml -Xaml $rollForwardXaml
         $dialog.Tag = $null
         $dialog.FindName("btnApply").Add_Click({
                 $choice = if ([bool]$dialog.FindName("rbSdk").IsChecked) { "SDK" } elseif ([bool]$dialog.FindName("rbBoth").IsChecked) { "Both" } else { "Runtime" }
@@ -25335,7 +21792,7 @@ $btnAppxRemoveSel.Add_Click({
     })
 
 $btnAppxRemoveAll.Add_Click({
-        if ([System.Windows.Forms.MessageBox]::Show("Remove ALL listed apps? This cannot be undone easily.", "Confirm", "YesNo", "Warning") -eq "Yes") {
+        if ((Show-WmtMessageBox -Message "Remove ALL listed apps? This cannot be undone easily." -Title "Confirm" -Button YesNo -Image Warning) -eq [System.Windows.MessageBoxResult]::Yes) {
             $btnAppxRemoveSel.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
         }
     })
@@ -25479,7 +21936,7 @@ $btnWUSecurity.Add_Click({
     })
 
 $btnWUDisable.Add_Click({
-        if ([System.Windows.Forms.MessageBox]::Show("Disable ALL Windows Updates? This is not recommended for security.", "Warning", "YesNo", "Warning") -eq "Yes") {
+        if ((Show-WmtMessageBox -Message "Disable ALL Windows Updates? This is not recommended for security." -Title "Warning" -Button YesNo -Image Warning) -eq [System.Windows.MessageBoxResult]::Yes) {
             Invoke-UiCommand {
                 Set-Service -Name wuauserv -StartupType Disabled -ErrorAction SilentlyContinue
                 Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
@@ -25839,7 +22296,7 @@ Register-WmtTweakButton "btnSearchIndexDefault" {
     } "Restoring search indexing..."
 }
 Register-WmtTweakButton "btnSearchIndexRebuild" {
-    if ([System.Windows.Forms.MessageBox]::Show("Rebuild the Windows Search index? Search results may be incomplete while it rebuilds.", "Rebuild Search Index", "YesNo", "Warning") -eq "Yes") {
+    if ((Show-WmtMessageBox -Message "Rebuild the Windows Search index? Search results may be incomplete while it rebuilds." -Title "Rebuild Search Index" -Button YesNo -Image Warning) -eq [System.Windows.MessageBoxResult]::Yes) {
         Invoke-UiCommand {
             Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
             $db = Join-Path $env:ProgramData "Microsoft\Search\Data\Applications\Windows\Windows.edb"
