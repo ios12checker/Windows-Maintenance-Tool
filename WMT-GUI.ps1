@@ -20194,7 +20194,7 @@ function Show-ProviderManager {
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="590" Width="520" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="620" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -20214,10 +20214,12 @@ function Show-ProviderManager {
         <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
 
         <StackPanel Grid.Row="1" Margin="0,15,0,0">
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Windows Package Manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
                 <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Windows Package Manager" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Name="lblProviderWingetStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderWingetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
             <Grid Margin="30,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -20226,53 +20228,69 @@ function Show-ProviderManager {
                 <TextBlock Text="Adds --include-unknown to winget scans" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Microsoft Store Apps via store.exe">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkMsStore" Grid.Column="0"/>
                 <TextBlock Text="Store CLI" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Microsoft Store Apps via store.exe" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
+                <TextBlock Name="lblProviderMsStoreStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderMsStoreAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Python package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkPip" Grid.Column="0"/>
                 <TextBlock Text="Python (Pip)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblPipStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderPipAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Node.js package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkNpm" Grid.Column="0"/>
                 <TextBlock Text="Node (Npm)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderNpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
             <!-- PNPM -->
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Fast Node.js package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkPnpm" Grid.Column="0"/>
                 <TextBlock Text="pnpm" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblPnpmStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderPnpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Chocolatey package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkChoco" Grid.Column="0"/>
                 <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblChocoStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderChocoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Scoop command-line installer">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkScoop" Grid.Column="0"/>
                 <TextBlock Text="Scoop" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblScoopStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderScoopAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="RubyGems package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkGem" Grid.Column="0"/>
                 <TextBlock Text="Ruby (Gem)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblGemStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderGemAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="100"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <Grid Margin="0,0,0,10" ToolTip="Rust package manager">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkCargo" Grid.Column="0"/>
                 <TextBlock Text="Rust (Cargo)" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblCargoStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderCargoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
         </StackPanel>
 
@@ -20295,7 +20313,504 @@ function Show-ProviderManager {
     $chkScoop = Get-WinCtrl "chkScoop"
     $chkGem = Get-WinCtrl "chkGem"
     $chkCargo = Get-WinCtrl "chkCargo"
-    
+
+    $providerDefinitions = @(
+        [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
+        [PSCustomObject]@{ Key = "msstore"; DisplayName = "Store CLI"; Commands = [string[]]@("store"); Label = "lblProviderMsStoreStatus"; Button = "btnProviderMsStoreAction" },
+        [PSCustomObject]@{ Key = "pip"; DisplayName = "Python (Pip)"; Commands = [string[]]@("pip", "pip3"); Label = "lblPipStatus"; Button = "btnProviderPipAction" },
+        [PSCustomObject]@{ Key = "npm"; DisplayName = "Node (Npm)"; Commands = [string[]]@("npm"); Label = "lblNpmStatus"; Button = "btnProviderNpmAction" },
+        [PSCustomObject]@{ Key = "pnpm"; DisplayName = "pnpm"; Commands = [string[]]@("pnpm"); Label = "lblPnpmStatus"; Button = "btnProviderPnpmAction" },
+        [PSCustomObject]@{ Key = "chocolatey"; DisplayName = "Chocolatey"; Commands = [string[]]@("choco"); Label = "lblChocoStatus"; Button = "btnProviderChocoAction" },
+        [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
+        [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
+        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" }
+    )
+    $providerInstallState = @{}
+    $providerActionMonitors = @{}
+
+    function Update-WmtProviderPathEnvironment {
+        try {
+            $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+            $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+            $pathParts = New-Object System.Collections.Generic.List[string]
+            foreach ($pathValue in @($machinePath, $userPath, $env:Path)) {
+                foreach ($part in @(([string]$pathValue) -split ";")) {
+                    $trimmed = $part.Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($trimmed) -and -not $pathParts.Contains($trimmed)) {
+                        [void]$pathParts.Add($trimmed)
+                    }
+                }
+            }
+            $env:Path = $pathParts -join ";"
+        }
+        catch {}
+    }
+
+    function Get-WmtProviderActionScript {
+        param(
+            [string]$ProviderKey,
+            [string]$Action
+        )
+
+        $installing = ($Action -eq "Install")
+        $body = switch ($ProviderKey) {
+            "winget" {
+                if ($installing) {
+                    @'
+Write-Host "Registering App Installer for winget..."
+try {
+    Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop
+}
+catch {
+    Write-Warning $_.Exception.Message
+}
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    Start-Process "ms-windows-store://pdp/?ProductId=9NBLGGH4NNS1"
+    throw "Winget is still not available. App Installer was opened in Microsoft Store."
+}
+winget source reset --force
+winget source update
+winget --version
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Winget was not found." }
+winget source reset --force
+winget source update
+winget upgrade --id Microsoft.AppInstaller --accept-source-agreements --accept-package-agreements --disable-interactivity
+winget --version
+'@
+                }
+                break
+            }
+            "msstore" {
+                @'
+Write-Host "Opening Microsoft Store Updates..."
+try {
+    $appManagement = Get-CimInstance -Namespace "Root\cimv2\mdm\dmmap" -ClassName "MDM_EnterpriseModernAppManagement_AppManagement01" -ErrorAction Stop | Select-Object -First 1
+    if ($appManagement) {
+        [void](Invoke-CimMethod -InputObject $appManagement -MethodName "UpdateScanMethod" -ErrorAction Stop)
+        Write-Host "Requested a Microsoft Store app update scan."
+    }
+}
+catch {
+    Write-Warning "Direct Store update scan failed: $($_.Exception.Message)"
+}
+Start-Process "ms-windows-store://downloadsandupdates"
+if (Get-Command store -ErrorAction SilentlyContinue) {
+    store --help
+}
+else {
+    Write-Host "Update Microsoft Store from the opened Store updates page, then reopen WMT."
+}
+'@
+                break
+            }
+            "pip" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Command py -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Python install needs winget or an existing Python launcher." }
+    $pythonIds = @("Python.Python.3.13", "Python.Python.3.12", "Python.Python.3.11")
+    $installedPython = $false
+    foreach ($pythonId in $pythonIds) {
+        Write-Host "Trying $pythonId..."
+        winget install --id $pythonId --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+        if ($LASTEXITCODE -eq 0) { $installedPython = $true; break }
+    }
+    if (-not $installedPython) { throw "Could not install Python with winget." }
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    py -3 -m ensurepip --upgrade
+    py -3 -m pip install --upgrade pip setuptools wheel
+    py -3 -m pip --version
+}
+elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    python -m ensurepip --upgrade
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip --version
+}
+else {
+    throw "Python was installed, but the launcher is not visible in this session yet. Open a new terminal and retry."
+}
+'@
+                }
+                else {
+                    @'
+if (Get-Command py -ErrorAction SilentlyContinue) {
+    py -3 -m ensurepip --upgrade
+    py -3 -m pip install --upgrade pip setuptools wheel
+    py -3 -m pip --version
+}
+elseif (Get-Command python -ErrorAction SilentlyContinue) {
+    python -m ensurepip --upgrade
+    python -m pip install --upgrade pip setuptools wheel
+    python -m pip --version
+}
+else {
+    throw "Python was not found."
+}
+'@
+                }
+                break
+            }
+            "npm" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Node.js install needs winget." }
+    winget install --id OpenJS.NodeJS.LTS --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command npm -ErrorAction SilentlyContinue) {
+    npm install -g npm@latest
+    npm --version
+}
+else {
+    Write-Host "Node.js was requested. Open a new terminal after install if npm is not visible yet."
+}
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "npm was not found." }
+npm install -g npm@latest
+npm --version
+'@
+                }
+                break
+            }
+            "pnpm" {
+                if ($installing) {
+                    @'
+$installedPnpm = $false
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id pnpm.pnpm --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+    if ($LASTEXITCODE -eq 0) { $installedPnpm = $true }
+    Update-WmtProviderPathEnvironment
+}
+if (-not $installedPnpm -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+    npm install -g pnpm@latest
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+    pnpm --version
+}
+else {
+    Write-Host "pnpm was requested. Open a new terminal after install if pnpm is not visible yet."
+}
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) { throw "pnpm was not found." }
+pnpm self-update
+if ($LASTEXITCODE -ne 0 -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+    npm install -g pnpm@latest
+}
+pnpm --version
+'@
+                }
+                break
+            }
+            "chocolatey" {
+                if ($installing) {
+                    @'
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget install --id Chocolatey.Chocolatey --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+else {
+    throw "Chocolatey install needs winget."
+}
+if (Get-Command choco -ErrorAction SilentlyContinue) { choco --version }
+else { Write-Host "Chocolatey was requested. Open a new terminal after install if choco is not visible yet." }
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command choco -ErrorAction SilentlyContinue)) { throw "Chocolatey was not found." }
+choco upgrade chocolatey -y
+choco --version
+'@
+                }
+                break
+            }
+            "scoop" {
+                if ($installing) {
+                    @'
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+Invoke-Expression "& {$(Invoke-RestMethod -Uri https://get.scoop.sh)} -RunAsAdmin"
+Update-WmtProviderPathEnvironment
+if (Get-Command scoop -ErrorAction SilentlyContinue) { scoop --version }
+else { Write-Host "Scoop was requested. Open a new terminal after install if scoop is not visible yet." }
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) { throw "Scoop was not found." }
+scoop update
+scoop checkup
+'@
+                }
+                break
+            }
+            "gem" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command gem -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Ruby install needs winget." }
+    winget install --id RubyInstallerTeam.RubyWithDevKit.3.3 --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command gem -ErrorAction SilentlyContinue) {
+    gem update --system
+    gem --version
+}
+else {
+    Write-Host "Ruby was requested. Open a new terminal after install if gem is not visible yet."
+}
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command gem -ErrorAction SilentlyContinue)) { throw "RubyGems was not found." }
+gem update --system
+gem update
+gem --version
+'@
+                }
+                break
+            }
+            "cargo" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Rust install needs winget." }
+    winget install --id Rustlang.Rustup --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command rustup -ErrorAction SilentlyContinue) { rustup update }
+if (Get-Command cargo -ErrorAction SilentlyContinue) { cargo --version }
+else { Write-Host "Rust was requested. Open a new terminal after install if cargo is not visible yet." }
+'@
+                }
+                else {
+                    @'
+if (Get-Command rustup -ErrorAction SilentlyContinue) {
+    rustup update
+}
+elseif (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "Cargo was not found."
+}
+cargo --version
+'@
+                }
+                break
+            }
+            default { "" }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($body)) { return "" }
+
+return @"
+`$ErrorActionPreference = "Continue"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+function Update-WmtProviderPathEnvironment {
+    try {
+        `$pathParts = New-Object System.Collections.Generic.List[string]
+        foreach (`$pathValue in @([Environment]::GetEnvironmentVariable("Path", "Machine"), [Environment]::GetEnvironmentVariable("Path", "User"), `$env:Path)) {
+            foreach (`$part in @(([string]`$pathValue) -split ";")) {
+                `$trimmed = `$part.Trim()
+                if (-not [string]::IsNullOrWhiteSpace(`$trimmed) -and -not `$pathParts.Contains(`$trimmed)) {
+                    [void]`$pathParts.Add(`$trimmed)
+                }
+            }
+        }
+        `$env:Path = `$pathParts -join ";"
+    }
+    catch {}
+}
+Update-WmtProviderPathEnvironment
+
+`$exitCode = 0
+try {
+    Write-Host "WMT provider $Action`: $ProviderKey"
+    Write-Host ""
+$body
+    Write-Host ""
+    Write-Host "Provider $Action completed."
+}
+catch {
+    `$exitCode = 1
+    Write-Host ""
+    Write-Host "ERROR: `$(`$_.Exception.Message)" -ForegroundColor Red
+}
+Write-Host ""
+Write-Host "Closing in 8 seconds..."
+Start-Sleep -Seconds 8
+exit `$exitCode
+"@
+    }
+
+    $getWinCtrl = { param($name) $win.FindName($name) }.GetNewClosure()
+    $updateProviderPathEnvironment = ${function:Update-WmtProviderPathEnvironment}.GetNewClosure()
+    $getProviderActionScript = ${function:Get-WmtProviderActionScript}.GetNewClosure()
+    $testProviderInstalled = {
+        param($Provider)
+
+        if (-not $Provider) { return $false }
+        & $updateProviderPathEnvironment
+        foreach ($cmd in @($Provider.Commands)) {
+            if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+            if (Get-Command $cmd -ErrorAction SilentlyContinue) { return $true }
+        }
+        return $false
+    }.GetNewClosure()
+    $updateProviderStatuses = {
+        & $updateProviderPathEnvironment
+        foreach ($provider in $providerDefinitions) {
+            $labelCtrl = & $getWinCtrl $provider.Label
+            $buttonCtrl = & $getWinCtrl $provider.Button
+            $installed = [bool](& $testProviderInstalled -Provider $provider)
+            $providerInstallState[$provider.Key] = $installed
+
+            if ($installed) {
+                if ($labelCtrl) {
+                    $labelCtrl.Text = "Installed"
+                    Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
+                }
+                if ($buttonCtrl) {
+                    $buttonCtrl.Content = "Repair"
+                    $buttonCtrl.ToolTip = "Repair or refresh $($provider.DisplayName)"
+                    $buttonCtrl.IsEnabled = $true
+                }
+            }
+            else {
+                if ($labelCtrl) {
+                    $labelCtrl.Text = "Not Found"
+                    Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
+                }
+                if ($buttonCtrl) {
+                    $buttonCtrl.Content = "Install"
+                    $buttonCtrl.ToolTip = "Install $($provider.DisplayName)"
+                    $buttonCtrl.IsEnabled = $true
+                }
+            }
+        }
+    }.GetNewClosure()
+    $startProviderAction = {
+        param([string]$ProviderKey)
+
+        $provider = @($providerDefinitions | Where-Object { $_.Key -eq $ProviderKey } | Select-Object -First 1)
+        if (-not $provider) { return }
+
+        $installed = if ($providerInstallState.ContainsKey($ProviderKey)) { [bool]$providerInstallState[$ProviderKey] } else { [bool](& $testProviderInstalled -Provider $provider) }
+        $action = if ($installed) { "Repair" } else { "Install" }
+        $message = "$action $($provider.DisplayName)?`r`n`r`nThis opens a PowerShell window and may download provider files from the internet."
+        if ((Show-WmtMessageBox -Owner $win -Message $message -Title "$action Provider" -Button YesNo -Image Question) -ne [System.Windows.MessageBoxResult]::Yes) {
+            return
+        }
+
+        $scriptText = & $getProviderActionScript -ProviderKey $ProviderKey -Action $action
+        if ([string]::IsNullOrWhiteSpace($scriptText)) {
+            Show-WmtMessageBox -Owner $win -Message "No $action action is configured for $($provider.DisplayName)." -Title "Provider Action" -Button OK -Image Warning | Out-Null
+            return
+        }
+
+        $buttonCtrl = & $getWinCtrl $provider.Button
+        $labelCtrl = & $getWinCtrl $provider.Label
+        foreach ($providerDef in $providerDefinitions) {
+            $otherButton = & $getWinCtrl $providerDef.Button
+            if ($otherButton) { $otherButton.IsEnabled = $false }
+        }
+        if ($buttonCtrl) { $buttonCtrl.Content = "Running" }
+        if ($labelCtrl) {
+            $labelCtrl.Text = "$action running..."
+            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Accent"
+        }
+
+        $tempScriptPath = Join-Path $env:TEMP ("WMT_Provider_{0}_{1}.ps1" -f $ProviderKey, ([Guid]::NewGuid().ToString("N")))
+        try {
+            Set-Content -Path $tempScriptPath -Value $scriptText -Encoding UTF8 -Force
+            Write-GuiLog "[$($provider.DisplayName)] $action started."
+            $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScriptPath`"" -WindowStyle Normal -PassThru
+        }
+        catch {
+            Write-GuiLog "[$($provider.DisplayName)] $action failed to start: $($_.Exception.Message)"
+            try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
+            & $updateProviderStatuses
+            return
+        }
+
+        $monitorKey = "$ProviderKey-$([Guid]::NewGuid().ToString("N"))"
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds(1)
+        $timer.Add_Tick({
+                $hasExited = $false
+                try { $hasExited = [bool]$proc.HasExited } catch { $hasExited = $true }
+                if (-not $hasExited) { return }
+
+                try { $timer.Stop() } catch {}
+                try { $providerActionMonitors.Remove($monitorKey) } catch {}
+                $exitCode = 1
+                try { $exitCode = [int]$proc.ExitCode } catch {}
+                try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
+                if ($exitCode -eq 0) {
+                    Write-GuiLog "[$($provider.DisplayName)] $action completed."
+                }
+                else {
+                    Write-GuiLog "[$($provider.DisplayName)] $action exited with code $exitCode."
+                }
+                & $updateProviderStatuses
+            }.GetNewClosure())
+        $providerActionMonitors[$monitorKey] = [PSCustomObject]@{
+            Timer          = $timer
+            Process        = $proc
+            TempScriptPath = $tempScriptPath
+            ProviderKey    = $ProviderKey
+        }
+        $timer.Start()
+    }.GetNewClosure()
+
+    $win.Add_Closed({
+            foreach ($monitor in @($providerActionMonitors.Values)) {
+                try { if ($monitor.Timer) { $monitor.Timer.Stop() } } catch {}
+                try {
+                    if ($monitor.Process -and $monitor.Process.HasExited -and $monitor.TempScriptPath) {
+                        Remove-Item -LiteralPath $monitor.TempScriptPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+                catch {}
+            }
+            try { $providerActionMonitors.Clear() } catch {}
+        }.GetNewClosure())
+    $win.Add_Activated({
+            $completedKeys = @()
+            foreach ($key in @($providerActionMonitors.Keys)) {
+                $monitor = $providerActionMonitors[$key]
+                try {
+                    if ($monitor.Process -and $monitor.Process.HasExited) {
+                        $completedKeys += $key
+                    }
+                }
+                catch {
+                    $completedKeys += $key
+                }
+            }
+            if ($completedKeys.Count -gt 0) {
+                foreach ($key in $completedKeys) {
+                    $monitor = $providerActionMonitors[$key]
+                    try { if ($monitor.Timer) { $monitor.Timer.Stop() } } catch {}
+                    try { if ($monitor.TempScriptPath) { Remove-Item -LiteralPath $monitor.TempScriptPath -Force -ErrorAction SilentlyContinue } } catch {}
+                    try { $providerActionMonitors.Remove($key) } catch {}
+                }
+                & $updateProviderStatuses
+            }
+        }.GetNewClosure())
+
     # Load settings
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
@@ -20307,26 +20822,13 @@ function Show-ProviderManager {
     if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
 
-    # Helper for status check
-    function Set-ProviderStatus($cmd, $lbl) {
-        $labelCtrl = Get-WinCtrl $lbl
-        if (Get-Command $cmd -ErrorAction SilentlyContinue) {
-            $labelCtrl.Text = "Installed"
-            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Success"
-        }
-        else {
-            $labelCtrl.Text = "Not Found"
-            Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "Warning"
-        }
+    & $updateProviderStatuses
+    foreach ($provider in $providerDefinitions) {
+        $buttonCtrl = & $getWinCtrl $provider.Button
+        if (-not $buttonCtrl) { continue }
+        $providerKey = [string]$provider.Key
+        $buttonCtrl.Add_Click({ & $startProviderAction -ProviderKey $providerKey }.GetNewClosure())
     }
-
-    Set-ProviderStatus "pip" "lblPipStatus"
-    Set-ProviderStatus "npm" "lblNpmStatus"
-    Set-ProviderStatus "pnpm" "lblPnpmStatus"
-    Set-ProviderStatus "choco" "lblChocoStatus"
-    Set-ProviderStatus "scoop" "lblScoopStatus"
-    Set-ProviderStatus "gem" "lblGemStatus"
-    Set-ProviderStatus "cargo" "lblCargoStatus"
 
     # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
