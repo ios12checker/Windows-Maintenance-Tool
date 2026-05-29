@@ -2399,6 +2399,76 @@ function Add-WmtWpfRuntimeResources {
         <Setter Property="VerticalAlignment" Value="Center"/>
     </Style>
 
+    <Style x:Key="WmtNoGutterMenuItemStyle" TargetType="{x:Type MenuItem}">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="Padding" Value="10,7"/>
+        <Setter Property="MinWidth" Value="150"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type MenuItem}">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" SnapsToDevicePixels="True">
+                        <ContentPresenter ContentSource="Header"
+                                          RecognizesAccessKey="True"
+                                          Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"
+                                          HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Opacity" Value="0.55"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="{x:Type MenuItem}" BasedOn="{StaticResource WmtNoGutterMenuItemStyle}"/>
+
+    <Style x:Key="WmtNoGutterSeparatorStyle" TargetType="{x:Type Separator}">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type Separator}">
+                    <Border Height="1" Margin="6,4" Background="{DynamicResource BorderBrush}"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <Style TargetType="{x:Type Separator}" BasedOn="{StaticResource WmtNoGutterSeparatorStyle}"/>
+
+    <Style TargetType="{x:Type ContextMenu}">
+        <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
+        <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        <Setter Property="BorderThickness" Value="1"/>
+        <Setter Property="Padding" Value="4"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="ItemContainerStyle" Value="{StaticResource WmtNoGutterMenuItemStyle}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="{x:Type ContextMenu}">
+                    <Border Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            Padding="{TemplateBinding Padding}"
+                            SnapsToDevicePixels="True">
+                        <ScrollViewer Focusable="False" CanContentScroll="True">
+                            <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                        </ScrollViewer>
+                    </Border>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style TargetType="{x:Type ListBox}">
         <Setter Property="Background" Value="{DynamicResource BgDark}"/>
         <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
@@ -2563,6 +2633,50 @@ function Add-WmtThemeResources {
                 })
         }
     }
+}
+
+function Set-WmtContextMenuChrome {
+    param([System.Windows.Controls.ContextMenu]$ContextMenu)
+
+    if (-not $ContextMenu) { return }
+    Add-WmtThemeResources -Element $ContextMenu
+    Set-WmtThemedBrush -Object $ContextMenu -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
+    Set-WmtThemedBrush -Object $ContextMenu -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+    Set-WmtThemedBrush -Object $ContextMenu -Property ([System.Windows.Controls.Control]::BorderBrushProperty) -ColorOrKey "BorderBrush"
+    try {
+        $contextMenuStyle = $ContextMenu.TryFindResource([System.Windows.Controls.ContextMenu])
+        if ($contextMenuStyle) { $ContextMenu.Style = $contextMenuStyle }
+    }
+    catch {}
+
+    $applyNoGutterChrome = {
+        $menuItemStyle = $null
+        $separatorStyle = $null
+        try { $menuItemStyle = $ContextMenu.TryFindResource("WmtNoGutterMenuItemStyle") } catch {}
+        try { $separatorStyle = $ContextMenu.TryFindResource("WmtNoGutterSeparatorStyle") } catch {}
+
+        if ($menuItemStyle) {
+            try { $ContextMenu.ItemContainerStyle = $menuItemStyle } catch {}
+        }
+
+        foreach ($item in @($ContextMenu.Items)) {
+            if ($item -is [System.Windows.Controls.MenuItem]) {
+                try { $item.Icon = $null } catch {}
+                if ($menuItemStyle) { try { $item.Style = $menuItemStyle } catch {} }
+            }
+            elseif ($item -is [System.Windows.Controls.Separator]) {
+                if ($separatorStyle) { try { $item.Style = $separatorStyle } catch {} }
+            }
+        }
+    }.GetNewClosure()
+
+    & $applyNoGutterChrome
+    try {
+        $notifyItems = [System.Collections.Specialized.INotifyCollectionChanged]$ContextMenu.Items
+        $notifyItems.add_CollectionChanged({ & $applyNoGutterChrome }.GetNewClosure())
+    }
+    catch {}
+    $ContextMenu.Add_Opened({ & $applyNoGutterChrome }.GetNewClosure())
 }
 
 function Invoke-WmtDispatcherPump {
@@ -6854,6 +6968,7 @@ function Show-WmtCleanupPreviewWpf {
     $dg.ItemsSource = $previewRows
 
     $ctxMenu = [System.Windows.Controls.ContextMenu]::new()
+    Set-WmtContextMenuChrome -ContextMenu $ctxMenu
     $menuOpen = [System.Windows.Controls.MenuItem]::new()
     $menuOpen.Header = "Go to file [Open folder]"
     $menuDelete = [System.Windows.Controls.MenuItem]::new()
@@ -8604,7 +8719,16 @@ function Show-RegistryCleaner {
 
         <DataGrid Name="dgRegistry" Grid.Row="1" AlternationCount="2">
             <DataGrid.Columns>
-                <DataGridCheckBoxColumn Header=" " Binding="{Binding Check, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Width="42"/>
+                <DataGridTemplateColumn Header=" " Width="42" SortMemberPath="Check">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding Check, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Focusable="False"/>
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
                 <DataGridTextColumn Header="Problem" Binding="{Binding Problem}" Width="185" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Action" Binding="{Binding FixAction}" Width="90" IsReadOnly="True"/>
                 <DataGridTextColumn Header="Risk" Binding="{Binding Risk}" Width="75" IsReadOnly="True"/>
@@ -8695,6 +8819,24 @@ function Show-RegistryCleaner {
         }
     )
     $dg.ItemsSource = $registryRows
+
+    $dg.Add_KeyDown({
+            param($sender, $e)
+
+            if ([string]$e.Key -notin @("Return", "Enter")) { return }
+
+            $selectedRows = @($sender.SelectedItems | Where-Object { $_ })
+            if ($selectedRows.Count -eq 0) { return }
+
+            foreach ($row in $selectedRows) {
+                if ($row.PSObject.Properties["Check"]) {
+                    $row.Check = $true
+                }
+            }
+
+            $sender.Items.Refresh()
+            $e.Handled = $true
+        })
 
     $btnCopySelected.Add_Click({
             $rowsToCopy = @($dg.SelectedItems | Where-Object { $_ })
@@ -9821,6 +9963,14 @@ function Invoke-RegistryTask {
                     if (Test-IsWhitelisted $cleanPath) { return $null }
                     if (Test-IsProtectedWindowsPath $cleanPath) { return $null }
                     if (Test-PathExists -Path $cleanPath -RegistryView $RegistryView) { return $null }
+
+                    if ($cleanPath -match '^(?<Path>[a-zA-Z]:\\.+\.(?:dll|exe|ocx|tlb|olb))\\-?\d+$') {
+                        $resourceHostPath = $Matches.Path
+                        if ((-not (Test-IsProtectedWindowsPath $resourceHostPath)) -and (Test-PathExists -Path $resourceHostPath -RegistryView $RegistryView)) {
+                            return $null
+                        }
+                    }
+
                     return $cleanPath
                 }
 
@@ -14895,8 +15045,7 @@ function Show-StartupManager {
     function Add-GridContextMenu {
         param($TabObj, [System.Windows.Controls.Button[]]$Buttons)
         $menu = [System.Windows.Controls.ContextMenu]::new()
-        Set-WmtThemedBrush -Object $menu -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgElevated"
-        Set-WmtThemedBrush -Object $menu -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
+        Set-WmtContextMenuChrome -ContextMenu $menu
         foreach ($button in @($Buttons)) {
             $item = [System.Windows.Controls.MenuItem]::new()
             $item.Header = [string]$button.Content
@@ -18105,6 +18254,7 @@ $lstSearchResults.Add_SelectionChanged({
 
 # WINGET CONTEXT MENU (Right-Click)
 $ctxMenu = New-Object System.Windows.Controls.ContextMenu
+Set-WmtContextMenuChrome -ContextMenu $ctxMenu
 
 if ($lstWinget) {
     $lstWinget.Add_PreviewMouseRightButtonDown({
@@ -21789,6 +21939,7 @@ $lstFw.Add_MouseDoubleClick({
     })
 # --- FIREWALL CONTEXT MENU ---
 $fwCtxMenu = New-Object System.Windows.Controls.ContextMenu
+Set-WmtContextMenuChrome -ContextMenu $fwCtxMenu
 
 # 1. Option: Copy Rule Name
 $mniCopyName = New-Object System.Windows.Controls.MenuItem
