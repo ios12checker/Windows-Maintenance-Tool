@@ -8482,6 +8482,7 @@ function Show-RegistryCleaner {
             '^Invalid User Shell Command$',
             '^Orphaned Service$',
             '^Missing HelpDir$',
+            '^Missing TypeLib Path$',
             '^Invalid Default Icon$',
             '^Missing Shared Ref$'
         )
@@ -9773,6 +9774,22 @@ function Invoke-RegistryTask {
                     }
 
                     return "HKCR:\$effectivePath"
+                }
+
+                function Get-WmtMissingRegistryPathTarget {
+                    param(
+                        $RawValue,
+                        $RegistryView = $null
+                    )
+
+                    if ($null -eq $RawValue) { return $null }
+                    $cleanPath = Get-RealExePath ([string]$RawValue)
+                    if ([string]::IsNullOrWhiteSpace($cleanPath)) { return $null }
+                    if ($cleanPath -notmatch '^[a-zA-Z]:\\') { return $null }
+                    if (Test-IsWhitelisted $cleanPath) { return $null }
+                    if (Test-IsProtectedWindowsPath $cleanPath) { return $null }
+                    if (Test-PathExists -Path $cleanPath -RegistryView $RegistryView) { return $null }
+                    return $cleanPath
                 }
 
                 function Test-WmtClsidExists {
@@ -11358,26 +11375,85 @@ function Invoke-RegistryTask {
                     # 12. TYPE LIBRARIES
                     if ($SelectedScans -contains "TypeLib") {
                         $SyncHash.Status = "Scanning Type Libraries..."
-                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                        foreach ($view in @(Get-WmtRegistryViews)) {
                             $root = $null; $tlKey = $null
                             try {
                                 $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
                                 $tlKey = $root.OpenSubKey("TypeLib", $false)
                                 if ($tlKey) {
                                     $viewLabel = Get-WmtRegistryViewLabel $view
-                                    $names = $tlKey.GetSubKeyNames(); $total = $names.Count; $i = 0
+                                    $names = @($tlKey.GetSubKeyNames()); $total = [math]::Max($names.Count, 1); $i = 0
                                     foreach ($guid in $names) {
                                         $i++; & $Tick "Scanning TypeLib ($viewLabel): $guid" $i $total
                                         try {
                                             $verKey = $tlKey.OpenSubKey($guid)
                                             if ($verKey) {
-                                                foreach ($ver in $verKey.GetSubKeyNames()) {
-                                                    $numKey = $verKey.OpenSubKey($ver)
-                                                    $helpDir = $numKey.GetValue("HELPDIR")
-                                                    if ($helpDir -and $helpDir -match '^[a-zA-Z]:\\' -and -not (Test-IsProtectedWindowsPath $helpDir) -and -not (Test-PathExists $helpDir)) {
-                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $helpDir; DisplayKey = "$guid ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver" -View $view); ValueName = "HELPDIR"; Type = "Value"; Details = "Type library HELPDIR path is missing in the $viewLabel registry view." })
+                                                foreach ($ver in @($verKey.GetSubKeyNames())) {
+                                                    $numKey = $null
+                                                    try {
+                                                        $numKey = $verKey.OpenSubKey($ver)
+                                                        if (-not $numKey) { continue }
+
+                                                        $helpDirValue = $numKey.GetValue("HELPDIR", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                        $missingHelpDir = Get-WmtMissingRegistryPathTarget -RawValue $helpDirValue -RegistryView $view
+                                                        if ($missingHelpDir) {
+                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $missingHelpDir; DisplayKey = "$guid\$ver ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver" -View $view); ValueName = "HELPDIR"; Type = "Value"; Details = "Type library HELPDIR value points to a missing path in the $viewLabel registry view." })
+                                                        }
+
+                                                        $helpKey = $null
+                                                        try {
+                                                            $helpKey = $numKey.OpenSubKey("HELPDIR", $false)
+                                                            if ($helpKey) {
+                                                                $helpDir = $helpKey.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                                $missingHelpDir = Get-WmtMissingRegistryPathTarget -RawValue $helpDir -RegistryView $view
+                                                                if ($missingHelpDir) {
+                                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing HelpDir"; Data = $missingHelpDir; DisplayKey = "$guid\$ver\HELPDIR ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver\HELPDIR" -View $view); ValueName = $null; Type = "Key"; Details = "Type library HELPDIR default path points to a missing path in the $viewLabel registry view." })
+                                                                }
+                                                            }
+                                                        }
+                                                        catch {}
+                                                        finally {
+                                                            if ($helpKey) { $helpKey.Close() }
+                                                        }
+
+                                                        foreach ($locale in @($numKey.GetSubKeyNames())) {
+                                                            if ($locale -ieq "HELPDIR") { continue }
+
+                                                            $localeKey = $null
+                                                            try {
+                                                                $localeKey = $numKey.OpenSubKey($locale, $false)
+                                                                if (-not $localeKey) { continue }
+
+                                                                foreach ($platform in @($localeKey.GetSubKeyNames())) {
+                                                                    if ($platform -notmatch '^(?i)win') { continue }
+
+                                                                    $platformKey = $null
+                                                                    try {
+                                                                        $platformKey = $localeKey.OpenSubKey($platform, $false)
+                                                                        if (-not $platformKey) { continue }
+
+                                                                        $typeLibPath = $platformKey.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                                        $missingTypeLibPath = Get-WmtMissingRegistryPathTarget -RawValue $typeLibPath -RegistryView $view
+                                                                        if ($missingTypeLibPath) {
+                                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing TypeLib Path"; Data = $missingTypeLibPath; DisplayKey = "$guid\$ver\$locale\$platform ($viewLabel)"; RegPath = (ConvertTo-WmtClassesViewPath -SubPath "TypeLib\$guid\$ver\$locale\$platform" -View $view); ValueName = $null; Type = "Key"; Details = "Type library $platform default path points to a missing file or folder in the $viewLabel registry view." })
+                                                                        }
+                                                                    }
+                                                                    catch {}
+                                                                    finally {
+                                                                        if ($platformKey) { $platformKey.Close() }
+                                                                    }
+                                                                }
+                                                            }
+                                                            catch {}
+                                                            finally {
+                                                                if ($localeKey) { $localeKey.Close() }
+                                                            }
+                                                        }
                                                     }
-                                                    $numKey.Close()
+                                                    catch {}
+                                                    finally {
+                                                        if ($numKey) { $numKey.Close() }
+                                                    }
                                                 }
                                                 $verKey.Close()
                                             }
