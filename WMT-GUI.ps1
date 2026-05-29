@@ -1970,6 +1970,9 @@ function Set-MyDeviceSectionData {
 
 function Stop-MyDeviceSectionJobs {
     if ($script:StatsTimer) { try { $script:StatsTimer.Stop() } catch {} }
+    if ($script:MyDevicePendingSections) {
+        try { $script:MyDevicePendingSections.Clear() } catch {}
+    }
     if ($script:MyDeviceSectionJobs) {
         foreach ($job in @($script:MyDeviceSectionJobs.Values)) {
             try { $job.PowerShell.Stop() } catch {}
@@ -1981,6 +1984,20 @@ function Stop-MyDeviceSectionJobs {
         try { $script:StatsRunspace.Stop() } catch {}
         try { $script:StatsRunspace.Dispose() } catch {}
         $script:StatsRunspace = $null
+    }
+}
+
+function Start-MyDeviceQueuedSections {
+    if (-not $script:MyDevicePendingSections -or $script:MyDevicePendingSections.Count -eq 0) { return }
+
+    if (-not $script:MyDeviceStatsMaxConcurrent -or $script:MyDeviceStatsMaxConcurrent -lt 1) {
+        $script:MyDeviceStatsMaxConcurrent = 6
+    }
+
+    while ($script:MyDeviceSectionJobs.Count -lt $script:MyDeviceStatsMaxConcurrent -and $script:MyDevicePendingSections.Count -gt 0) {
+        $section = $script:MyDevicePendingSections[0]
+        $script:MyDevicePendingSections.RemoveAt(0)
+        Start-MyDeviceSectionJob -Name $section.Name -Body $section.Body
     }
 }
 
@@ -2002,9 +2019,13 @@ function Start-MyDeviceSectionJob {
 }
 
 function Update-MyDeviceStats {
-    param([switch]$ForceRefresh)
+    param([switch]$ForceRefresh, [switch]$Preload)
+    $script:MyDeviceStatsStarted = $true
     $script:StatsStartedAt = Get-Date
+    $script:MyDeviceStatsPreloadMode = [bool]$Preload
+    $script:MyDeviceStatsMaxConcurrent = 6
     Stop-MyDeviceSectionJobs
+    $script:MyDevicePendingSections = [System.Collections.ArrayList]::new()
     Set-MyDeviceUiPlaceholders
 
     $sections = @(
@@ -2020,29 +2041,27 @@ function Update-MyDeviceStats {
         $cached = if (-not $ForceRefresh) { Get-MyDeviceCacheEntry -Section $section.Name } else { $null }
         if ($cached) {
             Set-MyDeviceSectionData -Data $cached
-            Write-GuiLog "[My Device] Loaded $($section.Name) from RAM cache."
+            if (-not $Preload) { Write-GuiLog "[My Device] Loaded $($section.Name) from RAM cache." }
         }
         else {
-            Start-MyDeviceSectionJob -Name $section.Name -Body $section.Body
+            [void]$script:MyDevicePendingSections.Add($section)
         }
     }
 
-    if ($script:MyDeviceSectionJobs.Count -eq 0) {
-        Write-GuiLog "[My Device] All sections loaded from RAM cache."
+    Start-MyDeviceQueuedSections
+
+    $hasPendingSections = ($script:MyDevicePendingSections -and $script:MyDevicePendingSections.Count -gt 0)
+    if ($script:MyDeviceSectionJobs.Count -eq 0 -and -not $hasPendingSections) {
+        if (-not $Preload) { Write-GuiLog "[My Device] All sections loaded from RAM cache." }
+        $script:MyDeviceStatsPreloadMode = $false
         return
     }
 
     $script:StatsTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:StatsTimer.Interval = [TimeSpan]::FromMilliseconds(200)
     $script:StatsTimer.Add_Tick({
-            if (-not $script:MyDeviceSectionJobs -or $script:MyDeviceSectionJobs.Count -eq 0) {
-                try { $script:StatsTimer.Stop() } catch {}
-                if ($script:StatsStartedAt) {
-                    $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
-                    Write-GuiLog "[My Device] Progressive stats load finished in ${elapsed}s."
-                }
-                return
-            }
+            if (-not $script:MyDeviceSectionJobs) { $script:MyDeviceSectionJobs = @{} }
+            if ($script:MyDeviceSectionJobs.Count -eq 0) { Start-MyDeviceQueuedSections }
 
             foreach ($key in @($script:MyDeviceSectionJobs.Keys)) {
                 $job = $script:MyDeviceSectionJobs[$key]
@@ -2055,7 +2074,7 @@ function Update-MyDeviceStats {
                             Set-MyDeviceSectionData -Data $data
                             Set-MyDeviceCacheEntry -Section $key -Data $data
                             $elapsed = [math]::Round(((Get-Date) - $job.StartedAt).TotalSeconds, 1)
-                            Write-GuiLog "[My Device] $key loaded in ${elapsed}s."
+                            if (-not $script:MyDeviceStatsPreloadMode) { Write-GuiLog "[My Device] $key loaded in ${elapsed}s." }
                         }
                     }
                     catch {
@@ -2066,6 +2085,19 @@ function Update-MyDeviceStats {
                         $script:MyDeviceSectionJobs.Remove($key)
                     }
                 }
+            }
+
+            Start-MyDeviceQueuedSections
+
+            $hasPendingSections = ($script:MyDevicePendingSections -and $script:MyDevicePendingSections.Count -gt 0)
+            if ($script:MyDeviceSectionJobs.Count -eq 0 -and -not $hasPendingSections) {
+                try { $script:StatsTimer.Stop() } catch {}
+                if (-not $script:MyDeviceStatsPreloadMode -and $script:StatsStartedAt) {
+                    $elapsed = [math]::Round(((Get-Date) - $script:StatsStartedAt).TotalSeconds, 1)
+                    Write-GuiLog "[My Device] Progressive stats load finished in ${elapsed}s."
+                }
+                $script:MyDeviceStatsPreloadMode = $false
+                return
             }
         })
     $script:StatsTimer.Start()
@@ -17874,6 +17906,11 @@ foreach ($tabButton in $script:WmtTabButtonControls) {
                     $script:MyDeviceStatsStarted = $true
                     Update-MyDeviceStats
                 }
+                elseif ($script:MyDeviceStatsPreloadMode) {
+                    $script:MyDeviceStatsPreloadMode = $false
+                    $script:MyDeviceStatsMaxConcurrent = 6
+                    Start-MyDeviceQueuedSections
+                }
             }
         })
 }
@@ -21811,6 +21848,7 @@ $script:FirewallLoadInProgress = $false
 $script:FirewallLoadRunspace = $null
 $script:FirewallLoadAsyncResult = $null
 $script:FirewallLoadTimer = $null
+$script:FirewallLoadPreloadMode = $false
 $script:FirewallDetailCache = @{}
 $script:FirewallDetailJob = $null
 $script:FirewallDetailTimer = $null
@@ -21956,6 +21994,7 @@ function Stop-FirewallRuleLoad {
     }
     $script:FirewallLoadAsyncResult = $null
     $script:FirewallLoadInProgress = $false
+    $script:FirewallLoadPreloadMode = $false
     if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
 }
 
@@ -22093,24 +22132,33 @@ function Initialize-FirewallRuleDetails {
 }
 
 function Start-FirewallRuleLoad {
-    param([switch]$Force)
+    param([switch]$Force, [switch]$Preload)
     if ($script:FirewallLoadInProgress) {
-        if (-not $Force) { return }
+        if (-not $Force) {
+            if ($script:FirewallLoadPreloadMode -and -not $Preload) {
+                $script:FirewallLoadPreloadMode = $false
+                Set-FirewallStatus "Loading firewall rules..." -Visible $true
+            }
+            return
+        }
         Stop-FirewallRuleLoad
     }
     if ($script:FirewallRulesLoaded -and -not $Force) {
-        Update-FirewallListView
+        if (-not $Preload) { Update-FirewallListView }
         return
     }
 
     Stop-FirewallDetailLoad
     $script:FirewallLoadInProgress = $true
     $script:FirewallRulesLoaded = $false
+    $script:FirewallLoadPreloadMode = [bool]$Preload
     $script:FirewallDetailCache = @{}
     if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $false }
-    if ($lstFw) { $lstFw.Items.Clear() }
-    Set-FirewallStatus "Loading firewall rules..." -Visible $true
-    Write-GuiLog "[Firewall] Loading base rule list..."
+    if (-not $Preload -and $lstFw) { $lstFw.Items.Clear() }
+    if (-not $Preload) {
+        Set-FirewallStatus "Loading firewall rules..." -Visible $true
+        Write-GuiLog "[Firewall] Loading base rule list..."
+    }
 
     $script:FirewallLoadRunspace = [PowerShell]::Create().AddScript({
             try {
@@ -22149,27 +22197,37 @@ function Start-FirewallRuleLoad {
                 if ($result -and $result.Success) {
                     $script:AllFw = @($result.Rules | Where-Object { $null -ne $_ })
                     $script:FirewallRulesLoaded = $true
-                    Update-FirewallListView
-                    Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
-                    Set-FirewallStatus "" -Visible $false
+                    if ($script:FirewallLoadPreloadMode) {
+                        if ($lblFwStatus) { Set-FirewallStatus "" -Visible $false }
+                    }
+                    else {
+                        Update-FirewallListView
+                        Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
+                        Set-FirewallStatus "" -Visible $false
+                    }
                 }
                 else {
                     $script:AllFw = @()
                     $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
-                    Set-FirewallStatus "Firewall load failed" -Visible $true
-                    Write-GuiLog "[Firewall] Load failed: $err"
+                    if (-not $script:FirewallLoadPreloadMode) {
+                        Set-FirewallStatus "Firewall load failed" -Visible $true
+                        Write-GuiLog "[Firewall] Load failed: $err"
+                    }
                 }
             }
             catch {
                 $script:AllFw = @()
-                Set-FirewallStatus "Firewall load failed" -Visible $true
-                Write-GuiLog "[Firewall] Load failed: $($_.Exception.Message)"
+                if (-not $script:FirewallLoadPreloadMode) {
+                    Set-FirewallStatus "Firewall load failed" -Visible $true
+                    Write-GuiLog "[Firewall] Load failed: $($_.Exception.Message)"
+                }
             }
             finally {
                 try { $script:FirewallLoadRunspace.Dispose() } catch {}
                 $script:FirewallLoadRunspace = $null
                 $script:FirewallLoadAsyncResult = $null
                 $script:FirewallLoadInProgress = $false
+                $script:FirewallLoadPreloadMode = $false
                 $script:FirewallLoadTimer = $null
                 if ($btnFwRefresh) { $btnFwRefresh.IsEnabled = $true }
             }
@@ -23402,6 +23460,44 @@ function Connect-WmtMyDeviceShortcut {
     Connect-WmtMyDeviceShortcut -ShortcutButtonName $_.Key -TargetButtonName $_.Value
 }
 
+function Test-WmtMyDevicePreloadBusy {
+    try {
+        if ($script:MyDevicePendingSections -and $script:MyDevicePendingSections.Count -gt 0) { return $true }
+        if ($script:MyDeviceSectionJobs -and $script:MyDeviceSectionJobs.Count -gt 0) { return $true }
+        if ($script:BitLockerStatusAsyncResult -and -not $script:BitLockerStatusAsyncResult.IsCompleted) { return $true }
+    }
+    catch {}
+
+    return $false
+}
+
+function Stop-WmtStartupBackgroundPreload {
+    if ($script:WmtStartupPreloadTimer) {
+        try { $script:WmtStartupPreloadTimer.Stop() } catch {}
+        $script:WmtStartupPreloadTimer = $null
+    }
+}
+
+function Start-WmtStartupBackgroundPreload {
+    if ($script:WmtStartupPreloadTimer) { return }
+
+    if (-not $script:MyDeviceStatsStarted) {
+        Update-MyDeviceStats -Preload
+    }
+    if (-not $script:FirewallRulesLoaded -and -not $script:FirewallLoadInProgress) {
+        Start-FirewallRuleLoad -Preload
+    }
+
+    $script:WmtStartupPreloadTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtStartupPreloadTimer.Interval = [TimeSpan]::FromMilliseconds(1000)
+    $script:WmtStartupPreloadTimer.Add_Tick({
+            if (Test-WmtMyDevicePreloadBusy) { return }
+            if ($script:FirewallLoadInProgress) { return }
+            Stop-WmtStartupBackgroundPreload
+        })
+    $script:WmtStartupPreloadTimer.Start()
+}
+
 # --- LAUNCH ---
 $window.Add_ContentRendered({
         $settings = Get-WmtSettings
@@ -23435,12 +23531,12 @@ $window.Add_ContentRendered({
         # 1. Click the Updates tab by default (This is the fixed line)
         (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
 
-        # 2. Trigger the background update check
+        # 2. Immediately warm hidden pages in background while the Updates scan starts.
+        Start-WmtStartupBackgroundPreload
+        # 3. Trigger the background update check
         Start-UpdateCheckBackground
-        # 3. Update tweak button states based on system
+        # 4. Update tweak button states based on system
         Update-TweakButtonStates
-        # 4. Defer My Device hardware statistics until the My Device tab is opened.
-        # CIM/storage/BitLocker queries already run in background runspaces, but delaying them avoids competing with startup and winget preflight.
         Update-MyDeviceResponsiveLayout
     })
 
@@ -23458,6 +23554,7 @@ $window.Add_Closing({
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+        Stop-WmtStartupBackgroundPreload
         if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
         if ($script:WingetSourcePreflightRunspace) {
             try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
