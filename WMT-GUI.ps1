@@ -347,6 +347,25 @@ function New-WmtVirtualRows {
 
 function Update-TweakButtonStates {
     try {
+        $regCache = @{}
+        $getRegValue = {
+            param(
+                [string]$Path,
+                [string]$Name,
+                $Default = $null
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+            if (-not $regCache.ContainsKey($Path)) {
+                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
+                catch { $regCache[$Path] = $null }
+            }
+
+            $item = $regCache[$Path]
+            if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+            return $Default
+        }.GetNewClosure()
+
         $setButtonEnabled = {
             param(
                 [string]$Name,
@@ -354,10 +373,10 @@ function Update-TweakButtonStates {
             )
 
             $button = Get-Ctrl $Name
-            if ($button) { $button.IsEnabled = $Enabled }
+            if ($button) { $button.IsEnabled = [bool]$Enabled }
         }
 
-        $h = (Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" -Name "HwSchMode" -EA Ignore).HwSchMode
+        $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
         & $setButtonEnabled "btnPerfEnableHags" ($h -ne 2); & $setButtonEnabled "btnPerfDisableHags" ($h -eq 2)
 
         $sm = Get-Service "SysMain" -EA Ignore
@@ -366,9 +385,9 @@ function Update-TweakButtonStates {
             & $setButtonEnabled "btnPerfDisableSuperfetch" (-not $d); & $setButtonEnabled "btnPerfEnableSuperfetch" $d
         }
 
-        $hibernation = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Control\Power" -Name "HibernateEnabled" -EA Ignore
-        if ($hibernation -and $null -ne $hibernation.HibernateEnabled) {
-            $hibernateEnabled = ([int]$hibernation.HibernateEnabled -ne 0)
+        $hibernate = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
+        if ($null -ne $hibernate) {
+            $hibernateEnabled = ([int]$hibernate -ne 0)
             & $setButtonEnabled "btnPerfDisableHibernate" $hibernateEnabled; & $setButtonEnabled "btnPerfEnableHibernate" (-not $hibernateEnabled)
         }
 
@@ -381,36 +400,37 @@ function Update-TweakButtonStates {
         }
 
         $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-        $ta = (Get-ItemProperty $ap -Name "TaskbarAl" -EA Ignore).TaskbarAl; (Get-Ctrl "btnTaskbarLeft").IsEnabled = ($ta -ne 0); (Get-Ctrl "btnTaskbarCenter").IsEnabled = ($ta -eq 0 -or $null -eq $ta)
-        $tc = (Get-ItemProperty $ap -Name "TaskbarGlomLevel" -EA Ignore).TaskbarGlomLevel; (Get-Ctrl "btnNeverCombine").IsEnabled = ($tc -ne 2); (Get-Ctrl "btnAlwaysCombine").IsEnabled = ($tc -eq 2 -or $null -eq $tc)
-        $is24 = ([string](Get-ItemProperty "HKCU:\Control Panel\International" -Name "sShortTime" -EA Ignore).sShortTime -cmatch "H")
-        (Get-Ctrl "btnClock24").IsEnabled = (-not $is24); (Get-Ctrl "btnClock12").IsEnabled = $is24
-        $cs = (Get-ItemProperty $ap -Name "ShowSecondsInSystemClock" -EA Ignore).ShowSecondsInSystemClock; (Get-Ctrl "btnClockSecsOn").IsEnabled = ($cs -ne 1); (Get-Ctrl "btnClockSecsOff").IsEnabled = ($cs -eq 1 -or $null -eq $cs)
-        $smode = (Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -EA Ignore).SearchboxTaskbarMode
-        (Get-Ctrl "btnHideSearch").IsEnabled = ($smode -ne 0); (Get-Ctrl "btnSearchIcon").IsEnabled = ($smode -ne 1)
-        (Get-Ctrl "btnHideWidgets").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarDa" -EA Ignore).TaskbarDa -ne 0)
-        (Get-Ctrl "btnHideTaskView").IsEnabled = ((Get-ItemProperty $ap -Name "ShowTaskViewButton" -EA Ignore).ShowTaskViewButton -ne 0)
-        (Get-Ctrl "btnHideChat").IsEnabled = ((Get-ItemProperty $ap -Name "TaskbarMn" -EA Ignore).TaskbarMn -ne 0)
+        $ta = & $getRegValue $ap "TaskbarAl"; & $setButtonEnabled "btnTaskbarLeft" ($ta -ne 0); & $setButtonEnabled "btnTaskbarCenter" ($ta -eq 0 -or $null -eq $ta)
+        $tc = & $getRegValue $ap "TaskbarGlomLevel"; & $setButtonEnabled "btnNeverCombine" ($tc -ne 2); & $setButtonEnabled "btnAlwaysCombine" ($tc -eq 2 -or $null -eq $tc)
+        $is24 = ([string](& $getRegValue "HKCU:\Control Panel\International" "sShortTime") -cmatch "H")
+        & $setButtonEnabled "btnClock24" (-not $is24); & $setButtonEnabled "btnClock12" $is24
+        $cs = & $getRegValue $ap "ShowSecondsInSystemClock"; & $setButtonEnabled "btnClockSecsOn" ($cs -ne 1); & $setButtonEnabled "btnClockSecsOff" ($cs -eq 1 -or $null -eq $cs)
+        $smode = & $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode"
+        & $setButtonEnabled "btnHideSearch" ($smode -ne 0); & $setButtonEnabled "btnSearchIcon" ($smode -ne 1)
+        & $setButtonEnabled "btnHideWidgets" ((& $getRegValue $ap "TaskbarDa") -ne 0)
+        & $setButtonEnabled "btnHideTaskView" ((& $getRegValue $ap "ShowTaskViewButton") -ne 0)
+        & $setButtonEnabled "btnHideChat" ((& $getRegValue $ap "TaskbarMn") -ne 0)
 
         $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
         $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-        $hideExt = [int](Get-WmtRegValue $ap "HideFileExt" 1)
+        $hideExt = [int](& $getRegValue $ap "HideFileExt" 1)
         & $setButtonEnabled "btnExpShowExt" ($hideExt -ne 0); & $setButtonEnabled "btnExpHideExt" ($hideExt -eq 0)
-        $hidden = [int](Get-WmtRegValue $ap "Hidden" 2)
+        $hidden = [int](& $getRegValue $ap "Hidden" 2)
         & $setButtonEnabled "btnExpShowHidden" ($hidden -ne 1); & $setButtonEnabled "btnExpHideHidden" ($hidden -eq 1)
-        $fullPath = [int](Get-WmtRegValue $cabinetPath "FullPath" 0)
+        $fullPath = [int](& $getRegValue $cabinetPath "FullPath" 0)
         & $setButtonEnabled "btnExpFullPathOn" ($fullPath -ne 1); & $setButtonEnabled "btnExpFullPathOff" ($fullPath -eq 1)
-        $launchTo = [int](Get-WmtRegValue $ap "LaunchTo" 2)
+        $launchTo = [int](& $getRegValue $ap "LaunchTo" 2)
         & $setButtonEnabled "btnExpLaunchThisPc" ($launchTo -ne 1); & $setButtonEnabled "btnExpLaunchQuickAccess" ($launchTo -eq 1)
-        $recentsHidden = ([int](Get-WmtRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $explorerPath "ShowFrequent" 1) -eq 0)
+        $recentsHidden = ([int](& $getRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](& $getRegValue $explorerPath "ShowFrequent" 1) -eq 0)
         & $setButtonEnabled "btnExpHideRecents" (-not $recentsHidden); & $setButtonEnabled "btnExpShowRecents" $recentsHidden
 
         $mousePath = "HKCU:\Control Panel\Mouse"
-        $mouseSpeed = [int](Get-WmtRegValue $mousePath "MouseSensitivity" 10)
+        $mouseSpeed = [int](& $getRegValue $mousePath "MouseSensitivity" 10)
         & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
-        $mouseAccelOn = ([string](Get-WmtRegValue $mousePath "MouseSpeed" "1") -ne "0")
+        $mouseAccelOn = ([string](& $getRegValue $mousePath "MouseSpeed" "1") -ne "0")
         & $setButtonEnabled "btnMouseAccelOn" (-not $mouseAccelOn); & $setButtonEnabled "btnMouseAccelOff" $mouseAccelOn
-        $singleClick = Test-WmtExplorerSingleClick
+        $shellState = & $getRegValue $explorerPath "ShellState"
+        $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
         & $setButtonEnabled "btnMouseSingleClick" (-not $singleClick); & $setButtonEnabled "btnMouseDoubleClick" $singleClick
 
         $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
@@ -420,23 +440,24 @@ function Update-TweakButtonStates {
         $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
         & $setButtonEnabled "btnCtxPsHereAdd" (-not $psHereInstalled); & $setButtonEnabled "btnCtxPsHereRemove" $psHereInstalled
 
-        $adEnabled = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
+        $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
         & $setButtonEnabled "btnPrivacyAdsOff" ($adEnabled -ne 0); & $setButtonEnabled "btnPrivacyAdsOn" ($adEnabled -eq 0)
+        $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
         $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
         $suggestionsOff = $true
         foreach ($name in $suggestionNames) {
-            if ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" $name 1) -ne 0) { $suggestionsOff = $false; break }
+            if ([int](& $getRegValue $contentDeliveryPath $name 1) -ne 0) { $suggestionsOff = $false; break }
         }
         & $setButtonEnabled "btnPrivacySuggestedOff" (-not $suggestionsOff); & $setButtonEnabled "btnPrivacySuggestedOn" $suggestionsOff
-        $tailoredOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
+        $tailoredOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
         & $setButtonEnabled "btnPrivacyTailoredOff" (-not $tailoredOff); & $setButtonEnabled "btnPrivacyTailoredOn" $tailoredOff
         $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-        $activityOff = ([int](Get-WmtRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](Get-WmtRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
+        $activityOff = ([int](& $getRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
         & $setButtonEnabled "btnPrivacyActivityOff" (-not $activityOff); & $setButtonEnabled "btnPrivacyActivityOn" $activityOff
-        $launchTrackingOff = ([int](Get-WmtRegValue $ap "Start_TrackProgs" 1) -eq 0)
+        $launchTrackingOff = ([int](& $getRegValue $ap "Start_TrackProgs" 1) -eq 0)
         & $setButtonEnabled "btnPrivacyAppLaunchOff" (-not $launchTrackingOff); & $setButtonEnabled "btnPrivacyAppLaunchOn" $launchTrackingOff
 
-        $webSearchOff = ([int](Get-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
+        $webSearchOff = ([int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
         & $setButtonEnabled "btnSearchWebOff" (-not $webSearchOff); & $setButtonEnabled "btnSearchWebOn" $webSearchOff
         $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
         if ($searchSvc) {
@@ -447,34 +468,33 @@ function Update-TweakButtonStates {
         $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
         $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
         $gameCfgPath = "HKCU:\System\GameConfigStore"
-        $gameModeOn = ([int](Get-WmtRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](Get-WmtRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
+        $gameModeOn = ([int](& $getRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](& $getRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
         & $setButtonEnabled "btnGameModeOn" (-not $gameModeOn); & $setButtonEnabled "btnGameModeOff" $gameModeOn
-        $gameBarOn = ([int](Get-WmtRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
+        $gameBarOn = ([int](& $getRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](& $getRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
         & $setButtonEnabled "btnGameBarOff" $gameBarOn; & $setButtonEnabled "btnGameBarOn" (-not $gameBarOn)
-        $captureOn = ([int](Get-WmtRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
+        $captureOn = ([int](& $getRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
         & $setButtonEnabled "btnGameCaptureOff" $captureOn; & $setButtonEnabled "btnGameCaptureOn" (-not $captureOn)
-        $fsoOff = ([int](Get-WmtRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](Get-WmtRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+        $fsoOff = ([int](& $getRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](& $getRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
         & $setButtonEnabled "btnGameFsoOff" (-not $fsoOff); & $setButtonEnabled "btnGameFsoDefault" $fsoOff
 
         $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-        $visualMode = [int](Get-WmtRegValue $visualPath "VisualFXSetting" 0)
-        $snappyOn = ($visualMode -eq 3 -and [string](Get-WmtRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](Get-WmtRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
+        $visualMode = [int](& $getRegValue $visualPath "VisualFXSetting" 0)
+        $snappyOn = ($visualMode -eq 3 -and [string](& $getRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](& $getRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
         & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
 
-        $tipsOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SoftLandingEnabled" 1) -eq 0 -and [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338389Enabled" 1) -eq 0)
+        $tipsOff = ([int](& $getRegValue $contentDeliveryPath "SoftLandingEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338389Enabled" 1) -eq 0)
         & $setButtonEnabled "btnNotifyTipsOff" (-not $tipsOff); & $setButtonEnabled "btnNotifyTipsOn" $tipsOff
-        $setupOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+        $setupOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
         & $setButtonEnabled "btnNotifySetupOff" (-not $setupOff); & $setButtonEnabled "btnNotifySetupOn" $setupOff
-        $lockPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-        $lockFactsOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](Get-WmtRegValue $lockPath "SubscribedContent-338387Enabled" 1) -eq 0)
-        $spotlightOff = ([int](Get-WmtRegValue $lockPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
+        $lockFactsOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338387Enabled" 1) -eq 0)
+        $spotlightOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](& $getRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
         & $setButtonEnabled "btnLockFactsOff" (-not $lockFactsOff); & $setButtonEnabled "btnLockFactsOn" $lockFactsOff
         & $setButtonEnabled "btnLockSpotlightOff" (-not $spotlightOff); & $setButtonEnabled "btnLockSpotlightOn" $spotlightOff
         & $setButtonEnabled "btnLockPlain" (-not ($lockFactsOff -and $spotlightOff)); & $setButtonEnabled "btnLockDefault" ($lockFactsOff -or $spotlightOff)
 
-        $fastStartupOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
+        $fastStartupOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
         & $setButtonEnabled "btnStartupFastOff" $fastStartupOn; & $setButtonEnabled "btnStartupFastOn" (-not $fastStartupOn)
-        $restoreFoldersOn = ([int](Get-WmtRegValue $ap "PersistBrowsers" 0) -ne 0)
+        $restoreFoldersOn = ([int](& $getRegValue $ap "PersistBrowsers" 0) -ne 0)
         & $setButtonEnabled "btnStartupRestoreFoldersOn" (-not $restoreFoldersOn); & $setButtonEnabled "btnStartupRestoreFoldersOff" $restoreFoldersOn
 
         $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
@@ -494,9 +514,9 @@ function Update-TweakButtonStates {
             & $setButtonEnabled "btnPowerPcieModerate" (-not $pcieModerate); & $setButtonEnabled "btnPowerPcieOff" ($pcieAc -ne 0 -or $pcieDc -ne 0)
         }
 
-        $longPathsOn = ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
+        $longPathsOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
         & $setButtonEnabled "btnDevLongPathsOn" (-not $longPathsOn); & $setButtonEnabled "btnDevLongPathsOff" $longPathsOn
-        $devModeOn = ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
+        $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
         & $setButtonEnabled "btnDevModeOn" (-not $devModeOn); & $setButtonEnabled "btnDevModeOff" $devModeOn
     }
     catch {}
@@ -17342,6 +17362,21 @@ Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2
 # ==========================================
 $TabButtons = @("btnTabUpdates", "btnTabTweaks", "btnTabHealth", "btnTabNetwork", "btnTabFirewall", "btnTabDrivers", "btnTabCleanup", "btnTabUtils", "btnTabMyDevice", "btnTabSupport")
 $Panels = @("pnlUpdates", "pnlCatalog", "pnlTweaks", "pnlHealth", "pnlNetwork", "pnlMyDevice", "pnlFirewall", "pnlDrivers", "pnlCleanup", "pnlUtils", "pnlSupport")
+$script:WmtPanelControls = [System.Collections.ArrayList]::new()
+$script:WmtTabButtonControls = [System.Collections.ArrayList]::new()
+$script:WmtTabTargetByButton = @{}
+foreach ($panelName in $Panels) {
+    $panelCtrl = Get-Ctrl $panelName
+    if ($panelCtrl) { [void]$script:WmtPanelControls.Add($panelCtrl) }
+}
+foreach ($btnName in $TabButtons) {
+    $btnCtrl = Get-Ctrl $btnName
+    if (-not $btnCtrl) { continue }
+    [void]$script:WmtTabButtonControls.Add($btnCtrl)
+    $targetName = if ($btnCtrl.Tag -and [string]$btnCtrl.Tag -like "pnl*") { [string]$btnCtrl.Tag } else { $btnName -replace "btnTab", "pnl" }
+    $targetCtrl = Get-Ctrl $targetName
+    if ($targetCtrl) { $script:WmtTabTargetByButton[$btnName] = $targetCtrl }
+}
 
 # --- INITIALIZE ALL CONTROLS ---
 $btnManageProviders = Get-Ctrl "btnManageProviders"
@@ -17735,25 +17770,18 @@ if ($bdQuickFind -and $txtGlobalSearch) {
 }
 
 # --- TABS LOGIC ---
-foreach ($btnName in $TabButtons) {
-    (Get-Ctrl $btnName).Add_Click({
+foreach ($tabButton in $script:WmtTabButtonControls) {
+    $tabButton.Add_Click({
             param($s, $e)
-            # Hide all panels
-            foreach ($p in $Panels) { (Get-Ctrl $p).Visibility = "Collapsed" }
-            # Reset all nav buttons
-            foreach ($b in $TabButtons) { 
-                $btn = Get-Ctrl $b
+            foreach ($panel in $script:WmtPanelControls) { $panel.Visibility = "Collapsed" }
+            foreach ($btn in $script:WmtTabButtonControls) {
                 $btn.ClearValue([System.Windows.Controls.Button]::BackgroundProperty)
                 $btn.Foreground = $window.Resources["TextSecondary"]
                 $btn.FontWeight = "Normal"
                 $btn.Tag = "Collapsed"  # Hide indicator
             }
-            # Show target panel (derive from button name: btnTabUpdates -> pnlUpdates)
-            $panelName = $s.Name -replace "btnTab", "pnl"
-            if ($s.Name -eq "btnNavDownloads") { $panelName = "pnlSupport" }
-            $target = (Get-Ctrl $panelName)
-            $target.Visibility = "Visible"
-            # Set active state on clicked button
+            $target = $script:WmtTabTargetByButton[[string]$s.Name]
+            if ($target) { $target.Visibility = "Visible" }
             $s.Background = $window.Resources["BgElevated"]
             $s.Foreground = $window.Resources["TextPrimary"]
             $s.FontWeight = "SemiBold"
@@ -17778,6 +17806,16 @@ foreach ($btnName in $TabButtons) {
 $SearchIndex = @{}
 function Add-SearchIndexEntry { param($BtnName, $Desc, $ParentTab) $b = Get-Ctrl $BtnName; if ($b) { $SearchIndex[$Desc] = @{Button = $b; Tab = $ParentTab; Action = $null } } }
 function Add-SearchIndexAction { param($Desc, [scriptblock]$Action, $ParentTab) if ($Action) { $SearchIndex[$Desc] = @{Button = $null; Tab = $ParentTab; Action = $Action } } }
+function Update-WmtSearchIndexEntries {
+    $entries = [System.Collections.ArrayList]::new()
+    foreach ($entry in ($SearchIndex.GetEnumerator() | Sort-Object Key)) {
+        [void]$entries.Add([PSCustomObject]@{
+                Text = [string]$entry.Key
+                Item = $entry.Value
+            })
+    }
+    $script:WmtSearchIndexEntries = $entries
+}
 # --- GLOBAL SEARCH INDEX ---
 
 # 1. Updates (Winget)
@@ -17909,6 +17947,7 @@ Add-SearchIndexEntry "btnSecuritySmartScreenOpen" "Open SmartScreen Settings" "b
 Add-SearchIndexEntry "btnPowerUsbSuspendOff" "Disable USB Selective Suspend" "btnTabTweaks"
 Add-SearchIndexEntry "btnDevLongPathsOn" "Enable Long Paths" "btnTabTweaks"
 Add-SearchIndexEntry "btnDevModeOn" "Enable Developer Mode" "btnTabTweaks"
+Update-WmtSearchIndexEntries
 
 $txtGlobalSearch.Add_TextChanged({
         $q = $txtGlobalSearch.Text
@@ -17916,10 +17955,11 @@ $txtGlobalSearch.Add_TextChanged({
             $pnlNavButtons.Visibility = "Collapsed"
             $lstSearchResults.Visibility = "Visible"
             $lstSearchResults.Items.Clear()
-            $SearchIndex.GetEnumerator() |
-            Where-Object { ([string]$_.Key).IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 } |
-            Sort-Object Key |
-            ForEach-Object { [void]$lstSearchResults.Items.Add($_.Key) }
+            foreach ($entry in $script:WmtSearchIndexEntries) {
+                if ($entry.Text.IndexOf($q, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    [void]$lstSearchResults.Items.Add($entry.Text)
+                }
+            }
         }
         else { $pnlNavButtons.Visibility = "Visible"; $lstSearchResults.Visibility = "Collapsed" }
     })
