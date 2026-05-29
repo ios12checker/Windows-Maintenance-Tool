@@ -194,18 +194,20 @@ function Invoke-UiCommand {
         $Msg = "Processing...", 
         [object[]]$ArgumentList = @()
     )
-    Set-WmtBusyCursor -Busy
-    Write-GuiLog $Msg
-    try { 
+    try {
+        Set-WmtBusyCursor -Busy
+        Write-GuiLog $Msg
         # Pass arguments to the scriptblock using splatting
         $res = & $Sb @ArgumentList | Out-String
-        if ($res) { Write-GuiLog $res.Trim() } 
+        if (-not [string]::IsNullOrWhiteSpace($res)) { Write-GuiLog $res.Trim() }
         else { Write-GuiLog "Done." }
     }
     catch { 
         Write-GuiLog "ERROR: $($_.Exception.Message)" 
     }
-    Set-WmtBusyCursor
+    finally {
+        Set-WmtBusyCursor
+    }
 }
 
 function Enable-WmtWpfItemsVirtualization {
@@ -217,6 +219,18 @@ function Enable-WmtWpfItemsVirtualization {
         [System.Windows.Controls.ScrollViewer]::SetCanContentScroll($Control, $true)
     }
     catch {}
+}
+
+function Test-WmtDirectoryReparsePoint {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $true }
+    try {
+        $attributes = [System.IO.Directory]::GetAttributes($Path)
+        return (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+    }
+    catch {
+        return $true
+    }
 }
 
 function Get-WmtEnumeratedFiles {
@@ -237,10 +251,14 @@ function Get-WmtEnumeratedFiles {
         return
     }
 
+    $visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     $pending = [System.Collections.Generic.Stack[string]]::new()
-    $pending.Push($Path)
+    try { $pending.Push([System.IO.DirectoryInfo]::new($Path).FullName) } catch { $pending.Push($Path) }
     while ($pending.Count -gt 0) {
         $dir = $pending.Pop()
+        try { $dirKey = [System.IO.DirectoryInfo]::new($dir).FullName.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) } catch { $dirKey = $dir }
+        if (-not $visited.Add($dirKey)) { continue }
+        if (Test-WmtDirectoryReparsePoint -Path $dir) { continue }
 
         try {
             foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, $Filter, [System.IO.SearchOption]::TopDirectoryOnly)) {
@@ -251,6 +269,7 @@ function Get-WmtEnumeratedFiles {
 
         try {
             foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+                if (Test-WmtDirectoryReparsePoint -Path $child) { continue }
                 $pending.Push($child)
             }
         }
@@ -298,11 +317,21 @@ function Test-WmtDirectoryHasEntries {
 }
 
 function Remove-WmtEmptyChildDirectories {
-    param([string]$Path)
+    param(
+        [string]$Path,
+        [System.Collections.Generic.HashSet[string]]$Visited
+    )
     if ([string]::IsNullOrWhiteSpace($Path) -or -not [System.IO.Directory]::Exists($Path)) { return }
+    if (-not $Visited) {
+        $Visited = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    }
+    try { $pathKey = [System.IO.DirectoryInfo]::new($Path).FullName.TrimEnd([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar) } catch { $pathKey = $Path }
+    if (-not $Visited.Add($pathKey)) { return }
+    if (Test-WmtDirectoryReparsePoint -Path $Path) { return }
     try {
         foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Path, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
-            Remove-WmtEmptyChildDirectories -Path $dir
+            if (Test-WmtDirectoryReparsePoint -Path $dir) { continue }
+            Remove-WmtEmptyChildDirectories -Path $dir -Visited $Visited
             try { [System.IO.Directory]::Delete($dir, $false) } catch {}
         }
     }
@@ -2678,12 +2707,65 @@ function Get-WmtDataGridSelectedRows {
     return $rows
 }
 
+function Add-WmtStatusTextTriggers {
+    param(
+        [System.Windows.Style]$Style,
+        [string]$BindingPath,
+        [string[]]$Values,
+        [string]$ColorKey
+    )
+
+    if (-not $Style -or [string]::IsNullOrWhiteSpace($BindingPath)) { return }
+    $brush = New-WmtBrush $ColorKey
+    $fontWeight = [System.Windows.FontWeights]::SemiBold
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+
+    foreach ($value in @($Values)) {
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        foreach ($variant in @($value, $value.ToLowerInvariant(), $value.ToUpperInvariant())) {
+            if (-not $seen.Add($variant)) { continue }
+
+            $trigger = [System.Windows.DataTrigger]::new()
+            $trigger.Binding = [System.Windows.Data.Binding]::new($BindingPath)
+            $trigger.Value = $variant
+            [void]$trigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.TextBlock]::ForegroundProperty, $brush))
+            [void]$trigger.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.TextBlock]::FontWeightProperty, $fontWeight))
+            [void]$Style.Triggers.Add($trigger)
+        }
+    }
+}
+
+function New-WmtStatusTextStyle {
+    param([string]$BindingPath)
+
+    $style = [System.Windows.Style]::new([System.Windows.Controls.TextBlock])
+    [void]$style.Setters.Add([System.Windows.Setter]::new([System.Windows.Controls.TextBlock]::TextTrimmingProperty, [System.Windows.TextTrimming]::CharacterEllipsis))
+
+    Add-WmtStatusTextTriggers -Style $style -BindingPath $BindingPath -ColorKey "SuccessHover" -Values @(
+        "Yes", "True", "Enabled", "Enable", "Allowed", "Allow", "Running", "Ready",
+        "Automatic", "Auto", "Boot", "System", "Success", "OK", "Healthy", "Online",
+        "Connected", "Up", "Installed", "Protected", "Active", "On"
+    )
+    Add-WmtStatusTextTriggers -Style $style -BindingPath $BindingPath -ColorKey "DangerHover" -Values @(
+        "No", "False", "Disabled", "Disable", "Denied", "Deny", "Disallowed", "Not Allowed",
+        "Blocked", "Block", "Stopped", "Failed", "Failure", "Error", "Access Denied",
+        "Critical", "Unhealthy", "Offline", "Disconnected", "Not Present", "Unavailable", "Off"
+    )
+    Add-WmtStatusTextTriggers -Style $style -BindingPath $BindingPath -ColorKey "WarningHover" -Values @(
+        "Manual", "Unknown", "Pending", "Queued", "Warning", "Degraded", "Limited",
+        "Paused", "Starting", "Stopping", "Partially Enabled"
+    )
+
+    return $style
+}
+
 function Set-WmtDataGridColumns {
     param(
         [System.Windows.Controls.DataGrid]$DataGrid,
         [string[]]$Columns,
         [hashtable]$Widths = @{},
-        [string[]]$Hidden = @()
+        [string[]]$Hidden = @(),
+        [string[]]$StatusColumns = @("Enabled", "State", "Status", "StartType", "Action", "Protection", "Result")
     )
 
     if (-not $DataGrid) { return }
@@ -2694,6 +2776,9 @@ function Set-WmtDataGridColumns {
         $col.Header = $column
         $col.Binding = [System.Windows.Data.Binding]::new($column)
         $col.IsReadOnly = $true
+        if ($StatusColumns -contains $column) {
+            $col.ElementStyle = New-WmtStatusTextStyle -BindingPath $column
+        }
         if ($Widths -and $Widths.ContainsKey($column)) {
             $widthValue = $Widths[$column]
             if ([string]$widthValue -match '^(?<weight>\d+(?:\.\d+)?)?\*$') {
@@ -3500,8 +3585,11 @@ function Get-WingetManifestText {
         $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
         $proc = [System.Diagnostics.Process]::Start($pInfo)
+        $outTask = $proc.StandardOutput.ReadToEndAsync()
+        $errTask = $proc.StandardError.ReadToEndAsync()
         if (-not $proc.WaitForExit($TimeoutMs)) {
             try { $proc.Kill() } catch {}
+            try { [void]$proc.WaitForExit(2000) } catch {}
             return [PSCustomObject]@{
                 Success  = $false
                 ExitCode = $null
@@ -3509,8 +3597,8 @@ function Get-WingetManifestText {
             }
         }
 
-        $out = $proc.StandardOutput.ReadToEnd()
-        $err = $proc.StandardError.ReadToEnd()
+        $out = $outTask.GetAwaiter().GetResult()
+        $err = $errTask.GetAwaiter().GetResult()
         $textParts = @()
         if (-not [string]::IsNullOrWhiteSpace($out)) { $textParts += $out.TrimEnd() }
         if (-not [string]::IsNullOrWhiteSpace($err)) { $textParts += $err.TrimEnd() }
@@ -8228,7 +8316,7 @@ function Show-RegScanSelection {
     [xml]$regScanXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Select Registry Scan Targets" Width="680" Height="560" MinWidth="620" MinHeight="500"
+        Title="Select Registry Scan Targets" Width="680" Height="720" MinWidth="620" MinHeight="640"
         WindowStartupLocation="CenterOwner" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
     <Window.Resources>
@@ -20301,14 +20389,16 @@ $btnWingetScan.Add_Click({
                         $pInfo.CreateNoWindow = $true
                         $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
                         $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
     
                         if (-not $p.WaitForExit($timeoutMs)) {
                             Write-Output "LOG:$SourceName scan timed out after $([int]($timeoutMs / 1000)) seconds."
                             try { $p.Kill() } catch { }
+                            try { [void]$p.WaitForExit(2000) } catch { }
                             return
                         }
     
-                        $out = $p.StandardOutput.ReadToEnd()
+                        $out = $outTask.GetAwaiter().GetResult()
     
                         # Auto-accept & refresh if needed (existing logic)
                         if ($p.ExitCode -eq -1978335231 -or $p.ExitCode -eq -1978335229) { 
@@ -20323,8 +20413,14 @@ $btnWingetScan.Add_Click({
     
                             Write-Output "LOG:$SourceName refreshed. Retrying scan..."
                             $p = [System.Diagnostics.Process]::Start($pInfo)
-                            $p.WaitForExit($timeoutMs) | Out-Null
-                            $out = $p.StandardOutput.ReadToEnd()
+                            $outTask = $p.StandardOutput.ReadToEndAsync()
+                            if (-not $p.WaitForExit($timeoutMs)) {
+                                Write-Output "LOG:$SourceName retry scan timed out after $([int]($timeoutMs / 1000)) seconds."
+                                try { $p.Kill() } catch { }
+                                try { [void]$p.WaitForExit(2000) } catch { }
+                                return
+                            }
+                            $out = $outTask.GetAwaiter().GetResult()
                         }
     
                         if ($p.ExitCode -ne 0) {
@@ -20513,6 +20609,8 @@ $btnWingetScan.Add_Click({
                         $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
                         $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        $errTask = $p.StandardError.ReadToEndAsync()
                         try {
                             $p.StandardInput.WriteLine("n")
                             $p.StandardInput.Close()
@@ -20522,11 +20620,12 @@ $btnWingetScan.Add_Click({
                         if (-not $p.WaitForExit(60000)) {
                             Write-Output "LOG:Store CLI scan timed out after 60 seconds."
                             try { $p.Kill() } catch {}
+                            try { [void]$p.WaitForExit(2000) } catch {}
                             return
                         }
 
-                        $out = $p.StandardOutput.ReadToEnd()
-                        $err = $p.StandardError.ReadToEnd()
+                        $out = $outTask.GetAwaiter().GetResult()
+                        $err = $errTask.GetAwaiter().GetResult()
                         $combined = "$out`n$err"
 
                         if ($p.ExitCode -ne 0) {
@@ -21576,6 +21675,11 @@ $script:FirewallDetailCache = @{}
 $script:FirewallDetailJob = $null
 $script:FirewallDetailTimer = $null
 $script:FirewallDetailToken = 0
+$script:FirewallBulkDetailRunspace = $null
+$script:FirewallBulkDetailAsyncResult = $null
+$script:FirewallBulkDetailTimer = $null
+$script:FirewallBulkDetailToken = 0
+$script:FirewallBulkDetailInProgress = $false
 
 function Test-FirewallSearchIsBlank {
     param([string]$Text)
@@ -21705,7 +21809,25 @@ function Stop-FirewallDetailLoad {
     }
 }
 
+function Stop-FirewallBulkDetailLoad {
+    if ($script:FirewallBulkDetailInProgress -or $script:FirewallBulkDetailTimer -or $script:FirewallBulkDetailRunspace) {
+        $script:FirewallBulkDetailToken++
+    }
+    if ($script:FirewallBulkDetailTimer) {
+        try { $script:FirewallBulkDetailTimer.Stop() } catch {}
+        $script:FirewallBulkDetailTimer = $null
+    }
+    if ($script:FirewallBulkDetailRunspace) {
+        try { $script:FirewallBulkDetailRunspace.Stop() } catch {}
+        try { $script:FirewallBulkDetailRunspace.Dispose() } catch {}
+        $script:FirewallBulkDetailRunspace = $null
+    }
+    $script:FirewallBulkDetailAsyncResult = $null
+    $script:FirewallBulkDetailInProgress = $false
+}
+
 function Stop-FirewallRuleLoad {
+    Stop-FirewallBulkDetailLoad
     if ($script:FirewallLoadTimer) {
         try { $script:FirewallLoadTimer.Stop() } catch {}
         $script:FirewallLoadTimer = $null
@@ -21815,7 +21937,12 @@ function Start-FirewallRuleDetailLoad {
                 try { $job.PowerShell.Dispose() } catch {}
                 if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Token -eq $job.Token) { $script:FirewallDetailJob = $null }
                 $script:FirewallDetailTimer = $null
-                Set-FirewallStatus "" -Visible $false
+                if ($script:FirewallBulkDetailInProgress) {
+                    Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
+                }
+                else {
+                    Set-FirewallStatus "" -Visible $false
+                }
             }
         })
     $script:FirewallDetailTimer.Start()
@@ -21846,11 +21973,158 @@ function Initialize-FirewallRuleDetails {
             Write-GuiLog "[Firewall] Failed to load selected rule details: $($details.Error)"
         }
         if ($lstFw) { $lstFw.Items.Refresh() }
-        Set-FirewallStatus "" -Visible $false
+        if ($script:FirewallBulkDetailInProgress) {
+            Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
+        }
+        else {
+            Set-FirewallStatus "" -Visible $false
+        }
         return
     }
 
     Start-FirewallRuleDetailLoad -Rule $Rule
+}
+
+function Start-FirewallBulkDetailLoad {
+    param([object[]]$Rules)
+
+    $rulesToLoad = @(
+        $Rules | Where-Object {
+            $_ -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.Name) -and
+            -not ($_.PSObject.Properties["DetailsLoaded"] -and $_.DetailsLoaded)
+        }
+    )
+    if ($rulesToLoad.Count -eq 0) {
+        Set-FirewallStatus "" -Visible $false
+        return
+    }
+
+    Stop-FirewallBulkDetailLoad
+    $script:FirewallBulkDetailInProgress = $true
+    $script:FirewallBulkDetailToken++
+    $token = $script:FirewallBulkDetailToken
+    $ruleNames = @($rulesToLoad | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
+
+    Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
+    Write-GuiLog "[Firewall] Loading port/protocol details in the background..."
+
+    $script:FirewallBulkDetailRunspace = [PowerShell]::Create().AddScript({
+            param([string[]]$RuleNames, [int]$BatchSize)
+
+            function Format-RuleValue {
+                param([object[]]$Values)
+                $clean = @(
+                    $Values | ForEach-Object {
+                        if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
+                        else { [string]$_ }
+                    } | Select-Object -Unique
+                )
+                if ($clean.Count -eq 0) { return "Any" }
+                return ($clean -join ", ")
+            }
+
+            try {
+                $names = @($RuleNames | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
+                if ($names.Count -eq 0) {
+                    return [PSCustomObject]@{ Success = $true; Details = @(); Error = ""; Failed = 0 }
+                }
+                if ($BatchSize -lt 1) { $BatchSize = 200 }
+
+                $details = [System.Collections.Generic.List[object]]::new()
+                $failed = 0
+                for ($offset = 0; $offset -lt $names.Count; $offset += $BatchSize) {
+                    $end = [Math]::Min($offset + $BatchSize - 1, $names.Count - 1)
+                    $batch = @($names[$offset..$end])
+                    foreach ($rule in @(Get-NetFirewallRule -Name $batch -ErrorAction SilentlyContinue)) {
+                        $ruleName = [string]$rule.Name
+                        try {
+                            $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
+                            if ($filters.Count -eq 0) {
+                                [void]$details.Add([PSCustomObject]@{ Success = $true; Name = $ruleName; Protocol = "Any"; LocalPort = "Any"; Error = "" })
+                                continue
+                            }
+
+                            $protocol = Format-RuleValue -Values @($filters | ForEach-Object { $_.Protocol })
+                            $localPort = Format-RuleValue -Values @($filters | ForEach-Object { $_.LocalPort })
+                            [void]$details.Add([PSCustomObject]@{ Success = $true; Name = $ruleName; Protocol = $protocol; LocalPort = $localPort; Error = "" })
+                        }
+                        catch {
+                            $failed++
+                            [void]$details.Add([PSCustomObject]@{ Success = $false; Name = $ruleName; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message })
+                        }
+                    }
+                }
+
+                return [PSCustomObject]@{ Success = $true; Details = $details.ToArray(); Error = ""; Failed = $failed }
+            }
+            catch {
+                return [PSCustomObject]@{ Success = $false; Details = @(); Error = $_.Exception.Message; Failed = 0 }
+            }
+        }).AddArgument([string[]]$ruleNames).AddArgument(200)
+
+    $bulkRunspace = $script:FirewallBulkDetailRunspace
+    $bulkAsync = $bulkRunspace.BeginInvoke()
+    $script:FirewallBulkDetailAsyncResult = $bulkAsync
+    $bulkTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:FirewallBulkDetailTimer = $bulkTimer
+    $bulkTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $bulkTimer.Add_Tick({
+            if (-not $bulkAsync -or -not $bulkAsync.IsCompleted) { return }
+
+            $bulkTimer.Stop()
+            try {
+                $result = $bulkRunspace.EndInvoke($bulkAsync)
+                if ($result -and $result.Count -eq 1) { $result = $result[0] }
+                if ($token -ne $script:FirewallBulkDetailToken) { return }
+
+                if ($result -and $result.Success) {
+                    $updated = 0
+                    foreach ($detail in @($result.Details)) {
+                        if (-not $detail -or -not $detail.Success -or [string]::IsNullOrWhiteSpace([string]$detail.Name)) { continue }
+                        $script:FirewallDetailCache[[string]$detail.Name] = $detail
+                    }
+
+                    foreach ($rule in @($script:AllFw)) {
+                        if ($rule -and $script:FirewallDetailCache.ContainsKey([string]$rule.Name)) {
+                            Set-FirewallRuleDetails -Rule $rule -Details $script:FirewallDetailCache[[string]$rule.Name]
+                            $updated++
+                        }
+                    }
+
+                    if ($txtFwSearch -and -not (Test-FirewallSearchIsBlank $txtFwSearch.Text)) {
+                        Update-FirewallListView
+                    }
+                    elseif ($lstFw) {
+                        $lstFw.Items.Refresh()
+                    }
+
+                    $failed = if ($result.PSObject.Properties["Failed"]) { [int]$result.Failed } else { 0 }
+                    $failedText = if ($failed -gt 0) { " ($failed failed)" } else { "" }
+                    Write-GuiLog "[Firewall] Loaded port/protocol details for $updated rule(s)$failedText."
+                    Set-FirewallStatus "" -Visible $false
+                }
+                else {
+                    $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
+                    Write-GuiLog "[Firewall] Port/protocol background load failed: $err"
+                    Set-FirewallStatus "" -Visible $false
+                }
+            }
+            catch {
+                Write-GuiLog "[Firewall] Port/protocol background load failed: $($_.Exception.Message)"
+                Set-FirewallStatus "" -Visible $false
+            }
+            finally {
+                try { $bulkRunspace.Dispose() } catch {}
+                if ($token -eq $script:FirewallBulkDetailToken) {
+                    $script:FirewallBulkDetailRunspace = $null
+                    $script:FirewallBulkDetailAsyncResult = $null
+                    $script:FirewallBulkDetailTimer = $null
+                    $script:FirewallBulkDetailInProgress = $false
+                }
+            }
+        }.GetNewClosure())
+    $bulkTimer.Start()
 }
 
 function Start-FirewallRuleLoad {
@@ -21912,7 +22186,7 @@ function Start-FirewallRuleLoad {
                     $script:FirewallRulesLoaded = $true
                     Update-FirewallListView
                     Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
-                    Set-FirewallStatus "" -Visible $false
+                    Start-FirewallBulkDetailLoad -Rules $script:AllFw
                 }
                 else {
                     $script:AllFw = @()
