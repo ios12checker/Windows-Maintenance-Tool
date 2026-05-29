@@ -20983,11 +20983,20 @@ $btnWingetUnignore.Add_Click({
 # --- LISTVIEW SORTING LOGIC ---
 $lstWinget = Get-Ctrl "lstWinget"
 $script:WingetSortChain = New-Object System.Collections.ArrayList
+$script:GridSortAscendingGlyph = [string][char]0x25B2
+$script:GridSortDescendingGlyph = [string][char]0x25BC
 
 function Get-CleanHeader {
     param([object]$Header)
     if ($null -eq $Header) { return "" }
-    return ([string]$Header -replace '\s+[▲▼]$', '').Trim()
+    return ([regex]::Replace([string]$Header, '\s+(?:[\u25B2\u25BC]|\u00E2\u2013[\u00B2\u00BC])$', '')).Trim()
+}
+
+function Get-GridViewColumnHeaderFromSource {
+    param([object]$OriginalSource)
+    if (-not $OriginalSource) { return $null }
+    if ($OriginalSource -is [System.Windows.Controls.GridViewColumnHeader]) { return $OriginalSource }
+    return Get-WmtVisualAncestor -Element $OriginalSource -AncestorType ([System.Windows.Controls.GridViewColumnHeader])
 }
 
 function Update-GridViewHeaders {
@@ -20996,7 +21005,8 @@ function Update-GridViewHeaders {
     foreach ($col in $ListView.View.Columns) {
         $clean = Get-CleanHeader $col.Header
         if ($clean -eq $ActiveHeader) {
-            $col.Header = if ($Ascending) { "$clean ▲" } else { "$clean ▼" }
+            $glyph = if ($Ascending) { $script:GridSortAscendingGlyph } else { $script:GridSortDescendingGlyph }
+            $col.Header = "$clean $glyph"
         }
         else {
             $col.Header = $clean
@@ -21009,7 +21019,7 @@ function Set-SortChainPrimary {
         [System.Collections.ArrayList]$Chain,
         [string]$PropertyName
     )
-    if (-not $Chain -or [string]::IsNullOrWhiteSpace($PropertyName)) { return $false }
+    if ($null -eq $Chain -or [string]::IsNullOrWhiteSpace($PropertyName)) { return $false }
 
     $existingIndex = -1
     for ($i = 0; $i -lt $Chain.Count; $i++) {
@@ -21032,37 +21042,50 @@ function Set-ListViewSort {
         [System.Windows.Controls.ListView]$ListView,
         [System.Collections.ArrayList]$Chain
     )
-    if (-not $ListView -or -not $Chain -or $Chain.Count -eq 0) { return }
+    if (-not $ListView -or $null -eq $Chain -or $Chain.Count -eq 0) { return }
     if ($ListView.Items.Count -eq 0) { return }
 
-    try {
-        $ListView.Items.SortDescriptions.Clear()
-        foreach ($rule in $Chain) {
-            if ([string]::IsNullOrWhiteSpace([string]$rule.Property)) { continue }
-            $direction = if ([bool]$rule.Descending) {
-                [System.ComponentModel.ListSortDirection]::Descending
+    if ($ListView.ItemsSource) {
+        try {
+            $ListView.Items.SortDescriptions.Clear()
+            foreach ($rule in $Chain) {
+                if ([string]::IsNullOrWhiteSpace([string]$rule.Property)) { continue }
+                $direction = if ([bool]$rule.Descending) {
+                    [System.ComponentModel.ListSortDirection]::Descending
+                }
+                else {
+                    [System.ComponentModel.ListSortDirection]::Ascending
+                }
+                $description = [System.ComponentModel.SortDescription]::new([string]$rule.Property, $direction)
+                [void]$ListView.Items.SortDescriptions.Add($description)
             }
-            else {
-                [System.ComponentModel.ListSortDirection]::Ascending
-            }
-            $description = [System.ComponentModel.SortDescription]::new([string]$rule.Property, $direction)
-            [void]$ListView.Items.SortDescriptions.Add($description)
+            $ListView.Items.Refresh()
+            return
         }
-        $ListView.Items.Refresh()
-        return
-    }
-    catch {
-        try { $ListView.Items.SortDescriptions.Clear() } catch {}
+        catch {
+            try { $ListView.Items.SortDescriptions.Clear() } catch {}
+        }
     }
 
     $items = @($ListView.Items)
     if ($items.Count -eq 0) { return }
     $sortSpec = foreach ($rule in $Chain) {
-        @{ Expression = $rule.Property; Descending = [bool]$rule.Descending }
+        if (-not [string]::IsNullOrWhiteSpace([string]$rule.Property)) {
+            @{ Expression = [string]$rule.Property; Descending = [bool]$rule.Descending }
+        }
     }
+    if (-not $sortSpec -or $sortSpec.Count -eq 0) { return }
+
+    $selectedItems = @($ListView.SelectedItems)
     $sorted = $items | Sort-Object -Property $sortSpec
+    try { $ListView.Items.SortDescriptions.Clear() } catch {}
     $ListView.Items.Clear()
-    foreach ($item in $sorted) { [void]$ListView.Items.Add($item) }
+    foreach ($item in $sorted) {
+        [void]$ListView.Items.Add($item)
+        if ($selectedItems -contains $item) {
+            try { $ListView.SelectedItems.Add($item) } catch {}
+        }
+    }
 }
 
 function Resolve-WingetSortProperty {
@@ -21078,8 +21101,9 @@ function Resolve-WingetSortProperty {
 if ($lstWinget) {
     $wingetSortHandler = [System.Windows.RoutedEventHandler] {
         param($src, $e)
-        if ($e.OriginalSource -isnot [System.Windows.Controls.GridViewColumnHeader]) { return }
-        $header = Get-CleanHeader $e.OriginalSource.Column.Header
+        $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+        if (-not $columnHeader -or -not $columnHeader.Column) { return }
+        $header = Get-CleanHeader $columnHeader.Column.Header
         if ([string]::IsNullOrWhiteSpace($header)) { return }
 
         $propName = Resolve-WingetSortProperty $header
@@ -21089,7 +21113,7 @@ if ($lstWinget) {
         Update-GridViewHeaders -ListView $lstWinget -ActiveHeader $header -Ascending:$isAscending
         Set-ListViewSort -ListView $lstWinget -Chain $script:WingetSortChain
     }
-    $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $wingetSortHandler)
+    $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $wingetSortHandler, $true)
 }
 
 # ---------------------------------------------------------
@@ -21675,11 +21699,6 @@ $script:FirewallDetailCache = @{}
 $script:FirewallDetailJob = $null
 $script:FirewallDetailTimer = $null
 $script:FirewallDetailToken = 0
-$script:FirewallBulkDetailRunspace = $null
-$script:FirewallBulkDetailAsyncResult = $null
-$script:FirewallBulkDetailTimer = $null
-$script:FirewallBulkDetailToken = 0
-$script:FirewallBulkDetailInProgress = $false
 
 function Test-FirewallSearchIsBlank {
     param([string]$Text)
@@ -21809,25 +21828,7 @@ function Stop-FirewallDetailLoad {
     }
 }
 
-function Stop-FirewallBulkDetailLoad {
-    if ($script:FirewallBulkDetailInProgress -or $script:FirewallBulkDetailTimer -or $script:FirewallBulkDetailRunspace) {
-        $script:FirewallBulkDetailToken++
-    }
-    if ($script:FirewallBulkDetailTimer) {
-        try { $script:FirewallBulkDetailTimer.Stop() } catch {}
-        $script:FirewallBulkDetailTimer = $null
-    }
-    if ($script:FirewallBulkDetailRunspace) {
-        try { $script:FirewallBulkDetailRunspace.Stop() } catch {}
-        try { $script:FirewallBulkDetailRunspace.Dispose() } catch {}
-        $script:FirewallBulkDetailRunspace = $null
-    }
-    $script:FirewallBulkDetailAsyncResult = $null
-    $script:FirewallBulkDetailInProgress = $false
-}
-
 function Stop-FirewallRuleLoad {
-    Stop-FirewallBulkDetailLoad
     if ($script:FirewallLoadTimer) {
         try { $script:FirewallLoadTimer.Stop() } catch {}
         $script:FirewallLoadTimer = $null
@@ -21937,12 +21938,7 @@ function Start-FirewallRuleDetailLoad {
                 try { $job.PowerShell.Dispose() } catch {}
                 if ($script:FirewallDetailJob -and $script:FirewallDetailJob.Token -eq $job.Token) { $script:FirewallDetailJob = $null }
                 $script:FirewallDetailTimer = $null
-                if ($script:FirewallBulkDetailInProgress) {
-                    Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
-                }
-                else {
-                    Set-FirewallStatus "" -Visible $false
-                }
+                Set-FirewallStatus "" -Visible $false
             }
         })
     $script:FirewallDetailTimer.Start()
@@ -21973,158 +21969,11 @@ function Initialize-FirewallRuleDetails {
             Write-GuiLog "[Firewall] Failed to load selected rule details: $($details.Error)"
         }
         if ($lstFw) { $lstFw.Items.Refresh() }
-        if ($script:FirewallBulkDetailInProgress) {
-            Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
-        }
-        else {
-            Set-FirewallStatus "" -Visible $false
-        }
-        return
-    }
-
-    Start-FirewallRuleDetailLoad -Rule $Rule
-}
-
-function Start-FirewallBulkDetailLoad {
-    param([object[]]$Rules)
-
-    $rulesToLoad = @(
-        $Rules | Where-Object {
-            $_ -and
-            -not [string]::IsNullOrWhiteSpace([string]$_.Name) -and
-            -not ($_.PSObject.Properties["DetailsLoaded"] -and $_.DetailsLoaded)
-        }
-    )
-    if ($rulesToLoad.Count -eq 0) {
         Set-FirewallStatus "" -Visible $false
         return
     }
 
-    Stop-FirewallBulkDetailLoad
-    $script:FirewallBulkDetailInProgress = $true
-    $script:FirewallBulkDetailToken++
-    $token = $script:FirewallBulkDetailToken
-    $ruleNames = @($rulesToLoad | ForEach-Object { [string]$_.Name } | Select-Object -Unique)
-
-    Set-FirewallStatus "Loading firewall ports/protocols..." -Visible $true
-    Write-GuiLog "[Firewall] Loading port/protocol details in the background..."
-
-    $script:FirewallBulkDetailRunspace = [PowerShell]::Create().AddScript({
-            param([string[]]$RuleNames, [int]$BatchSize)
-
-            function Format-RuleValue {
-                param([object[]]$Values)
-                $clean = @(
-                    $Values | ForEach-Object {
-                        if ($null -eq $_ -or [string]::IsNullOrWhiteSpace([string]$_)) { "Any" }
-                        else { [string]$_ }
-                    } | Select-Object -Unique
-                )
-                if ($clean.Count -eq 0) { return "Any" }
-                return ($clean -join ", ")
-            }
-
-            try {
-                $names = @($RuleNames | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } | Select-Object -Unique)
-                if ($names.Count -eq 0) {
-                    return [PSCustomObject]@{ Success = $true; Details = @(); Error = ""; Failed = 0 }
-                }
-                if ($BatchSize -lt 1) { $BatchSize = 200 }
-
-                $details = [System.Collections.Generic.List[object]]::new()
-                $failed = 0
-                for ($offset = 0; $offset -lt $names.Count; $offset += $BatchSize) {
-                    $end = [Math]::Min($offset + $BatchSize - 1, $names.Count - 1)
-                    $batch = @($names[$offset..$end])
-                    foreach ($rule in @(Get-NetFirewallRule -Name $batch -ErrorAction SilentlyContinue)) {
-                        $ruleName = [string]$rule.Name
-                        try {
-                            $filters = @($rule | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue)
-                            if ($filters.Count -eq 0) {
-                                [void]$details.Add([PSCustomObject]@{ Success = $true; Name = $ruleName; Protocol = "Any"; LocalPort = "Any"; Error = "" })
-                                continue
-                            }
-
-                            $protocol = Format-RuleValue -Values @($filters | ForEach-Object { $_.Protocol })
-                            $localPort = Format-RuleValue -Values @($filters | ForEach-Object { $_.LocalPort })
-                            [void]$details.Add([PSCustomObject]@{ Success = $true; Name = $ruleName; Protocol = $protocol; LocalPort = $localPort; Error = "" })
-                        }
-                        catch {
-                            $failed++
-                            [void]$details.Add([PSCustomObject]@{ Success = $false; Name = $ruleName; Protocol = ""; LocalPort = ""; Error = $_.Exception.Message })
-                        }
-                    }
-                }
-
-                return [PSCustomObject]@{ Success = $true; Details = $details.ToArray(); Error = ""; Failed = $failed }
-            }
-            catch {
-                return [PSCustomObject]@{ Success = $false; Details = @(); Error = $_.Exception.Message; Failed = 0 }
-            }
-        }).AddArgument([string[]]$ruleNames).AddArgument(200)
-
-    $bulkRunspace = $script:FirewallBulkDetailRunspace
-    $bulkAsync = $bulkRunspace.BeginInvoke()
-    $script:FirewallBulkDetailAsyncResult = $bulkAsync
-    $bulkTimer = New-Object System.Windows.Threading.DispatcherTimer
-    $script:FirewallBulkDetailTimer = $bulkTimer
-    $bulkTimer.Interval = [TimeSpan]::FromMilliseconds(250)
-    $bulkTimer.Add_Tick({
-            if (-not $bulkAsync -or -not $bulkAsync.IsCompleted) { return }
-
-            $bulkTimer.Stop()
-            try {
-                $result = $bulkRunspace.EndInvoke($bulkAsync)
-                if ($result -and $result.Count -eq 1) { $result = $result[0] }
-                if ($token -ne $script:FirewallBulkDetailToken) { return }
-
-                if ($result -and $result.Success) {
-                    $updated = 0
-                    foreach ($detail in @($result.Details)) {
-                        if (-not $detail -or -not $detail.Success -or [string]::IsNullOrWhiteSpace([string]$detail.Name)) { continue }
-                        $script:FirewallDetailCache[[string]$detail.Name] = $detail
-                    }
-
-                    foreach ($rule in @($script:AllFw)) {
-                        if ($rule -and $script:FirewallDetailCache.ContainsKey([string]$rule.Name)) {
-                            Set-FirewallRuleDetails -Rule $rule -Details $script:FirewallDetailCache[[string]$rule.Name]
-                            $updated++
-                        }
-                    }
-
-                    if ($txtFwSearch -and -not (Test-FirewallSearchIsBlank $txtFwSearch.Text)) {
-                        Update-FirewallListView
-                    }
-                    elseif ($lstFw) {
-                        $lstFw.Items.Refresh()
-                    }
-
-                    $failed = if ($result.PSObject.Properties["Failed"]) { [int]$result.Failed } else { 0 }
-                    $failedText = if ($failed -gt 0) { " ($failed failed)" } else { "" }
-                    Write-GuiLog "[Firewall] Loaded port/protocol details for $updated rule(s)$failedText."
-                    Set-FirewallStatus "" -Visible $false
-                }
-                else {
-                    $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
-                    Write-GuiLog "[Firewall] Port/protocol background load failed: $err"
-                    Set-FirewallStatus "" -Visible $false
-                }
-            }
-            catch {
-                Write-GuiLog "[Firewall] Port/protocol background load failed: $($_.Exception.Message)"
-                Set-FirewallStatus "" -Visible $false
-            }
-            finally {
-                try { $bulkRunspace.Dispose() } catch {}
-                if ($token -eq $script:FirewallBulkDetailToken) {
-                    $script:FirewallBulkDetailRunspace = $null
-                    $script:FirewallBulkDetailAsyncResult = $null
-                    $script:FirewallBulkDetailTimer = $null
-                    $script:FirewallBulkDetailInProgress = $false
-                }
-            }
-        }.GetNewClosure())
-    $bulkTimer.Start()
+    Start-FirewallRuleDetailLoad -Rule $Rule
 }
 
 function Start-FirewallRuleLoad {
@@ -22186,7 +22035,7 @@ function Start-FirewallRuleLoad {
                     $script:FirewallRulesLoaded = $true
                     Update-FirewallListView
                     Write-GuiLog "[Firewall] Loaded $($script:AllFw.Count) base rules."
-                    Start-FirewallBulkDetailLoad -Rules $script:AllFw
+                    Set-FirewallStatus "" -Visible $false
                 }
                 else {
                     $script:AllFw = @()
@@ -22240,8 +22089,9 @@ function Resolve-FirewallSortProperty {
 if ($lstFw) {
     $fwSortHandler = [System.Windows.RoutedEventHandler] {
         param($src, $e)
-        if ($e.OriginalSource -isnot [System.Windows.Controls.GridViewColumnHeader]) { return }
-        $header = Get-CleanHeader $e.OriginalSource.Column.Header
+        $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+        if (-not $columnHeader -or -not $columnHeader.Column) { return }
+        $header = Get-CleanHeader $columnHeader.Column.Header
         if ([string]::IsNullOrWhiteSpace($header)) { return }
 
         $propName = Resolve-FirewallSortProperty $header
@@ -22251,7 +22101,7 @@ if ($lstFw) {
         Update-GridViewHeaders -ListView $lstFw -ActiveHeader $header -Ascending:$isAscending
         Set-ListViewSort -ListView $lstFw -Chain $script:FirewallSortChain
     }
-    $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler)
+    $lstFw.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $fwSortHandler, $true)
 }
 
 $txtFwSearch.Add_TextChanged({ Update-FirewallListView })
