@@ -3697,6 +3697,30 @@ function Get-WmtVisualAncestor {
     return $null
 }
 
+function Get-WmtVisualDescendant {
+    param(
+        [object]$Element,
+        [type]$DescendantType
+    )
+
+    if (-not $Element -or -not ($Element -is [System.Windows.DependencyObject]) -or -not $DescendantType) { return $null }
+
+    $childCount = 0
+    try { $childCount = [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($Element) }
+    catch { return $null }
+
+    for ($i = 0; $i -lt $childCount; $i++) {
+        $child = $null
+        try { $child = [System.Windows.Media.VisualTreeHelper]::GetChild($Element, $i) } catch { continue }
+        if ($child -and $DescendantType.IsInstanceOfType($child)) { return $child }
+
+        $nested = Get-WmtVisualDescendant -Element $child -DescendantType $DescendantType
+        if ($nested) { return $nested }
+    }
+
+    return $null
+}
+
 function Set-WmtListViewRightClickSelection {
     param(
         [System.Windows.Controls.ListView]$ListView,
@@ -3898,7 +3922,7 @@ function Get-WmtSettings {
         WingetIncludeUnknown = $true
         LoadWinapp2          = $false 
         LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        EnabledProviders     = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         CustomDnsServers     = @()
         CustomDohTemplate    = ""
         CustomDohEnabled     = $false
@@ -16678,6 +16702,15 @@ function Set-WmtPowerSettingIndex {
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
                                 <GridView>
+                                    <GridViewColumn Header="Select" Width="64">
+                                        <GridViewColumn.CellTemplate>
+                                            <DataTemplate>
+                                                <CheckBox IsChecked="{Binding IsChecked, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                          HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                          ToolTip="Check this item to include it when you click Update Checked"/>
+                                            </DataTemplate>
+                                        </GridViewColumn.CellTemplate>
+                                    </GridViewColumn>
                                     <GridViewColumn Header="Source" Width="90" DisplayMemberBinding="{Binding Source}"/>
                                     <GridViewColumn Header="Package Name" Width="280" DisplayMemberBinding="{Binding Name}"/>
                                     <GridViewColumn Header="ID" Width="220" DisplayMemberBinding="{Binding Id}"/>
@@ -16694,7 +16727,7 @@ function Set-WmtPowerSettingIndex {
                             <Button Name="btnManageProviders" Content="Providers" Style="{StaticResource ActionBtn}" ToolTip="Manage package sources"/>
                             <Button Name="btnShowCatalog" Content="Software Catalog" Style="{StaticResource ActionBtn}" ToolTip="Browse our curated catalog of popular free applications. Install multiple apps at once with one click."/>
                             <Button Name="btnWingetScan" Content="Refresh All" Style="{StaticResource AccentBtn}"/>
-                            <Button Name="btnWingetUpdateSel" Content="Update Selected" Style="{StaticResource PositiveBtn}"/>
+                            <Button Name="btnWingetUpdateSel" Content="Update Checked" Style="{StaticResource PositiveBtn}" ToolTip="Update checked rows. If none are checked, selected rows are used."/>
                             <Button Name="btnWingetUpdateAll" Content="Update All" Style="{StaticResource PositiveBtn}"/>
                             <Button Name="btnWingetInstall" Content="Install" Style="{StaticResource PositiveBtn}" Visibility="Collapsed"/>
                             <Button Name="btnWingetUninstall" Content="Uninstall" Style="{StaticResource DestructiveBtn}"/>
@@ -18134,7 +18167,7 @@ Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H
 (Get-Ctrl "btnWingetFind").Width = 100
 Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
 Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks enabled providers for available application updates"
-Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Selected" "Updates the selected applications"
+Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Checked" "Updates the checked applications; falls back to selected rows if nothing is checked"
 Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
 Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
 Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
@@ -18653,7 +18686,7 @@ function Update-WmtSearchIndexEntries {
 
 # 1. Updates
 Add-SearchIndexEntry "btnWingetScan"        "Check Package Updates"           "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Selected Apps"            "btnTabUpdates"
+Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Checked Apps"             "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
 Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
@@ -18836,7 +18869,7 @@ if ($lstWinget) {
 
 # 1. Update Selected
 $miUpdate = New-Object System.Windows.Controls.MenuItem
-$miUpdate.Header = "Update Selected"
+$miUpdate.Header = "Update Checked"
 # We reference the button variable directly to ensure it works
 $miUpdate.Add_Click({ 
         $btnWingetUpdateSel.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
@@ -18899,6 +18932,37 @@ $miManage.Add_Click({
     })
 [void]$ctxMenu.Items.Add($miManage)
 
+# --- Checkbox helpers ---
+[void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miCheckSelected = New-Object System.Windows.Controls.MenuItem
+$miCheckSelected.Header = "Check Selected Rows"
+$miCheckSelected.Add_Click({
+        Set-WmtUpdateListCheckedState -Items @($lstWinget.SelectedItems) -IsChecked:$true
+    })
+[void]$ctxMenu.Items.Add($miCheckSelected)
+
+$miUncheckSelected = New-Object System.Windows.Controls.MenuItem
+$miUncheckSelected.Header = "Uncheck Selected Rows"
+$miUncheckSelected.Add_Click({
+        Set-WmtUpdateListCheckedState -Items @($lstWinget.SelectedItems) -IsChecked:$false
+    })
+[void]$ctxMenu.Items.Add($miUncheckSelected)
+
+$miCheckAll = New-Object System.Windows.Controls.MenuItem
+$miCheckAll.Header = "Check All Rows"
+$miCheckAll.Add_Click({
+        Set-WmtUpdateListCheckedState -Items @($lstWinget.Items) -IsChecked:$true
+    })
+[void]$ctxMenu.Items.Add($miCheckAll)
+
+$miUncheckAll = New-Object System.Windows.Controls.MenuItem
+$miUncheckAll.Header = "Uncheck All Rows"
+$miUncheckAll.Add_Click({
+        Set-WmtUpdateListCheckedState -Items @($lstWinget.Items) -IsChecked:$false
+    })
+[void]$ctxMenu.Items.Add($miUncheckAll)
+
 # --- Separator ---
 [void]$ctxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
@@ -18912,7 +18976,14 @@ $miRefresh.Add_Click({
 
 $ctxMenu.Add_Opened({
         $selected = @($lstWinget.SelectedItems)
+        $checked = @(Get-WmtUpdateListCheckedItems)
+        $actionable = @($lstWinget.Items | Where-Object { Test-WmtUpdateListActionableItem -Item $_ })
         $canShowManifest = ($selected.Count -eq 1 -and (Test-WingetManifestSupportedItem $selected[0]))
+        $miUpdate.IsEnabled = ($checked.Count -gt 0 -or $selected.Count -gt 0)
+        $miCheckSelected.IsEnabled = ($selected.Count -gt 0)
+        $miUncheckSelected.IsEnabled = ($selected.Count -gt 0)
+        $miCheckAll.IsEnabled = ($actionable.Count -gt 0)
+        $miUncheckAll.IsEnabled = ($actionable.Count -gt 0)
         $miUpdateAll.IsEnabled = ($btnWingetUpdateAll -and $btnWingetUpdateAll.Visibility -eq [System.Windows.Visibility]::Visible)
         $miManifest.IsEnabled = $canShowManifest
         if ($canShowManifest) {
@@ -18947,7 +19018,7 @@ $Script:StartWingetAction = {
     }
     catch {}
 
-    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, LibraryPath, InstallDir, ManifestPath, ExecutablePath, Platform -Unique)
+    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, IsChecked, LibraryPath, InstallDir, ManifestPath, ExecutablePath, Platform, RawAvailable, WUIsOptional -Unique)
     $totalItems = $uniqueItems.Count
     
     # UI Updates
@@ -20124,6 +20195,99 @@ exit /b %WMT_EXIT%
             return ""
         }
 
+        function Invoke-WmtWindowsUpdateInstall {
+            param([object]$Item)
+
+            $targetRaw = ([string]$Item.Id).Trim()
+            $targetName = ([string]$Item.Name).Trim()
+            if ([string]::IsNullOrWhiteSpace($targetRaw) -and [string]::IsNullOrWhiteSpace($targetName)) {
+                Write-Output "LOG:[Windows Update] Selected update has no usable identity."
+                return [PSCustomObject]@{ ExitCode = 1 }
+            }
+
+            $targetParts = @($targetRaw -split '\|', 2)
+            $targetId = if ($targetParts.Count -gt 0) { ([string]$targetParts[0]).Trim() } else { $targetRaw }
+            $targetRevision = -1
+            if ($targetParts.Count -gt 1) { [void][int]::TryParse(([string]$targetParts[1]).Trim(), [ref]$targetRevision) }
+
+            try {
+                Write-Output "LOG:[Windows Update] Preparing selected update: $targetName"
+                $session = New-Object -ComObject Microsoft.Update.Session
+                $searcher = $session.CreateUpdateSearcher()
+                try { $searcher.Online = $true } catch {}
+                $result = $searcher.Search("IsInstalled=0 and IsHidden=0")
+                if (-not $result -or -not $result.Updates) {
+                    Write-Output "LOG:[Windows Update] No pending updates were returned."
+                    return [PSCustomObject]@{ ExitCode = 0 }
+                }
+
+                $updatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+                for ($wuIndex = 0; $wuIndex -lt $result.Updates.Count; $wuIndex++) {
+                    $update = $result.Updates.Item($wuIndex)
+                    if (-not $update) { continue }
+
+                    $updateId = ""
+                    $revision = -1
+                    try { $updateId = ([string]$update.Identity.UpdateID).Trim() } catch {}
+                    try { $revision = [int]$update.Identity.RevisionNumber } catch {}
+                    $title = ""
+                    try { $title = ([string]$update.Title).Trim() } catch {}
+
+                    $idMatches = (-not [string]::IsNullOrWhiteSpace($targetId) -and $updateId -eq $targetId)
+                    $revisionMatches = ($targetRevision -lt 0 -or $revision -eq $targetRevision)
+                    $nameMatches = ([string]::IsNullOrWhiteSpace($targetId) -and -not [string]::IsNullOrWhiteSpace($targetName) -and $title -eq $targetName)
+
+                    if (($idMatches -and $revisionMatches) -or $nameMatches) {
+                        try {
+                            if (-not [bool]$update.EulaAccepted) { $update.AcceptEula() }
+                        }
+                        catch {
+                            Write-Output "LOG:[Windows Update] Could not accept EULA for ${title}: $($_.Exception.Message)"
+                        }
+                        [void]$updatesToInstall.Add($update)
+                        break
+                    }
+                }
+
+                if ($updatesToInstall.Count -eq 0) {
+                    Write-Output "LOG:[Windows Update] $targetName is no longer offered, already installed, or hidden."
+                    return [PSCustomObject]@{ ExitCode = 0 }
+                }
+
+                Write-Output "LOG:[Windows Update] Downloading $($updatesToInstall.Count) update(s)..."
+                $downloader = $session.CreateUpdateDownloader()
+                $downloader.Updates = $updatesToInstall
+                $downloadResult = $downloader.Download()
+                $downloadCode = 0
+                try { $downloadCode = [int]$downloadResult.ResultCode } catch { $downloadCode = 0 }
+                if ($downloadCode -notin @(2, 3)) {
+                    Write-Output "LOG:[Windows Update] Download failed with WUA result code $downloadCode."
+                    return [PSCustomObject]@{ ExitCode = 1 }
+                }
+
+                Write-Output "LOG:[Windows Update] Installing $($updatesToInstall.Count) update(s)..."
+                $installer = $session.CreateUpdateInstaller()
+                $installer.Updates = $updatesToInstall
+                $installResult = $installer.Install()
+                $installCode = 0
+                $rebootRequired = $false
+                try { $installCode = [int]$installResult.ResultCode } catch { $installCode = 0 }
+                try { $rebootRequired = [bool]$installResult.RebootRequired } catch { $rebootRequired = $false }
+                Write-Output "LOG:[Windows Update] Install result code: $installCode | Reboot required: $rebootRequired"
+
+                if ($installCode -in @(2, 3)) {
+                    if ($rebootRequired) { return [PSCustomObject]@{ ExitCode = 3010 } }
+                    return [PSCustomObject]@{ ExitCode = 0 }
+                }
+
+                return [PSCustomObject]@{ ExitCode = 1 }
+            }
+            catch {
+                Write-Output "LOG:[Windows Update] Install failed: $($_.Exception.Message)"
+                return [PSCustomObject]@{ ExitCode = 1 }
+            }
+        }
+
         $storeUpdatesDelegated = $false
         $hasStoreUpdateItems = @($items | Where-Object { $act -eq "Update" -and ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
         if ($hasStoreUpdateItems) {
@@ -20139,10 +20303,12 @@ exit /b %WMT_EXIT%
             $id = $item.Id
             $name = $item.Name
             $src = $item.Source
+            $srcKey = ([string]$src).ToLowerInvariant()
             $cmd = ""
             $userCmd = "" 
             $wingetArgs = $null
             $storeCliArgs = $null
+            $windowsUpdateItem = $null
             $storeForceUpdateScan = $false
             $storeFallbackUri = ""
             $storeFallbackWebUri = ""
@@ -20227,6 +20393,20 @@ exit /b %WMT_EXIT%
                         $wingetArgs = "uninstall --id `"$id`" --source msstore $flags"
                         $cmd = "winget $wingetArgs"
                         $userCmd = "winget uninstall --id `"$id`" --source msstore $userFlags"
+                    }
+                }
+                # --- WINDOWS UPDATE ---
+                elseif ($srcKey -eq "windowsupdate") {
+                    if ($act -eq "Update") {
+                        $windowsUpdateItem = $item
+                        $cmd = "Windows Update COM install"
+                        $userCmd = "Microsoft.Update.Session install selected update"
+                    }
+                    elseif ($act -eq "Install") {
+                        $skipReason = "Windows Update items can only be updated from this list; use Refresh All to rescan offered updates."
+                    }
+                    elseif ($act -eq "Uninstall") {
+                        $skipReason = "Windows Update uninstall is not supported here. Use Windows Update history if you need to remove an update."
                     }
                 }
                 # --- STEAM GAMES ---
@@ -20408,7 +20588,7 @@ exit /b %WMT_EXIT%
                 $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
                 $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
                 $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
-                $useVisibleWindow = ($act -eq "Update" -and -not ($src -eq "msstore" -and $storeCliArgs))
+                $useVisibleWindow = ($act -eq "Update" -and -not ($src -eq "msstore" -and $storeCliArgs) -and -not $windowsUpdateItem)
 
                 if ($useVisibleWindow) {
                     $windowTag = switch -Regex ($src) {
@@ -20424,6 +20604,7 @@ exit /b %WMT_EXIT%
                         "^(steam)$" { "Steam"; break }
                         "^(legendary)$" { "Legendary"; break }
                         "^(gogdl)$" { "GOGDL"; break }
+                        "^(windowsupdate)$" { "WindowsUpdate"; break }
                         default { "Package" }
                     }
                     if ($isPipUpdate) { $windowTag = "PIP" }
@@ -20467,6 +20648,9 @@ exit /b %WMT_EXIT%
                 }
                 elseif ($storeCliArgs) {
                     $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act -StoreFallbackUri $storeFallbackUri -StoreFallbackWebUri $storeFallbackWebUri -EventPath $eventPath
+                }
+                elseif ($windowsUpdateItem) {
+                    $p = Invoke-WmtWindowsUpdateInstall -Item $windowsUpdateItem
                 }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
@@ -21157,7 +21341,7 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
     }
     $enabled = $settings.EnabledProviders
 
@@ -21183,7 +21367,8 @@ function Show-ProviderManager {
         <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
         <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
 
-        <StackPanel Grid.Row="1" Margin="0,15,0,0">
+        <ScrollViewer Grid.Row="1" Margin="0,15,0,0" VerticalScrollBarVisibility="Auto">
+            <StackPanel>
             <Grid Margin="0,0,0,10" ToolTip="Windows Package Manager">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
@@ -21204,6 +21389,14 @@ function Show-ProviderManager {
                 <TextBlock Text="Store CLI" FontWeight="Bold" Grid.Column="1"/>
                 <TextBlock Name="lblProviderMsStoreStatus" Text="Checking..." Grid.Column="2"/>
                 <Button Name="btnProviderMsStoreAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="Windows Update Agent. Scans both regular and optional Windows updates, including drivers when offered.">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkWindowsUpdate" Grid.Column="0"/>
+                <TextBlock Text="Windows Update" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblWindowsUpdateStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderWindowsUpdateAction" Content="Open" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
             <Grid Margin="0,0,0,10" ToolTip="Python package manager">
@@ -21286,7 +21479,8 @@ function Show-ProviderManager {
                 <TextBlock Name="lblGogdlStatus" Text="Checking..." Grid.Column="2"/>
                 <Button Name="btnProviderGogdlAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
-        </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
             <Button Name="btnSave" Content="Save &amp; Close" Background="{DynamicResource Accent}" Width="120" Height="30" Foreground="{DynamicResource AccentText}"/>
@@ -21300,6 +21494,7 @@ function Show-ProviderManager {
     
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
+    $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
     $chkPip = Get-WinCtrl "chkPip"
     $chkNpm = Get-WinCtrl "chkNpm"
     $chkPnpm = Get-WinCtrl "chkPnpm"  
@@ -21314,6 +21509,7 @@ function Show-ProviderManager {
     $providerDefinitions = @(
         [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
         [PSCustomObject]@{ Key = "msstore"; DisplayName = "Store CLI"; Commands = [string[]]@("store"); Label = "lblProviderMsStoreStatus"; Button = "btnProviderMsStoreAction" },
+        [PSCustomObject]@{ Key = "windowsupdate"; DisplayName = "Windows Update"; Commands = [string[]]@("powershell"); Label = "lblWindowsUpdateStatus"; Button = "btnProviderWindowsUpdateAction" },
         [PSCustomObject]@{ Key = "pip"; DisplayName = "Python (Pip)"; Commands = [string[]]@("pip", "pip3"); Label = "lblPipStatus"; Button = "btnProviderPipAction" },
         [PSCustomObject]@{ Key = "npm"; DisplayName = "Node (Npm)"; Commands = [string[]]@("npm"); Label = "lblNpmStatus"; Button = "btnProviderNpmAction" },
         [PSCustomObject]@{ Key = "pnpm"; DisplayName = "pnpm"; Commands = [string[]]@("pnpm"); Label = "lblPnpmStatus"; Button = "btnProviderPnpmAction" },
@@ -21404,6 +21600,20 @@ if (Get-Command store -ErrorAction SilentlyContinue) {
 else {
     Write-Host "Update Microsoft Store from the opened Store updates page, then reopen WMT."
 }
+'@
+                break
+            }
+            "windowsupdate" {
+                @'
+Write-Host "Opening Windows Update optional updates..."
+try {
+    Start-Process "ms-settings:windowsupdate-optionalupdates"
+}
+catch {
+    Write-Warning "Optional updates page failed: $($_.Exception.Message)"
+    Start-Process "ms-settings:windowsupdate"
+}
+Write-Host "Windows Update is built into Windows. WMT will scan it through Microsoft.Update.Session when the provider is enabled."
 '@
                 break
             }
@@ -22113,6 +22323,10 @@ exit `$exitCode
                         $buttonCtrl.Content = "Open"
                         $buttonCtrl.ToolTip = "Open Steam and its Downloads updater"
                     }
+                    elseif ($provider.Key -eq "windowsupdate") {
+                        $buttonCtrl.Content = "Open"
+                        $buttonCtrl.ToolTip = "Open Windows Update optional updates"
+                    }
                     else {
                         $buttonCtrl.Content = "Repair"
                         $buttonCtrl.ToolTip = "Repair or refresh $($provider.DisplayName)"
@@ -22140,9 +22354,12 @@ exit `$exitCode
         if (-not $provider) { return }
 
         $installed = if ($providerInstallState.ContainsKey($ProviderKey)) { [bool]$providerInstallState[$ProviderKey] } else { [bool](& $testProviderInstalled -Provider $provider) }
-        $action = if ($ProviderKey -eq "steam" -and $installed) { "Open" } elseif ($installed) { "Repair" } else { "Install" }
+        $action = if (($ProviderKey -eq "steam" -or $ProviderKey -eq "windowsupdate") -and $installed) { "Open" } elseif ($installed) { "Repair" } else { "Install" }
         $message = if ($ProviderKey -eq "steam" -and $action -eq "Open") {
             "Open Steam Downloads?`r`n`r`nThis starts Steam so its own updater can process pending game updates."
+        }
+        elseif ($ProviderKey -eq "windowsupdate" -and $action -eq "Open") {
+            "Open Windows Update optional updates?`r`n`r`nWMT scans Windows Update from the Updates page when this provider is enabled."
         }
         else {
             "$action $($provider.DisplayName)?`r`n`r`nThis opens a PowerShell window and may download provider files from the internet."
@@ -22251,6 +22468,7 @@ exit `$exitCode
     # Load settings
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
+    if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
     if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
     if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
     if ("pnpm" -in $enabled) { $chkPnpm.IsChecked = $true }
@@ -22274,6 +22492,7 @@ exit `$exitCode
     (Get-WinCtrl "btnSave").Add_Click({
             $newEnabled = @("winget") 
             if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
+            if ($chkWindowsUpdate.IsChecked) { $newEnabled += "windowsupdate" }
             if ($chkPip.IsChecked) { $newEnabled += "pip" }
             if ($chkNpm.IsChecked) { $newEnabled += "npm" }
             if ($chkPnpm.IsChecked) { $newEnabled += "pnpm" } 
@@ -22461,6 +22680,7 @@ $script:ScanTimer.Add_Tick({
                                 if ($item.Version -eq "Version" -or $item.Available -eq "Available") { continue }
                             
                                 # Add to UI
+                                [void](Set-WmtUpdateListItemCheckState -Item $item -DefaultChecked:$false)
                                 [void]$lstWinget.Items.Add($item)
                             }
                         }
@@ -22487,6 +22707,7 @@ $script:ScanTimer.Add_Tick({
                 $btnWingetUpdateSel.IsEnabled = $true
                 $lstWinget.Items.Refresh()
                 $lstWinget.UpdateLayout()
+                Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             
                 if ($lstWinget.Items.Count -eq 0) {
                     Write-GuiLog "System is up to date."
@@ -22529,7 +22750,7 @@ $btnWingetScan.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
@@ -22893,6 +23114,122 @@ $btnWingetScan.Add_Click({
                     }
                     catch {
                         Write-Output "LOG:Store CLI check failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($ignoreList)
+
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # WINDOWS UPDATE WORKER - includes optional updates.
+        if ("windowsupdate" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+
+                    function Test-Ignored($n, $i) {
+                        if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
+                        return $false
+                    }
+
+                    function Get-WmtWuCategoryText {
+                        param($Update)
+                        $names = New-Object System.Collections.Generic.List[string]
+                        try {
+                            for ($i = 0; $i -lt $Update.Categories.Count; $i++) {
+                                $title = ([string]$Update.Categories.Item($i).Name).Trim()
+                                if (-not [string]::IsNullOrWhiteSpace($title) -and -not $names.Contains($title)) { [void]$names.Add($title) }
+                            }
+                        }
+                        catch {}
+                        $text = ($names.ToArray() -join ", ")
+                        if ([string]::IsNullOrWhiteSpace($text)) {
+                            try { $text = [string]$Update.Type } catch { $text = "Windows Update" }
+                        }
+                        if ([string]::IsNullOrWhiteSpace($text)) { $text = "Windows Update" }
+                        return $text
+                    }
+
+                    function Test-WmtWuOptionalUpdate {
+                        param($Update)
+                        $isOptional = $false
+                        try { if ([bool]$Update.BrowseOnly) { $isOptional = $true } } catch {}
+                        try { if (-not [bool]$Update.AutoSelectOnWebSites) { $isOptional = $true } } catch {}
+                        try { if (-not [bool]$Update.IsMandatory -and [bool]$Update.BrowseOnly) { $isOptional = $true } } catch {}
+                        return $isOptional
+                    }
+
+                    Write-Output "LOG:Scanning Windows Update, including optional updates..."
+                    try {
+                        $session = New-Object -ComObject Microsoft.Update.Session
+                        $searcher = $session.CreateUpdateSearcher()
+                        try { $searcher.Online = $true } catch {}
+                        $criteria = "IsInstalled=0 and IsHidden=0"
+                        $result = $searcher.Search($criteria)
+                        if (-not $result -or -not $result.Updates) {
+                            Write-Output "LOG:Windows Update returned no scan result."
+                            return
+                        }
+
+                        $count = [int]$result.Updates.Count
+                        $visibleCount = 0
+                        $optionalCount = 0
+                        for ($i = 0; $i -lt $count; $i++) {
+                            $update = $result.Updates.Item($i)
+                            if (-not $update) { continue }
+
+                            $title = ([string]$update.Title).Trim()
+                            if ([string]::IsNullOrWhiteSpace($title)) { $title = "Windows Update" }
+                            $updateId = ""
+                            $revision = 0
+                            try { $updateId = ([string]$update.Identity.UpdateID).Trim() } catch {}
+                            try { $revision = [int]$update.Identity.RevisionNumber } catch { $revision = 0 }
+                            if ([string]::IsNullOrWhiteSpace($updateId)) { $updateId = $title }
+                            $rowId = "$updateId|$revision"
+                            if (Test-Ignored $title $rowId) { continue }
+
+                            $categoryText = Get-WmtWuCategoryText -Update $update
+                            $kbText = ""
+                            try {
+                                $kbValues = @()
+                                for ($kbIndex = 0; $kbIndex -lt $update.KBArticleIDs.Count; $kbIndex++) {
+                                    $kb = ([string]$update.KBArticleIDs.Item($kbIndex)).Trim()
+                                    if (-not [string]::IsNullOrWhiteSpace($kb)) { $kbValues += "KB$kb" }
+                                }
+                                if ($kbValues.Count -gt 0) { $kbText = $kbValues -join ", " }
+                            }
+                            catch {}
+
+                            $isOptional = Test-WmtWuOptionalUpdate -Update $update
+                            if ($isOptional) { $optionalCount++ }
+                            $severity = ""
+                            try { $severity = ([string]$update.MsrcSeverity).Trim() } catch {}
+                            $availability = if ($isOptional) { "Optional" } elseif (-not [string]::IsNullOrWhiteSpace($severity)) { "Security: $severity" } elseif ($categoryText -match '(?i)driver') { "Driver" } else { "Important" }
+                            $displayName = if ($isOptional -and $title -notmatch '^\[Optional\]') { "[Optional] $title" } else { $title }
+                            if (-not [string]::IsNullOrWhiteSpace($kbText) -and $displayName -notmatch [regex]::Escape($kbText)) {
+                                $displayName = "$displayName ($kbText)"
+                            }
+
+                            $visibleCount++
+                            [PSCustomObject]@{
+                                Source       = "windowsupdate"
+                                Name         = $displayName
+                                Id           = $rowId
+                                Version      = $categoryText
+                                Available    = $availability
+                                WUIsOptional = $isOptional
+                            }
+                        }
+
+                        if ($visibleCount -eq 0) {
+                            Write-Output "LOG:No Windows Update items found."
+                        }
+                        else {
+                            Write-Output "LOG:Windows Update found $visibleCount item(s), including $optionalCount optional item(s)."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Windows Update scan failed: $($_.Exception.Message)"
                     }
                 }).AddArgument($ignoreList)
 
@@ -23853,6 +24190,247 @@ $btnWingetUnignore.Add_Click({
     })
 # --- LISTVIEW SORTING LOGIC ---
 $lstWinget = Get-Ctrl "lstWinget"
+
+function Test-WmtUpdateListActionableItem {
+    param([object]$Item)
+
+    if (-not $Item) { return $false }
+    $source = ([string]$Item.Source).Trim()
+    $name = ([string]$Item.Name).Trim()
+    $id = ([string]$Item.Id).Trim()
+
+    if ([string]::IsNullOrWhiteSpace($source)) { return $false }
+    if ($name -in @("No results found", "No updates available")) { return $false }
+    if ([string]::IsNullOrWhiteSpace($name) -and [string]::IsNullOrWhiteSpace($id)) { return $false }
+
+    return $true
+}
+
+function Set-WmtUpdateListItemCheckState {
+    param(
+        [object]$Item,
+        [bool]$DefaultChecked = $false
+    )
+
+    if (-not $Item) { return $Item }
+    $checked = if (Test-WmtUpdateListActionableItem -Item $Item) { [bool]$DefaultChecked } else { $false }
+    if ($checked -and $Item.PSObject.Properties["WUIsOptional"] -and [bool]$Item.WUIsOptional) { $checked = $false }
+
+    if (-not $Item.PSObject.Properties["IsChecked"]) {
+        try { $Item | Add-Member -MemberType NoteProperty -Name "IsChecked" -Value $checked -Force } catch {}
+    }
+    elseif ($null -eq $Item.IsChecked) {
+        try { $Item.IsChecked = $checked } catch {}
+    }
+
+    return $Item
+}
+
+function Get-WmtUpdateListCheckedItems {
+    param(
+        [System.Windows.Controls.ListView]$ListView = $lstWinget,
+        [switch]$FallbackToSelection
+    )
+
+    if (-not $ListView) { return @() }
+
+    $checked = @($ListView.Items | Where-Object {
+            (Test-WmtUpdateListActionableItem -Item $_) -and
+            $_.PSObject.Properties["IsChecked"] -and
+            ([bool]$_.IsChecked)
+        })
+
+    if ($checked.Count -eq 0 -and $FallbackToSelection) {
+        $checked = @($ListView.SelectedItems | Where-Object { Test-WmtUpdateListActionableItem -Item $_ })
+    }
+
+    return $checked
+}
+
+function Set-WmtUpdateListCheckedState {
+    param(
+        [object[]]$Items,
+        [bool]$IsChecked
+    )
+
+    foreach ($item in @($Items)) {
+        if (-not (Test-WmtUpdateListActionableItem -Item $item)) { continue }
+        [void](Set-WmtUpdateListItemCheckState -Item $item -DefaultChecked:$IsChecked)
+        try { $item.IsChecked = $IsChecked } catch {}
+    }
+    try { if ($lstWinget) { $lstWinget.Items.Refresh() } } catch {}
+}
+
+function Measure-WmtUpdateListTextScore {
+    param([object]$Text)
+
+    if ($null -eq $Text) { return 0.0 }
+    $s = [string]$Text
+    if ([string]::IsNullOrEmpty($s)) { return 0.0 }
+
+    $score = 0.0
+    foreach ($ch in $s.ToCharArray()) {
+        $c = [string]$ch
+        if ($c -match '\s') { $score += 0.35 }
+        elseif ("ilI1.,:;|![]()".IndexOf($c) -ge 0) { $score += 0.35 }
+        elseif ("MW@#%&".IndexOf($c) -ge 0) { $score += 1.25 }
+        elseif ($c -cmatch '[A-Z0-9]') { $score += 0.90 }
+        else { $score += 0.72 }
+    }
+
+    return [Math]::Min(140.0, [Math]::Ceiling($score))
+}
+
+function Get-WmtUpdateListPropertyText {
+    param(
+        [object]$Item,
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Item -or [string]::IsNullOrWhiteSpace($PropertyName)) { return "" }
+    if ($Item.PSObject.Properties[$PropertyName]) { return [string]$Item.$PropertyName }
+    return ""
+}
+
+function Set-WmtUpdateListSmartColumnWidths {
+    param([System.Windows.Controls.ListView]$ListView = $lstWinget)
+
+    if (-not $ListView -or -not $ListView.View -or -not ($ListView.View -is [System.Windows.Controls.GridView])) { return }
+    $grid = [System.Windows.Controls.GridView]$ListView.View
+    if (-not $grid.Columns -or $grid.Columns.Count -lt 6) { return }
+
+    # There should only be six real update columns. If a stale/extra GridViewColumn ever survives
+    # a patch merge, collapse it so it cannot look like an unused seventh column.
+    if ($grid.Columns.Count -gt 6) {
+        for ($i = 6; $i -lt $grid.Columns.Count; $i++) {
+            try { $grid.Columns[$i].Width = 0.0 } catch {}
+        }
+    }
+
+    $available = 0.0
+    try {
+        $viewer = Get-WmtVisualDescendant -Element $ListView -DescendantType ([System.Windows.Controls.ScrollViewer])
+        if ($viewer -and -not [double]::IsNaN([double]$viewer.ViewportWidth) -and [double]$viewer.ViewportWidth -gt 150) {
+            # ViewportWidth already excludes the vertical scrollbar, so using it prevents the
+            # right-side blank GridView filler from being mistaken for another column.
+            $available = [double]$viewer.ViewportWidth
+        }
+    }
+    catch {}
+
+    if ($available -le 150) {
+        try { $available = [double]$ListView.ActualWidth - 4.0 } catch {}
+    }
+    if ($available -le 150) {
+        try { $available = [double]$ListView.RenderSize.Width - 4.0 } catch {}
+    }
+    if ($available -le 150) { return }
+    $available = [Math]::Max(420.0, [Math]::Floor($available) - 2.0)
+
+    $specs = @(
+        [PSCustomObject]@{ Index = 0; Header = "Select"; Property = "IsChecked"; Min = 64.0; Char = 0.0; Grow = 0.0; Fixed = $true },
+        [PSCustomObject]@{ Index = 1; Header = "Source"; Property = "Source"; Min = 82.0; Char = 7.0; Grow = 0.35; Fixed = $false },
+        [PSCustomObject]@{ Index = 2; Header = "Package Name"; Property = "Name"; Min = 210.0; Char = 7.0; Grow = 5.00; Fixed = $false },
+        [PSCustomObject]@{ Index = 3; Header = "ID"; Property = "Id"; Min = 170.0; Char = 6.7; Grow = 3.50; Fixed = $false },
+        [PSCustomObject]@{ Index = 4; Header = "Installed"; Property = "Version"; Min = 100.0; Char = 6.8; Grow = 0.85; Fixed = $false },
+        [PSCustomObject]@{ Index = 5; Header = "Latest"; Property = "Available"; Min = 100.0; Char = 6.8; Grow = 0.85; Fixed = $false }
+    )
+
+    $scores = @{}
+    foreach ($spec in $specs) {
+        $scores[[int]$spec.Index] = Measure-WmtUpdateListTextScore $spec.Header
+    }
+
+    $sampled = 0
+    foreach ($item in @($ListView.Items)) {
+        if ($sampled -ge 600) { break }
+        $sampled++
+        foreach ($spec in $specs) {
+            if ([bool]$spec.Fixed) { continue }
+            $score = Measure-WmtUpdateListTextScore (Get-WmtUpdateListPropertyText -Item $item -PropertyName $spec.Property)
+            if ($score -gt $scores[[int]$spec.Index]) { $scores[[int]$spec.Index] = $score }
+        }
+    }
+
+    $widths = @{}
+    foreach ($spec in $specs) {
+        if ([bool]$spec.Fixed) {
+            $widths[[int]$spec.Index] = [double]$spec.Min
+            continue
+        }
+        $desired = ([double]$scores[[int]$spec.Index] * [double]$spec.Char) + 30.0
+        $widths[[int]$spec.Index] = [Math]::Max([double]$spec.Min, [Math]::Ceiling($desired))
+    }
+
+    $total = 0.0
+    foreach ($spec in $specs) { $total += [double]$widths[[int]$spec.Index] }
+
+    if ($total -lt $available) {
+        $extra = $available - $total
+        $growTotal = 0.0
+        foreach ($spec in $specs) { if (-not [bool]$spec.Fixed) { $growTotal += [double]$spec.Grow } }
+        if ($growTotal -gt 0) {
+            foreach ($spec in $specs) {
+                if ([bool]$spec.Fixed) { continue }
+                $widths[[int]$spec.Index] = [double]$widths[[int]$spec.Index] + ($extra * ([double]$spec.Grow / $growTotal))
+            }
+        }
+    }
+    elseif ($total -gt $available) {
+        $overflow = $total - $available
+        $shrinkRoom = 0.0
+        foreach ($spec in $specs) {
+            if ([bool]$spec.Fixed) { continue }
+            $shrinkRoom += [Math]::Max(0.0, ([double]$widths[[int]$spec.Index] - [double]$spec.Min))
+        }
+        if ($shrinkRoom -gt 0) {
+            foreach ($spec in $specs) {
+                if ([bool]$spec.Fixed) { continue }
+                $room = [Math]::Max(0.0, ([double]$widths[[int]$spec.Index] - [double]$spec.Min))
+                $reduce = [Math]::Min($room, $overflow * ($room / $shrinkRoom))
+                $widths[[int]$spec.Index] = [double]$widths[[int]$spec.Index] - $reduce
+            }
+        }
+    }
+
+    $roundedTotal = 0.0
+    foreach ($spec in $specs) {
+        $idx = [int]$spec.Index
+        $newWidth = [Math]::Max([double]$spec.Min, [Math]::Floor([double]$widths[$idx]))
+        $grid.Columns[$idx].Width = $newWidth
+        $roundedTotal += $newWidth
+    }
+
+    $remainder = [Math]::Floor($available - $roundedTotal)
+    if ($remainder -gt 0 -and $grid.Columns.Count -gt 2) {
+        # Use the name column as the final elastic column so the GridView fills the card cleanly
+        # instead of leaving a blank right-side filler that looks like an unused column.
+        $grid.Columns[2].Width = [double]$grid.Columns[2].Width + $remainder
+    }
+    elseif ($remainder -lt -1 -and $grid.Columns.Count -gt 2) {
+        # Last-pixel correction for DPI/rounding: trim the elastic name column before WPF creates
+        # a horizontal scroll area or visually separates a phantom filler column.
+        $trim = [Math]::Min([Math]::Abs($remainder), [Math]::Max(0.0, [double]$grid.Columns[2].Width - 210.0))
+        if ($trim -gt 0) { $grid.Columns[2].Width = [double]$grid.Columns[2].Width - $trim }
+    }
+}
+
+function Request-WmtUpdateListSmartColumnResize {
+    param([System.Windows.Controls.ListView]$ListView = $lstWinget)
+
+    if (-not $ListView) { return }
+    $targetListView = $ListView
+    try {
+        $resizeAction = {
+            Set-WmtUpdateListSmartColumnWidths -ListView $targetListView
+        }.GetNewClosure()
+        [void]$targetListView.Dispatcher.BeginInvoke([Action]$resizeAction, [System.Windows.Threading.DispatcherPriority]::Background)
+    }
+    catch {
+        try { Set-WmtUpdateListSmartColumnWidths -ListView $targetListView } catch {}
+    }
+}
+
 $script:WingetSortChain = New-Object System.Collections.ArrayList
 $script:GridSortAscendingGlyph = [string][char]0x25B2
 $script:GridSortDescendingGlyph = [string][char]0x25BC
@@ -24002,6 +24580,7 @@ function Set-ListViewSort {
 function Resolve-WingetSortProperty {
     param([string]$Header)
     switch ($Header) {
+        "Select" { return "IsChecked" }
         "Package Name" { return "Name" }
         "Installed" { return "VersionSort" }
         "Latest" { return "AvailableSort" }
@@ -24025,6 +24604,9 @@ if ($lstWinget) {
         Set-ListViewSort -ListView $lstWinget -Chain $script:WingetSortChain
     }
     $lstWinget.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $wingetSortHandler, $true)
+    $lstWinget.Add_Loaded({ Request-WmtUpdateListSmartColumnResize -ListView $lstWinget })
+    $lstWinget.Add_SizeChanged({ Request-WmtUpdateListSmartColumnResize -ListView $lstWinget })
+    Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
 }
 
 # ---------------------------------------------------------
@@ -24053,6 +24635,7 @@ $script:SearchTimer.Add_Tick({
                         Write-GuiLog ($item.Substring(4))
                     }
                     elseif ($item.PSObject.Properties["Name"]) {
+                        [void](Set-WmtUpdateListItemCheckState -Item $item -DefaultChecked:$false)
                         [void]$lstWinget.Items.Add($item)
                     }
                 }
@@ -24068,8 +24651,9 @@ $script:SearchTimer.Add_Tick({
             $lblWingetStatus.Text = "Ready"
         
             if ($lstWinget.Items.Count -eq 0) { 
-                [void]$lstWinget.Items.Add([PSCustomObject]@{ Source = ""; Name = "No results found"; Id = ""; Version = ""; Available = "" }) 
+                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "No results found"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false)) 
             }
+            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
         
             $script:AsyncSearch = $null
@@ -24101,7 +24685,7 @@ $btnWingetFind.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
 
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
@@ -24282,8 +24866,11 @@ function Show-WingetRestartRiskWarning {
 
 # 1. Update Selected (Removed CmdTemplate to allow smart logic)
 $btnWingetUpdateSel.Add_Click({ 
-        $selected = @($lstWinget.SelectedItems)
-        if ($selected.Count -eq 0) { return }
+        $selected = @(Get-WmtUpdateListCheckedItems -FallbackToSelection)
+        if ($selected.Count -eq 0) {
+            Show-WmtMessageBox -Message "Check one or more update rows first, or select rows as a fallback." -Title "No Updates Checked" -Image Information | Out-Null
+            return
+        }
         if (-not (Show-WingetRestartRiskWarning -Items $selected -Action "Update")) {
             Write-GuiLog "[Update] Cancelled by user after restart warning."
             return
@@ -24353,7 +24940,9 @@ if ($btnWingetUpdateAll) {
 
 # 2. Install Selected (Removed CmdTemplate so it includes --accept-agreements)
 $btnWingetInstall.Add_Click({ 
-        & $Script:StartWingetAction -ListItems $lstWinget.SelectedItems -ActionName "Install"
+        $selected = @(Get-WmtUpdateListCheckedItems -FallbackToSelection)
+        if ($selected.Count -eq 0) { return }
+        & $Script:StartWingetAction -ListItems $selected -ActionName "Install"
     })
 
 # 3. Uninstall Selected
