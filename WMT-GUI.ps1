@@ -3627,6 +3627,18 @@ function Get-WmtLegendaryExePath {
     return (Join-Path $legendaryDir "legendary.exe")
 }
 
+function Get-WmtGogdlRootPath {
+    return (Join-Path (Get-DataPath) "gogdl")
+}
+
+function Get-WmtGogdlExePath {
+    return (Join-Path (Get-WmtGogdlRootPath) "gogdl_windows_x86_64.exe")
+}
+
+function Get-WmtGogdlAuthConfigPath {
+    return (Join-Path (Get-WmtGogdlRootPath) "auth.json")
+}
+
 # Simple modal text viewer (read-only)
 function Show-TextDialog {
     param(
@@ -3882,11 +3894,11 @@ function Get-WmtSettings {
     $defaults = @{
         TempCleanup          = @{}
         RegistryScan         = @{}
-        WingetIgnore         = @()
+        WingetIgnore         = @("228980") # Filter false positive updates for Steamworks Redist
         WingetIncludeUnknown = $true
         LoadWinapp2          = $false 
         LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
+        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         CustomDnsServers     = @()
         CustomDohTemplate    = ""
         CustomDohEnabled     = $false
@@ -3945,7 +3957,20 @@ function Get-WmtSettings {
             Write-GuiLog "Error loading settings: $($_.Exception.Message)" 
         }
     }
-    
+    $normalizedProviders = New-Object System.Collections.Generic.List[string]
+    foreach ($provider in @($defaults.EnabledProviders)) {
+        $providerKey = ([string]$provider).Trim().ToLowerInvariant()
+        if ([string]::IsNullOrWhiteSpace($providerKey)) { continue }
+        if ($providerKey -eq "comet") { $providerKey = "gogdl" }
+        if (-not $normalizedProviders.Contains($providerKey)) {
+            [void]$normalizedProviders.Add($providerKey)
+        }
+    }
+    if ($normalizedProviders.Count -eq 0) {
+        [void]$normalizedProviders.Add("winget")
+    }
+    $defaults.EnabledProviders = $normalizedProviders.ToArray()
+
     # Cache the result
     $script:WmtSettingsCache = $defaults
     return $defaults
@@ -18922,7 +18947,7 @@ $Script:StartWingetAction = {
     }
     catch {}
 
-    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, LibraryPath, InstallDir, ManifestPath, ExecutablePath -Unique)
+    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, LibraryPath, InstallDir, ManifestPath, ExecutablePath, Platform -Unique)
     $totalItems = $uniqueItems.Count
     
     # UI Updates
@@ -19035,6 +19060,8 @@ $Script:StartWingetAction = {
         EventPath            = $script:WingetActionEventPath
         WingetIncludeUnknown = $wingetIncludeUnknown
         LegendaryExePath     = Get-WmtLegendaryExePath
+        GogdlExePath         = Get-WmtGogdlExePath
+        GogdlAuthConfigPath  = Get-WmtGogdlAuthConfigPath
     }
 
     # 2. Start the Background Job
@@ -19047,6 +19074,8 @@ $Script:StartWingetAction = {
         $eventPath = $ArgsDict.EventPath
         $wingetIncludeUnknown = [bool]$ArgsDict.WingetIncludeUnknown
         $legendaryExePath = [string]$ArgsDict.LegendaryExePath
+        $gogdlExePath = [string]$ArgsDict.GogdlExePath
+        $gogdlAuthConfigPath = [string]$ArgsDict.GogdlAuthConfigPath
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
@@ -19103,6 +19132,30 @@ $Script:StartWingetAction = {
                 catch {}
             }
             if ([string]::IsNullOrWhiteSpace($exe)) { $exe = "legendary" }
+
+            $safeExe = ([string]$exe).Replace('"', '')
+            if ($ForPowerShell) { return "& `"$safeExe`"" }
+            if ($safeExe -match '^[A-Za-z]:\\|^\\\\') { return "`"$safeExe`"" }
+            return $safeExe
+        }
+
+        function Get-WmtGogdlCommandText {
+            param([switch]$ForPowerShell)
+
+            $exe = ([string]$gogdlExePath).Trim()
+            if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                try {
+                    foreach ($cmdName in @("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe")) {
+                        $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+                        if ($cmd -and $cmd.Source) {
+                            $exe = [string]$cmd.Source
+                            break
+                        }
+                    }
+                }
+                catch {}
+            }
+            if ([string]::IsNullOrWhiteSpace($exe)) { $exe = "gogdl" }
 
             $safeExe = ([string]$exe).Replace('"', '')
             if ($ForPowerShell) { return "& `"$safeExe`"" }
@@ -20233,13 +20286,49 @@ exit /b %WMT_EXIT%
                     if ($act -eq "Uninstall") { $cmd = "$legendaryCommand -y uninstall `"$id`"" }
                     $userCmd = $cmd
                 }
-                # --- COMET / GOG GALAXY SDK ---
-                elseif ($src -eq "comet") {
-                    $cometId = if ([string]::IsNullOrWhiteSpace([string]$id)) { "imLinguin.comet" } else { [string]$id }
-                    if ($act -eq "Install") { $cmd = "winget install --id `"$cometId`" --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity" }
-                    if ($act -eq "Update") { $cmd = "winget upgrade --id `"$cometId`" --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity" }
-                    if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$cometId`" --exact --source winget --disable-interactivity" }
-                    $userCmd = $cmd
+                # --- GOGDL / GOG GAMES ---
+                elseif ($src -eq "gogdl") {
+                    if ($act -eq "Update") {
+                        $installDir = ([string]$item.InstallDir).Trim()
+                        if ([string]::IsNullOrWhiteSpace($installDir)) {
+                            $skipReason = "GOG install path was not available."
+                        }
+                        elseif (-not (Test-Path -LiteralPath $installDir -PathType Container)) {
+                            $skipReason = "GOG install path no longer exists: $installDir"
+                        }
+                        else {
+                            $gogdlCommand = Get-WmtGogdlCommandText
+                            $platform = ([string]$item.Platform).Trim().ToLowerInvariant()
+                            if ($platform -notin @("windows", "osx", "linux")) { $platform = "windows" }
+                            $authConfig = ([string]$gogdlAuthConfigPath).Trim()
+                            $authCandidates = @($authConfig)
+                            if (-not [string]::IsNullOrWhiteSpace($env:APPDATA)) {
+                                $authCandidates += (Join-Path $env:APPDATA "heroic\gog_store\auth.json")
+                                $authCandidates += (Join-Path $env:APPDATA "Heroic\gog_store\auth.json")
+                            }
+                            $resolvedAuthConfig = ""
+                            foreach ($candidateAuth in $authCandidates) {
+                                if ([string]::IsNullOrWhiteSpace([string]$candidateAuth)) { continue }
+                                if (Test-Path -LiteralPath ([string]$candidateAuth) -PathType Leaf) {
+                                    $resolvedAuthConfig = [string]$candidateAuth
+                                    break
+                                }
+                            }
+                            if ([string]::IsNullOrWhiteSpace($resolvedAuthConfig)) {
+                                $skipReason = "GOGDL auth.json was not found. Sign into GOG in Heroic or place auth.json at $authConfig."
+                            }
+                            else {
+                                $cmd = "$gogdlCommand --auth-config-path `"$resolvedAuthConfig`" update `"$id`" --path `"$installDir`" --os $platform"
+                                $userCmd = $cmd
+                            }
+                        }
+                    }
+                    elseif ($act -eq "Install") {
+                        $skipReason = "GOG game installs should be started from GOG Galaxy or Heroic; WMT updates installed GOG games."
+                    }
+                    elseif ($act -eq "Uninstall") {
+                        $skipReason = "GOG game uninstall should be handled from GOG Galaxy, Heroic, or Apps & Features."
+                    }
                 }
                 # --- SCOOP (Likely requires User Mode) ---
                 elseif ($src -eq "scoop") {
@@ -20334,7 +20423,7 @@ exit /b %WMT_EXIT%
                         "^(cargo|rust)$" { "Cargo"; break }
                         "^(steam)$" { "Steam"; break }
                         "^(legendary)$" { "Legendary"; break }
-                        "^(comet)$" { "Comet"; break }
+                        "^(gogdl)$" { "GOGDL"; break }
                         default { "Package" }
                     }
                     if ($isPipUpdate) { $windowTag = "PIP" }
@@ -20347,8 +20436,8 @@ exit /b %WMT_EXIT%
                         
                         # Check if the process crashed or the user manually closed the frozen window
                         if ($null -eq $p -or $null -eq $p.ExitCode -or $p.ExitCode -ne 0) {
-                            if ($src -eq "msstore") {
-                                Write-Output "LOG:[$act] Store update window exited with a non-zero code."
+                            if ($src -eq "msstore" -or $src -eq "gogdl") {
+                                Write-Output "LOG:[$act] $windowTag update window exited with a non-zero code."
                                 $exitCode = if ($p -and $null -ne $p.ExitCode) { $p.ExitCode } else { 1 }
                                 $p = [PSCustomObject]@{ ExitCode = $exitCode }
                             }
@@ -20359,8 +20448,8 @@ exit /b %WMT_EXIT%
                         }
                     }
                     catch {
-                        if ($src -eq "msstore") {
-                            Write-Output "LOG:[$act] Store update window was interrupted."
+                        if ($src -eq "msstore" -or $src -eq "gogdl") {
+                            Write-Output "LOG:[$act] $windowTag update window was interrupted."
                             $p = [PSCustomObject]@{ ExitCode = 1 }
                         }
                         else {
@@ -21068,7 +21157,7 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
     }
     $enabled = $settings.EnabledProviders
 
@@ -21190,12 +21279,12 @@ function Show-ProviderManager {
                 <Button Name="btnProviderLegendaryAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
-            <Grid Margin="0,0,0,10" ToolTip="Comet provides GOG Galaxy SDK services for supported GOG games. WMT checks the Comet package itself.">
+            <Grid Margin="0,0,0,10" ToolTip="GOGDL updates installed GOG games through Heroic's gogdl downloader.">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkComet" Grid.Column="0"/>
-                <TextBlock Text="Comet" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblCometStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderCometAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+                <CheckBox Name="chkGogdl" Grid.Column="0"/>
+                <TextBlock Text="GOGDL" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblGogdlStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderGogdlAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
         </StackPanel>
 
@@ -21220,7 +21309,7 @@ function Show-ProviderManager {
     $chkCargo = Get-WinCtrl "chkCargo"
     $chkSteam = Get-WinCtrl "chkSteam"
     $chkLegendary = Get-WinCtrl "chkLegendary"
-    $chkComet = Get-WinCtrl "chkComet"
+    $chkGogdl = Get-WinCtrl "chkGogdl"
 
     $providerDefinitions = @(
         [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
@@ -21234,7 +21323,7 @@ function Show-ProviderManager {
         [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
         [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" },
         [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary (Epic Games)"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction" },
-        [PSCustomObject]@{ Key = "comet"; DisplayName = "Comet (GOG Galaxy)"; Commands = [string[]]@("comet", "comet.exe"); Label = "lblCometStatus"; Button = "btnProviderCometAction" }
+        [PSCustomObject]@{ Key = "gogdl"; DisplayName = "GOGDL (GOG Games)"; Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction" }
     )
     $providerInstallState = @{}
     $providerActionMonitors = @{}
@@ -21617,32 +21706,183 @@ else {
                 $legendaryBody.Replace("__WMT_LEGENDARY_DIR__", $legendaryDirLiteral).Replace("__WMT_LEGENDARY_EXE__", $legendaryExeLiteral)
                 break
             }
-            "comet" {
-                if ($installing) {
-                    @'
-if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Comet install needs winget." }
-winget install --id imLinguin.comet --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
-Update-WmtProviderPathEnvironment
-if (Get-Command comet -ErrorAction SilentlyContinue) {
-    comet --version
+            "gogdl" {
+                $gogdlExePath = Get-WmtGogdlExePath
+                $gogdlDir = Split-Path -Parent $gogdlExePath
+                $gogdlAuthConfigPath = Get-WmtGogdlAuthConfigPath
+                $gogdlExeLiteral = ([string]$gogdlExePath).Replace("'", "''")
+                $gogdlDirLiteral = ([string]$gogdlDir).Replace("'", "''")
+                $gogdlAuthLiteral = ([string]$gogdlAuthConfigPath).Replace("'", "''")
+                $gogdlBody = @'
+$gogdlDir = '__WMT_GOGDL_DIR__'
+$gogdlExe = '__WMT_GOGDL_EXE__'
+$authConfig = '__WMT_GOGDL_AUTH__'
+$latestApi = "https://api.github.com/repos/Heroic-Games-Launcher/heroic-gogdl/releases/latest"
+$fallbackUrl = "https://github.com/Heroic-Games-Launcher/heroic-gogdl/releases/latest/download/gogdl_windows_x86_64.exe"
+$headers = @{ "User-Agent" = "Windows-Maintenance-Tool" }
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
 }
-else {
-    Write-Host "Comet was requested. Open a new terminal after install if comet is not visible yet."
+catch {}
+
+if (-not (Test-Path -LiteralPath $gogdlDir)) {
+    [void][System.IO.Directory]::CreateDirectory($gogdlDir)
+}
+
+$firstInstall = -not (Test-Path -LiteralPath $gogdlExe -PathType Leaf)
+$downloadUrl = $fallbackUrl
+$releaseName = "latest"
+try {
+    Write-Host "Checking latest GOGDL release..."
+    $release = Invoke-RestMethod -Uri $latestApi -Headers $headers -UseBasicParsing -ErrorAction Stop
+    if ($release -and $release.tag_name) { $releaseName = [string]$release.tag_name }
+    $asset = @($release.assets | Where-Object { ([string]$_.name) -ieq "gogdl_windows_x86_64.exe" } | Select-Object -First 1)
+    if ($asset -and $asset.browser_download_url) {
+        $downloadUrl = [string]$asset.browser_download_url
+    }
+}
+catch {
+    Write-Warning "Could not query GitHub latest release API: $($_.Exception.Message)"
+    Write-Host "Falling back to GitHub's latest/download redirect."
+}
+
+$tmpPath = Join-Path $gogdlDir ("gogdl_windows_x86_64.exe.{0}.download" -f ([Guid]::NewGuid().ToString("N")))
+try {
+    Write-Host "Downloading GOGDL $releaseName..."
+    Write-Host $downloadUrl
+    Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -OutFile $tmpPath -ErrorAction Stop
+
+    $download = Get-Item -LiteralPath $tmpPath -ErrorAction Stop
+    if ($download.Length -lt 1MB) {
+        throw "Downloaded file is unexpectedly small ($($download.Length) bytes)."
+    }
+
+    Move-Item -LiteralPath $tmpPath -Destination $gogdlExe -Force
+    try { Unblock-File -LiteralPath $gogdlExe -ErrorAction SilentlyContinue } catch {}
+}
+finally {
+    if (Test-Path -LiteralPath $tmpPath) {
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if (-not (Test-Path -LiteralPath $gogdlExe -PathType Leaf)) {
+    throw "GOGDL executable was not saved to $gogdlExe."
+}
+
+Write-Host "GOGDL saved to:"
+Write-Host $gogdlExe
+& $gogdlExe --version
+Write-Host ""
+Write-Host "GOGDL auth config:"
+Write-Host $authConfig
+
+# Try to auto-copy Heroic's auth.json if available
+$heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+if ((Test-Path -LiteralPath $authConfig -PathType Leaf)) {
+    Write-Host "auth.json already exists."
+}
+elseif ($env:APPDATA -and (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf)) {
+    try {
+        Write-Host "Found Heroic GOG auth. Copying to GOGDL..."
+        Copy-Item -LiteralPath $heroicAuthPath -Destination $authConfig -Force -ErrorAction Stop
+        Write-Host "Successfully copied auth from Heroic. GOGDL is ready!"
+    }
+    catch {
+        Write-Warning "Could not copy auth from Heroic: $($_.Exception.Message)"
+        Write-Host "You will need to authenticate GOG in the next step."
+    }
+}
+
+# If this is a fresh install, or auth.json is still missing, open GOG OAuth flow
+if ($firstInstall -or -not (Test-Path -LiteralPath $authConfig -PathType Leaf)) {
+    Write-Host ""
+    Write-Host "Starting GOG authentication..."
+    Write-Host "Your browser will open. Log in, then paste the redirect URL back here."
+    Write-Host ""
+
+    $authScript = @"
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
+`$ErrorActionPreference = "Continue"
+
+`$clientId     = "46899977096215655"
+`$clientSecret = "9d85c43b1482497dbbce61f6e4aa173a433796eeae2ca8c5f6129f2dc4de46d9"
+`$redirectUri  = "https://embed.gog.com/on_login_success?origin=client"
+`$authUrl      = "https://login.gog.com/auth?client_id=`$clientId&redirect_uri=" + [Uri]::EscapeDataString(`$redirectUri) + "&response_type=code&layout=client2"
+`$tokenUrl     = "https://auth.gog.com/token"
+
+Write-Host "WMT: GOG Authentication" -ForegroundColor Cyan
+Write-Host ""
+Write-Host "Step 1: Opening GOG login page in your browser..." -ForegroundColor Yellow
+Write-Host "Auth config path: $authConfig"
+Write-Host ""
+Start-Process `$authUrl
+Start-Sleep -Seconds 2
+
+Write-Host "Step 2: After logging in, GOG redirects to a URL starting with:" -ForegroundColor Yellow
+Write-Host "  https://embed.gog.com/on_login_success" -ForegroundColor Cyan
+Write-Host "Copy the full URL from the browser address bar and paste it below." -ForegroundColor Yellow
+Write-Host ""
+
+`$redirected = ""
+while ([string]::IsNullOrWhiteSpace(`$redirected)) {
+    `$redirected = (Read-Host "Paste redirect URL").Trim()
+    if ([string]::IsNullOrWhiteSpace(`$redirected)) { Write-Warning "Please paste the full redirect URL from your browser." }
+}
+
+`$code = ""
+if (`$redirected -match '[?&]code=([^&\s]+)') { `$code = `$matches[1] }
+
+if ([string]::IsNullOrWhiteSpace(`$code)) {
+    Write-Error "No 'code' found in the URL. Make sure you copied the full redirect URL from the address bar."
+    [void](Read-Host "Press Enter to close")
+    exit 1
+}
+
+Write-Host ""
+Write-Host "Step 3: Exchanging code for tokens..." -ForegroundColor Yellow
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    `$body = "client_id=`$clientId&client_secret=`$clientSecret&grant_type=authorization_code" +
+             "&redirect_uri=" + [Uri]::EscapeDataString(`$redirectUri) +
+             "&code="         + [Uri]::EscapeDataString(`$code)
+    `$token = Invoke-RestMethod -Uri `$tokenUrl -Method Post -Body `$body -ContentType "application/x-www-form-urlencoded" -UseBasicParsing -ErrorAction Stop
+
+    if (-not `$token.access_token) { throw "Token response missing access_token." }
+
+    `$authDir = Split-Path -Parent "$authConfig"
+    if (`$authDir -and -not (Test-Path -LiteralPath `$authDir)) { [void][System.IO.Directory]::CreateDirectory(`$authDir) }
+
+    [System.IO.File]::WriteAllText("$authConfig", (`$token | ConvertTo-Json -Depth 5), [System.Text.Encoding]::UTF8)
+
+    Write-Host ""
+    Write-Host "GOG authentication successful! Tokens saved." -ForegroundColor Green
+    Write-Host "  $authConfig"
+}
+catch {
+    Write-Host ""
+    Write-Error "Token exchange failed: `$(`$_.Exception.Message)"
+}
+
+Write-Host ""
+[void](Read-Host "Press Enter to close")
+"@
+
+    $tmpAuthScript = Join-Path $gogdlDir ("gogdl_auth_{0}.ps1" -f ([Guid]::NewGuid().ToString("N")))
+    try {
+        [System.IO.File]::WriteAllText($tmpAuthScript, $authScript, [System.Text.Encoding]::UTF8)
+        Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $tmpAuthScript -Wait
+    }
+    finally {
+        if (Test-Path -LiteralPath $tmpAuthScript) {
+            Remove-Item -LiteralPath $tmpAuthScript -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 '@
-                }
-                else {
-                    @'
-if (Get-Command winget -ErrorAction SilentlyContinue) {
-    winget upgrade --id imLinguin.comet --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
-    Update-WmtProviderPathEnvironment
-}
-elseif (-not (Get-Command comet -ErrorAction SilentlyContinue)) {
-    throw "Comet was not found."
-}
-if (Get-Command comet -ErrorAction SilentlyContinue) { comet --version }
-'@
-                }
+                $gogdlBody.Replace("__WMT_GOGDL_DIR__", $gogdlDirLiteral).Replace("__WMT_GOGDL_EXE__", $gogdlExeLiteral).Replace("__WMT_GOGDL_AUTH__", $gogdlAuthLiteral)
                 break
             }
             "steam" {
@@ -22020,7 +22260,7 @@ exit `$exitCode
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
     if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
     if ("legendary" -in $enabled) { $chkLegendary.IsChecked = $true }
-    if ("comet" -in $enabled) { $chkComet.IsChecked = $true }
+    if ("gogdl" -in $enabled) { $chkGogdl.IsChecked = $true }
 
     & $updateProviderStatuses
     foreach ($provider in $providerDefinitions) {
@@ -22043,7 +22283,7 @@ exit `$exitCode
             if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
             if ($chkSteam.IsChecked) { $newEnabled += "steam" }
             if ($chkLegendary.IsChecked) { $newEnabled += "legendary" }
-            if ($chkComet.IsChecked) { $newEnabled += "comet" }
+            if ($chkGogdl.IsChecked) { $newEnabled += "gogdl" }
         
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
@@ -22289,7 +22529,7 @@ $btnWingetScan.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
@@ -23033,86 +23273,249 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
-        # J. COMET / GOG GALAXY SDK WORKER
-        if ("comet" -in $enabled) {
+        # J. GOGDL / GOG GAMES WORKER
+        if ("gogdl" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
-                    param($IgnoreList)
+                    param($IgnoreList, $GogdlExePath)
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-                    Write-Output "LOG:Scanning Comet GOG Galaxy SDK package..."
+                    Write-Output "LOG:Scanning installed GOG games with GOGDL metadata..."
 
                     function Test-Ignored($n, $i) {
                         if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
                         return $false
                     }
 
-                    try {
-                        if (-not (Get-Command comet -ErrorAction SilentlyContinue)) {
-                            Write-Output "LOG:Comet scan skipped: comet was not found."
-                            return
+                    function Get-WmtGogdlCommand {
+                        param([string]$LocalPath)
+
+                        $local = ([string]$LocalPath).Trim()
+                        if (-not [string]::IsNullOrWhiteSpace($local) -and (Test-Path -LiteralPath $local -PathType Leaf)) {
+                            return $local
                         }
-
-                        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-                            Write-Output "LOG:Comet is installed, but winget is needed to check for Comet package updates."
-                            return
+                        foreach ($cmdName in @("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe")) {
+                            try {
+                                $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+                                if ($cmd -and $cmd.Source) { return [string]$cmd.Source }
+                            }
+                            catch {}
                         }
+                        return ""
+                    }
 
-                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-                        $pInfo.FileName = "winget"
-                        $pInfo.Arguments = "list --id imLinguin.comet --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity"
-                        $pInfo.RedirectStandardOutput = $true
-                        $pInfo.RedirectStandardError = $true
-                        $pInfo.UseShellExecute = $false
-                        $pInfo.CreateNoWindow = $true
-                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
-                        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+                    function Get-GogInstalledGames {
+                        $items = New-Object System.Collections.Generic.List[object]
+                        $seen = @{}
+                        $registryRoots = @(
+                            "HKLM:\SOFTWARE\WOW6432Node\GOG.com\Games",
+                            "HKLM:\SOFTWARE\GOG.com\Games",
+                            "HKCU:\SOFTWARE\GOG.com\Games",
+                            "HKCU:\SOFTWARE\WOW6432Node\GOG.com\Games"
+                        )
 
-                        $p = [System.Diagnostics.Process]::Start($pInfo)
-                        $outTask = $p.StandardOutput.ReadToEndAsync()
-                        $errTask = $p.StandardError.ReadToEndAsync()
-                        if (-not $p.WaitForExit(45000)) {
-                            Write-Output "LOG:Comet package scan timed out after 45 seconds."
-                            try { $p.Kill() } catch {}
-                            try { [void]$p.WaitForExit(2000) } catch {}
-                            return
-                        }
-
-                        $out = $outTask.GetAwaiter().GetResult()
-                        $err = $errTask.GetAwaiter().GetResult()
-                        if ($p.ExitCode -ne 0) {
-                            Write-Output "LOG:Comet package scan exited with code $($p.ExitCode)."
-                            if (-not [string]::IsNullOrWhiteSpace($err)) {
-                                foreach ($errLine in ($err -split "`r?`n")) {
-                                    if (-not [string]::IsNullOrWhiteSpace($errLine)) { Write-Output "LOG:Comet winget: $errLine" }
+                        foreach ($root in $registryRoots) {
+                            if (-not (Test-Path -LiteralPath $root)) { continue }
+                            foreach ($key in @(Get-ChildItem -LiteralPath $root -ErrorAction SilentlyContinue)) {
+                                try {
+                                    $props = Get-ItemProperty -LiteralPath $key.PSPath -ErrorAction Stop
+                                    $gameId = ([string]$props.gameID).Trim()
+                                    if ([string]::IsNullOrWhiteSpace($gameId)) { $gameId = (Split-Path -Leaf $key.Name) }
+                                    $installPath = ([string]$props.path).Trim()
+                                    if ([string]::IsNullOrWhiteSpace($installPath) -and $props.PSObject.Properties["installPath"]) {
+                                        $installPath = ([string]$props.installPath).Trim()
+                                    }
+                                    if ([string]::IsNullOrWhiteSpace($gameId) -or [string]::IsNullOrWhiteSpace($installPath)) { continue }
+                                    $installPath = [Environment]::ExpandEnvironmentVariables($installPath)
+                                    if (-not (Test-Path -LiteralPath $installPath -PathType Container)) { continue }
+                                    $name = ([string]$props.gameName).Trim()
+                                    if ([string]::IsNullOrWhiteSpace($name)) { $name = (Split-Path -Leaf $installPath) }
+                                    $dedupeKey = "$gameId`n$installPath"
+                                    if ($seen.ContainsKey($dedupeKey)) { continue }
+                                    $seen[$dedupeKey] = $true
+                                    [void]$items.Add([PSCustomObject]@{
+                                            GameID      = $gameId
+                                            Name        = $name
+                                            InstallPath = $installPath
+                                        })
                                 }
+                                catch {}
                             }
                         }
 
+                        return $items.ToArray()
+                    }
+
+                    function Get-GogLocalMetadata {
+                        param($Game)
+
+                        $installPath = ([string]$Game.InstallPath).Trim()
+                        $registryId = ([string]$Game.GameID).Trim()
+                        $title = ([string]$Game.Name).Trim()
+                        $platform = "windows"
+                        $candidateDirs = @($installPath, (Join-Path $installPath "game"), (Join-Path $installPath "Contents\Resources"))
+                        $infoObjects = New-Object System.Collections.Generic.List[object]
+
+                        foreach ($dir in $candidateDirs) {
+                            if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }
+                            foreach ($infoFile in @(Get-ChildItem -LiteralPath $dir -Filter "goggame-*.info" -File -ErrorAction SilentlyContinue)) {
+                                try {
+                                    $json = Get-Content -LiteralPath $infoFile.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                                    [void]$infoObjects.Add([PSCustomObject]@{ Json = $json; Directory = $dir; Path = $infoFile.FullName })
+                                }
+                                catch {}
+                            }
+                        }
+
+                        $chosen = $null
+                        foreach ($entry in @($infoObjects.ToArray())) {
+                            $json = $entry.Json
+                            $rootId = ([string]$json.rootGameId).Trim()
+                            $gameId = ([string]$json.gameId).Trim()
+                            if (-not [string]::IsNullOrWhiteSpace($registryId) -and ($registryId -eq $rootId -or $registryId -eq $gameId)) {
+                                $chosen = $entry
+                                break
+                            }
+                            if (-not [string]::IsNullOrWhiteSpace($rootId) -and $rootId -eq $gameId) {
+                                $chosen = $entry
+                            }
+                        }
+                        if (-not $chosen -and $infoObjects.Count -gt 0) { $chosen = $infoObjects[0] }
+
+                        $gameId = $registryId
+                        $buildId = ""
+                        if ($chosen) {
+                            $json = $chosen.Json
+                            if (-not [string]::IsNullOrWhiteSpace([string]$json.rootGameId)) { $gameId = ([string]$json.rootGameId).Trim() }
+                            elseif (-not [string]::IsNullOrWhiteSpace([string]$json.gameId)) { $gameId = ([string]$json.gameId).Trim() }
+                            if (-not [string]::IsNullOrWhiteSpace([string]$json.name)) { $title = ([string]$json.name).Trim() }
+                            if (-not [string]::IsNullOrWhiteSpace([string]$json.buildId)) { $buildId = ([string]$json.buildId).Trim() }
+
+                            $idPath = Join-Path ([string]$chosen.Directory) ("goggame-{0}.id" -f $gameId)
+                            if (-not (Test-Path -LiteralPath $idPath -PathType Leaf)) {
+                                $idPath = [System.IO.Path]::ChangeExtension([string]$chosen.Path, ".id")
+                            }
+                            if (Test-Path -LiteralPath $idPath -PathType Leaf) {
+                                try {
+                                    $idText = (Get-Content -LiteralPath $idPath -Raw -ErrorAction Stop).Trim()
+                                    if (-not [string]::IsNullOrWhiteSpace($idText)) {
+                                        try {
+                                            $idJson = $idText | ConvertFrom-Json -ErrorAction Stop
+                                            if (-not [string]::IsNullOrWhiteSpace([string]$idJson.buildId)) {
+                                                $buildId = ([string]$idJson.buildId).Trim()
+                                            }
+                                        }
+                                        catch {
+                                            if ($idText -match '^\d+$') { $buildId = $idText }
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+                        }
+
+                        return [PSCustomObject]@{
+                            GameID      = $gameId
+                            Name        = $title
+                            InstallPath = $installPath
+                            BuildID     = $buildId
+                            Platform    = $platform
+                        }
+                    }
+
+                    function Get-GogBuildCatalog {
+                        param([string]$GameID)
+
+                        if ([string]::IsNullOrWhiteSpace($GameID)) { return $null }
+                        $escapedId = [uri]::EscapeDataString($GameID)
+                        $url = "https://content-system.gog.com/products/$escapedId/os/windows/builds?generation=2"
+                        $headers = @{ "User-Agent" = "GOGGalaxyCommunicationService/2.0.4.164 (Windows_32bit)" }
+                        return Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -ErrorAction Stop
+                    }
+
+                    try {
+                        $gogdlCommand = Get-WmtGogdlCommand -LocalPath $GogdlExePath
+                        if ([string]::IsNullOrWhiteSpace($gogdlCommand)) {
+                            Write-Output "LOG:GOGDL scan skipped: gogdl was not found in WMT data or PATH."
+                            return
+                        }
+
+                        $games = @(Get-GogInstalledGames)
+                        if ($games.Count -eq 0) {
+                            Write-Output "LOG:GOGDL scan found no installed GOG games in the registry."
+                            return
+                        }
+
                         $pendingCount = 0
-                        foreach ($rawLine in ($out -split "`r?`n")) {
-                            $line = ([string]$rawLine).Trim()
-                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                            if ($line -match "^-+$" -or $line -match "^(?i)name\s+id\s+version" -or $line -match "^(?i)no installed package|no package found") { continue }
-                            $parts = @($line -split '\s{2,}' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-                            if ($parts.Count -lt 4) { continue }
-                            $n = ([string]$parts[0]).Trim()
-                            $i = ([string]$parts[1]).Trim()
-                            $v = ([string]$parts[2]).Trim()
-                            $a = ([string]$parts[3]).Trim()
-                            if ($i -ne "imLinguin.comet") { continue }
-                            if (Test-Ignored $n $i) { continue }
+                        $checkedCount = 0
+                        $missingMetadataCount = 0
+                        foreach ($game in $games) {
+                            $metadata = Get-GogLocalMetadata -Game $game
+                            $gameId = ([string]$metadata.GameID).Trim()
+                            $title = ([string]$metadata.Name).Trim()
+                            $installPath = ([string]$metadata.InstallPath).Trim()
+                            $installedBuild = ([string]$metadata.BuildID).Trim()
+                            if ([string]::IsNullOrWhiteSpace($title)) { $title = $gameId }
+                            if ([string]::IsNullOrWhiteSpace($gameId) -or [string]::IsNullOrWhiteSpace($installedBuild)) {
+                                $missingMetadataCount++
+                                continue
+                            }
+
+                            $catalog = $null
+                            try {
+                                $catalog = Get-GogBuildCatalog -GameID $gameId
+                            }
+                            catch {
+                                Write-Output "LOG:GOGDL could not query latest build for $title ($gameId): $($_.Exception.Message)"
+                                continue
+                            }
+
+                            $items = @($catalog.items)
+                            if ($items.Count -eq 0) { continue }
+                            $checkedCount++
+                            $latest = $items[0]
+                            $latestBuild = ([string]$latest.build_id).Trim()
+                            if ([string]::IsNullOrWhiteSpace($latestBuild)) { continue }
+                            if ($installedBuild -eq $latestBuild) { continue }
+                            if (Test-Ignored $title $gameId) { continue }
+
+                            $installedVersionName = ""
+                            foreach ($build in $items) {
+                                if (([string]$build.build_id).Trim() -eq $installedBuild) {
+                                    $installedVersionName = ([string]$build.version_name).Trim()
+                                    break
+                                }
+                            }
                             $pendingCount++
-                            [PSCustomObject]@{Source = "comet"; Name = $n; Id = $i; Version = $v; Available = $a }
+                            $displayInstalled = if ([string]::IsNullOrWhiteSpace($installedVersionName)) { $installedBuild } else { $installedVersionName }
+                            $displayLatest = if ([string]::IsNullOrWhiteSpace([string]$latest.version_name)) { $latestBuild } else { ([string]$latest.version_name).Trim() }
+                            [PSCustomObject]@{
+                                Source         = "gogdl"
+                                Name           = $title
+                                Id             = $gameId
+                                Version        = $displayInstalled
+                                Available      = $displayLatest
+                                VersionSort    = $installedBuild
+                                AvailableSort  = $latestBuild
+                                InstallDir     = $installPath
+                                ExecutablePath = $gogdlCommand
+                                Platform       = "windows"
+                            }
                         }
 
                         if ($pendingCount -eq 0) {
-                            Write-Output "LOG:No Comet package update found. Comet does not expose a GOG game-update list; it provides GOG Galaxy SDK services."
+                            Write-Output "LOG:GOGDL scan checked $checkedCount installed GOG game(s), with no pending updates."
+                        }
+                        else {
+                            Write-Output "LOG:GOGDL scan found $pendingCount pending GOG game update(s)."
+                        }
+                        if ($missingMetadataCount -gt 0) {
+                            Write-Output "LOG:GOGDL skipped $missingMetadataCount GOG game(s) without local goggame build metadata."
                         }
                     }
                     catch {
-                        Write-Output "LOG:Comet package scan failed: $($_.Exception.Message)"
+                        Write-Output "LOG:GOGDL scan failed: $($_.Exception.Message)"
                     }
-                }).AddArgument($ignoreList)
+                }).AddArgument($ignoreList).AddArgument((Get-WmtGogdlExePath))
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
@@ -23698,7 +24101,7 @@ $btnWingetFind.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
 
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
