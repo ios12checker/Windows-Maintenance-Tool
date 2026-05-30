@@ -3622,6 +3622,11 @@ function Get-DataPath {
 }
 $script:DataDir = Get-DataPath
 
+function Get-WmtLegendaryExePath {
+    $legendaryDir = Join-Path (Get-DataPath) "legendary"
+    return (Join-Path $legendaryDir "legendary.exe")
+}
+
 # Simple modal text viewer (read-only)
 function Show-TextDialog {
     param(
@@ -3881,7 +3886,7 @@ function Get-WmtSettings {
         WingetIncludeUnknown = $true
         LoadWinapp2          = $false 
         LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
+        EnabledProviders     = @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
         CustomDnsServers     = @()
         CustomDohTemplate    = ""
         CustomDohEnabled     = $false
@@ -18917,7 +18922,7 @@ $Script:StartWingetAction = {
     }
     catch {}
 
-    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, LibraryPath, InstallDir, ManifestPath -Unique)
+    $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, LibraryPath, InstallDir, ManifestPath, ExecutablePath -Unique)
     $totalItems = $uniqueItems.Count
     
     # UI Updates
@@ -19029,6 +19034,7 @@ $Script:StartWingetAction = {
         TempPath             = $env:TEMP
         EventPath            = $script:WingetActionEventPath
         WingetIncludeUnknown = $wingetIncludeUnknown
+        LegendaryExePath     = Get-WmtLegendaryExePath
     }
 
     # 2. Start the Background Job
@@ -19040,6 +19046,7 @@ $Script:StartWingetAction = {
         $temp = $ArgsDict.TempPath
         $eventPath = $ArgsDict.EventPath
         $wingetIncludeUnknown = [bool]$ArgsDict.WingetIncludeUnknown
+        $legendaryExePath = [string]$ArgsDict.LegendaryExePath
         
         [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
@@ -19082,6 +19089,25 @@ $Script:StartWingetAction = {
 
             return ($text -match '(?i)(^|\b)(Microsoft\s+Store|Windows\s+Store|Store\s+Experience\s+Host|Store\s+Purchase\s+App)(\b|$)' -or
                 $text -match '(?i)(Microsoft\.WindowsStore|Microsoft\.StorePurchaseApp|Microsoft\.Services\.Store\.Engagement|9WZDNCRFJBMP)')
+        }
+
+        function Get-WmtLegendaryCommandText {
+            param([switch]$ForPowerShell)
+
+            $exe = ([string]$legendaryExePath).Trim()
+            if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                try {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $exe = [string]$cmd.Source }
+                }
+                catch {}
+            }
+            if ([string]::IsNullOrWhiteSpace($exe)) { $exe = "legendary" }
+
+            $safeExe = ([string]$exe).Replace('"', '')
+            if ($ForPowerShell) { return "& `"$safeExe`"" }
+            if ($safeExe -match '^[A-Za-z]:\\|^\\\\') { return "`"$safeExe`"" }
+            return $safeExe
         }
 
         function Invoke-WmtStoreFallbackPage {
@@ -20199,6 +20225,22 @@ exit /b %WMT_EXIT%
                         $skipReason = "Steam game uninstall should be handled from the Steam client."
                     }
                 }
+                # --- LEGENDARY / EPIC GAMES ---
+                elseif ($src -eq "legendary") {
+                    $legendaryCommand = Get-WmtLegendaryCommandText -ForPowerShell:($act -ne "Update")
+                    if ($act -eq "Install") { $cmd = "$legendaryCommand -y install `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "$legendaryCommand -y update `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "$legendaryCommand -y uninstall `"$id`"" }
+                    $userCmd = $cmd
+                }
+                # --- COMET / GOG GALAXY SDK ---
+                elseif ($src -eq "comet") {
+                    $cometId = if ([string]::IsNullOrWhiteSpace([string]$id)) { "imLinguin.comet" } else { [string]$id }
+                    if ($act -eq "Install") { $cmd = "winget install --id `"$cometId`" --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity" }
+                    if ($act -eq "Update") { $cmd = "winget upgrade --id `"$cometId`" --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity" }
+                    if ($act -eq "Uninstall") { $cmd = "winget uninstall --id `"$cometId`" --exact --source winget --disable-interactivity" }
+                    $userCmd = $cmd
+                }
                 # --- SCOOP (Likely requires User Mode) ---
                 elseif ($src -eq "scoop") {
                     if ($act -eq "Install") { $cmd = "scoop install `"$id`"" }
@@ -20291,6 +20333,8 @@ exit /b %WMT_EXIT%
                         "^(gem|ruby)$" { "RubyGem"; break }
                         "^(cargo|rust)$" { "Cargo"; break }
                         "^(steam)$" { "Steam"; break }
+                        "^(legendary)$" { "Legendary"; break }
+                        "^(comet)$" { "Comet"; break }
                         default { "Package" }
                     }
                     if ($isPipUpdate) { $windowTag = "PIP" }
@@ -21024,14 +21068,14 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet") -Force
     }
     $enabled = $settings.EnabledProviders
 
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="670" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="750" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -21137,6 +21181,22 @@ function Show-ProviderManager {
                 <TextBlock Name="lblSteamStatus" Text="Checking..." Grid.Column="2"/>
                 <Button Name="btnProviderSteamAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="Legendary CLI for Epic Games Store game updates.">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkLegendary" Grid.Column="0"/>
+                <TextBlock Text="Legendary" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblLegendaryStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderLegendaryAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="Comet provides GOG Galaxy SDK services for supported GOG games. WMT checks the Comet package itself.">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkComet" Grid.Column="0"/>
+                <TextBlock Text="Comet" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblCometStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderCometAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
         </StackPanel>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
@@ -21159,6 +21219,8 @@ function Show-ProviderManager {
     $chkGem = Get-WinCtrl "chkGem"
     $chkCargo = Get-WinCtrl "chkCargo"
     $chkSteam = Get-WinCtrl "chkSteam"
+    $chkLegendary = Get-WinCtrl "chkLegendary"
+    $chkComet = Get-WinCtrl "chkComet"
 
     $providerDefinitions = @(
         [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
@@ -21170,7 +21232,9 @@ function Show-ProviderManager {
         [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
         [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
         [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
-        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" }
+        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" },
+        [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary (Epic Games)"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction" },
+        [PSCustomObject]@{ Key = "comet"; DisplayName = "Comet (GOG Galaxy)"; Commands = [string[]]@("comet", "comet.exe"); Label = "lblCometStatus"; Button = "btnProviderCometAction" }
     )
     $providerInstallState = @{}
     $providerActionMonitors = @{}
@@ -21457,6 +21521,130 @@ cargo --version
                 }
                 break
             }
+            "legendary" {
+                $legendaryExePath = Get-WmtLegendaryExePath
+                $legendaryDir = Split-Path -Parent $legendaryExePath
+                $legendaryExeLiteral = ([string]$legendaryExePath).Replace("'", "''")
+                $legendaryDirLiteral = ([string]$legendaryDir).Replace("'", "''")
+                $legendaryBody = @'
+$legendaryDir = '__WMT_LEGENDARY_DIR__'
+$legendaryExe = '__WMT_LEGENDARY_EXE__'
+$latestApi = "https://api.github.com/repos/legendary-gl/legendary/releases/latest"
+$fallbackUrl = "https://github.com/legendary-gl/legendary/releases/latest/download/legendary.exe"
+$headers = @{ "User-Agent" = "Windows-Maintenance-Tool" }
+
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11 -bor [Net.SecurityProtocolType]::Tls
+}
+catch {}
+
+if (-not (Test-Path -LiteralPath $legendaryDir)) {
+    [void][System.IO.Directory]::CreateDirectory($legendaryDir)
+}
+
+$firstInstall = -not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)
+$downloadUrl = $fallbackUrl
+$releaseName = "latest"
+try {
+    Write-Host "Checking latest Legendary release..."
+    $release = Invoke-RestMethod -Uri $latestApi -Headers $headers -UseBasicParsing -ErrorAction Stop
+    if ($release -and $release.tag_name) { $releaseName = [string]$release.tag_name }
+    $asset = @($release.assets | Where-Object { ([string]$_.name) -ieq "legendary.exe" } | Select-Object -First 1)
+    if ($asset -and $asset.browser_download_url) {
+        $downloadUrl = [string]$asset.browser_download_url
+    }
+}
+catch {
+    Write-Warning "Could not query GitHub latest release API: $($_.Exception.Message)"
+    Write-Host "Falling back to GitHub's latest/download redirect."
+}
+
+$tmpPath = Join-Path $legendaryDir ("legendary.exe.{0}.download" -f ([Guid]::NewGuid().ToString("N")))
+try {
+    Write-Host "Downloading Legendary $releaseName..."
+    Write-Host $downloadUrl
+    Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -OutFile $tmpPath -ErrorAction Stop
+
+    $download = Get-Item -LiteralPath $tmpPath -ErrorAction Stop
+    if ($download.Length -lt 1MB) {
+        throw "Downloaded file is unexpectedly small ($($download.Length) bytes)."
+    }
+
+    Move-Item -LiteralPath $tmpPath -Destination $legendaryExe -Force
+    try { Unblock-File -LiteralPath $legendaryExe -ErrorAction SilentlyContinue } catch {}
+}
+finally {
+    if (Test-Path -LiteralPath $tmpPath) {
+        Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+if (-not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)) {
+    throw "Legendary executable was not saved to $legendaryExe."
+}
+
+Write-Host "Legendary saved to:"
+Write-Host $legendaryExe
+& $legendaryExe --version
+
+if ($firstInstall) {
+    Write-Host ""
+    Write-Host "Starting Legendary Epic Games authentication..."
+    Write-Host "Follow the browser and terminal prompts. You can close or cancel this step if you want to authenticate later."
+    try {
+        & $legendaryExe auth
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Legendary auth exited with code $LASTEXITCODE. You can retry later with '$legendaryExe auth'."
+        }
+        else {
+            Write-Host ""
+            Write-Host "Enabling Epic Games Launcher sync and importing installed Epic games..."
+            "y" | & $legendaryExe egl-sync --enable-sync
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Legendary egl-sync exited with code $LASTEXITCODE. You can retry later with '$legendaryExe egl-sync --enable-sync'."
+            }
+        }
+    }
+    catch {
+        Write-Warning "Legendary auth could not be started: $($_.Exception.Message)"
+        Write-Host "You can retry later with '$legendaryExe auth'."
+    }
+}
+else {
+    Write-Host "Legendary is ready. Run '$legendaryExe auth' from a terminal if Epic login has not been configured yet."
+}
+'@
+                $legendaryBody.Replace("__WMT_LEGENDARY_DIR__", $legendaryDirLiteral).Replace("__WMT_LEGENDARY_EXE__", $legendaryExeLiteral)
+                break
+            }
+            "comet" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Comet install needs winget." }
+winget install --id imLinguin.comet --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
+Update-WmtProviderPathEnvironment
+if (Get-Command comet -ErrorAction SilentlyContinue) {
+    comet --version
+}
+else {
+    Write-Host "Comet was requested. Open a new terminal after install if comet is not visible yet."
+}
+'@
+                }
+                else {
+                    @'
+if (Get-Command winget -ErrorAction SilentlyContinue) {
+    winget upgrade --id imLinguin.comet --exact --source winget --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+elseif (-not (Get-Command comet -ErrorAction SilentlyContinue)) {
+    throw "Comet was not found."
+}
+if (Get-Command comet -ErrorAction SilentlyContinue) { comet --version }
+'@
+                }
+                break
+            }
             "steam" {
                 if ($installing) {
                     @'
@@ -21659,6 +21847,12 @@ exit `$exitCode
                 if (Test-Path -LiteralPath $registryPath) { return $true }
             }
         }
+        if ($Provider.PSObject.Properties["LocalPaths"]) {
+            foreach ($localPath in @($Provider.LocalPaths)) {
+                if ([string]::IsNullOrWhiteSpace($localPath)) { continue }
+                if (Test-Path -LiteralPath $localPath -PathType Leaf) { return $true }
+            }
+        }
         return $false
     }.GetNewClosure()
     $updateProviderStatuses = {
@@ -21825,6 +22019,8 @@ exit `$exitCode
     if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
     if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
+    if ("legendary" -in $enabled) { $chkLegendary.IsChecked = $true }
+    if ("comet" -in $enabled) { $chkComet.IsChecked = $true }
 
     & $updateProviderStatuses
     foreach ($provider in $providerDefinitions) {
@@ -21846,6 +22042,8 @@ exit `$exitCode
             if ($chkGem.IsChecked) { $newEnabled += "gem" }
             if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
             if ($chkSteam.IsChecked) { $newEnabled += "steam" }
+            if ($chkLegendary.IsChecked) { $newEnabled += "legendary" }
+            if ($chkComet.IsChecked) { $newEnabled += "comet" }
         
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
@@ -22091,7 +22289,7 @@ $btnWingetScan.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
@@ -22687,7 +22885,238 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
-        # I. STEAM WORKER
+        # I. LEGENDARY / EPIC GAMES WORKER
+        if ("legendary" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList, $LegendaryExePath)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    Write-Output "LOG:Scanning Legendary Epic Games updates..."
+
+                    function Test-Ignored($n, $i) {
+                        if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
+                        return $false
+                    }
+
+                    function ConvertFrom-LegendaryBuildVersion {
+                        param([string]$RawVersion)
+
+                        $raw = ([string]$RawVersion).Trim()
+                        if ([string]::IsNullOrWhiteSpace($raw)) {
+                            return [PSCustomObject]@{ Display = ""; Sort = "" }
+                        }
+
+                        $releaseMatch = [regex]::Match($raw, '(?i)\bRelease-(\d+(?:\.\d+){1,5})(?:-CL-(\d+))?')
+                        if ($releaseMatch.Success) {
+                            $version = [string]$releaseMatch.Groups[1].Value
+                            $cl = [string]$releaseMatch.Groups[2].Value
+                            $display = if ([string]::IsNullOrWhiteSpace($cl)) { $version } else { "$version (CL $cl)" }
+                            $sort = if ([string]::IsNullOrWhiteSpace($cl)) { $version } else { "$version.$cl" }
+                            return [PSCustomObject]@{ Display = $display; Sort = $sort }
+                        }
+
+                        $lastVersion = ""
+                        foreach ($match in [regex]::Matches($raw, '(?<!\d)(\d+(?:\.\d+){1,5})(?!\d)')) {
+                            $lastVersion = [string]$match.Groups[1].Value
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace($lastVersion)) {
+                            return [PSCustomObject]@{ Display = $lastVersion; Sort = $lastVersion }
+                        }
+
+                        return [PSCustomObject]@{ Display = $raw; Sort = $raw }
+                    }
+
+                    try {
+                        $legendaryCommand = ([string]$LegendaryExePath).Trim()
+                        if ([string]::IsNullOrWhiteSpace($legendaryCommand) -or -not (Test-Path -LiteralPath $legendaryCommand -PathType Leaf)) {
+                            $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                            if ($cmd -and $cmd.Source) {
+                                $legendaryCommand = [string]$cmd.Source
+                            }
+                            else {
+                                Write-Output "LOG:Legendary scan skipped: legendary.exe was not found in WMT data or PATH."
+                                return
+                            }
+                        }
+
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $pInfo.FileName = $legendaryCommand
+                        $pInfo.Arguments = "list-installed --check-updates --csv --show-dirs"
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.RedirectStandardError = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        $errTask = $p.StandardError.ReadToEndAsync()
+                        if (-not $p.WaitForExit(90000)) {
+                            Write-Output "LOG:Legendary scan timed out after 90 seconds."
+                            try { $p.Kill() } catch {}
+                            try { [void]$p.WaitForExit(2000) } catch {}
+                            return
+                        }
+
+                        $out = $outTask.GetAwaiter().GetResult()
+                        $err = $errTask.GetAwaiter().GetResult()
+                        if ($p.ExitCode -ne 0) {
+                            Write-Output "LOG:Legendary scan exited with code $($p.ExitCode)."
+                            if (-not [string]::IsNullOrWhiteSpace($err)) {
+                                foreach ($errLine in ($err -split "`r?`n")) {
+                                    if (-not [string]::IsNullOrWhiteSpace($errLine)) { Write-Output "LOG:Legendary: $errLine" }
+                                }
+                            }
+                        }
+
+                        if ([string]::IsNullOrWhiteSpace($out)) {
+                            if (-not [string]::IsNullOrWhiteSpace($err)) { Write-Output "LOG:Legendary returned no CSV output. Run 'legendary auth' if Epic login is not configured." }
+                            return
+                        }
+
+                        $headerIndex = $out.IndexOf("App name,")
+                        if ($headerIndex -gt 0) { $out = $out.Substring($headerIndex) }
+                        $rows = @($out | ConvertFrom-Csv)
+                        $installedCount = 0
+                        $pendingCount = 0
+                        foreach ($row in $rows) {
+                            if (-not $row) { continue }
+                            $appName = ([string]$row.'App name').Trim()
+                            $title = ([string]$row.'App title').Trim()
+                            $installedVersion = ([string]$row.'Installed version').Trim()
+                            $availableVersion = ([string]$row.'Available version').Trim()
+                            $updateFlag = ([string]$row.'Update available').Trim()
+                            $installPath = ([string]$row.'Install path').Trim()
+                            $platform = ([string]$row.Platform).Trim()
+                            if ([string]::IsNullOrWhiteSpace($appName)) { continue }
+                            $installedCount++
+                            if ([string]::IsNullOrWhiteSpace($title)) { $title = $appName }
+                            $hasUpdate = ($updateFlag -match '^(?i:true|yes|1)$')
+                            if (-not $hasUpdate -and -not [string]::IsNullOrWhiteSpace($availableVersion) -and $availableVersion -ne $installedVersion) {
+                                $hasUpdate = $true
+                            }
+                            if (-not $hasUpdate) { continue }
+                            if (Test-Ignored $title $appName) { continue }
+                            $pendingCount++
+                            $installedVersionInfo = ConvertFrom-LegendaryBuildVersion -RawVersion $installedVersion
+                            $availableVersionInfo = ConvertFrom-LegendaryBuildVersion -RawVersion $availableVersion
+                            $displayInstalledVersion = if ([string]::IsNullOrWhiteSpace([string]$installedVersionInfo.Display)) { "?" } else { [string]$installedVersionInfo.Display }
+                            $displayAvailableVersion = if ([string]::IsNullOrWhiteSpace([string]$availableVersionInfo.Display)) { "Update available" } else { [string]$availableVersionInfo.Display }
+                            [PSCustomObject]@{
+                                Source         = "legendary"
+                                Name           = $title
+                                Id             = $appName
+                                Version        = $displayInstalledVersion
+                                Available      = $displayAvailableVersion
+                                VersionSort    = if ([string]::IsNullOrWhiteSpace([string]$installedVersionInfo.Sort)) { $displayInstalledVersion } else { [string]$installedVersionInfo.Sort }
+                                AvailableSort  = if ([string]::IsNullOrWhiteSpace([string]$availableVersionInfo.Sort)) { $displayAvailableVersion } else { [string]$availableVersionInfo.Sort }
+                                RawVersion     = $installedVersion
+                                RawAvailable   = $availableVersion
+                                InstallDir     = $installPath
+                                ExecutablePath = $legendaryCommand
+                                Platform       = $platform
+                            }
+                        }
+
+                        if ($pendingCount -eq 0) {
+                            Write-Output "LOG:Legendary scan found $installedCount installed Epic game(s), with no pending updates."
+                        }
+                        else {
+                            Write-Output "LOG:Legendary scan found $pendingCount pending Epic game update(s)."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Legendary scan failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($ignoreList).AddArgument((Get-WmtLegendaryExePath))
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # J. COMET / GOG GALAXY SDK WORKER
+        if ("comet" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    Write-Output "LOG:Scanning Comet GOG Galaxy SDK package..."
+
+                    function Test-Ignored($n, $i) {
+                        if ($IgnoreList -and ($IgnoreList -contains $n -or $IgnoreList -contains $i)) { return $true }
+                        return $false
+                    }
+
+                    try {
+                        if (-not (Get-Command comet -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:Comet scan skipped: comet was not found."
+                            return
+                        }
+
+                        if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:Comet is installed, but winget is needed to check for Comet package updates."
+                            return
+                        }
+
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $pInfo.FileName = "winget"
+                        $pInfo.Arguments = "list --id imLinguin.comet --exact --source winget --upgrade-available --accept-source-agreements --disable-interactivity"
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.RedirectStandardError = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                        $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        $errTask = $p.StandardError.ReadToEndAsync()
+                        if (-not $p.WaitForExit(45000)) {
+                            Write-Output "LOG:Comet package scan timed out after 45 seconds."
+                            try { $p.Kill() } catch {}
+                            try { [void]$p.WaitForExit(2000) } catch {}
+                            return
+                        }
+
+                        $out = $outTask.GetAwaiter().GetResult()
+                        $err = $errTask.GetAwaiter().GetResult()
+                        if ($p.ExitCode -ne 0) {
+                            Write-Output "LOG:Comet package scan exited with code $($p.ExitCode)."
+                            if (-not [string]::IsNullOrWhiteSpace($err)) {
+                                foreach ($errLine in ($err -split "`r?`n")) {
+                                    if (-not [string]::IsNullOrWhiteSpace($errLine)) { Write-Output "LOG:Comet winget: $errLine" }
+                                }
+                            }
+                        }
+
+                        $pendingCount = 0
+                        foreach ($rawLine in ($out -split "`r?`n")) {
+                            $line = ([string]$rawLine).Trim()
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                            if ($line -match "^-+$" -or $line -match "^(?i)name\s+id\s+version" -or $line -match "^(?i)no installed package|no package found") { continue }
+                            $parts = @($line -split '\s{2,}' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                            if ($parts.Count -lt 4) { continue }
+                            $n = ([string]$parts[0]).Trim()
+                            $i = ([string]$parts[1]).Trim()
+                            $v = ([string]$parts[2]).Trim()
+                            $a = ([string]$parts[3]).Trim()
+                            if ($i -ne "imLinguin.comet") { continue }
+                            if (Test-Ignored $n $i) { continue }
+                            $pendingCount++
+                            [PSCustomObject]@{Source = "comet"; Name = $n; Id = $i; Version = $v; Available = $a }
+                        }
+
+                        if ($pendingCount -eq 0) {
+                            Write-Output "LOG:No Comet package update found. Comet does not expose a GOG game-update list; it provides GOG Galaxy SDK services."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Comet package scan failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # K. STEAM WORKER
         if ("steam" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
@@ -23076,6 +23505,41 @@ function Set-SortChainPrimary {
     return $true
 }
 
+function Get-WmtNaturalSortKey {
+    param([object]$Value)
+
+    if ($null -eq $Value) { return "" }
+    $text = ([string]$Value).Trim().ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($text)) { return "" }
+
+    return [regex]::Replace($text, '\d+', {
+            param($Match)
+            $Match.Value.PadLeft(20, '0')
+        })
+}
+
+function Get-WmtListSortValue {
+    param(
+        [object]$Item,
+        [string]$PropertyName
+    )
+
+    if ($null -eq $Item -or [string]::IsNullOrWhiteSpace($PropertyName)) { return "" }
+
+    $value = $null
+    if ($Item.PSObject.Properties[$PropertyName]) {
+        $value = $Item.$PropertyName
+    }
+    elseif ($PropertyName -eq "VersionSort" -and $Item.PSObject.Properties["Version"]) {
+        $value = $Item.Version
+    }
+    elseif ($PropertyName -eq "AvailableSort" -and $Item.PSObject.Properties["Available"]) {
+        $value = $Item.Available
+    }
+
+    return Get-WmtNaturalSortKey $value
+}
+
 function Set-ListViewSort {
     param(
         [System.Windows.Controls.ListView]$ListView,
@@ -23109,8 +23573,13 @@ function Set-ListViewSort {
     $items = @($ListView.Items)
     if ($items.Count -eq 0) { return }
     $sortSpec = foreach ($rule in $Chain) {
-        if (-not [string]::IsNullOrWhiteSpace([string]$rule.Property)) {
-            @{ Expression = [string]$rule.Property; Descending = [bool]$rule.Descending }
+        $propertyName = [string]$rule.Property
+        if (-not [string]::IsNullOrWhiteSpace($propertyName)) {
+            $propertyNameForClosure = $propertyName
+            @{
+                Expression = { Get-WmtListSortValue -Item $_ -PropertyName $propertyNameForClosure }.GetNewClosure()
+                Descending = [bool]$rule.Descending
+            }
         }
     }
     if (-not $sortSpec -or $sortSpec.Count -eq 0) { return }
@@ -23131,8 +23600,8 @@ function Resolve-WingetSortProperty {
     param([string]$Header)
     switch ($Header) {
         "Package Name" { return "Name" }
-        "Installed" { return "Version" }
-        "Latest" { return "Available" }
+        "Installed" { return "VersionSort" }
+        "Latest" { return "AvailableSort" }
         default { return $Header }
     }
 }
@@ -23229,7 +23698,7 @@ $btnWingetFind.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam")
+            @("winget", "msstore", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "comet")
         }
 
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
