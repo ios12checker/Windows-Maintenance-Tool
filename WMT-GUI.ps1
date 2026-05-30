@@ -3893,6 +3893,7 @@ function Save-WmtSettings {
             WingetIncludeUnknown       = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
             UpdateAutoScanMinutes      = [int](Get-WmtUpdateAutoScanMinutes -Settings $Settings)
             UpdateNotificationsEnabled = [bool](Get-WmtUpdateNotificationsEnabled -Settings $Settings)
+            RunInTrayOnClose           = [bool](Get-WmtRunInTrayOnClose -Settings $Settings)
             LoadWinapp2                = [bool]$Settings.LoadWinapp2
             LoadCleanerML              = [bool]$Settings.LoadCleanerML
             EnabledProviders           = $Settings.EnabledProviders
@@ -3924,6 +3925,7 @@ function Get-WmtSettings {
         WingetIncludeUnknown       = $true
         UpdateAutoScanMinutes      = 0
         UpdateNotificationsEnabled = $true
+        RunInTrayOnClose           = $false
         LoadWinapp2                = $false 
         LoadCleanerML              = $false
         EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
@@ -3962,6 +3964,7 @@ function Get-WmtSettings {
                 if ($defaults.UpdateAutoScanMinutes -lt 0) { $defaults.UpdateAutoScanMinutes = 0 }
             }
             if ($json.PSObject.Properties["UpdateNotificationsEnabled"]) { $defaults.UpdateNotificationsEnabled = [bool]$json.UpdateNotificationsEnabled }
+            if ($json.PSObject.Properties["RunInTrayOnClose"]) { $defaults.RunInTrayOnClose = [bool]$json.RunInTrayOnClose }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
@@ -4116,11 +4119,51 @@ function Set-WmtUpdateNotificationsEnabled {
     Save-WmtSettings -Settings $settings
 }
 
+function Get-WmtRunInTrayOnClose {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("RunInTrayOnClose")) {
+            return [bool]$Settings["RunInTrayOnClose"]
+        }
+        if ($Settings.PSObject.Properties["RunInTrayOnClose"]) {
+            return [bool]$Settings.RunInTrayOnClose
+        }
+    }
+    catch {}
+
+    return $false
+}
+
+function Set-WmtRunInTrayOnClose {
+    param([bool]$Enabled)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["RunInTrayOnClose"] = $Enabled
+    }
+    elseif ($settings.PSObject.Properties["RunInTrayOnClose"]) {
+        $settings.RunInTrayOnClose = $Enabled
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value $Enabled -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
 $script:WmtNotificationAppId = "Chaython.WindowsMaintenanceTool"
 $script:WmtNativeToastReady = $false
 $script:WmtNativeToastUnavailable = $false
 $script:WmtNativeToastShortcutWarningShown = $false
 $script:WmtNotificationFallbackTimers = New-Object System.Collections.ArrayList
+$script:WmtTrayIcon = $null
+$script:WmtTrayMenu = $null
+$script:WmtAllowFinalClose = $false
+$script:WmtTrayHideNotificationShown = $false
+$script:WmtHiddenToTray = $false
+$script:WmtApplication = $null
 
 function Get-WmtNotificationLaunchInfo {
     $targetPath = $script:WmtProcessPath
@@ -4389,6 +4432,201 @@ namespace WmtNotifications {
         $script:WmtNativeToastUnavailable = $true
         return $false
     }
+}
+
+function Show-WmtMainWindowFromTray {
+    try {
+        if (-not $window) { return }
+        $showAction = [Action] {
+            try {
+                if ($window.ShowInTaskbar -eq $false) { $window.ShowInTaskbar = $true }
+                if ($window.Visibility -ne [System.Windows.Visibility]::Visible) { $window.Show() }
+                if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) {
+                    $window.WindowState = [System.Windows.WindowState]::Normal
+                }
+                $script:WmtHiddenToTray = $false
+                $window.Activate() | Out-Null
+                $window.Topmost = $true
+                $window.Topmost = $false
+                Write-GuiLog "WMT restored from the system tray."
+            }
+            catch {
+                Write-GuiLog "Tray restore failed: $($_.Exception.Message)"
+            }
+        }
+
+        if ($window.Dispatcher.CheckAccess()) { $showAction.Invoke() }
+        else { [void]$window.Dispatcher.BeginInvoke($showAction) }
+    }
+    catch {}
+}
+
+function Invoke-WmtTrayUpdateScan {
+    try {
+        if (-not $window) { return }
+        $scanAction = [Action] {
+            try {
+                Show-WmtMainWindowFromTray
+                $updatesTab = Get-Ctrl "btnTabUpdates"
+                if ($updatesTab) {
+                    $updatesTab.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+                }
+
+                $scanButton = Get-Ctrl "btnWingetScan"
+                if ($scanButton -and $scanButton.IsEnabled) {
+                    $scanButton.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+                }
+                else {
+                    Write-GuiLog "Tray update scan skipped because an update scan is already running."
+                }
+            }
+            catch {
+                Write-GuiLog "Tray update scan failed: $($_.Exception.Message)"
+            }
+        }
+
+        if ($window.Dispatcher.CheckAccess()) { $scanAction.Invoke() }
+        else { [void]$window.Dispatcher.BeginInvoke($scanAction) }
+    }
+    catch {}
+}
+
+function Invoke-WmtFinalExitFromTray {
+    param($Window)
+
+    try {
+        $exitAction = [Action] {
+            try {
+                $script:WmtAllowFinalClose = $true
+                $script:WmtHiddenToTray = $false
+
+                # Hide the tray icon immediately so Windows does not leave a stale/ghost icon.
+                try { if ($script:WmtTrayIcon) { $script:WmtTrayIcon.Visible = $false } } catch {}
+
+                # A hidden WPF window does not always terminate reliably from a WinForms tray callback.
+                # Make it visible just long enough for Close() to run the normal cleanup path.
+                if ($Window) {
+                    try { $Window.ShowInTaskbar = $true } catch {}
+                    try {
+                        if ($Window.Visibility -ne [System.Windows.Visibility]::Visible) { $Window.Show() }
+                    }
+                    catch {}
+                    try { $Window.Close() }
+                    catch { Write-GuiLog "Tray exit window close failed: $($_.Exception.Message)" }
+                }
+
+                # Explicit shutdown is the important part: it prevents the script from staying alive
+                # if WPF does not treat the hidden window close as the last-window shutdown.
+                try {
+                    $app = $script:WmtApplication
+                    if (-not $app) { $app = [System.Windows.Application]::Current }
+                    if ($app) { $app.Shutdown() }
+                }
+                catch {
+                    Write-GuiLog "Tray exit application shutdown failed: $($_.Exception.Message)"
+                }
+            }
+            catch {
+                Write-GuiLog "Tray exit failed: $($_.Exception.Message)"
+            }
+        }
+
+        if ($Window -and $Window.Dispatcher) {
+            if ($Window.Dispatcher.CheckAccess()) { $exitAction.Invoke() }
+            else { [void]$Window.Dispatcher.Invoke($exitAction) }
+        }
+        else {
+            $exitAction.Invoke()
+        }
+    }
+    catch {
+        try { Write-GuiLog "Tray exit dispatch failed: $($_.Exception.Message)" } catch {}
+    }
+}
+
+function Initialize-WmtTrayIcon {
+    param($Window)
+
+    if ($script:WmtTrayIcon) {
+        try { $script:WmtTrayIcon.Visible = $true } catch {}
+        return $true
+    }
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+        $menu = New-Object System.Windows.Forms.ContextMenuStrip
+        $openItem = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList "Open WMT"
+        $scanItem = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList "Scan updates now"
+        $exitItem = New-Object System.Windows.Forms.ToolStripMenuItem -ArgumentList "Exit WMT"
+        [void]$menu.Items.Add($openItem)
+        [void]$menu.Items.Add($scanItem)
+        [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+        [void]$menu.Items.Add($exitItem)
+
+        $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+        $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+        $notifyIcon.Text = "Windows Maintenance Tool"
+        $notifyIcon.ContextMenuStrip = $menu
+        $notifyIcon.Visible = $true
+
+        $openItem.Add_Click({ Show-WmtMainWindowFromTray }.GetNewClosure())
+        $scanItem.Add_Click({ Invoke-WmtTrayUpdateScan }.GetNewClosure())
+        $exitItem.Add_Click({
+                Invoke-WmtFinalExitFromTray -Window $Window
+            }.GetNewClosure())
+
+        $notifyIcon.Add_DoubleClick({ Show-WmtMainWindowFromTray }.GetNewClosure())
+        $notifyIcon.Add_MouseDoubleClick({ Show-WmtMainWindowFromTray }.GetNewClosure())
+        $notifyIcon.Add_MouseClick({
+                param($traySender, $mouseArgs)
+                try {
+                    if ($mouseArgs.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+                        Show-WmtMainWindowFromTray
+                    }
+                }
+                catch {}
+            }.GetNewClosure())
+        $notifyIcon.Add_BalloonTipClicked({ Show-WmtMainWindowFromTray }.GetNewClosure())
+
+        $script:WmtTrayIcon = $notifyIcon
+        $script:WmtTrayMenu = $menu
+        return $true
+    }
+    catch {
+        Write-GuiLog "System tray initialization failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Show-WmtTrayHiddenBalloon {
+    try {
+        if (-not $script:WmtTrayIcon) { return }
+        if ($script:WmtTrayHideNotificationShown) { return }
+        $script:WmtTrayHideNotificationShown = $true
+        $script:WmtTrayIcon.BalloonTipTitle = "WMT is still running"
+        $script:WmtTrayIcon.BalloonTipText = "Background update scans and notifications will continue from the system tray. Right-click the tray icon to exit."
+        $script:WmtTrayIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
+        $script:WmtTrayIcon.ShowBalloonTip(7000)
+    }
+    catch {}
+}
+
+function Remove-WmtTrayIcon {
+    try {
+        if ($script:WmtTrayIcon) {
+            $script:WmtTrayIcon.Visible = $false
+            $script:WmtTrayIcon.Dispose()
+        }
+    }
+    catch {}
+    try {
+        if ($script:WmtTrayMenu) { $script:WmtTrayMenu.Dispose() }
+    }
+    catch {}
+    $script:WmtTrayIcon = $null
+    $script:WmtTrayMenu = $null
 }
 
 function Show-WmtNotificationFallbackBalloon {
@@ -4729,6 +4967,7 @@ function Start-UpdateCheckBackground {
                                                 # Restart with new EXE
                                                 [System.Windows.MessageBox]::Show("Update installed successfully! The application will restart with the new version.", "Update Complete", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                                                 Start-Process -FilePath $currentExe -WorkingDirectory (Split-Path -Parent $currentExe)
+                                                $script:WmtAllowFinalClose = $true
                                                 $window.Close()
                                             }
                                             catch {
@@ -4766,6 +5005,7 @@ function Start-UpdateCheckBackground {
 
                                             [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                                             Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WorkingDirectory (Split-Path -Parent $scriptPath)
+                                            $script:WmtAllowFinalClose = $true
                                             $window.Close()
                                         }
                                         catch {
@@ -21881,7 +22121,7 @@ function Show-ProviderManager {
             <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
                     ToolTip="Automatically re-run the Updates scan while WMT remains open. This only scans; it does not install updates.">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <TextBlock Text="Auto scan" FontWeight="Bold" Grid.Row="0" Grid.Column="0"/>
                     <ComboBox Name="cmbAutoScanInterval" Grid.Row="0" Grid.Column="1" Height="28" Width="210" HorizontalAlignment="Left" SelectedValuePath="Tag" Foreground="#111827" Background="#FFFFFF">
@@ -21895,8 +22135,10 @@ function Show-ProviderManager {
                     </ComboBox>
                     <CheckBox Name="chkUpdateNotifications" Grid.Row="0" Grid.Column="2" Content="Native notifications" Margin="12,0,0,0"
                               ToolTip="Show a Windows notification when an automatic background scan finds updates or fails."/>
-                    <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
-                               Text="Runs in the background while WMT remains open. It only scans for available updates and can notify you through Windows notifications when updates are found."
+                    <CheckBox Name="chkRunInTrayOnClose" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Content="Run in system tray when closed" Margin="0,8,0,0"
+                              ToolTip="When enabled, closing the main window hides WMT to the system tray so background scans and notifications can continue."/>
+                    <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                               Text="Auto scan runs while WMT is open or hidden in the tray. It only scans for available updates and can notify you through Windows notifications when updates are found."
                                Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
                 </Grid>
             </Border>
@@ -22050,6 +22292,7 @@ function Show-ProviderManager {
     
     $cmbAutoScanInterval = Get-WinCtrl "cmbAutoScanInterval"
     $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
+    $chkRunInTrayOnClose = Get-WinCtrl "chkRunInTrayOnClose"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
@@ -23138,6 +23381,7 @@ exit `$exitCode
         }
     }
     if ($chkUpdateNotifications) { $chkUpdateNotifications.IsChecked = (Get-WmtUpdateNotificationsEnabled -Settings $settings) }
+    if ($chkRunInTrayOnClose) { $chkRunInTrayOnClose.IsChecked = (Get-WmtRunInTrayOnClose -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
@@ -23198,6 +23442,7 @@ exit `$exitCode
             if ($current -is [System.Collections.IDictionary]) {
                 $current["UpdateAutoScanMinutes"] = $selectedAutoScanMinutes
                 $current["UpdateNotificationsEnabled"] = [bool]$chkUpdateNotifications.IsChecked
+                $current["RunInTrayOnClose"] = [bool]$chkRunInTrayOnClose.IsChecked
             }
             elseif ($current.PSObject.Properties["UpdateAutoScanMinutes"]) {
                 $current.UpdateAutoScanMinutes = $selectedAutoScanMinutes
@@ -23207,14 +23452,22 @@ exit `$exitCode
                 else {
                     $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
                 }
+                if ($current.PSObject.Properties["RunInTrayOnClose"]) {
+                    $current.RunInTrayOnClose = [bool]$chkRunInTrayOnClose.IsChecked
+                }
+                else {
+                    $current | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value ([bool]$chkRunInTrayOnClose.IsChecked) -Force
+                }
             }
             else {
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoScanMinutes" -Value $selectedAutoScanMinutes -Force
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
+                $current | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value ([bool]$chkRunInTrayOnClose.IsChecked) -Force
             }
 
             Save-WmtSettings -Settings $current
             Start-WmtUpdateAutoScanTimer -ResetNextRun
+            if (-not (Get-WmtRunInTrayOnClose -Settings $current)) { Remove-WmtTrayIcon }
             $win.Close()
         })
 
@@ -27966,6 +28219,25 @@ $window.Add_ContentRendered({
 $window.Add_SizeChanged({ Update-MyDeviceResponsiveLayout })
 
 $window.Add_Closing({
+        param($s, $e)
+
+        if (-not $script:WmtAllowFinalClose -and (Get-WmtRunInTrayOnClose)) {
+            try {
+                if (Initialize-WmtTrayIcon -Window $window) {
+                    if ($e) { $e.Cancel = $true }
+                    $script:WmtHiddenToTray = $true
+                    $window.ShowInTaskbar = $false
+                    $window.Hide()
+                    Show-WmtTrayHiddenBalloon
+                    Write-GuiLog "WMT hidden to the system tray. Background update scans will continue. Left-click the tray icon to reopen, or right-click it to exit."
+                    return
+                }
+            }
+            catch {
+                Write-GuiLog "Tray close fallback failed: $($_.Exception.Message)"
+            }
+        }
+
         # Cancel any ongoing scan
         if ($script:ActiveScans) {
             foreach ($task in $script:ActiveScans) {
@@ -27977,6 +28249,7 @@ $window.Add_Closing({
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
         Stop-WmtUpdateAutoScanTimer
+        Remove-WmtTrayIcon
         Stop-WmtNotificationFallbackTimers
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
         Stop-WmtStartupBackgroundPreload
@@ -28021,5 +28294,30 @@ $window.Add_Closing({
         catch {}
     })
 
+$window.Add_Closed({
+        try {
+            Remove-WmtTrayIcon
+            Stop-WmtNotificationFallbackTimers
+            $app = $script:WmtApplication
+            if (-not $app) { $app = [System.Windows.Application]::Current }
+            if ($app) { $app.Shutdown() }
+        }
+        catch {}
+    })
+
 # 3. Show the Window
-$window.ShowDialog() | Out-Null
+# Use a real WPF Application message loop instead of ShowDialog().
+# ShowDialog() can unwind after a modal window is hidden, which leaves a stale tray icon that vanishes when clicked.
+try {
+    $script:WmtApplication = [System.Windows.Application]::Current
+    if (-not $script:WmtApplication) {
+        $script:WmtApplication = New-Object System.Windows.Application
+    }
+    $script:WmtApplication.ShutdownMode = [System.Windows.ShutdownMode]::OnLastWindowClose
+    $script:WmtApplication.MainWindow = $window
+    [void]$script:WmtApplication.Run($window)
+}
+catch {
+    Write-Warning "WMT application loop failed: $($_.Exception.Message)"
+    try { $window.ShowDialog() | Out-Null } catch { throw }
+}
