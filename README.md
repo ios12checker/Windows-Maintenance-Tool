@@ -13,7 +13,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 - Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
 - Full dark/light theme support with a persistent theme toggle.
-- Package updater with Winget, Microsoft Store / Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, Cargo, Steam game manifests, Legendary Epic Games updates, and GOGDL GOG game updates.
+- Package updater with Winget, Microsoft Store / Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, Cargo, .NET global tools, PowerShell modules, Composer, Steam game manifests, Legendary Epic Games updates, and GOGDL GOG game updates.
 - One-by-one package update flow with visible progress windows.
 - My Device dashboard with system specs, storage health, improved drive benchmark, network, battery/power, driver tools, RAM cleanup, TRIM, export, and quick shortcuts to related tools.
 - Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
@@ -62,7 +62,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ### Updates and Software
 
-- Scan for updates from Winget, Microsoft Store / Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, Steam manifests, Legendary, GOGDL, and more.
+- Scan for updates from Winget, Microsoft Store / Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, .NET global tools, PowerShell modules, Composer, Steam manifests, Legendary, GOGDL, and more.
 - Update packages one at a time with a visible update window.
 - Search package results before updating.
 - Ignore selected Winget packages.
