@@ -3887,19 +3887,21 @@ function Save-WmtSettings {
 
         # Convert Hashtable/OrderedDictionary to generic Object for cleaner JSON
         $saveObj = [PSCustomObject]@{
-            TempCleanup          = $Settings.TempCleanup
-            RegistryScan         = $Settings.RegistryScan
-            WingetIgnore         = $Settings.WingetIgnore
-            WingetIncludeUnknown = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
-            LoadWinapp2          = [bool]$Settings.LoadWinapp2
-            LoadCleanerML        = [bool]$Settings.LoadCleanerML
-            EnabledProviders     = $Settings.EnabledProviders
-            CustomDnsServers     = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
-            CustomDohTemplate    = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
-            CustomDohEnabled     = [bool]$Settings.CustomDohEnabled
-            Theme                = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
-            WindowState          = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
-            WindowBounds         = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
+            TempCleanup                = $Settings.TempCleanup
+            RegistryScan               = $Settings.RegistryScan
+            WingetIgnore               = $Settings.WingetIgnore
+            WingetIncludeUnknown       = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
+            UpdateAutoScanMinutes      = [int](Get-WmtUpdateAutoScanMinutes -Settings $Settings)
+            UpdateNotificationsEnabled = [bool](Get-WmtUpdateNotificationsEnabled -Settings $Settings)
+            LoadWinapp2                = [bool]$Settings.LoadWinapp2
+            LoadCleanerML              = [bool]$Settings.LoadCleanerML
+            EnabledProviders           = $Settings.EnabledProviders
+            CustomDnsServers           = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
+            CustomDohTemplate          = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
+            CustomDohEnabled           = [bool]$Settings.CustomDohEnabled
+            Theme                      = if ($Settings.Theme) { [string]$Settings.Theme } else { "dark" }
+            WindowState                = if ($Settings.WindowState) { [string]$Settings.WindowState } else { "Normal" }
+            WindowBounds               = if ($Settings.WindowBounds) { $Settings.WindowBounds } else { $null }
         }
         $saveObj | ConvertTo-Json -Depth 5 | Set-Content $path -Force
     }
@@ -3916,19 +3918,21 @@ function Get-WmtSettings {
     
     # Default Structure
     $defaults = @{
-        TempCleanup          = @{}
-        RegistryScan         = @{}
-        WingetIgnore         = @("228980") # Filter false positive updates for Steamworks Redist
-        WingetIncludeUnknown = $true
-        LoadWinapp2          = $false 
-        LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
-        CustomDnsServers     = @()
-        CustomDohTemplate    = ""
-        CustomDohEnabled     = $false
-        Theme                = "dark"
-        WindowState          = "Normal"
-        WindowBounds         = @{
+        TempCleanup                = @{}
+        RegistryScan               = @{}
+        WingetIgnore               = @("228980") # Filter false positive updates for Steamworks Redist
+        WingetIncludeUnknown       = $true
+        UpdateAutoScanMinutes      = 0
+        UpdateNotificationsEnabled = $true
+        LoadWinapp2                = $false 
+        LoadCleanerML              = $false
+        EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        CustomDnsServers           = @()
+        CustomDohTemplate          = ""
+        CustomDohEnabled           = $false
+        Theme                      = "dark"
+        WindowState                = "Normal"
+        WindowBounds               = @{
             Top    = 0
             Left   = 0
             Width  = 1280
@@ -3953,6 +3957,11 @@ function Get-WmtSettings {
                 $defaults.WingetIgnore = $clean.ToArray()
             }
             if ($json.PSObject.Properties["WingetIncludeUnknown"]) { $defaults.WingetIncludeUnknown = [bool]$json.WingetIncludeUnknown }
+            if ($json.PSObject.Properties["UpdateAutoScanMinutes"]) {
+                try { $defaults.UpdateAutoScanMinutes = [int]$json.UpdateAutoScanMinutes } catch { $defaults.UpdateAutoScanMinutes = 0 }
+                if ($defaults.UpdateAutoScanMinutes -lt 0) { $defaults.UpdateAutoScanMinutes = 0 }
+            }
+            if ($json.PSObject.Properties["UpdateNotificationsEnabled"]) { $defaults.UpdateNotificationsEnabled = [bool]$json.UpdateNotificationsEnabled }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
@@ -4029,6 +4038,473 @@ function Set-WmtWingetIncludeUnknown {
         $settings | Add-Member -MemberType NoteProperty -Name "WingetIncludeUnknown" -Value $IncludeUnknown -Force
     }
     Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtUpdateAutoScanMinutes {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    $value = 0
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("UpdateAutoScanMinutes")) {
+            $value = [int]$Settings["UpdateAutoScanMinutes"]
+        }
+        elseif ($Settings.PSObject.Properties["UpdateAutoScanMinutes"]) {
+            $value = [int]$Settings.UpdateAutoScanMinutes
+        }
+    }
+    catch {
+        $value = 0
+    }
+
+    if ($value -lt 0) { return 0 }
+    if ($value -gt 1440) { return 1440 }
+    return $value
+}
+
+function Set-WmtUpdateAutoScanMinutes {
+    param([int]$Minutes)
+
+    if ($Minutes -lt 0) { $Minutes = 0 }
+    if ($Minutes -gt 1440) { $Minutes = 1440 }
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["UpdateAutoScanMinutes"] = $Minutes
+    }
+    elseif ($settings.PSObject.Properties["UpdateAutoScanMinutes"]) {
+        $settings.UpdateAutoScanMinutes = $Minutes
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "UpdateAutoScanMinutes" -Value $Minutes -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtUpdateNotificationsEnabled {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("UpdateNotificationsEnabled")) {
+            return [bool]$Settings["UpdateNotificationsEnabled"]
+        }
+        if ($Settings.PSObject.Properties["UpdateNotificationsEnabled"]) {
+            return [bool]$Settings.UpdateNotificationsEnabled
+        }
+    }
+    catch {}
+
+    return $true
+}
+
+function Set-WmtUpdateNotificationsEnabled {
+    param([bool]$Enabled)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["UpdateNotificationsEnabled"] = $Enabled
+    }
+    elseif ($settings.PSObject.Properties["UpdateNotificationsEnabled"]) {
+        $settings.UpdateNotificationsEnabled = $Enabled
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value $Enabled -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+$script:WmtNotificationAppId = "Chaython.WindowsMaintenanceTool"
+$script:WmtNativeToastReady = $false
+$script:WmtNativeToastUnavailable = $false
+$script:WmtNativeToastShortcutWarningShown = $false
+$script:WmtNotificationFallbackTimers = New-Object System.Collections.ArrayList
+
+function Get-WmtNotificationLaunchInfo {
+    $targetPath = $script:WmtProcessPath
+    $arguments = ""
+    $workingDirectory = $script:WmtRootPath
+    $iconPath = $script:WmtProcessPath
+
+    try {
+        if (-not $script:WmtIsCompiledExe) {
+            $pwsh = Get-Command "pwsh.exe" -ErrorAction SilentlyContinue
+            $powershell = Get-Command "powershell.exe" -ErrorAction SilentlyContinue
+            if ($pwsh) { $targetPath = $pwsh.Source }
+            elseif ($powershell) { $targetPath = $powershell.Source }
+            else { $targetPath = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe" }
+
+            if (-not [string]::IsNullOrWhiteSpace($script:WmtScriptPath)) {
+                $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$script:WmtScriptPath`""
+            }
+            $iconPath = $targetPath
+        }
+
+        if ([string]::IsNullOrWhiteSpace($workingDirectory) -and -not [string]::IsNullOrWhiteSpace($targetPath)) {
+            $workingDirectory = Split-Path -Parent $targetPath
+        }
+    }
+    catch {}
+
+    return [PSCustomObject]@{
+        TargetPath       = $targetPath
+        Arguments        = $arguments
+        WorkingDirectory = $workingDirectory
+        IconPath         = $iconPath
+    }
+}
+
+function Initialize-WmtNativeToastSupport {
+    if ($script:WmtNativeToastReady) { return $true }
+    if ($script:WmtNativeToastUnavailable) { return $false }
+
+    try {
+        if (-not $IsWindows -and $PSVersionTable.PSEdition -eq "Core") { return $false }
+    }
+    catch {}
+
+    try {
+        [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+        [void][Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]
+        [void][Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+    }
+    catch {
+        Write-GuiLog "Native toast API is unavailable: $($_.Exception.Message)"
+        return $false
+    }
+
+    try {
+        if (-not ([System.Management.Automation.PSTypeName]'WmtNotifications.DesktopToastShortcut').Type) {
+            Add-Type -TypeDefinition @"
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+
+namespace WmtNotifications {
+    [ComImport]
+    [Guid("00021401-0000-0000-C000-000000000046")]
+    public class CShellLink {}
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("000214F9-0000-0000-C000-000000000046")]
+    public interface IShellLinkW {
+        void GetPath([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszFile, int cchMaxPath, IntPtr pfd, uint fFlags);
+        void GetIDList(out IntPtr ppidl);
+        void SetIDList(IntPtr pidl);
+        void GetDescription([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszName, int cchMaxName);
+        void SetDescription([MarshalAs(UnmanagedType.LPWStr)] string pszName);
+        void GetWorkingDirectory([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszDir, int cchMaxPath);
+        void SetWorkingDirectory([MarshalAs(UnmanagedType.LPWStr)] string pszDir);
+        void GetArguments([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszArgs, int cchMaxPath);
+        void SetArguments([MarshalAs(UnmanagedType.LPWStr)] string pszArgs);
+        void GetHotkey(out short pwHotkey);
+        void SetHotkey(short wHotkey);
+        void GetShowCmd(out int piShowCmd);
+        void SetShowCmd(int iShowCmd);
+        void GetIconLocation([Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pszIconPath, int cchIconPath, out int piIcon);
+        void SetIconLocation([MarshalAs(UnmanagedType.LPWStr)] string pszIconPath, int iIcon);
+        void SetRelativePath([MarshalAs(UnmanagedType.LPWStr)] string pszPathRel, uint dwReserved);
+        void Resolve(IntPtr hwnd, uint fFlags);
+        void SetPath([MarshalAs(UnmanagedType.LPWStr)] string pszFile);
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("0000010b-0000-0000-C000-000000000046")]
+    public interface IPersistFile {
+        void GetClassID(out Guid pClassID);
+        [PreserveSig]
+        int IsDirty();
+        void Load([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, uint dwMode);
+        void Save([MarshalAs(UnmanagedType.LPWStr)] string pszFileName, bool fRemember);
+        void SaveCompleted([MarshalAs(UnmanagedType.LPWStr)] string pszFileName);
+        void GetCurFile([MarshalAs(UnmanagedType.LPWStr)] out string ppszFileName);
+    }
+
+    [ComImport]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    [Guid("00000138-0000-0000-C000-000000000046")]
+    public interface IPropertyStore {
+        void GetCount(out uint cProps);
+        void GetAt(uint iProp, out PROPERTYKEY pkey);
+        void GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        void SetValue(ref PROPERTYKEY key, ref PROPVARIANT pv);
+        void Commit();
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PROPERTYKEY {
+        public Guid fmtid;
+        public uint pid;
+        public PROPERTYKEY(Guid fmtid, uint pid) { this.fmtid = fmtid; this.pid = pid; }
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 4)]
+    public struct PROPVARIANT {
+        public ushort vt;
+        public ushort wReserved1;
+        public ushort wReserved2;
+        public ushort wReserved3;
+        public IntPtr p;
+
+        public static PROPVARIANT FromString(string value) {
+            PROPVARIANT pv = new PROPVARIANT();
+            pv.vt = 31; // VT_LPWSTR
+            pv.p = Marshal.StringToCoTaskMemUni(value);
+            return pv;
+        }
+
+        public void Clear() {
+            PropVariantClear(ref this);
+        }
+
+        [DllImport("Ole32.dll")]
+        private static extern int PropVariantClear(ref PROPVARIANT pvar);
+    }
+
+    public class ShortcutResult {
+        public string ShortcutPath { get; set; }
+        public bool AppIdSet { get; set; }
+        public string Warning { get; set; }
+    }
+
+    public static class DesktopToastShortcut {
+        private const uint GPS_READWRITE = 0x00000002;
+
+        [DllImport("Shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+        private static extern void SHGetPropertyStoreFromParsingName(
+            [MarshalAs(UnmanagedType.LPWStr)] string pszPath,
+            IntPtr pbc,
+            uint flags,
+            ref Guid riid,
+            out IPropertyStore ppv);
+
+        private static bool TrySetAppId(IPropertyStore propStore, string appId, out string warning) {
+            warning = null;
+            if (propStore == null) {
+                warning = "Property store was not available.";
+                return false;
+            }
+
+            PROPERTYKEY appUserModelId = new PROPERTYKEY(new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3"), 5);
+            PROPVARIANT pv = PROPVARIANT.FromString(appId);
+            try {
+                propStore.SetValue(ref appUserModelId, ref pv);
+                propStore.Commit();
+                return true;
+            }
+            catch (Exception ex) {
+                warning = ex.Message;
+                return false;
+            }
+            finally {
+                pv.Clear();
+            }
+        }
+
+        public static ShortcutResult EnsureShortcut(string shortcutName, string appId, string targetPath, string arguments, string workingDirectory, string iconPath) {
+            string programsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), "Programs");
+            Directory.CreateDirectory(programsPath);
+            string shortcutPath = Path.Combine(programsPath, shortcutName + ".lnk");
+            bool appIdSet = false;
+            string warning = null;
+
+            object shellLinkObject = new CShellLink();
+            IShellLinkW link = (IShellLinkW)shellLinkObject;
+            link.SetPath(targetPath);
+            if (!String.IsNullOrEmpty(arguments)) { link.SetArguments(arguments); }
+            if (!String.IsNullOrEmpty(workingDirectory)) { link.SetWorkingDirectory(workingDirectory); }
+            if (!String.IsNullOrEmpty(iconPath)) { link.SetIconLocation(iconPath, 0); }
+            link.SetDescription("Windows Maintenance Tool");
+
+            try {
+                appIdSet = TrySetAppId((IPropertyStore)shellLinkObject, appId, out warning);
+            }
+            catch (Exception ex) {
+                warning = ex.Message;
+            }
+
+            IPersistFile file = (IPersistFile)shellLinkObject;
+            file.Save(shortcutPath, true);
+
+            if (!appIdSet) {
+                try {
+                    Guid propertyStoreGuid = new Guid("00000138-0000-0000-C000-000000000046");
+                    IPropertyStore shortcutFileStore;
+                    SHGetPropertyStoreFromParsingName(shortcutPath, IntPtr.Zero, GPS_READWRITE, ref propertyStoreGuid, out shortcutFileStore);
+                    string secondaryWarning;
+                    if (TrySetAppId(shortcutFileStore, appId, out secondaryWarning)) {
+                        appIdSet = true;
+                        warning = null;
+                    }
+                    else if (!String.IsNullOrEmpty(secondaryWarning)) {
+                        warning = secondaryWarning;
+                    }
+                }
+                catch (Exception ex) {
+                    warning = ex.Message;
+                }
+            }
+
+            return new ShortcutResult { ShortcutPath = shortcutPath, AppIdSet = appIdSet, Warning = warning };
+        }
+    }
+}
+"@
+        }
+
+        $launch = Get-WmtNotificationLaunchInfo
+        if ([string]::IsNullOrWhiteSpace($launch.TargetPath) -or -not (Test-Path -LiteralPath $launch.TargetPath)) {
+            # Non-fatal: fall back to the tray balloon path without showing a startup error.
+            $script:WmtNativeToastUnavailable = $true
+            return $false
+        }
+
+        $shortcutResult = [WmtNotifications.DesktopToastShortcut]::EnsureShortcut(
+            "Windows Maintenance Tool",
+            $script:WmtNotificationAppId,
+            $launch.TargetPath,
+            $launch.Arguments,
+            $launch.WorkingDirectory,
+            $launch.IconPath
+        )
+
+        if (-not $shortcutResult.AppIdSet) {
+            # Non-fatal on some Windows/PowerShell COM combinations. The tray balloon path
+            # still produces a native Windows notification, so keep startup logs clean.
+            $script:WmtNativeToastUnavailable = $true
+            return $false
+        }
+
+        $script:WmtNativeToastReady = $true
+        return $true
+    }
+    catch {
+        # Non-fatal: do not show a scary startup error when native toast registration fails.
+        # The fallback notification path is expected to handle these environments.
+        $script:WmtNativeToastUnavailable = $true
+        return $false
+    }
+}
+
+function Show-WmtNotificationFallbackBalloon {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [ValidateSet("Info", "Warning", "Error")][string]$Kind = "Info"
+    )
+
+    try {
+        Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+        Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+        $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
+        switch ($Kind) {
+            "Warning" { $notifyIcon.Icon = [System.Drawing.SystemIcons]::Warning }
+            "Error" { $notifyIcon.Icon = [System.Drawing.SystemIcons]::Error }
+            default { $notifyIcon.Icon = [System.Drawing.SystemIcons]::Information }
+        }
+        $notifyIcon.Text = "Windows Maintenance Tool"
+        $notifyIcon.BalloonTipTitle = $Title
+        $notifyIcon.BalloonTipText = $Message
+        switch ($Kind) {
+            "Warning" { $notifyIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Warning }
+            "Error" { $notifyIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Error }
+            default { $notifyIcon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info }
+        }
+        $notifyIcon.Visible = $true
+        $notifyIcon.ShowBalloonTip(9000)
+
+        $disposeTimer = New-Object System.Windows.Threading.DispatcherTimer
+        $disposeTimer.Interval = [TimeSpan]::FromSeconds(12)
+        $disposeTimer.Add_Tick({
+                try { $this.Stop() } catch {}
+                try { $notifyIcon.Visible = $false; $notifyIcon.Dispose() } catch {}
+                try { [void]$script:WmtNotificationFallbackTimers.Remove($this) } catch {}
+            }.GetNewClosure())
+        [void]$script:WmtNotificationFallbackTimers.Add($disposeTimer)
+        $disposeTimer.Start()
+        return $true
+    }
+    catch {
+        Write-GuiLog "Notification fallback failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Show-WmtNativeNotification {
+    param(
+        [string]$Title,
+        [string]$Message,
+        [ValidateSet("Info", "Warning", "Error")][string]$Kind = "Info",
+        [switch]$IgnoreSetting
+    )
+
+    if (-not $IgnoreSetting -and -not (Get-WmtUpdateNotificationsEnabled)) { return $false }
+    if ([string]::IsNullOrWhiteSpace($Title)) { $Title = "Windows Maintenance Tool" }
+    if ([string]::IsNullOrWhiteSpace($Message)) { return $false }
+
+    try {
+        if (Initialize-WmtNativeToastSupport) {
+            $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
+            $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
+            $textNodes = $xml.GetElementsByTagName("text")
+            [void]$textNodes.Item(0).AppendChild($xml.CreateTextNode($Title))
+            [void]$textNodes.Item(1).AppendChild($xml.CreateTextNode($Message))
+
+            $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+            try { $toast.ExpirationTime = [DateTimeOffset]::Now.AddMinutes(15) } catch {}
+            $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($script:WmtNotificationAppId)
+            $notifier.Show($toast)
+            Write-GuiLog "Native notification sent: $Title"
+            return $true
+        }
+    }
+    catch {
+        Write-GuiLog "Native toast failed: $($_.Exception.Message)"
+    }
+
+    return (Show-WmtNotificationFallbackBalloon -Title $Title -Message $Message -Kind $Kind)
+}
+
+function Stop-WmtNotificationFallbackTimers {
+    try {
+        foreach ($timer in @($script:WmtNotificationFallbackTimers)) {
+            try { $timer.Stop() } catch {}
+        }
+        $script:WmtNotificationFallbackTimers.Clear()
+    }
+    catch {}
+}
+
+function Show-WmtUpdateScanNotification {
+    param(
+        [int]$UpdateCount,
+        [int]$ErrorCount = 0,
+        [switch]$TimedOut
+    )
+
+    if (-not (Get-WmtUpdateNotificationsEnabled)) { return }
+
+    if ($TimedOut) {
+        [void](Show-WmtNativeNotification -Title "Update scan timed out" -Message "One or more package providers did not respond within 120 seconds." -Kind Warning)
+        return
+    }
+
+    if ($UpdateCount -gt 0) {
+        $noun = if ($UpdateCount -eq 1) { "update" } else { "updates" }
+        [void](Show-WmtNativeNotification -Title "Updates available" -Message "WMT found $UpdateCount available $noun. Open the Updates page to review them." -Kind Info)
+        return
+    }
+
+    if ($ErrorCount -gt 0) {
+        $noun = if ($ErrorCount -eq 1) { "provider" } else { "providers" }
+        [void](Show-WmtNativeNotification -Title "Update scan incomplete" -Message "$ErrorCount package $noun returned an error. Check the WMT log for details." -Kind Warning)
+    }
 }
 
 function Show-DownloadStats {
@@ -21372,7 +21848,7 @@ function Show-ProviderManager {
     # 2. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="750" Width="620" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="790" Width="680" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
@@ -21384,6 +21860,15 @@ function Show-ProviderManager {
             <Setter Property="BorderThickness" Value="1"/>
             <Setter Property="Padding" Value="12,0"/>
         </Style>
+        <Style TargetType="ComboBox">
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        </Style>
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
@@ -21393,6 +21878,29 @@ function Show-ProviderManager {
 
         <ScrollViewer Grid.Row="1" Margin="0,15,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
+            <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
+                    ToolTip="Automatically re-run the Updates scan while WMT remains open. This only scans; it does not install updates.">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                    <TextBlock Text="Auto scan" FontWeight="Bold" Grid.Row="0" Grid.Column="0"/>
+                    <ComboBox Name="cmbAutoScanInterval" Grid.Row="0" Grid.Column="1" Height="28" Width="210" HorizontalAlignment="Left" SelectedValuePath="Tag" Foreground="#111827" Background="#FFFFFF">
+                        <ComboBoxItem Content="Disabled" Tag="0" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 1 minute (test)" Tag="1" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 15 minutes" Tag="15" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 30 minutes" Tag="30" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 1 hour" Tag="60" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 2 hours" Tag="120" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 4 hours" Tag="240" Foreground="#111827" Background="#FFFFFF"/>
+                    </ComboBox>
+                    <CheckBox Name="chkUpdateNotifications" Grid.Row="0" Grid.Column="2" Content="Native notifications" Margin="12,0,0,0"
+                              ToolTip="Show a Windows notification when an automatic background scan finds updates or fails."/>
+                    <TextBlock Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                               Text="Runs in the background while WMT remains open. It only scans for available updates and can notify you through Windows notifications when updates are found."
+                               Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
+                </Grid>
+            </Border>
+
             <Grid Margin="0,0,0,10" ToolTip="Windows Package Manager">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
@@ -21540,6 +22048,8 @@ function Show-ProviderManager {
 
     function Get-WinCtrl($name) { $win.FindName($name) }
     
+    $cmbAutoScanInterval = Get-WinCtrl "cmbAutoScanInterval"
+    $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
@@ -22612,6 +23122,22 @@ exit `$exitCode
         }.GetNewClosure())
 
     # Load settings
+    $autoScanMinutes = Get-WmtUpdateAutoScanMinutes -Settings $settings
+    if ($cmbAutoScanInterval) {
+        foreach ($item in @($cmbAutoScanInterval.Items)) {
+            try {
+                if ([int]$item.Tag -eq [int]$autoScanMinutes) {
+                    $cmbAutoScanInterval.SelectedItem = $item
+                    break
+                }
+            }
+            catch {}
+        }
+        if (-not $cmbAutoScanInterval.SelectedItem -and $cmbAutoScanInterval.Items.Count -gt 0) {
+            $cmbAutoScanInterval.SelectedIndex = 0
+        }
+    }
+    if ($chkUpdateNotifications) { $chkUpdateNotifications.IsChecked = (Get-WmtUpdateNotificationsEnabled -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
@@ -22664,11 +23190,117 @@ exit `$exitCode
             else {
                 $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
             }
+
+            $selectedAutoScanMinutes = 0
+            if ($cmbAutoScanInterval -and $cmbAutoScanInterval.SelectedItem) {
+                try { $selectedAutoScanMinutes = [int]$cmbAutoScanInterval.SelectedItem.Tag } catch { $selectedAutoScanMinutes = 0 }
+            }
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["UpdateAutoScanMinutes"] = $selectedAutoScanMinutes
+                $current["UpdateNotificationsEnabled"] = [bool]$chkUpdateNotifications.IsChecked
+            }
+            elseif ($current.PSObject.Properties["UpdateAutoScanMinutes"]) {
+                $current.UpdateAutoScanMinutes = $selectedAutoScanMinutes
+                if ($current.PSObject.Properties["UpdateNotificationsEnabled"]) {
+                    $current.UpdateNotificationsEnabled = [bool]$chkUpdateNotifications.IsChecked
+                }
+                else {
+                    $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
+                }
+            }
+            else {
+                $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoScanMinutes" -Value $selectedAutoScanMinutes -Force
+                $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
+            }
+
             Save-WmtSettings -Settings $current
+            Start-WmtUpdateAutoScanTimer -ResetNextRun
             $win.Close()
         })
 
     $win.ShowDialog() | Out-Null
+}
+
+
+function Test-WmtUpdateAutoScanBusy {
+    try {
+        if ($script:ActiveScans -and $script:ActiveScans.Count -gt 0) { return $true }
+        if ($script:ScanTimer -and $script:ScanTimer.IsEnabled) { return $true }
+        if ($script:GlobalScanTimer -and $script:GlobalScanTimer.IsEnabled) { return $true }
+        if ($script:WingetScanSourcePreflightInProgress) { return $true }
+        if ($script:WingetActiveAction) { return $true }
+        if ($btnWingetScan -and -not $btnWingetScan.IsEnabled) { return $true }
+    }
+    catch {}
+    return $false
+}
+
+function Invoke-WmtUpdateAutoScan {
+    param([switch]$Force)
+
+    $minutes = Get-WmtUpdateAutoScanMinutes
+    if ($minutes -le 0 -and -not $Force) { return }
+
+    if (Test-WmtUpdateAutoScanBusy) {
+        Write-GuiLog "Auto scan skipped because an update scan or action is already running."
+        return
+    }
+
+    if (-not $btnWingetScan) { return }
+    $script:WmtUpdateAutoScanLastRun = Get-Date
+    $script:WmtUpdateAutoScanPending = $true
+    Write-GuiLog "Auto scan starting in background..."
+    try {
+        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
+    catch {
+        $script:WmtUpdateAutoScanPending = $false
+        $script:WmtUpdateAutoScanActive = $false
+        Write-GuiLog "Auto scan failed to start: $($_.Exception.Message)"
+    }
+}
+
+function Start-WmtUpdateAutoScanTimer {
+    param([switch]$ResetNextRun)
+
+    $minutes = Get-WmtUpdateAutoScanMinutes
+
+    # DispatcherTimer is not IDisposable. Stop it and detach the Tick handler instead.
+    Stop-WmtUpdateAutoScanTimer
+
+    if ($minutes -le 0) {
+        Write-GuiLog "Update auto scan is disabled."
+        return
+    }
+
+    $script:WmtUpdateAutoScanIntervalMinutes = $minutes
+    if ($ResetNextRun -or -not $script:WmtUpdateAutoScanLastRun) {
+        $script:WmtUpdateAutoScanLastRun = Get-Date
+    }
+
+    $script:WmtUpdateAutoScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtUpdateAutoScanTimer.Interval = [TimeSpan]::FromMinutes($minutes)
+    $script:WmtUpdateAutoScanTimerTickHandler = [System.EventHandler] {
+        param($s, $eventArg)
+        Invoke-WmtUpdateAutoScan
+    }
+    $script:WmtUpdateAutoScanTimer.Add_Tick($script:WmtUpdateAutoScanTimerTickHandler)
+    $script:WmtUpdateAutoScanTimer.Start()
+    Write-GuiLog "Update auto scan enabled: every $minutes minute(s) while WMT is open."
+}
+
+function Stop-WmtUpdateAutoScanTimer {
+    if ($script:WmtUpdateAutoScanTimer) {
+        try { $script:WmtUpdateAutoScanTimer.Stop() } catch {}
+        try {
+            if ($script:WmtUpdateAutoScanTimerTickHandler) {
+                $script:WmtUpdateAutoScanTimer.Remove_Tick($script:WmtUpdateAutoScanTimerTickHandler)
+            }
+        }
+        catch {}
+        $script:WmtUpdateAutoScanTimer = $null
+    }
+    $script:WmtUpdateAutoScanTimerTickHandler = $null
 }
 
 
@@ -22838,6 +23470,7 @@ $script:ScanTimer.Add_Tick({
                         }
                     }
                     catch {
+                        $script:WmtUpdateScanErrorCount = [int]$script:WmtUpdateScanErrorCount + 1
                         Write-GuiLog "Scan Error: $($_.Exception.Message)"
                     }
                 
@@ -22850,6 +23483,7 @@ $script:ScanTimer.Add_Tick({
             # All tasks finished
             if ($script:ScanTimer.IsEnabled) {
                 $script:ScanTimer.Stop()
+                if ($script:GlobalScanTimer) { try { $script:GlobalScanTimer.Stop() } catch {} }
             
                 $lblWingetStatus.Visibility = "Hidden"
                 if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
@@ -22861,11 +23495,19 @@ $script:ScanTimer.Add_Tick({
                 $lstWinget.UpdateLayout()
                 Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             
+                $wasAutoScan = [bool]$script:WmtUpdateAutoScanActive
                 if ($lstWinget.Items.Count -eq 0) {
                     Write-GuiLog "System is up to date."
                 }
                 else {
                     Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
+                }
+                if ($wasAutoScan) {
+                    Show-WmtUpdateScanNotification -UpdateCount ([int]$lstWinget.Items.Count) -ErrorCount ([int]$script:WmtUpdateScanErrorCount)
+                }
+                $script:WmtUpdateAutoScanActive = $false
+                if (Get-WmtUpdateAutoScanMinutes -gt 0) {
+                    Start-WmtUpdateAutoScanTimer -ResetNextRun
                 }
             }
         }
@@ -22873,6 +23515,10 @@ $script:ScanTimer.Add_Tick({
 
 # 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
+        $autoScanTriggered = ([bool]$script:WmtUpdateAutoScanPending -or [bool]$script:WmtUpdateAutoScanActive)
+        $script:WmtUpdateAutoScanPending = $false
+        $script:WmtUpdateAutoScanActive = $autoScanTriggered
+
         # UI Prep
         $lblWingetTitle.Text = "Package Updates"
         $lblWingetStatus.Text = "Scanning all providers..."
@@ -22880,6 +23526,7 @@ $btnWingetScan.Add_Click({
         if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
         if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
         if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
+        if ($script:WmtUpdateAutoScanTimer) { try { $script:WmtUpdateAutoScanTimer.Stop() } catch {} }
     
         $lstWinget.Items.Clear()
         $btnWingetScan.IsEnabled = $false
@@ -22890,7 +23537,12 @@ $btnWingetScan.Add_Click({
         if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
     
         Write-GuiLog " "
-        Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
+        if ($autoScanTriggered) {
+            Write-GuiLog "Starting automatic background scan (global timeout 120s)..."
+        }
+        else {
+            Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
+        }
         # Winget source refresh is handled before the provider worker starts.
         # Store updates use the Microsoft Store CLI instead of the winget msstore source.
         # Do not kill winget here; source preflight may already be running.
@@ -22930,10 +23582,15 @@ $btnWingetScan.Add_Click({
         # --- Reset scan tracking ---
         $script:ActiveScans.Clear()
         $script:ScanCancelled = $false
+        $script:WmtUpdateScanErrorCount = 0
         $script:ScanStartTime = Get-Date
     
         # --- Global Timeout Timer (120 seconds) ---
-        if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Dispose() }
+        # DispatcherTimer does not implement Dispose(); stop the old timer and release the reference.
+        if ($script:GlobalScanTimer) {
+            try { $script:GlobalScanTimer.Stop() } catch {}
+            $script:GlobalScanTimer = $null
+        }
         $script:GlobalScanTimer = New-Object System.Windows.Threading.DispatcherTimer
         $script:GlobalScanTimer.Interval = [TimeSpan]::FromSeconds(120)
         $script:GlobalScanTimer.Add_Tick({
@@ -22953,10 +23610,19 @@ $btnWingetScan.Add_Click({
                     $btnWingetScan.IsEnabled = $true
                     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                     $btnWingetUpdateSel.IsEnabled = $true
-                    [System.Windows.MessageBox]::Show(
-                        "Scan timed out after 120 seconds.`n`nOne of the enabled package providers did not respond.`nTry disabling slow providers and scan again.",
-                        "Scan Timeout", "OK", "Warning"
-                    ) | Out-Null
+                    $wasAutoScan = [bool]$script:WmtUpdateAutoScanActive
+                    $script:WmtUpdateAutoScanActive = $false
+                    if (Get-WmtUpdateAutoScanMinutes -gt 0) { Start-WmtUpdateAutoScanTimer -ResetNextRun }
+                    if ($wasAutoScan) {
+                        Write-GuiLog "Automatic background scan timed out after 120 seconds. No prompt was shown."
+                        Show-WmtUpdateScanNotification -UpdateCount 0 -ErrorCount 0 -TimedOut
+                    }
+                    else {
+                        [System.Windows.MessageBox]::Show(
+                            "Scan timed out after 120 seconds.`n`nOne of the enabled package providers did not respond.`nTry disabling slow providers and scan again.",
+                            "Scan Timeout", "OK", "Warning"
+                        ) | Out-Null
+                    }
                 }
                 $script:GlobalScanTimer.Stop()
             })
@@ -27289,6 +27955,9 @@ $window.Add_ContentRendered({
         Start-WmtStartupBackgroundPreload
         # 3. Trigger the background update check
         Start-UpdateCheckBackground
+        # 3b. Enable periodic update auto scan if configured in Provider settings
+        if (Get-WmtUpdateNotificationsEnabled -Settings $settings) { [void](Initialize-WmtNativeToastSupport) }
+        Start-WmtUpdateAutoScanTimer -ResetNextRun
         # 4. Update tweak button states based on system
         Update-TweakButtonStates
         Update-MyDeviceResponsiveLayout
@@ -27307,6 +27976,8 @@ $window.Add_Closing({
         }
         if ($script:ScanTimer) { $script:ScanTimer.Stop() }
         if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
+        Stop-WmtUpdateAutoScanTimer
+        Stop-WmtNotificationFallbackTimers
         if ($script:WingetTimer) { $script:WingetTimer.Stop() }
         Stop-WmtStartupBackgroundPreload
         if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
