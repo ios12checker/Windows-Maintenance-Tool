@@ -9632,7 +9632,7 @@ function Show-RegistryCleaner {
         <Border Grid.Row="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="14" Margin="0,0,0,12">
             <StackPanel>
                 <TextBlock Name="lblStatus" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-                <TextBlock Text="Review checked findings before fixing. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBlock Text="Review checked findings before fixing. Missing-file COM server entries are selected by default; press Enter to check all highlighted rows. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
             </StackPanel>
         </Border>
 
@@ -9739,22 +9739,47 @@ function Show-RegistryCleaner {
     )
     $dg.ItemsSource = $registryRows
 
-    $dg.Add_KeyDown({
-            param($s, $e)
+    function Set-WmtRegistryHighlightedRowsChecked {
+        param(
+            [System.Windows.Controls.DataGrid]$Grid,
+            [bool]$Checked = $true
+        )
 
-            if ([string]$e.Key -notin @("Return", "Enter")) { return }
+        if ($null -eq $Grid) { return 0 }
+        try {
+            [void]$Grid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+            [void]$Grid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+        }
+        catch {}
 
-            $selectedRows = @($s.SelectedItems | Where-Object { $_ })
-            if ($selectedRows.Count -eq 0) { return }
+        $selectedRows = @($Grid.SelectedItems | Where-Object { $_ })
+        if ($selectedRows.Count -eq 0 -and $Grid.CurrentItem) {
+            $selectedRows = @($Grid.CurrentItem)
+        }
+        if ($selectedRows.Count -eq 0) { return 0 }
 
-            foreach ($row in $selectedRows) {
-                if ($row.PSObject.Properties["Check"]) {
-                    $row.Check = $true
-                }
+        $changed = 0
+        foreach ($row in $selectedRows) {
+            if ($row.PSObject.Properties["Check"]) {
+                $row.Check = $Checked
+                $changed++
             }
+        }
 
-            $s.Items.Refresh()
-            $e.Handled = $true
+        try { $Grid.Items.Refresh() } catch {}
+        return $changed
+    }
+
+    $dg.Add_PreviewKeyDown({
+            param($gridSender, $keyArgs)
+
+            if ([string]$keyArgs.Key -notin @("Return", "Enter")) { return }
+
+            $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $gridSender -Checked $true
+            if ($changed -gt 0) {
+                $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                $keyArgs.Handled = $true
+            }
         })
 
     $btnCopySelected.Add_Click({
@@ -10076,6 +10101,12 @@ function Remove-RegKeyForced {
     elseif ($Path -match "^HKU:\\(?<SubPath>.*)") { $realPaths += "Registry::HKEY_USERS\$($Matches.SubPath)" }
     elseif ($Path -match "^HKCR:\\(?<SubPath>.*)") {
         $sub = $Matches.SubPath
+        if ($sub -match "^(?i)WOW6432Node\\(?<Rest>.+)$") {
+            $wowRest = $Matches.Rest
+            if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$wowRest") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$wowRest" }
+            if (Test-Path "HKLM:\SOFTWARE\Classes\WOW6432Node\$wowRest") { $realPaths += "HKLM:\SOFTWARE\Classes\WOW6432Node\$wowRest" }
+            if (Test-Path "HKCU:\Software\Classes\WOW6432Node\$wowRest") { $realPaths += "HKCU:\Software\Classes\WOW6432Node\$wowRest" }
+        }
         if (Test-Path "HKLM:\SOFTWARE\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\Classes\$sub" }
         if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub" }
         if (Test-Path "HKCU:\Software\Classes\$sub") { $realPaths += "HKCU:\Software\Classes\$sub" }
@@ -10414,14 +10445,26 @@ function Invoke-RegistryTask {
                 Import-Module Microsoft.PowerShell.Management
                 Import-Module Microsoft.PowerShell.Security
                 $SelectedScans = @($SelectedScans)
-                $RegistrySafePathTokens = [string[]]@(
-                    "TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection", "psmachine", "WebView2",
-                    "System.Data.dll", "System.EnterpriseServices", "rundll32", "explorer.exe", "notepad.exe",
-                    "write.exe", "mspaint.exe", "svchost", "dllhost", "wmiprvse", "mmgaserver", "pickerhost",
-                    "castsrv", "uihelper", "backgroundtaskhost", "smartscreen", "runtimebroker",
-                    "mousocoreworker", "spatialaudiolicensesrv", "speechruntime", "mstsc.exe",
-                    "searchprotocolhost", "AppX", "WindowsApps", "UIEOrchestrator", "control.exe",
-                    "sdclt.exe", "provtool.exe", "perfmon", "Diagnostic.Perfmon", "QuickActionsPS", "VailAudioProxy"
+                # Registry skip tokens are intentionally split into two groups.
+                # Do not let a broad token hide an absolute filesystem path such as:
+                #   C:\Program Files\...\WebView2\...\some.dll
+                #   C:\BadPath\rundll32.exe
+                # Absolute paths must always flow through Test-PathExists / protected-path checks.
+                $RegistrySafeNonPathTokens = [string[]]@(
+                    "TetheringSettingHandler", "CrossDevice", "Windows.Media.Protection",
+                    "System.Data.dll", "System.EnterpriseServices", "AppX", "WindowsApps",
+                    "UIEOrchestrator", "Diagnostic.Perfmon", "QuickActionsPS", "VailAudioProxy"
+                )
+                $RegistrySafeCommandTokens = [string[]]@(
+                    "rundll32", "rundll32.exe", "explorer", "explorer.exe", "notepad", "notepad.exe",
+                    "write", "write.exe", "mspaint", "mspaint.exe", "svchost", "svchost.exe",
+                    "dllhost", "dllhost.exe", "wmiprvse", "wmiprvse.exe", "mmgaserver", "mmgaserver.exe",
+                    "pickerhost", "pickerhost.exe", "castsrv", "castsrv.exe", "uihelper", "uihelper.exe",
+                    "backgroundtaskhost", "backgroundtaskhost.exe", "smartscreen", "smartscreen.exe",
+                    "runtimebroker", "runtimebroker.exe", "mousocoreworker", "mousocoreworker.exe",
+                    "spatialaudiolicensesrv", "spatialaudiolicensesrv.exe", "speechruntime", "speechruntime.exe",
+                    "mstsc", "mstsc.exe", "searchprotocolhost", "searchprotocolhost.exe", "control", "control.exe",
+                    "sdclt", "sdclt.exe", "provtool", "provtool.exe", "perfmon", "perfmon.exe"
                 )
                 $RegistrySystemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
                 if ([string]::IsNullOrWhiteSpace($RegistrySystemRoot)) { $RegistrySystemRoot = "$env:SystemDrive\Windows" }
@@ -10432,14 +10475,31 @@ function Invoke-RegistryTask {
                 )
                 $RegistryPathExistsCache = [System.Collections.Generic.Dictionary[string, bool]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-                # Internal Helper: Whitelist
+                # Internal Helper: skip known virtual/non-path registrations only.
+                # Broad substring allow-listing against absolute paths caused stale COM DLLs to be hidden.
                 function Test-IsWhitelisted {
                     param($Path)
                     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-                    $pathText = [string]$Path
-                    foreach ($safe in $RegistrySafePathTokens) {
+
+                    $pathText = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim().Trim('"'))
+                    if ([string]::IsNullOrWhiteSpace($pathText)) { return $false }
+
+                    # If this value contains a real filesystem-style path, never whitelist it here.
+                    # Let Test-IsProtectedWindowsPath and Test-PathExists decide whether it is safe/valid.
+                    if ($pathText -match '(?i)([a-z]:\\|\\\\[^\\]+\\[^\\]+\\|%ProgramFiles%|%ProgramFiles\(x86\)%|%LocalAppData%|%AppData%|%ProgramData%|%SystemDrive%|%SystemRoot%|%windir%|\\SystemRoot\\)') {
+                        return $false
+                    }
+
+                    $firstToken = ($pathText -split '\s+', 2)[0].Trim('"')
+                    $firstTokenName = [System.IO.Path]::GetFileName($firstToken)
+                    foreach ($safeCommand in $RegistrySafeCommandTokens) {
+                        if ($firstTokenName.Equals($safeCommand, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+                    }
+
+                    foreach ($safe in $RegistrySafeNonPathTokens) {
                         if ($pathText.IndexOf($safe, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) { return $true }
                     }
+
                     return $false
                 }
 
@@ -10860,7 +10920,7 @@ function Invoke-RegistryTask {
 
                     $effectivePath = ([string]$SubPath).TrimStart('\')
                     if ([string]$View -eq "Registry32" -and [Environment]::Is64BitOperatingSystem) {
-                        return "HKLM:\SOFTWARE\WOW6432Node\Classes\$effectivePath"
+                        return "HKCR:\WOW6432Node\$effectivePath"
                     }
                     if ([string]$View -eq "Registry64") {
                         return "HKLM:\SOFTWARE\Classes\$effectivePath"
@@ -11191,38 +11251,171 @@ function Invoke-RegistryTask {
                     }
 
                     # 1. ACTIVEX & COM
-                    if ($SelectedScans -contains "ActiveX") { 
+                    if ($SelectedScans -contains "ActiveX") {
                         $SyncHash.Status = "Scanning ActiveX/COM..."
-                        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, [Microsoft.Win32.RegistryView]::Default)
-                        $clsidKey = $root.OpenSubKey("CLSID", $false)
-                        if ($clsidKey) { 
-                            $subKeys = $clsidKey.GetSubKeyNames(); $total = $subKeys.Count; $i = 0
-                            foreach ($id in $subKeys) { 
-                                $i++; & $Tick "Scanning CLSID: $id" $i $total
-                                try { 
-                                    $sub = $clsidKey.OpenSubKey("$id\InProcServer32", $false)
-                                    if ($sub) { 
-                                        $dll = $sub.GetValue($null)
-                                        if ($dll -and $dll -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $dll)) { 
-                                            $cleanDll = Get-RealExePath $dll
-                                            if (-not (Test-IsProtectedWindowsPath $cleanDll) -and -not (Test-PathExists $cleanDll)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanDll; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\InProcServer32"; ValueName = $null; Type = "Key" }) }
-                                        }
-                                        $sub.Close() 
-                                    }
-                                    $sub2 = $clsidKey.OpenSubKey("$id\LocalServer32", $false)
-                                    if ($sub2) {
-                                        $exe = $sub2.GetValue($null)
-                                        if ($exe -and $exe -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $exe)) {
-                                            $cleanExe = Get-RealExePath $exe
-                                            if (-not (Test-IsProtectedWindowsPath $cleanExe) -and -not (Test-PathExists $cleanExe)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "ActiveX Issue"; Data = $cleanExe; DisplayKey = $id; RegPath = "HKCR:\CLSID\$id\LocalServer32"; ValueName = $null; Type = "Key" }) }
-                                        }
-                                        $sub2.Close()
+
+                        $seenComFindings = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $comTargets = [System.Collections.Generic.List[object]]::new()
+
+                        function Add-WmtComClassScanTarget {
+                            param(
+                                [System.Collections.Generic.List[object]]$Targets,
+                                [Microsoft.Win32.RegistryHive]$Hive,
+                                $View,
+                                [string]$SubPath,
+                                [string]$RegPathPrefix,
+                                [string]$Label
+                            )
+
+                            if ([string]::IsNullOrWhiteSpace($SubPath) -or [string]::IsNullOrWhiteSpace($RegPathPrefix)) { return }
+
+                            $root = $null
+                            $probe = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($Hive, $View)
+                                $probe = $root.OpenSubKey($SubPath, $false)
+                                if ($probe) {
+                                    [void]$Targets.Add([PSCustomObject]@{
+                                            Root          = $root
+                                            SubPath       = $SubPath
+                                            RegPathPrefix = $RegPathPrefix
+                                            Label         = $Label
+                                            View          = $View
+                                        })
+                                    $root = $null
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($probe) { $probe.Close() }
+                                if ($root) { $root.Close() }
+                            }
+                        }
+
+                        function Add-WmtMissingComServerFinding {
+                            param(
+                                [string]$Clsid,
+                                [string]$ServerSubKey,
+                                [string]$RawServerPath,
+                                [string]$RegPath,
+                                [string]$TargetLabel,
+                                $RegistryView
+                            )
+
+                            if ([string]::IsNullOrWhiteSpace($Clsid) -or [string]::IsNullOrWhiteSpace($RawServerPath)) { return }
+                            if (Test-IsWhitelisted $RawServerPath) { return }
+
+                            $cleanServerPath = Get-ServiceImageExecutablePath $RawServerPath
+                            if ([string]::IsNullOrWhiteSpace($cleanServerPath)) { $cleanServerPath = Get-RealExePath $RawServerPath }
+                            if ([string]::IsNullOrWhiteSpace($cleanServerPath)) { return }
+                            if ($cleanServerPath -notmatch '^(?i)[a-z]:\\') { return }
+                            if (Test-IsWhitelisted $cleanServerPath) { return }
+                            if (Test-IsProtectedWindowsPath $cleanServerPath) { return }
+                            if (Test-PathExists -Path $cleanServerPath -RegistryView $RegistryView) { return }
+
+                            $dedupeKey = "$Clsid`0$ServerSubKey`0$cleanServerPath"
+                            if (-not $seenComFindings.Add($dedupeKey)) { return }
+
+                            $serverKind = if ($ServerSubKey -eq "InProcServer32") { "COM DLL" } else { "COM EXE" }
+                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                    Problem    = "ActiveX Issue"
+                                    Data       = $cleanServerPath
+                                    DisplayKey = "$Clsid ($serverKind, $TargetLabel)"
+                                    RegPath    = $RegPath
+                                    ValueName  = $null
+                                    Type       = "Key"
+                                    SafeToFix  = $true
+                                    Risk       = "Medium"
+                                    Confidence = "High"
+                                    Details    = "$serverKind registration points to a missing file. The target file does not exist and the path is not under a protected Windows folder, so this stale COM server key is selected by default. Registry view/source: $TargetLabel. Raw value: $RawServerPath"
+                                })
+                        }
+
+                        try {
+                            foreach ($view in @(Get-WmtRegistryViews)) {
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::LocalMachine) -View $view -SubPath "SOFTWARE\Classes\CLSID" -RegPathPrefix (ConvertTo-WmtClassesViewPath -SubPath "CLSID" -View $view) -Label "Machine classes, $viewLabel"
+                            }
+
+                            Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::CurrentUser) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "Software\Classes\CLSID" -RegPathPrefix "HKCU:\Software\Classes\CLSID" -Label "Current user classes"
+                            if ([Environment]::Is64BitOperatingSystem) {
+                                Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::CurrentUser) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "Software\Classes\WOW6432Node\CLSID" -RegPathPrefix "HKCU:\Software\Classes\WOW6432Node\CLSID" -Label "Current user classes, 32-bit"
+                            }
+
+                            $currentSid = $null
+                            try { $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch {}
+                            $usersRoot = $null
+                            try {
+                                $usersRoot = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::Users, [Microsoft.Win32.RegistryView]::Default)
+                                foreach ($sid in @($usersRoot.GetSubKeyNames())) {
+                                    if ($sid -notmatch '^S-1-5-21-.+-\d+$' -or $sid -match '_Classes$') { continue }
+                                    if (-not [string]::IsNullOrWhiteSpace($currentSid) -and $sid -eq $currentSid) { continue }
+
+                                    Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::Users) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "$sid\Software\Classes\CLSID" -RegPathPrefix "HKU:\$sid\Software\Classes\CLSID" -Label "User classes, $sid"
+                                    if ([Environment]::Is64BitOperatingSystem) {
+                                        Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::Users) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "$sid\Software\Classes\WOW6432Node\CLSID" -RegPathPrefix "HKU:\$sid\Software\Classes\WOW6432Node\CLSID" -Label "User classes, $sid, 32-bit"
                                     }
                                 }
-                                catch {} 
                             }
-                            $clsidKey.Close() 
+                            catch {}
+                            finally {
+                                if ($usersRoot) { $usersRoot.Close() }
+                            }
+
+                            # HKCR is a merged view. Scan it as a final fallback because some orphaned COM registrations
+                            # are visible to the PowerShell provider under HKCR even when they are not found through the
+                            # machine-only Classes paths above. On 64-bit Windows, 32-bit COM entries can also appear under
+                            # HKCR:\WOW6432Node\CLSID when viewed from the 64-bit registry provider.
+                            Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::ClassesRoot) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "CLSID" -RegPathPrefix "HKCR:\CLSID" -Label "HKCR merged view"
+                            if ([Environment]::Is64BitOperatingSystem) {
+                                Add-WmtComClassScanTarget -Targets $comTargets -Hive ([Microsoft.Win32.RegistryHive]::ClassesRoot) -View ([Microsoft.Win32.RegistryView]::Default) -SubPath "WOW6432Node\CLSID" -RegPathPrefix "HKCR:\WOW6432Node\CLSID" -Label "HKCR merged view, 32-bit"
+                            }
+
+                            foreach ($target in @($comTargets)) {
+                                $clsidKey = $null
+                                try {
+                                    $clsidKey = $target.Root.OpenSubKey([string]$target.SubPath, $false)
+                                    if (-not $clsidKey) { continue }
+
+                                    $subKeys = $clsidKey.GetSubKeyNames()
+                                    $total = [math]::Max($subKeys.Count, 1)
+                                    $i = 0
+
+                                    foreach ($id in $subKeys) {
+                                        $i++
+                                        & $Tick "Scanning CLSID ($($target.Label)): $id" $i $total
+
+                                        foreach ($serverSubKey in @("InProcServer32", "LocalServer32")) {
+                                            $serverKey = $null
+                                            try {
+                                                $serverKey = $clsidKey.OpenSubKey("$id\$serverSubKey", $false)
+                                                if (-not $serverKey) { continue }
+
+                                                $rawServerPath = [string]$serverKey.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                if ([string]::IsNullOrWhiteSpace($rawServerPath)) { continue }
+
+                                                $regPath = "$($target.RegPathPrefix)\$id\$serverSubKey"
+                                                Add-WmtMissingComServerFinding -Clsid $id -ServerSubKey $serverSubKey -RawServerPath $rawServerPath -RegPath $regPath -TargetLabel ([string]$target.Label) -RegistryView $target.View
+                                            }
+                                            catch {}
+                                            finally {
+                                                if ($serverKey) { $serverKey.Close() }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($clsidKey) { $clsidKey.Close() }
+                                }
+                            }
                         }
+                        finally {
+                            foreach ($target in @($comTargets)) {
+                                try { if ($target.Root) { $target.Root.Close() } } catch {}
+                            }
+                        }
+
                         & $EndCategory
                     }
 
