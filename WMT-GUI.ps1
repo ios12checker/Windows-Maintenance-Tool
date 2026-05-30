@@ -20233,12 +20233,12 @@ exit /b %WMT_EXIT%
                 elseif (([string]$src).ToLowerInvariant() -eq "steam") {
                     if ($act -eq "Update") {
                         # Steam game updates have to be handled by the Steam client.
-                        # Always open Downloads first; launching the game directly can fail silently
-                        # when WMT is elevated or when Steam is not already running.
-                        $steamUri = "steam://open/downloads"
+                        # Use steam://validate/<AppID> to validate/update individual apps.
+                        # Falls back to downloads page if AppID is not available.
+                        $steamUri = if (-not [string]::IsNullOrWhiteSpace([string]$id)) { "steam://validate/$id" } else { "steam://open/downloads" }
                         $steamRunUri = if (-not [string]::IsNullOrWhiteSpace([string]$id)) { "steam://rungameid/$id" } else { "" }
 
-                        Write-Output "LOG:[Steam] Opening Steam Downloads for $name."
+                        Write-Output "LOG:[Steam] Requesting validation for $name (AppID: $id)."
                         try {
                             $steamPayload = [ordered]@{
                                 Uri         = $steamUri
