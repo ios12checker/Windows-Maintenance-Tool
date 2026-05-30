@@ -3922,7 +3922,7 @@ function Get-WmtSettings {
         WingetIncludeUnknown = $true
         LoadWinapp2          = $false 
         LoadCleanerML        = $false
-        EnabledProviders     = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        EnabledProviders     = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         CustomDnsServers     = @()
         CustomDohTemplate    = ""
         CustomDohEnabled     = $false
@@ -20531,6 +20531,27 @@ exit /b %WMT_EXIT%
                     if ($act -eq "Uninstall") { $cmd = "cargo uninstall `"$id`"" }
                     $userCmd = $cmd
                 }
+                # --- .NET GLOBAL TOOLS ---
+                elseif ($src -eq "dotnet") {
+                    if ($act -eq "Install") { $cmd = "dotnet tool install --global `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "dotnet tool update --global `"$id`"" }
+                    if ($act -eq "Uninstall") { $cmd = "dotnet tool uninstall --global `"$id`"" }
+                    $userCmd = $cmd
+                }
+                # --- POWERSHELL MODULES ---
+                elseif ($src -eq "psmodule") {
+                    if ($act -eq "Install") { $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command `"Install-Module -Name '$id' -Scope CurrentUser -Force -AllowClobber`"" }
+                    if ($act -eq "Update") { $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command `"Update-Module -Name '$id' -Force`"" }
+                    if ($act -eq "Uninstall") { $cmd = "powershell -NoProfile -ExecutionPolicy Bypass -Command `"Uninstall-Module -Name '$id' -AllVersions -Force`"" }
+                    $userCmd = $cmd
+                }
+                # --- PHP COMPOSER GLOBAL PACKAGES ---
+                elseif ($src -eq "composer") {
+                    if ($act -eq "Install") { $cmd = "composer global require `"$id`" --no-interaction" }
+                    if ($act -eq "Update") { $cmd = "composer global update `"$id`" --with-all-dependencies --no-interaction" }
+                    if ($act -eq "Uninstall") { $cmd = "composer global remove `"$id`" --no-interaction" }
+                    $userCmd = $cmd
+                }
                 # --- PYTHON PIP ---
                 elseif ($src -eq "pip" -or $src -eq "pip3") {
                     if ($act -eq "Install") { $cmd = "python -m pip install `"$id`"" }
@@ -20601,6 +20622,9 @@ exit /b %WMT_EXIT%
                         "^(scoop)$" { "Scoop"; break }
                         "^(gem|ruby)$" { "RubyGem"; break }
                         "^(cargo|rust)$" { "Cargo"; break }
+                        "^(dotnet)$" { "DotNet"; break }
+                        "^(psmodule)$" { "PSModule"; break }
+                        "^(composer)$" { "Composer"; break }
                         "^(steam)$" { "Steam"; break }
                         "^(legendary)$" { "Legendary"; break }
                         "^(gogdl)$" { "GOGDL"; break }
@@ -21341,7 +21365,7 @@ function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
     if (-not $settings.EnabledProviders) { 
-        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
+        $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
     }
     $enabled = $settings.EnabledProviders
 
@@ -21456,6 +21480,30 @@ function Show-ProviderManager {
                 <Button Name="btnProviderCargoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
             </Grid>
 
+            <Grid Margin="0,0,0,10" ToolTip=".NET global tools installed with dotnet tool install -g">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkDotnet" Grid.Column="0"/>
+                <TextBlock Text=".NET Tools" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblDotnetStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderDotnetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="PowerShell modules installed from PSGallery with PowerShellGet">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkPsModule" Grid.Column="0"/>
+                <TextBlock Text="PS Modules" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblPsModuleStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderPsModuleAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
+
+            <Grid Margin="0,0,0,10" ToolTip="PHP Composer global packages">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <CheckBox Name="chkComposer" Grid.Column="0"/>
+                <TextBlock Text="Composer" FontWeight="Bold" Grid.Column="1"/>
+                <TextBlock Name="lblComposerStatus" Text="Checking..." Grid.Column="2"/>
+                <Button Name="btnProviderComposerAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+            </Grid>
+
             <Grid Margin="0,0,0,10" ToolTip="Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads.">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                 <CheckBox Name="chkSteam" Grid.Column="0"/>
@@ -21502,6 +21550,9 @@ function Show-ProviderManager {
     $chkScoop = Get-WinCtrl "chkScoop"
     $chkGem = Get-WinCtrl "chkGem"
     $chkCargo = Get-WinCtrl "chkCargo"
+    $chkDotnet = Get-WinCtrl "chkDotnet"
+    $chkPsModule = Get-WinCtrl "chkPsModule"
+    $chkComposer = Get-WinCtrl "chkComposer"
     $chkSteam = Get-WinCtrl "chkSteam"
     $chkLegendary = Get-WinCtrl "chkLegendary"
     $chkGogdl = Get-WinCtrl "chkGogdl"
@@ -21517,6 +21568,9 @@ function Show-ProviderManager {
         [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
         [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
         [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
+        [PSCustomObject]@{ Key = "dotnet"; DisplayName = ".NET Tools"; Commands = [string[]]@("dotnet"); Label = "lblDotnetStatus"; Button = "btnProviderDotnetAction" },
+        [PSCustomObject]@{ Key = "psmodule"; DisplayName = "PowerShell Modules"; Commands = [string[]]@("powershell", "pwsh"); Label = "lblPsModuleStatus"; Button = "btnProviderPsModuleAction" },
+        [PSCustomObject]@{ Key = "composer"; DisplayName = "Composer"; Commands = [string[]]@("composer"); Label = "lblComposerStatus"; Button = "btnProviderComposerAction" },
         [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" },
         [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary (Epic Games)"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction" },
         [PSCustomObject]@{ Key = "gogdl"; DisplayName = "GOGDL (GOG Games)"; Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction" }
@@ -21816,6 +21870,98 @@ elseif (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
     throw "Cargo was not found."
 }
 cargo --version
+'@
+                }
+                break
+            }
+            "dotnet" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw ".NET SDK install needs winget." }
+    $dotnetIds = @("Microsoft.DotNet.SDK.10", "Microsoft.DotNet.SDK.9", "Microsoft.DotNet.SDK.8")
+    $installedDotnet = $false
+    foreach ($dotnetId in $dotnetIds) {
+        Write-Host "Trying $dotnetId..."
+        winget install --id $dotnetId --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+        if ($LASTEXITCODE -eq 0) { $installedDotnet = $true; break }
+    }
+    if (-not $installedDotnet) { throw "Could not install .NET SDK with winget." }
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+    dotnet --info
+    Write-Host ""
+    Write-Host "Installed global .NET tools:"
+    dotnet tool list --global
+}
+else {
+    throw ".NET SDK was installed, but dotnet is not visible in this session yet. Open a new terminal and retry."
+}
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) { throw "dotnet was not found." }
+dotnet --info
+Write-Host ""
+Write-Host "Installed global .NET tools:"
+dotnet tool list --global
+Write-Host ""
+Write-Host "Individual .NET global tools are updated from WMT's update list with: dotnet tool update --global <package>"
+'@
+                }
+                break
+            }
+            "psmodule" {
+                if ($installing) {
+                    @'
+$psGet = Get-Module -ListAvailable PowerShellGet | Sort-Object Version -Descending | Select-Object -First 1
+if (-not $psGet) {
+    Install-PackageProvider -Name NuGet -Force -Scope CurrentUser
+    Install-Module -Name PowerShellGet -Scope CurrentUser -Force -AllowClobber
+}
+else {
+    Write-Host "PowerShellGet found: $($psGet.Version)"
+}
+Import-Module PowerShellGet -ErrorAction SilentlyContinue
+Get-Command Get-InstalledModule, Find-Module, Install-Module, Update-Module -ErrorAction SilentlyContinue | Format-Table Name, Source -AutoSize
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command Get-InstalledModule -ErrorAction SilentlyContinue)) { throw "PowerShellGet was not found." }
+Install-PackageProvider -Name NuGet -Force -Scope CurrentUser -ErrorAction SilentlyContinue
+Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+Write-Host "Installed PowerShellGet-managed modules:"
+Get-InstalledModule -ErrorAction SilentlyContinue | Sort-Object Name | Format-Table Name, Version, Repository -AutoSize
+'@
+                }
+                break
+            }
+            "composer" {
+                if ($installing) {
+                    @'
+if (-not (Get-Command composer -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { throw "Composer install needs winget." }
+    winget install --id Composer.Composer --exact --accept-source-agreements --accept-package-agreements --disable-interactivity
+    Update-WmtProviderPathEnvironment
+}
+if (Get-Command composer -ErrorAction SilentlyContinue) {
+    composer --version
+    composer self-update
+}
+else {
+    Write-Host "Composer was requested. Open a new terminal after install if composer is not visible yet."
+}
+'@
+                }
+                else {
+                    @'
+if (-not (Get-Command composer -ErrorAction SilentlyContinue)) { throw "Composer was not found." }
+composer self-update
+composer global diagnose
+composer --version
 '@
                 }
                 break
@@ -22476,6 +22622,9 @@ exit `$exitCode
     if ("scoop" -in $enabled) { $chkScoop.IsChecked = $true }
     if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
     if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
+    if ("dotnet" -in $enabled) { $chkDotnet.IsChecked = $true }
+    if ("psmodule" -in $enabled) { $chkPsModule.IsChecked = $true }
+    if ("composer" -in $enabled) { $chkComposer.IsChecked = $true }
     if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
     if ("legendary" -in $enabled) { $chkLegendary.IsChecked = $true }
     if ("gogdl" -in $enabled) { $chkGogdl.IsChecked = $true }
@@ -22500,6 +22649,9 @@ exit `$exitCode
             if ($chkScoop.IsChecked) { $newEnabled += "scoop" }
             if ($chkGem.IsChecked) { $newEnabled += "gem" }
             if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
+            if ($chkDotnet.IsChecked) { $newEnabled += "dotnet" }
+            if ($chkPsModule.IsChecked) { $newEnabled += "psmodule" }
+            if ($chkComposer.IsChecked) { $newEnabled += "composer" }
             if ($chkSteam.IsChecked) { $newEnabled += "steam" }
             if ($chkLegendary.IsChecked) { $newEnabled += "legendary" }
             if ($chkGogdl.IsChecked) { $newEnabled += "gogdl" }
@@ -22750,7 +22902,7 @@ $btnWingetScan.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
@@ -23421,6 +23573,194 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
     
+        # H. .NET GLOBAL TOOLS WORKER
+        if ("dotnet" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    Write-Output "LOG:Scanning .NET global tools..."
+
+                    function Invoke-DotnetToolCommand {
+                        param([string]$Arguments, [int]$TimeoutMs = 15000)
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("dotnet", $Arguments)
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.RedirectStandardError = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                        $proc = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $proc.StandardOutput.ReadToEndAsync()
+                        $errTask = $proc.StandardError.ReadToEndAsync()
+                        if (-not $proc.WaitForExit($TimeoutMs)) {
+                            try { $proc.Kill() } catch {}
+                            return [PSCustomObject]@{ TimedOut = $true; Out = ""; Err = ""; ExitCode = 124 }
+                        }
+                        return [PSCustomObject]@{
+                            TimedOut = $false
+                            Out      = $outTask.GetAwaiter().GetResult()
+                            Err      = $errTask.GetAwaiter().GetResult()
+                            ExitCode = $proc.ExitCode
+                        }
+                    }
+
+                    function Test-NewerVersionText {
+                        param([string]$Current, [string]$Latest)
+                        if ([string]::IsNullOrWhiteSpace($Current) -or [string]::IsNullOrWhiteSpace($Latest)) { return $false }
+                        try { return ([version]$Latest -gt [version]$Current) } catch { return (([string]$Latest).Trim() -ne ([string]$Current).Trim()) }
+                    }
+
+                    try {
+                        if (-not (Get-Command dotnet -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:.NET SDK was not found."
+                            return
+                        }
+
+                        $listResult = Invoke-DotnetToolCommand -Arguments "tool list --global" -TimeoutMs 20000
+                        if ($listResult.TimedOut) { Write-Output "LOG:.NET tool list timed out."; return }
+                        $installed = @()
+                        foreach ($line in ($listResult.Out -split "`r?`n")) {
+                            $trimmed = ([string]$line).Trim()
+                            if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                            if ($trimmed -match "(?i)^Package\s+Id\s+Version\s+Commands") { continue }
+                            if ($trimmed -match "^-+") { continue }
+                            $parts = @($trimmed -split "\s+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                            if ($parts.Count -lt 2) { continue }
+                            $pkgId = [string]$parts[0]
+                            $currentVersion = [string]$parts[1]
+                            if ($IgnoreList -contains $pkgId) { continue }
+                            $installed += [PSCustomObject]@{ Id = $pkgId; Version = $currentVersion }
+                        }
+
+                        if ($installed.Count -eq 0) {
+                            Write-Output "LOG:No global .NET tools are installed."
+                            return
+                        }
+
+                        foreach ($tool in $installed) {
+                            $pkgId = [string]$tool.Id
+                            $currentVersion = [string]$tool.Version
+                            $searchResult = Invoke-DotnetToolCommand -Arguments "tool search `"$pkgId`" --take 5" -TimeoutMs 12000
+                            if ($searchResult.TimedOut) { Write-Output "LOG:.NET search timed out for $pkgId."; continue }
+                            $latestVersion = ""
+                            foreach ($line in ($searchResult.Out -split "`r?`n")) {
+                                $trimmed = ([string]$line).Trim()
+                                if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                                if ($trimmed -match "(?i)^Package\s+ID\s+Version") { continue }
+                                if ($trimmed -match "^-+") { continue }
+                                $parts = @($trimmed -split "\s+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                                if ($parts.Count -ge 2 -and ([string]$parts[0]).Equals($pkgId, [StringComparison]::OrdinalIgnoreCase)) {
+                                    $latestVersion = [string]$parts[1]
+                                    break
+                                }
+                            }
+                            if (Test-NewerVersionText -Current $currentVersion -Latest $latestVersion) {
+                                [PSCustomObject]@{ Source = "dotnet"; Name = $pkgId; Id = $pkgId; Version = $currentVersion; Available = $latestVersion }
+                            }
+                        }
+                    }
+                    catch { Write-Output "LOG:.NET tools check failed: $($_.Exception.Message)" }
+                }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # I. POWERSHELL MODULES WORKER
+        if ("psmodule" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    Write-Output "LOG:Scanning PowerShell modules..."
+
+                    function Test-NewerVersionText {
+                        param([string]$Current, [string]$Latest)
+                        if ([string]::IsNullOrWhiteSpace($Current) -or [string]::IsNullOrWhiteSpace($Latest)) { return $false }
+                        try { return ([version]$Latest -gt [version]$Current) } catch { return (([string]$Latest).Trim() -ne ([string]$Current).Trim()) }
+                    }
+
+                    try {
+                        if (-not (Get-Command Get-InstalledModule -ErrorAction SilentlyContinue) -or -not (Get-Command Find-Module -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:PowerShellGet cmdlets were not found."
+                            return
+                        }
+
+                        $installed = @(Get-InstalledModule -ErrorAction Stop | Sort-Object Name -Unique)
+                        if ($installed.Count -eq 0) {
+                            Write-Output "LOG:No PowerShellGet-managed modules are installed."
+                            return
+                        }
+
+                        $nameList = @($installed | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                        $latestMap = @{}
+                        try {
+                            foreach ($found in @(Find-Module -Name $nameList -Repository PSGallery -ErrorAction SilentlyContinue)) {
+                                if ($found -and $found.Name -and -not $latestMap.ContainsKey([string]$found.Name)) {
+                                    $latestMap[[string]$found.Name] = [string]$found.Version
+                                }
+                            }
+                        }
+                        catch {
+                            Write-Output "LOG:PSGallery lookup failed: $($_.Exception.Message)"
+                        }
+
+                        foreach ($module in $installed) {
+                            $name = [string]$module.Name
+                            if ([string]::IsNullOrWhiteSpace($name) -or $IgnoreList -contains $name) { continue }
+                            if (-not $latestMap.ContainsKey($name)) { continue }
+                            $currentVersion = [string]$module.Version
+                            $latestVersion = [string]$latestMap[$name]
+                            if (Test-NewerVersionText -Current $currentVersion -Latest $latestVersion) {
+                                [PSCustomObject]@{ Source = "psmodule"; Name = $name; Id = $name; Version = $currentVersion; Available = $latestVersion }
+                            }
+                        }
+                    }
+                    catch { Write-Output "LOG:PowerShell module check failed: $($_.Exception.Message)" }
+                }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
+        # J. COMPOSER WORKER
+        if ("composer" -in $enabled) {
+            $ps = [PowerShell]::Create()
+            [void]$ps.AddScript({
+                    param($IgnoreList)
+                    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    Write-Output "LOG:Scanning Composer global packages..."
+                    try {
+                        if (-not (Get-Command composer -ErrorAction SilentlyContinue)) {
+                            Write-Output "LOG:Composer was not found."
+                            return
+                        }
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c composer global outdated --format=json --no-interaction 2>nul")
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        if (-not $p.WaitForExit(45000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Composer scan timed out."; return }
+                        $json = $p.StandardOutput.ReadToEnd().Trim()
+                        if ([string]::IsNullOrWhiteSpace($json) -or -not $json.StartsWith("{")) {
+                            Write-Output "LOG:Composer reported no outdated global packages."
+                            return
+                        }
+                        $data = $json | ConvertFrom-Json
+                        $packages = @()
+                        if ($data.PSObject.Properties["installed"]) { $packages = @($data.installed) }
+                        elseif ($data.PSObject.Properties["locked"]) { $packages = @($data.locked) }
+                        foreach ($pkg in $packages) {
+                            $name = [string]$pkg.name
+                            if ([string]::IsNullOrWhiteSpace($name) -or $IgnoreList -contains $name) { continue }
+                            $currentVersion = if ($pkg.PSObject.Properties["version"]) { [string]$pkg.version } elseif ($pkg.PSObject.Properties["installed"]) { [string]$pkg.installed } else { "?" }
+                            $latestVersion = if ($pkg.PSObject.Properties["latest"]) { [string]$pkg.latest } elseif ($pkg.PSObject.Properties["available"]) { [string]$pkg.available } else { "?" }
+                            if ($latestVersion -eq "?" -and $currentVersion -eq "?") { continue }
+                            [PSCustomObject]@{ Source = "composer"; Name = $name; Id = $name; Version = $currentVersion; Available = $latestVersion }
+                        }
+                    }
+                    catch { Write-Output "LOG:Composer check failed: $($_.Exception.Message)" }
+                }).AddArgument($ignoreList)
+            [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
+        }
+
         # H. PNPM WORKER (unchanged)
         if ("pnpm" -in $enabled) {
             $ps = [PowerShell]::Create()
@@ -24685,7 +25025,7 @@ $btnWingetFind.Add_Click({
             $settings.EnabledProviders 
         }
         else { 
-            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+            @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
 
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
@@ -24818,13 +25158,79 @@ $btnWingetFind.Add_Click({
                     $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
                     $lines = $out -split "`r`n"
                     foreach ($line in $lines) {
-                        if ([string]::IsNullOrWhiteSpace($line)) { continue }; $parts = $line -split "\|"
-                        if ($parts.Count -ge 2) { 
-                            [PSCustomObject]@{ Source = "chocolatey"; Name = $parts[0]; Id = $parts[0]; Version = $parts[1]; Available = "-" } 
+                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                        $parts = $line -split "\|"
+                        if ($parts.Count -ge 2) {
+                            [PSCustomObject]@{ Source = "chocolatey"; Name = $parts[0]; Id = $parts[0]; Version = $parts[1]; Available = "-" }
                         }
                     }
                 }
                 catch { Log "Choco skipped." }
+            }
+
+            # --- D. .NET TOOLS ---
+            if ("dotnet" -in $Enabled) {
+                Log "Searching .NET tools..."
+                try {
+                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("dotnet", "tool search `"$Query`" --take 40")
+                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+                    $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                        if ($trimmed -match "(?i)^Package\s+ID\s+Version" -or $trimmed -match "^-+") { continue }
+                        $parts = @($trimmed -split "\s+" | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                        if ($parts.Count -ge 2) {
+                            [PSCustomObject]@{ Source = "dotnet"; Name = [string]$parts[0]; Id = [string]$parts[0]; Version = [string]$parts[1]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log ".NET tools skipped." }
+            }
+
+            # --- E. POWERSHELL MODULES ---
+            if ("psmodule" -in $Enabled) {
+                Log "Searching PowerShell modules..."
+                try {
+                    if (Get-Command Find-Module -ErrorAction SilentlyContinue) {
+                        $mods = @(Find-Module -Name "*$Query*" -Repository PSGallery -ErrorAction SilentlyContinue | Select-Object -First 40)
+                        foreach ($mod in $mods) {
+                            [PSCustomObject]@{ Source = "psmodule"; Name = $mod.Name; Id = $mod.Name; Version = [string]$mod.Version; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "PowerShell modules skipped." }
+            }
+
+            # --- F. COMPOSER ---
+            if ("composer" -in $Enabled) {
+                Log "Searching Composer..."
+                try {
+                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c composer search `"$Query`" --format=json 2>nul")
+                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
+                    $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    $json = $json.Trim()
+                    if ($json.StartsWith("[")) {
+                        $pkgs = $json | ConvertFrom-Json
+                        foreach ($pkg in $pkgs) {
+                            $name = if ($pkg.PSObject.Properties["name"]) { [string]$pkg.name } else { "" }
+                            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                                [PSCustomObject]@{ Source = "composer"; Name = $name; Id = $name; Version = "?"; Available = "-" }
+                            }
+                        }
+                    }
+                    else {
+                        foreach ($line in ($json -split "`r?`n")) {
+                            $trimmed = ([string]$line).Trim()
+                            if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                            $name = @($trimmed -split "\s+" | Where-Object { $_ })[0]
+                            if (-not [string]::IsNullOrWhiteSpace($name)) {
+                                [PSCustomObject]@{ Source = "composer"; Name = $name; Id = $name; Version = "?"; Available = "-" }
+                            }
+                        }
+                    }
+                }
+                catch { Log "Composer skipped." }
             }
         }
 
