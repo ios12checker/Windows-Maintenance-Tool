@@ -168,6 +168,7 @@ function Write-GuiLog {
     param($Msg)
     if ($script:LogBox) {
         $script:LogBox.AppendText("[$((Get-Date).ToString('HH:mm'))] $Msg`n")
+        try { if ($script:LogBox.LineCount -gt ($script:WmtMaxLogLines + 100)) { Optimize-WmtLogMemory -MaxLines $script:WmtMaxLogLines } } catch {}
         if (-not $script:WmtLogAutoScrollAttached) {
             $script:LogBox.ScrollToEnd()
         }
@@ -3894,6 +3895,7 @@ function Save-WmtSettings {
             UpdateAutoScanMinutes      = [int](Get-WmtUpdateAutoScanMinutes -Settings $Settings)
             UpdateNotificationsEnabled = [bool](Get-WmtUpdateNotificationsEnabled -Settings $Settings)
             RunInTrayOnClose           = [bool](Get-WmtRunInTrayOnClose -Settings $Settings)
+            ReduceRamInTray            = [bool](Get-WmtReduceRamInTray -Settings $Settings)
             LoadWinapp2                = [bool]$Settings.LoadWinapp2
             LoadCleanerML              = [bool]$Settings.LoadCleanerML
             EnabledProviders           = $Settings.EnabledProviders
@@ -3926,6 +3928,7 @@ function Get-WmtSettings {
         UpdateAutoScanMinutes      = 0
         UpdateNotificationsEnabled = $true
         RunInTrayOnClose           = $false
+        ReduceRamInTray            = $true
         LoadWinapp2                = $false 
         LoadCleanerML              = $false
         EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
@@ -3965,6 +3968,7 @@ function Get-WmtSettings {
             }
             if ($json.PSObject.Properties["UpdateNotificationsEnabled"]) { $defaults.UpdateNotificationsEnabled = [bool]$json.UpdateNotificationsEnabled }
             if ($json.PSObject.Properties["RunInTrayOnClose"]) { $defaults.RunInTrayOnClose = [bool]$json.RunInTrayOnClose }
+            if ($json.PSObject.Properties["ReduceRamInTray"]) { $defaults.ReduceRamInTray = [bool]$json.ReduceRamInTray }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
@@ -4153,6 +4157,40 @@ function Set-WmtRunInTrayOnClose {
     Save-WmtSettings -Settings $settings
 }
 
+function Get-WmtReduceRamInTray {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("ReduceRamInTray")) {
+            return [bool]$Settings["ReduceRamInTray"]
+        }
+        if ($Settings.PSObject.Properties["ReduceRamInTray"]) {
+            return [bool]$Settings.ReduceRamInTray
+        }
+    }
+    catch {}
+
+    return $true
+}
+
+function Set-WmtReduceRamInTray {
+    param([bool]$Enabled)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["ReduceRamInTray"] = $Enabled
+    }
+    elseif ($settings.PSObject.Properties["ReduceRamInTray"]) {
+        $settings.ReduceRamInTray = $Enabled
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "ReduceRamInTray" -Value $Enabled -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
 $script:WmtNotificationAppId = "Chaython.WindowsMaintenanceTool"
 $script:WmtNativeToastReady = $false
 $script:WmtNativeToastUnavailable = $false
@@ -4163,6 +4201,66 @@ $script:WmtTrayMenu = $null
 $script:WmtAllowFinalClose = $false
 $script:WmtTrayHideNotificationShown = $false
 $script:WmtHiddenToTray = $false
+
+$script:WmtMaxLogLines = 500
+$script:WmtMemoryTrimBusy = $false
+
+function Optimize-WmtLogMemory {
+    param([int]$MaxLines = $script:WmtMaxLogLines)
+
+    try {
+        if (-not $script:LogBox) { return }
+        if ($MaxLines -lt 50) { $MaxLines = 50 }
+
+        $text = [string]$script:LogBox.Text
+        if ([string]::IsNullOrEmpty($text)) { return }
+        $lines = $text -split "`r?`n"
+        if ($lines.Count -le $MaxLines) { return }
+
+        $keep = $lines | Select-Object -Last $MaxLines
+        $script:LogBox.Text = (($keep -join "`r`n").TrimEnd() + "`r`n")
+        try { $script:LogBox.ScrollToEnd() } catch {}
+    }
+    catch {}
+}
+
+function Invoke-WmtMemoryTrim {
+    param([string]$Reason = "manual")
+
+    if ($script:WmtMemoryTrimBusy) { return }
+    $script:WmtMemoryTrimBusy = $true
+    try {
+        Stop-WmtStartupBackgroundPreload
+
+        if ($script:MyDeviceCache) {
+            try { $script:MyDeviceCache.Clear() } catch { $script:MyDeviceCache = @{} }
+        }
+
+        Optimize-WmtLogMemory -MaxLines $script:WmtMaxLogLines
+
+        [System.GC]::Collect()
+        [System.GC]::WaitForPendingFinalizers()
+        [System.GC]::Collect()
+
+        try {
+            if (-not ("WmtMemoryNative" -as [type])) {
+                Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class WmtMemoryNative {
+    [DllImport("psapi.dll")]
+    public static extern bool EmptyWorkingSet(IntPtr hProcess);
+}
+"@ -ErrorAction Stop
+            }
+            [void][WmtMemoryNative]::EmptyWorkingSet([System.Diagnostics.Process]::GetCurrentProcess().Handle)
+        }
+        catch {}
+    }
+    finally {
+        $script:WmtMemoryTrimBusy = $false
+    }
+}
 $script:WmtApplication = $null
 
 function Get-WmtNotificationLaunchInfo {
@@ -4437,7 +4535,7 @@ namespace WmtNotifications {
 function Show-WmtMainWindowFromTray {
     try {
         if (-not $window) { return }
-        $showAction = [Action] {
+        $showAction = [Action]{
             try {
                 if ($window.ShowInTaskbar -eq $false) { $window.ShowInTaskbar = $true }
                 if ($window.Visibility -ne [System.Windows.Visibility]::Visible) { $window.Show() }
@@ -4464,7 +4562,7 @@ function Show-WmtMainWindowFromTray {
 function Invoke-WmtTrayUpdateScan {
     try {
         if (-not $window) { return }
-        $scanAction = [Action] {
+        $scanAction = [Action]{
             try {
                 Show-WmtMainWindowFromTray
                 $updatesTab = Get-Ctrl "btnTabUpdates"
@@ -4495,7 +4593,7 @@ function Invoke-WmtFinalExitFromTray {
     param($Window)
 
     try {
-        $exitAction = [Action] {
+        $exitAction = [Action]{
             try {
                 $script:WmtAllowFinalClose = $true
                 $script:WmtHiddenToTray = $false
@@ -4509,8 +4607,7 @@ function Invoke-WmtFinalExitFromTray {
                     try { $Window.ShowInTaskbar = $true } catch {}
                     try {
                         if ($Window.Visibility -ne [System.Windows.Visibility]::Visible) { $Window.Show() }
-                    }
-                    catch {}
+                    } catch {}
                     try { $Window.Close() }
                     catch { Write-GuiLog "Tray exit window close failed: $($_.Exception.Message)" }
                 }
@@ -22121,7 +22218,7 @@ function Show-ProviderManager {
             <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
                     ToolTip="Automatically re-run the Updates scan while WMT remains open. This only scans; it does not install updates.">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <TextBlock Text="Auto scan" FontWeight="Bold" Grid.Row="0" Grid.Column="0"/>
                     <ComboBox Name="cmbAutoScanInterval" Grid.Row="0" Grid.Column="1" Height="28" Width="210" HorizontalAlignment="Left" SelectedValuePath="Tag" Foreground="#111827" Background="#FFFFFF">
@@ -22137,7 +22234,9 @@ function Show-ProviderManager {
                               ToolTip="Show a Windows notification when an automatic background scan finds updates or fails."/>
                     <CheckBox Name="chkRunInTrayOnClose" Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3" Content="Run in system tray when closed" Margin="0,8,0,0"
                               ToolTip="When enabled, closing the main window hides WMT to the system tray so background scans and notifications can continue."/>
-                    <TextBlock Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                    <CheckBox Name="chkReduceRamInTray" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Content="Reduce RAM while hidden in tray" Margin="0,8,0,0"
+                              ToolTip="When WMT is hidden to the tray, clear short-lived caches, trim the log, run garbage collection, and ask Windows to release unused working-set pages."/>
+                    <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
                                Text="Auto scan runs while WMT is open or hidden in the tray. It only scans for available updates and can notify you through Windows notifications when updates are found."
                                Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
                 </Grid>
@@ -22293,6 +22392,7 @@ function Show-ProviderManager {
     $cmbAutoScanInterval = Get-WinCtrl "cmbAutoScanInterval"
     $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
     $chkRunInTrayOnClose = Get-WinCtrl "chkRunInTrayOnClose"
+    $chkReduceRamInTray = Get-WinCtrl "chkReduceRamInTray"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
@@ -23382,6 +23482,7 @@ exit `$exitCode
     }
     if ($chkUpdateNotifications) { $chkUpdateNotifications.IsChecked = (Get-WmtUpdateNotificationsEnabled -Settings $settings) }
     if ($chkRunInTrayOnClose) { $chkRunInTrayOnClose.IsChecked = (Get-WmtRunInTrayOnClose -Settings $settings) }
+    if ($chkReduceRamInTray) { $chkReduceRamInTray.IsChecked = (Get-WmtReduceRamInTray -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
@@ -23443,6 +23544,7 @@ exit `$exitCode
                 $current["UpdateAutoScanMinutes"] = $selectedAutoScanMinutes
                 $current["UpdateNotificationsEnabled"] = [bool]$chkUpdateNotifications.IsChecked
                 $current["RunInTrayOnClose"] = [bool]$chkRunInTrayOnClose.IsChecked
+                $current["ReduceRamInTray"] = [bool]$chkReduceRamInTray.IsChecked
             }
             elseif ($current.PSObject.Properties["UpdateAutoScanMinutes"]) {
                 $current.UpdateAutoScanMinutes = $selectedAutoScanMinutes
@@ -23458,11 +23560,18 @@ exit `$exitCode
                 else {
                     $current | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value ([bool]$chkRunInTrayOnClose.IsChecked) -Force
                 }
+                if ($current.PSObject.Properties["ReduceRamInTray"]) {
+                    $current.ReduceRamInTray = [bool]$chkReduceRamInTray.IsChecked
+                }
+                else {
+                    $current | Add-Member -MemberType NoteProperty -Name "ReduceRamInTray" -Value ([bool]$chkReduceRamInTray.IsChecked) -Force
+                }
             }
             else {
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoScanMinutes" -Value $selectedAutoScanMinutes -Force
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
                 $current | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value ([bool]$chkRunInTrayOnClose.IsChecked) -Force
+                $current | Add-Member -MemberType NoteProperty -Name "ReduceRamInTray" -Value ([bool]$chkReduceRamInTray.IsChecked) -Force
             }
 
             Save-WmtSettings -Settings $current
@@ -23475,7 +23584,7 @@ exit `$exitCode
 }
 
 
-function Test-WmtUpdateAutoScanBusy {
+function Test-WmtUpdateScanEngineBusy {
     try {
         if ($script:ActiveScans -and $script:ActiveScans.Count -gt 0) { return $true }
         if ($script:ScanTimer -and $script:ScanTimer.IsEnabled) { return $true }
@@ -23488,6 +23597,85 @@ function Test-WmtUpdateAutoScanBusy {
     return $false
 }
 
+function Test-WmtPackageSearchActive {
+    try {
+        # A live package search always owns the shared Updates/Search result list.
+        if ($script:AsyncSearch) { return $true }
+        if ($script:AsyncPowerShell) { return $true }
+        if ($script:SearchTimer -and $script:SearchTimer.IsEnabled) { return $true }
+        if ($btnWingetFind -and -not $btnWingetFind.IsEnabled) { return $true }
+        if ($txtWingetSearch -and -not $txtWingetSearch.IsEnabled) { return $true }
+
+        # Completed search results should only block auto scans while the user can actually see that view.
+        $windowVisible = $true
+        if ($window) {
+            $windowVisible = ($window.Visibility -eq [System.Windows.Visibility]::Visible -and $window.WindowState -ne [System.Windows.WindowState]::Minimized)
+        }
+        if (-not $windowVisible) { return $false }
+
+        $updatesVisible = $true
+        if ($pnlUpdates) { $updatesVisible = ($pnlUpdates.Visibility -eq [System.Windows.Visibility]::Visible) }
+        if (-not $updatesVisible) { return $false }
+
+        if ($script:WmtPackageSearchActive) { return $true }
+        if ($lblWingetTitle -and ([string]$lblWingetTitle.Text).StartsWith("Search Results:", [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+        if ($btnWingetInstall -and $btnWingetInstall.Visibility -eq [System.Windows.Visibility]::Visible) { return $true }
+    }
+    catch {}
+    return $false
+}
+
+function Test-WmtUpdateAutoScanBusy {
+    try {
+        if (Test-WmtUpdateScanEngineBusy) { return $true }
+        if (Test-WmtPackageSearchActive) { return $true }
+    }
+    catch {}
+    return $false
+}
+
+function Get-WmtUpdateListItemKey {
+    param([object]$Item)
+    if (-not $Item) { return "" }
+
+    $source = ([string]$Item.Source).Trim().ToLowerInvariant()
+    $id = ([string]$Item.Id).Trim().ToLowerInvariant()
+    $name = ([string]$Item.Name).Trim().ToLowerInvariant()
+    $available = ([string]$Item.Available).Trim().ToLowerInvariant()
+
+    if ([string]::IsNullOrWhiteSpace($id)) { $id = $name }
+    if ([string]::IsNullOrWhiteSpace($source) -or [string]::IsNullOrWhiteSpace($id)) { return "" }
+    return "$source|$id|$available"
+}
+
+function Get-WmtVisibleUpdateResultItems {
+    if (-not $lstWinget) { return @() }
+
+    $seen = @{}
+    $items = New-Object System.Collections.Generic.List[object]
+    foreach ($item in @($lstWinget.Items)) {
+        if (-not $item -or -not $item.PSObject.Properties["Name"]) { continue }
+
+        $source = ([string]$item.Source).Trim()
+        $name = ([string]$item.Name).Trim()
+        $id = ([string]$item.Id).Trim()
+        $available = ([string]$item.Available).Trim()
+
+        if ([string]::IsNullOrWhiteSpace($source)) { continue }
+        if ([string]::IsNullOrWhiteSpace($name) -or $name -in @("No results found", "No updates available")) { continue }
+        if ([string]::IsNullOrWhiteSpace($available) -or $available -eq "-") { continue }
+        if ([string]::IsNullOrWhiteSpace($id) -and ([string]::IsNullOrWhiteSpace($name))) { continue }
+
+        $key = Get-WmtUpdateListItemKey -Item $item
+        if ([string]::IsNullOrWhiteSpace($key)) { continue }
+        if ($seen.ContainsKey($key)) { continue }
+
+        $seen[$key] = $true
+        [void]$items.Add($item)
+    }
+    return $items.ToArray()
+}
+
 function Invoke-WmtUpdateAutoScan {
     param([switch]$Force)
 
@@ -23495,7 +23683,12 @@ function Invoke-WmtUpdateAutoScan {
     if ($minutes -le 0 -and -not $Force) { return }
 
     if (Test-WmtUpdateAutoScanBusy) {
-        Write-GuiLog "Auto scan skipped because an update scan or action is already running."
+        if (Test-WmtPackageSearchActive) {
+            Write-GuiLog "Auto scan skipped because package search/results are active."
+        }
+        else {
+            Write-GuiLog "Auto scan skipped because an update scan or package action is already running."
+        }
         return
     }
 
@@ -23716,7 +23909,12 @@ $script:ScanTimer.Add_Tick({
                                 if ($item.Name -eq "Source" -and $item.Id -eq "Name") { continue }
                                 if ($item.Version -eq "Version" -or $item.Available -eq "Available") { continue }
                             
-                                # Add to UI
+                                # Add to UI, but guard against duplicated provider output or overlapping callbacks.
+                                if (-not $script:WmtUpdateScanResultKeys) { $script:WmtUpdateScanResultKeys = @{} }
+                                $itemKey = Get-WmtUpdateListItemKey -Item $item
+                                if ([string]::IsNullOrWhiteSpace($itemKey)) { continue }
+                                if ($script:WmtUpdateScanResultKeys.ContainsKey($itemKey)) { continue }
+                                $script:WmtUpdateScanResultKeys[$itemKey] = $true
                                 [void](Set-WmtUpdateListItemCheckState -Item $item -DefaultChecked:$false)
                                 [void]$lstWinget.Items.Add($item)
                             }
@@ -23749,14 +23947,16 @@ $script:ScanTimer.Add_Tick({
                 Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             
                 $wasAutoScan = [bool]$script:WmtUpdateAutoScanActive
-                if ($lstWinget.Items.Count -eq 0) {
+                $updateItems = @(Get-WmtVisibleUpdateResultItems)
+                $updateCount = [int]$updateItems.Count
+                if ($updateCount -eq 0) {
                     Write-GuiLog "System is up to date."
                 }
                 else {
-                    Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
+                    Write-GuiLog "Scan Complete. Found $updateCount updates."
                 }
                 if ($wasAutoScan) {
-                    Show-WmtUpdateScanNotification -UpdateCount ([int]$lstWinget.Items.Count) -ErrorCount ([int]$script:WmtUpdateScanErrorCount)
+                    Show-WmtUpdateScanNotification -UpdateCount $updateCount -ErrorCount ([int]$script:WmtUpdateScanErrorCount)
                 }
                 $script:WmtUpdateAutoScanActive = $false
                 if (Get-WmtUpdateAutoScanMinutes -gt 0) {
@@ -23771,6 +23971,7 @@ $btnWingetScan.Add_Click({
         $autoScanTriggered = ([bool]$script:WmtUpdateAutoScanPending -or [bool]$script:WmtUpdateAutoScanActive)
         $script:WmtUpdateAutoScanPending = $false
         $script:WmtUpdateAutoScanActive = $autoScanTriggered
+        $script:WmtPackageSearchActive = $false
 
         # UI Prep
         $lblWingetTitle.Text = "Package Updates"
@@ -23836,6 +24037,7 @@ $btnWingetScan.Add_Click({
         $script:ActiveScans.Clear()
         $script:ScanCancelled = $false
         $script:WmtUpdateScanErrorCount = 0
+        $script:WmtUpdateScanResultKeys = @{}
         $script:ScanStartTime = Get-Date
     
         # --- Global Timeout Timer (120 seconds) ---
@@ -25877,6 +26079,7 @@ $script:SearchTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:SearchTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 $script:AsyncSearch = $null
 $script:AsyncPowerShell = $null
+$script:WmtPackageSearchActive = $false
 
 $script:SearchTimer.Add_Tick({
         # Check if the thread has finished
@@ -25914,6 +26117,7 @@ $script:SearchTimer.Add_Tick({
             }
             Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+            $script:WmtPackageSearchActive = $true
         
             $script:AsyncSearch = $null
             $script:AsyncPowerShell = $null
@@ -25922,9 +26126,14 @@ $script:SearchTimer.Add_Tick({
 
 # 2. THE BUTTON CLICK (Starts the Thread)
 $btnWingetFind.Add_Click({
+        if (Test-WmtUpdateScanEngineBusy) {
+            Write-GuiLog "Package search skipped because an update scan or package action is already running."
+            return
+        }
         if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -in @("Search packages...", "Search new packages...")) { return }
 
         # UI Prep
+        $script:WmtPackageSearchActive = $true
         $query = $txtWingetSearch.Text
         $lblWingetTitle.Text = "Search Results: $query"
         $lblWingetStatus.Text = "Searching..."; $lblWingetStatus.Visibility = "Visible"
@@ -28172,140 +28381,155 @@ function Start-WmtStartupBackgroundPreload {
 }
 
 # --- LAUNCH ---
-$window.Add_ContentRendered({
+$onMainWindowContentRendered = {
+    $settings = Get-WmtSettings
+
+    # Restore persisted window geometry/state when valid.
+    if ($settings.WindowBounds) {
+        $wb = $settings.WindowBounds
+        if ($wb.Width -ge $window.MinWidth -and $wb.Height -ge $window.MinHeight) {
+            $window.Width = [double]$wb.Width
+            $window.Height = [double]$wb.Height
+        }
+        if (($wb.Left -ne 0 -or $wb.Top -ne 0) -and $settings.WindowState -ne "Maximized") {
+            $screenW = [System.Windows.SystemParameters]::VirtualScreenWidth
+            $screenH = [System.Windows.SystemParameters]::VirtualScreenHeight
+            $screenX = [System.Windows.SystemParameters]::VirtualScreenLeft
+            $screenY = [System.Windows.SystemParameters]::VirtualScreenTop
+
+            $clampedLeft = [math]::Max($screenX, [math]::Min([double]$wb.Left, $screenX + $screenW - 100))
+            $clampedTop = [math]::Max($screenY, [math]::Min([double]$wb.Top, $screenY + $screenH - 40))
+
+            $window.Left = $clampedLeft
+            $window.Top = $clampedTop
+        }
+    }
+
+    Set-WmtTheme -Theme $settings.Theme
+    if ($settings.WindowState -eq "Maximized") {
+        $window.WindowState = [System.Windows.WindowState]::Maximized
+    }
+
+    # 1. Click the Updates tab by default.
+    (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
+
+    # 2. Warm hidden pages in the background while the Updates scan starts.
+    Start-WmtStartupBackgroundPreload
+
+    # 3. Trigger the background update check.
+    Start-UpdateCheckBackground
+
+    # 3b. Enable periodic update auto scan if configured in Provider settings.
+    if (Get-WmtUpdateNotificationsEnabled -Settings $settings) {
+        [void](Initialize-WmtNativeToastSupport)
+    }
+    Start-WmtUpdateAutoScanTimer -ResetNextRun
+
+    # 4. Update tweak button states based on system.
+    Update-TweakButtonStates
+    Update-MyDeviceResponsiveLayout
+}.GetNewClosure()
+[void]$window.Add_ContentRendered($onMainWindowContentRendered)
+
+$onMainWindowSizeChanged = {
+    Update-MyDeviceResponsiveLayout
+}.GetNewClosure()
+[void]$window.Add_SizeChanged($onMainWindowSizeChanged)
+
+$onMainWindowClosing = {
+    param($windowSender, $closeArgs)
+
+    if (-not $script:WmtAllowFinalClose -and (Get-WmtRunInTrayOnClose)) {
+        try {
+            if (Initialize-WmtTrayIcon -Window $window) {
+                if ($closeArgs) { $closeArgs.Cancel = $true }
+                $script:WmtHiddenToTray = $true
+                $window.ShowInTaskbar = $false
+                $window.Hide()
+                if (Get-WmtReduceRamInTray) {
+                    Invoke-WmtMemoryTrim -Reason "hidden-to-tray"
+                }
+                Show-WmtTrayHiddenBalloon
+                Write-GuiLog "WMT hidden to the system tray. Background update scans will continue. Left-click the tray icon to reopen, or right-click it to exit."
+                return
+            }
+        }
+        catch {
+            Write-GuiLog "Tray close fallback failed: $($_.Exception.Message)"
+        }
+    }
+
+    # Cancel any ongoing scan.
+    if ($script:ActiveScans) {
+        foreach ($task in $script:ActiveScans) {
+            try { $task.PowerShell.Stop() } catch {}
+            try { $task.PowerShell.Dispose() } catch {}
+        }
+        $script:ActiveScans.Clear()
+    }
+    if ($script:ScanTimer) { $script:ScanTimer.Stop() }
+    if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
+    Stop-WmtUpdateAutoScanTimer
+    Remove-WmtTrayIcon
+    Stop-WmtNotificationFallbackTimers
+    if ($script:WingetTimer) { $script:WingetTimer.Stop() }
+    Stop-WmtStartupBackgroundPreload
+    if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
+    if ($script:WingetSourcePreflightRunspace) {
+        try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
+        try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
+    }
+    Stop-FirewallRuleLoad
+    Stop-FirewallDetailLoad
+    Stop-MyDeviceSectionJobs
+    Stop-WmtDnsRunspaces
+    if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
+    if ($script:BitLockerStatusRunspace) {
+        try { $script:BitLockerStatusRunspace.Stop() } catch {}
+        try { $script:BitLockerStatusRunspace.Dispose() } catch {}
+    }
+
+    try {
         $settings = Get-WmtSettings
+        $settings.Theme = $script:CurrentTheme
+        $settings.WindowState = [string]$window.WindowState
 
-        # Restore persisted window geometry/state when valid
-        if ($settings.WindowBounds) {
-            $wb = $settings.WindowBounds
-            if ($wb.Width -ge $window.MinWidth -and $wb.Height -ge $window.MinHeight) {
-                $window.Width = [double]$wb.Width
-                $window.Height = [double]$wb.Height
-            }
-            if (($wb.Left -ne 0 -or $wb.Top -ne 0) -and $settings.WindowState -ne "Maximized") {
-                $screenW = [System.Windows.SystemParameters]::VirtualScreenWidth
-                $screenH = [System.Windows.SystemParameters]::VirtualScreenHeight
-                $screenX = [System.Windows.SystemParameters]::VirtualScreenLeft
-                $screenY = [System.Windows.SystemParameters]::VirtualScreenTop
-            
-                $clampedLeft = [math]::Max($screenX, [math]::Min([double]$wb.Left, $screenX + $screenW - 100))
-                $clampedTop = [math]::Max($screenY, [math]::Min([double]$wb.Top, $screenY + $screenH - 40))
-            
-                $window.Left = $clampedLeft
-                $window.Top = $clampedTop
+        $rb = if ($window.WindowState -eq [System.Windows.WindowState]::Normal) { $null } else { $window.RestoreBounds }
+        if ($rb) {
+            $settings.WindowBounds = @{
+                Top    = [double]$rb.Top
+                Left   = [double]$rb.Left
+                Width  = [double]$rb.Width
+                Height = [double]$rb.Height
             }
         }
-
-        Set-WmtTheme -Theme $settings.Theme
-        if ($settings.WindowState -eq "Maximized") {
-            $window.WindowState = [System.Windows.WindowState]::Maximized
-        }
-
-        # 1. Click the Updates tab by default (This is the fixed line)
-        (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
-
-        # 2. Immediately warm hidden pages in background while the Updates scan starts.
-        Start-WmtStartupBackgroundPreload
-        # 3. Trigger the background update check
-        Start-UpdateCheckBackground
-        # 3b. Enable periodic update auto scan if configured in Provider settings
-        if (Get-WmtUpdateNotificationsEnabled -Settings $settings) { [void](Initialize-WmtNativeToastSupport) }
-        Start-WmtUpdateAutoScanTimer -ResetNextRun
-        # 4. Update tweak button states based on system
-        Update-TweakButtonStates
-        Update-MyDeviceResponsiveLayout
-    })
-
-$window.Add_SizeChanged({ Update-MyDeviceResponsiveLayout })
-
-$window.Add_Closing({
-        param($s, $e)
-
-        if (-not $script:WmtAllowFinalClose -and (Get-WmtRunInTrayOnClose)) {
-            try {
-                if (Initialize-WmtTrayIcon -Window $window) {
-                    if ($e) { $e.Cancel = $true }
-                    $script:WmtHiddenToTray = $true
-                    $window.ShowInTaskbar = $false
-                    $window.Hide()
-                    Show-WmtTrayHiddenBalloon
-                    Write-GuiLog "WMT hidden to the system tray. Background update scans will continue. Left-click the tray icon to reopen, or right-click it to exit."
-                    return
-                }
-            }
-            catch {
-                Write-GuiLog "Tray close fallback failed: $($_.Exception.Message)"
+        else {
+            $settings.WindowBounds = @{
+                Top    = [double]$window.Top
+                Left   = [double]$window.Left
+                Width  = [double]$window.Width
+                Height = [double]$window.Height
             }
         }
+        Save-WmtSettings -Settings $settings
+    }
+    catch {}
+}.GetNewClosure()
+[void]$window.Add_Closing($onMainWindowClosing)
 
-        # Cancel any ongoing scan
-        if ($script:ActiveScans) {
-            foreach ($task in $script:ActiveScans) {
-                try { $task.PowerShell.Stop() } catch {}
-                try { $task.PowerShell.Dispose() } catch {}
-            }
-            $script:ActiveScans.Clear()
-        }
-        if ($script:ScanTimer) { $script:ScanTimer.Stop() }
-        if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() }
-        Stop-WmtUpdateAutoScanTimer
-        Remove-WmtTrayIcon
-        Stop-WmtNotificationFallbackTimers
-        if ($script:WingetTimer) { $script:WingetTimer.Stop() }
-        Stop-WmtStartupBackgroundPreload
-        if ($script:WingetSourcePreflightTimer) { $script:WingetSourcePreflightTimer.Stop() }
-        if ($script:WingetSourcePreflightRunspace) {
-            try { $script:WingetSourcePreflightRunspace.Stop() } catch {}
-            try { $script:WingetSourcePreflightRunspace.Dispose() } catch {}
-        }
-        Stop-FirewallRuleLoad
-        Stop-FirewallDetailLoad
-        Stop-MyDeviceSectionJobs
-        Stop-WmtDnsRunspaces
-        if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
-        if ($script:BitLockerStatusRunspace) {
-            try { $script:BitLockerStatusRunspace.Stop() } catch {}
-            try { $script:BitLockerStatusRunspace.Dispose() } catch {}
-        }
-        try {
-            $settings = Get-WmtSettings
-            $settings.Theme = $script:CurrentTheme
-            $settings.WindowState = [string]$window.WindowState
+$onMainWindowClosed = {
+    try { Remove-WmtTrayIcon } catch {}
+    try { Stop-WmtNotificationFallbackTimers } catch {}
+    try {
+        $app = $script:WmtApplication
+        if (-not $app) { $app = [System.Windows.Application]::Current }
+        if ($app) { $app.Shutdown() }
+    }
+    catch {}
+}.GetNewClosure()
+[void]$window.Add_Closed($onMainWindowClosed)
 
-            $rb = if ($window.WindowState -eq [System.Windows.WindowState]::Normal) { $null } else { $window.RestoreBounds }
-            if ($rb) {
-                $settings.WindowBounds = @{
-                    Top    = [double]$rb.Top
-                    Left   = [double]$rb.Left
-                    Width  = [double]$rb.Width
-                    Height = [double]$rb.Height
-                }
-            }
-            else {
-                $settings.WindowBounds = @{
-                    Top    = [double]$window.Top
-                    Left   = [double]$window.Left
-                    Width  = [double]$window.Width
-                    Height = [double]$window.Height
-                }
-            }
-            Save-WmtSettings -Settings $settings
-        }
-        catch {}
-    })
-
-$window.Add_Closed({
-        try {
-            Remove-WmtTrayIcon
-            Stop-WmtNotificationFallbackTimers
-            $app = $script:WmtApplication
-            if (-not $app) { $app = [System.Windows.Application]::Current }
-            if ($app) { $app.Shutdown() }
-        }
-        catch {}
-    })
-
-# 3. Show the Window
+# Show the Window.
 # Use a real WPF Application message loop instead of ShowDialog().
 # ShowDialog() can unwind after a modal window is hidden, which leaves a stale tray icon that vanishes when clicked.
 try {
