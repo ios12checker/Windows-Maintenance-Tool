@@ -17369,15 +17369,32 @@ function Show-SystemRestoreManager {
 
         $descriptionText = & $toRestoreCellText $Description
         if ([string]::IsNullOrWhiteSpace($descriptionText)) { return }
+
+        $restoreDialog = $null
+        $restoreStatusLabel = $null
+        $restoreCreateButton = $null
+        $restoreRefreshButton = $null
+        try { $restoreDialog = $dialog } catch {}
+        try { $restoreStatusLabel = $lblStatus } catch {}
+        try { $restoreCreateButton = $btnCreate } catch {}
+        try {
+            if ($null -ne $restoreDialog) { $restoreRefreshButton = $restoreDialog.FindName("btnRefresh") }
+        }
+        catch {}
+        try {
+            if ($null -eq $restoreRefreshButton) { $restoreRefreshButton = $btnRefresh }
+        }
+        catch {}
+
         if ($script:WmtRestorePointCreateActive) {
-            Show-WmtMessageBox -Owner $dialog -Message "A restore point is already being created. Please wait for it to finish." -Title "System Restore Manager" -Image Information | Out-Null
+            Show-WmtMessageBox -Owner $restoreDialog -Message "A restore point is already being created. Please wait for it to finish." -Title "System Restore Manager" -Image Information | Out-Null
             return
         }
 
         if ($descriptionText.Length -gt 256) { $descriptionText = $descriptionText.Substring(0, 256) }
         $script:WmtRestorePointCreateActive = $true
-        if ($btnCreate) { $btnCreate.IsEnabled = $false }
-        $lblStatus.Text = "Creating restore point..."
+        if ($null -ne $restoreCreateButton) { $restoreCreateButton.IsEnabled = $false }
+        if ($null -ne $restoreStatusLabel) { $restoreStatusLabel.Text = "Creating restore point..." }
 
         $progressContent = @'
     <Grid Margin="20">
@@ -17399,13 +17416,16 @@ function Show-SystemRestoreManager {
         }
         catch {
             $script:WmtRestorePointCreateActive = $false
-            if ($btnCreate) { $btnCreate.IsEnabled = $true }
-            $lblStatus.Text = "Restore point creation failed to start."
-            Show-WmtMessageBox -Owner $dialog -Message "Could not open the restore point progress window.`n$($_.Exception.Message)" -Title "System Restore Manager" -Image Error | Out-Null
+            if ($null -ne $restoreCreateButton) { $restoreCreateButton.IsEnabled = $true }
+            if ($null -ne $restoreStatusLabel) { $restoreStatusLabel.Text = "Restore point creation failed to start." }
+            Show-WmtMessageBox -Owner $restoreDialog -Message "Could not open the restore point progress window.`n$($_.Exception.Message)" -Title "System Restore Manager" -Image Error | Out-Null
             return
         }
 
-        try { $progressWindow.Owner = $dialog } catch {}
+        try {
+            if ($null -ne $restoreDialog) { $progressWindow.Owner = $restoreDialog }
+        }
+        catch {}
         try { $progressWindow.ShowInTaskbar = $false } catch {}
         $lblCreateDetail = $progressWindow.FindName("lblCreateDetail")
         $btnHideCreate = $progressWindow.FindName("btnHide")
@@ -17552,9 +17572,9 @@ catch {
             try { Remove-Item -LiteralPath $resultPath -Force -ErrorAction SilentlyContinue } catch {}
             try { $progressWindow.Close() } catch {}
             $script:WmtRestorePointCreateActive = $false
-            if ($btnCreate) { $btnCreate.IsEnabled = $true }
-            $lblStatus.Text = "Restore point creation failed to start."
-            Show-WmtMessageBox -Owner $dialog -Message "Failed to start restore point creation.`n$($_.Exception.Message)" -Title "System Restore Manager" -Image Error | Out-Null
+            if ($null -ne $restoreCreateButton) { $restoreCreateButton.IsEnabled = $true }
+            if ($null -ne $restoreStatusLabel) { $restoreStatusLabel.Text = "Restore point creation failed to start." }
+            Show-WmtMessageBox -Owner $restoreDialog -Message "Failed to start restore point creation.`n$($_.Exception.Message)" -Title "System Restore Manager" -Image Error | Out-Null
             return
         }
 
@@ -17589,36 +17609,34 @@ catch {
                     $script:WmtRestorePointCreateActive = $false
                     if ([object]::ReferenceEquals($script:WmtRestorePointCreateTimer, $timer)) { $script:WmtRestorePointCreateTimer = $null }
                     if ([object]::ReferenceEquals($script:WmtRestorePointCreateProcess, $process)) { $script:WmtRestorePointCreateProcess = $null }
-                    if ($btnCreate) { $btnCreate.IsEnabled = $true }
+                    if ($null -ne $restoreCreateButton) { $restoreCreateButton.IsEnabled = $true }
 
                     $messageOwner = $null
-                    try { if ($dialog) { $messageOwner = $dialog } } catch {}
+                    try { if ($null -ne $restoreDialog) { $messageOwner = $restoreDialog } } catch {}
                     if ($result -and [bool]$result.Success) {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$result.Message)) { Write-GuiLog ([string]$result.Message) }
+                        if (-not [string]::IsNullOrWhiteSpace([string]$result.Message)) { try { Write-GuiLog ([string]$result.Message) } catch {} }
                         Show-WmtMessageBox -Owner $messageOwner -Message "Restore point created successfully." -Title "Success" -Image Information | Out-Null
-                        $refreshHandler = $null
-                        try { $refreshHandler = $restoreRefreshState.Handler } catch {}
-                        if ($refreshHandler) {
-                            try { $lblStatus.Text = "Restore point created. Refresh queued..." } catch {}
-                            Write-GuiLog "Queueing restore point list refresh after creation."
-                            $refreshAction = {
-                                try { & $refreshHandler }
-                                catch {
-                                    try { $lblStatus.Text = "Restore point created. Click Refresh to reload the list." } catch {}
-                                    Write-GuiLog "Queued restore point refresh failed: $($_.Exception.Message)"
-                                }
-                            }.GetNewClosure()
+                        try {
+                            if ($null -ne $restoreStatusLabel) { $restoreStatusLabel.Text = "Restore point created. Refreshing list..." }
+                        }
+                        catch {}
+                        if ($null -eq $restoreRefreshButton) {
                             try {
-                                [void]$dialog.Dispatcher.BeginInvoke([System.Action]$refreshAction, [System.Windows.Threading.DispatcherPriority]::Background)
+                                if ($null -ne $restoreDialog) { $restoreRefreshButton = $restoreDialog.FindName("btnRefresh") }
+                            }
+                            catch {}
+                        }
+                        if ($null -ne $restoreRefreshButton) {
+                            try {
+                                Write-GuiLog "Clicking restore point Refresh button after creation."
+                                $restoreRefreshButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
                             }
                             catch {
-                                Write-GuiLog "Dispatcher queue failed for restore point refresh: $($_.Exception.Message)"
-                                & $refreshHandler
+                                try { Write-GuiLog "Restore point Refresh button click failed: $($_.Exception.Message)" } catch {}
                             }
                         }
                         else {
-                            try { $lblStatus.Text = "Restore point created. Click Refresh to reload the list." } catch {}
-                            Write-GuiLog "Restore point was created, but the automatic refresh handler was not ready."
+                            try { Write-GuiLog "Restore point was created, but the Refresh button was not available." } catch {}
                         }
                     }
                     else {
@@ -17638,11 +17656,14 @@ catch {
                     $script:WmtRestorePointCreateActive = $false
                     if ([object]::ReferenceEquals($script:WmtRestorePointCreateTimer, $timer)) { $script:WmtRestorePointCreateTimer = $null }
                     if ([object]::ReferenceEquals($script:WmtRestorePointCreateProcess, $process)) { $script:WmtRestorePointCreateProcess = $null }
-                    if ($btnCreate) { $btnCreate.IsEnabled = $true }
-                    try { $lblStatus.Text = "Restore point creation failed." } catch {}
-                    Write-GuiLog "Restore point completion handler failed: $($_.Exception.Message)"
+                    if ($null -ne $restoreCreateButton) { $restoreCreateButton.IsEnabled = $true }
+                    try {
+                        if ($null -ne $restoreStatusLabel) { $restoreStatusLabel.Text = "Restore point creation failed." }
+                    }
+                    catch {}
+                    try { Write-GuiLog "Restore point completion handler failed: $($_.Exception.Message)" } catch {}
                     $messageOwner = $null
-                    try { if ($dialog -and $dialog.IsVisible) { $messageOwner = $dialog } } catch {}
+                    try { if ($null -ne $restoreDialog -and $restoreDialog.IsVisible) { $messageOwner = $restoreDialog } } catch {}
                     Show-WmtMessageBox -Owner $messageOwner -Message "Restore point creation finished, but WMT could not process the result.`n$($_.Exception.Message)" -Title "System Restore Manager" -Image Error | Out-Null
                 }
             }.GetNewClosure())
@@ -17682,9 +17703,10 @@ catch {
         try {
             $queryResult = & $getRestorePointItems
             $list = @($queryResult.Items | Sort-Object @{ Expression = {
-                            $seqText = & $toRestoreCellText (& $getRestorePointValue $_ @("SequenceNumber", "Sequence"))
-                            try { [int]$seqText } catch { 0 }
-                        }; Descending = $true })
+                        $seqText = & $toRestoreCellText (& $getRestorePointValue $_ @("SequenceNumber", "Sequence"))
+                        try { [int]$seqText } catch { 0 }
+                    }; Descending                                    = $true 
+                })
             $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
             foreach ($rp in $list) {
                 if ($null -eq $rp) { continue }
@@ -17749,7 +17771,18 @@ catch {
                 $lblStatus.Text = "Refreshing restore points... ($($refreshState.Attempt)/$($refreshState.MaxAttempts))"
             }
 
-            & $loadRestorePoints -ShowError:$ShowError
+            if ($btnRefresh) {
+                try {
+                    $btnRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                }
+                catch {
+                    Write-GuiLog "Restore point Refresh button click failed: $($_.Exception.Message)"
+                    & $loadRestorePoints -ShowError:$ShowError
+                }
+            }
+            else {
+                & $loadRestorePoints -ShowError:$ShowError
+            }
             return $true
         }.GetNewClosure()
 
