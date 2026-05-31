@@ -9493,36 +9493,161 @@ function Show-RegScanSelection {
 function Show-RegistryCleaner {
     param($ScanResults)
 
-    function ConvertTo-WmtRegistryResultClipboardText {
+    function script:ConvertTo-WmtRegistryResultClipboardText {
         param([object[]]$Rows)
 
-        $lines = New-Object System.Collections.Generic.List[string]
-        [void]$lines.Add("Problem`tAction`tRisk`tConfidence`tDefault`tType`tValueName`tData`tDisplayKey`tRegPath`tNewData`tDetails")
-        foreach ($row in @($Rows)) {
-            if ($null -eq $row) { continue }
-            $values = @(
-                [string]$row.Problem
-                [string]$row.FixAction
-                [string]$row.Risk
-                [string]$row.Confidence
-                [string]$row.DefaultAction
-                [string]$row.Type
-                [string]$row.ValueName
-                [string]$row.Data
-                [string]$row.Key
-                [string]$row.FullPath
-                [string]$row.NewData
-                [string]$row.Details
-            ) | ForEach-Object {
-                $cell = [string]$_
-                $cell = $cell -replace '\r?\n', ' '
-                $cell = $cell -replace "`t", ' '
-                $cell.Trim()
+        $selectedRows = @($Rows | Where-Object { $null -ne $_ })
+        $lines = [System.Collections.Generic.List[string]]::new()
+        [void]$lines.Add("WMT Registry Cleaner Details")
+        [void]$lines.Add("Count: $($selectedRows.Count)")
+        [void]$lines.Add("")
+
+        $index = 1
+        foreach ($row in $selectedRows) {
+            $cleanValue = {
+                param($Value)
+                if ($null -eq $Value) { return "" }
+                $text = [string]$Value
+                $text = $text -replace '\r?\n', ' '
+                $text = $text -replace "`t", ' '
+                return $text.Trim()
             }
-            [void]$lines.Add(($values -join "`t"))
+
+            [void]$lines.Add("$index) $(& $cleanValue $row.Problem)")
+            [void]$lines.Add("   Action: $(& $cleanValue $row.FixAction)")
+            [void]$lines.Add("   Risk: $(& $cleanValue $row.Risk)")
+            [void]$lines.Add("   Confidence: $(& $cleanValue $row.Confidence)")
+            [void]$lines.Add("   Default: $(& $cleanValue $row.DefaultAction)")
+            [void]$lines.Add("   Type: $(& $cleanValue $row.Type)")
+            [void]$lines.Add("   Value: $(& $cleanValue $row.ValueName)")
+            [void]$lines.Add("   Data (Path/Value): $(& $cleanValue $row.Data)")
+            [void]$lines.Add("   Display Key: $(& $cleanValue $row.Key)")
+            [void]$lines.Add("   Exact Registry Path: $(& $cleanValue $row.FullPath)")
+            if (-not [string]::IsNullOrWhiteSpace([string]$row.NewData)) {
+                [void]$lines.Add("   New Data: $(& $cleanValue $row.NewData)")
+            }
+            [void]$lines.Add("   Why Flagged: $(& $cleanValue $row.Details)")
+            [void]$lines.Add("")
+            $index++
         }
 
         return ($lines -join [Environment]::NewLine)
+    }
+
+    function script:ConvertTo-WmtRegeditPath {
+        param([string]$RegistryPath)
+
+        if ([string]::IsNullOrWhiteSpace($RegistryPath)) { return $null }
+        $normalized = ([string]$RegistryPath).Trim()
+        $normalized = $normalized -replace '/', '\'
+        $normalized = $normalized -replace '^Microsoft\.PowerShell\.Core\\Registry::', ''
+        $normalized = $normalized.TrimEnd('\')
+
+        if ($normalized -match '^(?i)(HKEY_LOCAL_MACHINE|HKEY_CURRENT_USER|HKEY_CLASSES_ROOT|HKEY_USERS|HKEY_CURRENT_CONFIG)(\\.*)?$') {
+            return $normalized
+        }
+        if ($normalized -match '^(?i)HKLM:\\?(?<Rest>.*)$') {
+            return "HKEY_LOCAL_MACHINE\$($Matches.Rest.TrimStart('\'))".TrimEnd('\')
+        }
+        if ($normalized -match '^(?i)HKCU:\\?(?<Rest>.*)$') {
+            return "HKEY_CURRENT_USER\$($Matches.Rest.TrimStart('\'))".TrimEnd('\')
+        }
+        if ($normalized -match '^(?i)HKCR:\\?(?<Rest>.*)$') {
+            return "HKEY_CLASSES_ROOT\$($Matches.Rest.TrimStart('\'))".TrimEnd('\')
+        }
+        if ($normalized -match '^(?i)HKU:\\?(?<Rest>.*)$') {
+            return "HKEY_USERS\$($Matches.Rest.TrimStart('\'))".TrimEnd('\')
+        }
+        if ($normalized -match '^(?i)HKCC:\\?(?<Rest>.*)$') {
+            return "HKEY_CURRENT_CONFIG\$($Matches.Rest.TrimStart('\'))".TrimEnd('\')
+        }
+
+        return $normalized
+    }
+
+    function script:Open-WmtRegistryPathInRegedit {
+        param([string]$RegistryPath)
+
+        $regeditPath = ConvertTo-WmtRegeditPath -RegistryPath $RegistryPath
+        if ([string]::IsNullOrWhiteSpace($regeditPath)) {
+            [System.Windows.MessageBox]::Show("No registry path is available for the selected result.", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+            return $false
+        }
+
+        try {
+            $regeditStatePath = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit'
+            if (-not (Test-Path -LiteralPath $regeditStatePath)) {
+                [void](New-Item -Path $regeditStatePath -Force)
+            }
+            Set-ItemProperty -LiteralPath $regeditStatePath -Name LastKey -Value $regeditPath -Force
+            Start-Process -FilePath "regedit.exe" | Out-Null
+            return $true
+        }
+        catch {
+            [System.Windows.MessageBox]::Show("Could not open Regedit to:`n$regeditPath`n`n$($_.Exception.Message)", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            return $false
+        }
+    }
+
+    function script:Get-WmtVisualParentOfType {
+        param(
+            [object]$Source,
+            [type]$TargetType
+        )
+
+        if ($null -eq $Source -or $null -eq $TargetType) { return $null }
+
+        $current = $Source
+        while ($null -ne $current) {
+            try {
+                if ($TargetType.IsInstanceOfType($current)) { return $current }
+            }
+            catch {
+                return $null
+            }
+
+            # VisualTreeHelper.GetParent only accepts DependencyObject instances.
+            # Right-clicks on headers, scrollbars, adorner elements, or text runs can
+            # surface non-visual objects; do not let that bubble into an unhandled WPF
+            # event exception and terminate the script.
+            if (-not ($current -is [System.Windows.DependencyObject])) { return $null }
+
+            try {
+                $current = [System.Windows.Media.VisualTreeHelper]::GetParent([System.Windows.DependencyObject]$current)
+            }
+            catch {
+                return $null
+            }
+        }
+        return $null
+    }
+
+    function script:Select-WmtRegistryGridRowFromOriginalSource {
+        param(
+            [System.Windows.Controls.DataGrid]$Grid,
+            [object]$OriginalSource
+        )
+
+        if ($null -eq $Grid -or $null -eq $OriginalSource) { return $false }
+
+        try {
+            $rowElement = Get-WmtVisualParentOfType -Source $OriginalSource -TargetType ([System.Windows.Controls.DataGridRow])
+            if ($null -eq $rowElement) { return $false }
+
+            if (-not $rowElement.IsSelected) {
+                try { $Grid.SelectedItems.Clear() } catch {}
+                try { $rowElement.IsSelected = $true } catch {}
+            }
+
+            try { $Grid.SelectedItem = $rowElement.Item } catch {}
+            try { $Grid.CurrentItem = $rowElement.Item } catch {}
+            try { [void]$rowElement.Focus() } catch {}
+            return $true
+        }
+        catch {
+            try { Write-GuiLog "Registry result right-click row selection failed: $($_.Exception.Message)" } catch {}
+            return $false
+        }
     }
 
     function Test-WmtRegistryFindingAutoSelected {
@@ -9634,7 +9759,7 @@ function Show-RegistryCleaner {
         <Border Grid.Row="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="14" Margin="0,0,0,12">
             <StackPanel>
                 <TextBlock Name="lblStatus" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-                <TextBlock Text="Review checked findings before fixing. Missing-file COM server entries are selected by default unless WMT classifies them as protected/merged Microsoft COM registrations. Press Enter to check highlighted rows. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBlock Text="Review checked findings before fixing. Missing-file COM server entries are selected by default unless WMT classifies them as protected/merged Microsoft COM registrations. Press Enter to check highlighted rows. Right-click a row to open its key in Regedit or copy details. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
             </StackPanel>
         </Border>
 
@@ -9741,7 +9866,128 @@ function Show-RegistryCleaner {
     )
     $dg.ItemsSource = $registryRows
 
-    function Set-WmtRegistryHighlightedRowsChecked {
+    $registryContextMenu = [System.Windows.Controls.ContextMenu]::new()
+    try { Set-WmtContextMenuChrome -ContextMenu $registryContextMenu } catch {}
+
+    $mniOpenRegedit = [System.Windows.Controls.MenuItem]::new()
+    $mniOpenRegedit.Header = "Open in Regedit"
+    $mniOpenRegedit.Add_Click({
+            try {
+                $row = $dg.SelectedItem
+                if ($null -eq $row -and $dg.CurrentItem) { $row = $dg.CurrentItem }
+                if ($null -eq $row) { return }
+                [void](Open-WmtRegistryPathInRegedit -RegistryPath ([string]$row.FullPath))
+            }
+            catch {
+                try { Write-GuiLog "Open in Regedit failed: $($_.Exception.Message)" } catch {}
+                [System.Windows.MessageBox]::Show("Could not open the selected registry path:`n$($_.Exception.Message)", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
+            }
+        }.GetNewClosure())
+
+    $mniCopyContextDetails = [System.Windows.Controls.MenuItem]::new()
+    $mniCopyContextDetails.Header = "Copy Selected Details"
+    $mniCopyContextDetails.Add_Click({
+            try {
+                $rowsToCopy = @($dg.SelectedItems | Where-Object { $_ })
+                if ($rowsToCopy.Count -eq 0 -and $dg.CurrentItem) { $rowsToCopy = @($dg.CurrentItem) }
+                if ($rowsToCopy.Count -eq 0) { return }
+                [System.Windows.Clipboard]::SetText((ConvertTo-WmtRegistryResultClipboardText -Rows $rowsToCopy))
+            }
+            catch {
+                try { Write-GuiLog "Copy selected registry details failed: $($_.Exception.Message)" } catch {}
+            }
+        }.GetNewClosure())
+
+    $mniCheckHighlighted = [System.Windows.Controls.MenuItem]::new()
+    $mniCheckHighlighted.Header = "Check Highlighted Rows"
+    $mniCheckHighlighted.Add_Click({
+            try {
+                $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $dg -Checked $true
+                if ($changed -gt 0) {
+                    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                }
+            }
+            catch {
+                try { Write-GuiLog "Check highlighted registry rows failed: $($_.Exception.Message)" } catch {}
+            }
+        }.GetNewClosure())
+
+    [void]$registryContextMenu.Items.Add($mniOpenRegedit)
+    [void]$registryContextMenu.Items.Add($mniCopyContextDetails)
+    [void]$registryContextMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+    [void]$registryContextMenu.Items.Add($mniCheckHighlighted)
+    try { $registryContextMenu.Placement = [System.Windows.Controls.Primitives.PlacementMode]::MousePoint } catch {}
+    $dg.ContextMenu = $registryContextMenu
+
+    function Update-WmtRegistryContextMenuState {
+        param([System.Windows.Controls.DataGrid]$Grid)
+
+        $hasSelection = $false
+        try {
+            $hasSelection = (($null -ne $Grid) -and (($Grid.SelectedItems.Count -gt 0) -or ($null -ne $Grid.CurrentItem)))
+        }
+        catch {
+            $hasSelection = $false
+        }
+
+        try { $mniOpenRegedit.IsEnabled = $hasSelection } catch {}
+        try { $mniCopyContextDetails.IsEnabled = $hasSelection } catch {}
+        try { $mniCheckHighlighted.IsEnabled = $hasSelection } catch {}
+        return $hasSelection
+    }
+
+    $openRegistryContextMenu = {
+        param($gridSender, $mouseArgs)
+
+        try {
+            if ($null -eq $dg -or $null -eq $registryContextMenu) { return }
+
+            # Selection is best-effort only.  Never suppress the menu just because the
+            # click happened on a TextBlock, header, scrollbar, or empty DataGrid area.
+            try {
+                $sourceObject = $null
+                if ($null -ne $mouseArgs) { $sourceObject = $mouseArgs.OriginalSource }
+                if ($null -ne $sourceObject) {
+                    [void](Select-WmtRegistryGridRowFromOriginalSource -Grid $dg -OriginalSource $sourceObject)
+                }
+            }
+            catch {
+                try { Write-GuiLog "Registry result right-click selection ignored: $($_.Exception.Message)" } catch {}
+            }
+
+            [void](Update-WmtRegistryContextMenuState -Grid $dg)
+            try { $registryContextMenu.PlacementTarget = $dg } catch {}
+
+            # Explicitly open the menu.  Some WPF-hosted PowerShell windows do not show a
+            # programmatically assigned ContextMenu reliably from ContextMenuOpening alone.
+            try {
+                $registryContextMenu.IsOpen = $true
+                if ($null -ne $mouseArgs) { $mouseArgs.Handled = $true }
+            }
+            catch {
+                try { Write-GuiLog "Registry result context menu open failed: $($_.Exception.Message)" } catch {}
+            }
+        }
+        catch {
+            try { Write-GuiLog "Registry result context menu failed: $($_.Exception.Message)" } catch {}
+        }
+    }.GetNewClosure()
+
+    $dg.Add_PreviewMouseRightButtonDown($openRegistryContextMenu)
+
+    $dg.Add_ContextMenuOpening({
+            param($gridSender, $menuArgs)
+            try {
+                [void](Update-WmtRegistryContextMenuState -Grid $dg)
+            }
+            catch {
+                # Do not mark Handled here.  Even if state refresh fails, WPF should still
+                # display the menu instead of making right-click look broken.
+                try { Write-GuiLog "Registry result context menu state refresh failed: $($_.Exception.Message)" } catch {}
+            }
+        }.GetNewClosure())
+
+    function script:Set-WmtRegistryHighlightedRowsChecked {
         param(
             [System.Windows.Controls.DataGrid]$Grid,
             [bool]$Checked = $true
@@ -10898,6 +11144,428 @@ function Backup-RegKey {
     catch {}
 }
 
+
+function Start-WmtRegistryCleanupBackground {
+    param(
+        [object[]]$Items,
+        [string]$BackupDirectory
+    )
+
+    if ($script:WmtRegistryCleanupActive) {
+        Show-WmtMessageBox -Message "A registry cleanup is already running in the background. Please wait for it to finish before starting another cleanup." -Title "Registry Cleaner" -Image Information | Out-Null
+        return
+    }
+
+    $selectedItems = @($Items | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.RegPath) })
+    if ($selectedItems.Count -eq 0) { return }
+
+    if ([string]::IsNullOrWhiteSpace($BackupDirectory)) {
+        $BackupDirectory = Join-Path (Get-DataPath) "RegistryBackups"
+    }
+    if (-not (Test-Path -LiteralPath $BackupDirectory -PathType Container -ErrorAction SilentlyContinue)) {
+        New-Item -Path $BackupDirectory -ItemType Directory -Force | Out-Null
+    }
+
+    [xml]$cleanupProgressXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Registry Cleanup Running" Width="620" Height="216" MinWidth="580" MinHeight="200" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="42"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <TextBlock Name="lblTitle" Text="Registry cleanup is running in the background" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+        <TextBlock Name="lblStatus" Grid.Row="1" Margin="0,8,0,8" Text="Starting..." Foreground="{DynamicResource TextSecondary}"
+                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Height="26" MaxHeight="26"
+                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+        <ProgressBar Name="barProgress" Grid.Row="2" Minimum="0" Maximum="100" Height="12" IsIndeterminate="False"/>
+        <Grid Grid.Row="3" Margin="0,18,0,0">
+            <TextBlock Text="You can keep using WMT while this runs." VerticalAlignment="Bottom" HorizontalAlignment="Left" Foreground="{DynamicResource TextSecondary}"/>
+            <Button Name="btnHide" Content="Hide" Width="96" Height="34" HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
+        </Grid>
+    </Grid>
+</Window>
+'@
+
+    $progressWindow = $null
+    $lblStatus = $null
+    $barProgress = $null
+    try {
+        $progressWindow = New-WmtWindowFromFullXaml -Xaml $cleanupProgressXaml
+        $lblStatus = $progressWindow.FindName("lblStatus")
+        $barProgress = $progressWindow.FindName("barProgress")
+        $btnHide = $progressWindow.FindName("btnHide")
+        if ($btnHide) {
+            $btnHide.Add_Click({ try { $progressWindow.Close() } catch {} }.GetNewClosure())
+        }
+        $progressWindow.Show() | Out-Null
+    }
+    catch {
+        Write-GuiLog "Registry cleanup progress window could not open: $($_.Exception.Message)"
+    }
+
+    $cleanupSync = [hashtable]::Synchronized(@{
+            Logs        = [System.Collections.ArrayList]::Synchronized([System.Collections.ArrayList]::new())
+            Status      = "Starting registry cleanup..."
+            Progress    = 0
+            IsCompleted = $false
+            Error       = $null
+            Result      = $null
+        })
+
+    $functionNames = @(
+        "Convert-WmtRegistryPath",
+        "Convert-WmtRegistryPathToRegExePath",
+        "Test-WmtRegistryValueExists",
+        "Remove-WmtRegistryValueNative",
+        "Test-WmtRegistryKeyExistsNative",
+        "Remove-WmtRegistryKeyNative",
+        "Grant-WmtRegistryKeyFullControlNative",
+        "ConvertTo-WmtRegistryDeleteTargetSet",
+        "Set-WmtRegistryValueNative",
+        "Remove-WmtRegistryValueRegExe",
+        "Get-WmtRegExeCandidatePaths",
+        "ConvertTo-WmtComClassParentPath",
+        "ConvertTo-WmtComClassServerSubPath",
+        "Invoke-WmtRegExeDeleteImportFallback",
+        "Add-WmtRegExeTarget",
+        "ConvertTo-WmtRegExeKeyDeleteTargets",
+        "Test-WmtRegExeKeyExists",
+        "Remove-WmtRegistryKeyRegExe",
+        "Remove-RegKeyForced",
+        "Backup-RegKey"
+    )
+
+    $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+    foreach ($fnName in $functionNames) {
+        try {
+            $cmd = Get-Command -Name $fnName -CommandType Function -ErrorAction Stop
+            $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new($fnName, $cmd.Definition))
+        }
+        catch {
+            Write-GuiLog "Registry cleanup background worker missing helper $fnName`: $($_.Exception.Message)"
+        }
+    }
+
+    $runspace = $null
+    $ps = $null
+    try {
+        $runspace = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace($iss)
+        $runspace.ApartmentState = "STA"
+        $runspace.ThreadOptions = "ReuseThread"
+        $runspace.Open()
+        $runspace.SessionStateProxy.SetVariable("CleanupSync", $cleanupSync)
+        $runspace.SessionStateProxy.SetVariable("CleanupItems", $selectedItems)
+        $runspace.SessionStateProxy.SetVariable("CleanupBackupDirectory", $BackupDirectory)
+
+        $workerScript = {
+            Import-Module Microsoft.PowerShell.Management
+            Import-Module Microsoft.PowerShell.Security
+
+            function Add-WmtCleanupWorkerLog {
+                param([string]$Message)
+                if ([string]::IsNullOrWhiteSpace($Message)) { return }
+                try { [void]$CleanupSync.Logs.Add($Message) } catch {}
+            }
+
+            try {
+                $itemsToClean = @($CleanupItems | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.RegPath) })
+                if (-not (Test-Path -LiteralPath $CleanupBackupDirectory -PathType Container -ErrorAction SilentlyContinue)) {
+                    New-Item -Path $CleanupBackupDirectory -ItemType Directory -Force | Out-Null
+                }
+
+                $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                $bkFile = Join-Path $CleanupBackupDirectory ("DeepClean_Backup_{0}.reg" -f $timestamp)
+                $skipLogFile = Join-Path $CleanupBackupDirectory ("DeepClean_Skipped_{0}.log" -f $timestamp)
+                $fixed = 0
+                $skipped = 0
+                $backedUpKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                $backupState = [pscustomobject]@{ Created = $false; Count = 0 }
+                $skipLogState = [pscustomobject]@{ Created = $false }
+
+                $ensureSkippedRegistryLog = {
+                    try {
+                        if (-not $skipLogState.Created) {
+                            Set-Content -Path $skipLogFile -Value @(
+                                "WMT Registry Cleanup skipped/failed item log",
+                                "Started: $(Get-Date -Format o)",
+                                "Only successfully changed registry entries are appended to the .reg backup.",
+                                "No .reg backup is written unless at least one selected item is successfully changed.",
+                                ""
+                            ) -Encoding UTF8
+                            $skipLogState.Created = $true
+                        }
+                    }
+                    catch {}
+                }
+
+                $writeSkippedRegistryLog = {
+                    param($Item, [string]$Reason, [string]$Detail)
+                    try {
+                        & $ensureSkippedRegistryLog
+                        $lines = @(
+                            "[$(Get-Date -Format o)] $Reason",
+                            "Problem: $($Item.Problem)",
+                            "Action: $($Item.Action)",
+                            "Type: $($Item.Type)",
+                            "DisplayKey: $($Item.DisplayKey)",
+                            "RegPath: $($Item.RegPath)",
+                            "ValueName: $($Item.ValueName)",
+                            "Data: $($Item.Data)",
+                            "WhyFlagged: $($Item.WhyFlagged)",
+                            "Detail: $Detail",
+                            ""
+                        )
+                        Add-Content -Path $skipLogFile -Value $lines -Encoding UTF8
+                    }
+                    catch {}
+                }
+
+                $appendVerifiedBackup = {
+                    param([string]$TempBackupFile)
+                    if ([string]::IsNullOrWhiteSpace($TempBackupFile) -or -not (Test-Path -LiteralPath $TempBackupFile -PathType Leaf -ErrorAction SilentlyContinue)) { return }
+                    try {
+                        $content = Get-Content -LiteralPath $TempBackupFile -Raw -Encoding Unicode
+                        $content = $content -replace '^\uFEFF?Windows Registry Editor Version 5\.00\r?\n\r?\n', ''
+                        if (-not [string]::IsNullOrWhiteSpace($content)) {
+                            if (-not $backupState.Created) {
+                                Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+                                $backupState.Created = $true
+                            }
+                            Add-Content -Path $bkFile -Value $content -Encoding Unicode
+                            $backupState.Count++
+                        }
+                    }
+                    catch {
+                        try {
+                            & $ensureSkippedRegistryLog
+                            Add-Content -Path $skipLogFile -Value @("[$(Get-Date -Format o)] Backup append failed", "Detail: $($_.Exception.Message)", "") -Encoding UTF8
+                        }
+                        catch {}
+                    }
+                }
+
+                $total = [Math]::Max(1, $itemsToClean.Count)
+                $index = 0
+                Add-WmtCleanupWorkerLog "Registry cleanup started in background. Selected items: $($itemsToClean.Count)"
+
+                foreach ($item in $itemsToClean) {
+                    $index++
+                    $CleanupSync.Progress = [Math]::Min(100, [int](($index - 1) * 100 / $total))
+                    $CleanupSync.Status = "Processing $index of $total`: $($item.DisplayKey)"
+
+                    if ($item.Type -eq "ReviewOnly") {
+                        $skipped++
+                        Add-WmtCleanupWorkerLog "Review only (not changed): $($item.DisplayKey)"
+                        & $writeSkippedRegistryLog $item "ReviewOnly" "Item is informational/review-only and WMT intentionally did not modify it."
+                        continue
+                    }
+
+                    $uid = "$($item.RegPath):$($item.ValueName)"
+                    $itemBackupFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT_RegistryItemBackup_{0}.reg" -f ([guid]::NewGuid().ToString("N")))
+                    $shouldAppendItemBackup = $false
+                    if ($backedUpKeys.Add($uid)) {
+                        Set-Content -Path $itemBackupFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+                        Backup-RegKey -ItemObj $item -FilePath $itemBackupFile
+                        $shouldAppendItemBackup = $true
+                    }
+
+                    if ($item.Type -eq "SetValue") {
+                        Add-WmtCleanupWorkerLog "Updating: $($item.DisplayKey)"
+                    }
+                    else {
+                        Add-WmtCleanupWorkerLog "Removing: $($item.DisplayKey)"
+                    }
+
+                    if ($item.Type -eq "SetValue") {
+                        $success = Set-WmtRegistryValueNative -Path $item.RegPath -ValueName $item.ValueName -ValueData $item.NewData
+                    }
+                    else {
+                        $isKey = ($item.Type -eq "Key")
+                        $success = Remove-RegKeyForced -Path $item.RegPath -IsKey $isKey -ValName $item.ValueName
+                    }
+
+                    if ($success) {
+                        $fixed++
+                        if ($shouldAppendItemBackup) { & $appendVerifiedBackup $itemBackupFile }
+                        if ($item.Type -eq "SetValue") {
+                            Add-WmtCleanupWorkerLog "Updated: $($item.RegPath)\$($item.ValueName)"
+                        }
+                        else {
+                            Add-WmtCleanupWorkerLog "Removed: $($item.RegPath)"
+                        }
+                    }
+                    else {
+                        $skipped++
+                        if ($item.Type -eq "SetValue") {
+                            Add-WmtCleanupWorkerLog "Failed to update: $($item.RegPath)\$($item.ValueName)"
+                            & $writeSkippedRegistryLog $item "Update failed" "The value was still present or could not be verified after SetValue."
+                        }
+                        else {
+                            $deleteFailureDetail = if (-not [string]::IsNullOrWhiteSpace([string]$script:WmtLastRegistryDeleteFailure)) { $script:WmtLastRegistryDeleteFailure } else { "Delete helper returned failure but did not provide a remaining target. Run elevated and check whether another service recreated the key immediately." }
+                            Add-WmtCleanupWorkerLog "Failed to remove: $($item.RegPath) - $deleteFailureDetail"
+                            & $writeSkippedRegistryLog $item "Delete failed" $deleteFailureDetail
+                        }
+                    }
+
+                    Remove-Item -LiteralPath $itemBackupFile -Force -ErrorAction SilentlyContinue
+                    $CleanupSync.Progress = [Math]::Min(100, [int]($index * 100 / $total))
+                }
+
+                if ($backupState.Count -le 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) {
+                    Remove-Item -LiteralPath $bkFile -Force -ErrorAction SilentlyContinue
+                }
+
+                if ($skipLogState.Created -and (Test-Path -LiteralPath $skipLogFile -PathType Leaf -ErrorAction SilentlyContinue)) {
+                    Add-Content -Path $skipLogFile -Value "Finished: $(Get-Date -Format o)`r`nFixed: $fixed`r`nSkipped: $skipped" -Encoding UTF8
+                    if ($backupState.Count -le 0) {
+                        Add-Content -Path $skipLogFile -Value "Backup: not created because no selected registry entries were successfully changed." -Encoding UTF8
+                    }
+                    else {
+                        Add-Content -Path $skipLogFile -Value "Backup: $bkFile" -Encoding UTF8
+                    }
+                }
+
+                $CleanupSync.Progress = 100
+                $CleanupSync.Status = "Registry cleanup complete."
+                $CleanupSync.Result = [pscustomobject]@{
+                    Fixed          = $fixed
+                    Skipped        = $skipped
+                    BackupFile     = if ($backupState.Count -gt 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) { $bkFile } else { $null }
+                    SkippedLogFile = if ($skipLogState.Created -and (Test-Path -LiteralPath $skipLogFile -PathType Leaf -ErrorAction SilentlyContinue)) { $skipLogFile } else { $null }
+                    BackupCount    = $backupState.Count
+                }
+                Add-WmtCleanupWorkerLog "Registry cleanup finished. Fixed: $fixed. Skipped: $skipped."
+            }
+            catch {
+                $CleanupSync.Error = $_.Exception.Message
+                try { [void]$CleanupSync.Logs.Add("Registry cleanup background worker failed: $($_.Exception.Message)") } catch {}
+            }
+            finally {
+                $CleanupSync.IsCompleted = $true
+            }
+        }
+
+        $ps = [PowerShell]::Create()
+        $ps.Runspace = $runspace
+        [void]$ps.AddScript($workerScript)
+        $async = $ps.BeginInvoke()
+        $script:WmtRegistryCleanupActive = $true
+        $script:WmtRegistryCleanupRunspace = $runspace
+        $script:WmtRegistryCleanupPowerShell = $ps
+        $script:WmtRegistryCleanupAsync = $async
+        $script:WmtRegistryCleanupSync = $cleanupSync
+        Write-GuiLog "Registry cleanup started in the background. WMT remains usable."
+    }
+    catch {
+        $script:WmtRegistryCleanupActive = $false
+        try { if ($ps) { $ps.Dispose() } } catch {}
+        try { if ($runspace) { $runspace.Dispose() } } catch {}
+        Write-GuiLog "Registry cleanup failed to start: $($_.Exception.Message)"
+        Show-WmtMessageBox -Message "Registry cleanup failed to start:`n$($_.Exception.Message)" -Title "Registry Cleaner" -Image Error | Out-Null
+        return
+    }
+
+    $lastLogIndex = 0
+    $cleanupTimer = [System.Windows.Threading.DispatcherTimer]::new()
+    $cleanupTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+    $cleanupTimer.Add_Tick({
+            try {
+                while ($lastLogIndex -lt $cleanupSync.Logs.Count) {
+                    Write-GuiLog ([string]$cleanupSync.Logs[$lastLogIndex])
+                    $lastLogIndex++
+                }
+
+                try {
+                    if ($lblStatus) {
+                        $cleanupStatusText = [string]$cleanupSync.Status
+                        $cleanupStatusText = ($cleanupStatusText -replace '[\r\n\t]+', '  ').Trim()
+                        if ($cleanupStatusText.Length -gt 220) { $cleanupStatusText = $cleanupStatusText.Substring(0, 217) + '...' }
+                        $lblStatus.Text = $cleanupStatusText
+                    }
+                    if ($barProgress) { $barProgress.Value = [double]$cleanupSync.Progress }
+                }
+                catch {}
+
+                if (-not $cleanupSync.IsCompleted -and $async -and -not $async.IsCompleted) { return }
+
+                $cleanupTimer.Stop()
+                while ($lastLogIndex -lt $cleanupSync.Logs.Count) {
+                    Write-GuiLog ([string]$cleanupSync.Logs[$lastLogIndex])
+                    $lastLogIndex++
+                }
+
+                try {
+                    if ($ps -and $async) { [void]$ps.EndInvoke($async) }
+                }
+                catch {
+                    if (-not $cleanupSync.Error) { $cleanupSync.Error = $_.Exception.Message }
+                }
+                finally {
+                    try { if ($ps) { $ps.Dispose() } } catch {}
+                    try { if ($runspace) { $runspace.Dispose() } } catch {}
+                    $script:WmtRegistryCleanupActive = $false
+                    if ([object]::ReferenceEquals($script:WmtRegistryCleanupRunspace, $runspace)) { $script:WmtRegistryCleanupRunspace = $null }
+                    if ([object]::ReferenceEquals($script:WmtRegistryCleanupPowerShell, $ps)) { $script:WmtRegistryCleanupPowerShell = $null }
+                    if ([object]::ReferenceEquals($script:WmtRegistryCleanupTimer, $cleanupTimer)) { $script:WmtRegistryCleanupTimer = $null }
+                    if ([object]::ReferenceEquals($script:WmtRegistryCleanupSync, $cleanupSync)) { $script:WmtRegistryCleanupSync = $null }
+                    $script:WmtRegistryCleanupAsync = $null
+                }
+
+                try { if ($progressWindow) { $progressWindow.Close() } } catch {}
+
+                if ($cleanupSync.Error) {
+                    Write-GuiLog "Registry cleanup background worker error: $($cleanupSync.Error)"
+                    Show-WmtMessageBox -Message "Registry cleanup failed:`n$($cleanupSync.Error)" -Title "Registry Cleaner" -Image Error | Out-Null
+                    return
+                }
+
+                $result = $cleanupSync.Result
+                if ($null -eq $result) {
+                    Show-WmtMessageBox -Message "Registry cleanup finished, but no result summary was returned." -Title "Registry Cleaner" -Image Information | Out-Null
+                    return
+                }
+
+                $finalMsg = "Cleanup Complete.`n`nFixed: $($result.Fixed) item(s)"
+                if ([int]$result.Skipped -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$result.SkippedLogFile)) {
+                    $finalMsg += "`nSkipped: $($result.Skipped) (details: $($result.SkippedLogFile))"
+                }
+                elseif ([int]$result.Skipped -gt 0) {
+                    $finalMsg += "`nSkipped: $($result.Skipped)"
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$result.BackupFile)) {
+                    $finalMsg += "`n`nBackup: $($result.BackupFile)"
+                }
+                else {
+                    $finalMsg += "`n`nBackup: not created because nothing was successfully changed."
+                }
+                if (-not [string]::IsNullOrWhiteSpace([string]$result.SkippedLogFile)) {
+                    $finalMsg += "`nSkipped log: $($result.SkippedLogFile)"
+                }
+                Show-WmtMessageBox -Message $finalMsg -Title "Result" -Image Information | Out-Null
+            }
+            catch {
+                try { $cleanupTimer.Stop() } catch {}
+                try { if ($ps) { $ps.Dispose() } } catch {}
+                try { if ($runspace) { $runspace.Dispose() } } catch {}
+                $script:WmtRegistryCleanupActive = $false
+                if ([object]::ReferenceEquals($script:WmtRegistryCleanupRunspace, $runspace)) { $script:WmtRegistryCleanupRunspace = $null }
+                if ([object]::ReferenceEquals($script:WmtRegistryCleanupPowerShell, $ps)) { $script:WmtRegistryCleanupPowerShell = $null }
+                if ([object]::ReferenceEquals($script:WmtRegistryCleanupTimer, $cleanupTimer)) { $script:WmtRegistryCleanupTimer = $null }
+                if ([object]::ReferenceEquals($script:WmtRegistryCleanupSync, $cleanupSync)) { $script:WmtRegistryCleanupSync = $null }
+                $script:WmtRegistryCleanupAsync = $null
+                Write-GuiLog "Registry cleanup completion handler failed: $($_.Exception.Message)"
+            }
+        }.GetNewClosure())
+    $script:WmtRegistryCleanupTimer = $cleanupTimer
+    $cleanupTimer.Start()
+}
+
 function Show-SafetyDialog {
     param($Count)
 
@@ -11064,19 +11732,23 @@ function Invoke-RegistryTask {
         [xml]$registryProgressXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Scanning Registry" Width="520" Height="172" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
+        Title="Scanning Registry" Width="640" Height="218" MinWidth="600" MinHeight="200" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
         FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
     <Grid Margin="20">
         <Grid.RowDefinitions>
+            <RowDefinition Height="56"/>
             <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <TextBlock Name="pLabel" Text="Initializing Background Scan..." Foreground="{DynamicResource TextPrimary}" TextTrimming="CharacterEllipsis"/>
-        <ProgressBar Name="pBar" Grid.Row="1" Minimum="0" Maximum="100" Height="12" Margin="0,16,0,18"/>
-        <Button Name="btnCancelScan" Grid.Row="2" Content="Cancel" Width="100" HorizontalAlignment="Right"/>
+        <TextBlock Name="pLabel" Grid.Row="0" Text="Initializing Background Scan..." Foreground="{DynamicResource TextPrimary}"
+                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Height="46" MaxHeight="46"
+                   VerticalAlignment="Center" ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
+        <ProgressBar Name="pBar" Grid.Row="1" Minimum="0" Maximum="100" Height="12" Margin="0,6,0,0"/>
+        <Grid Grid.Row="2" Margin="0,16,0,0">
+            <Button Name="btnCancelScan" Content="Cancel" Width="100" Height="34" HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
+        </Grid>
     </Grid>
 </Window>
 '@
@@ -13817,7 +14489,10 @@ function Invoke-RegistryTask {
         $timer.Interval = [TimeSpan]::FromMilliseconds(100)
         
         $timer.Add_Tick({
-                $pLabel.Text = $syncHash.Status
+                $statusText = [string]$syncHash.Status
+                $statusText = ($statusText -replace '[\r\n\t]+', '  ').Trim()
+                if ($statusText.Length -gt 220) { $statusText = $statusText.Substring(0, 217) + '...' }
+                $pLabel.Text = $statusText
                 $pBar.Value = $syncHash.Progress
             
                 if ($syncHash.IsCompleted) {
@@ -13868,150 +14543,8 @@ function Invoke-RegistryTask {
                         Invoke-UiCommand { try { Checkpoint-Computer -Description "WMT DeepClean" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop; "Restore Point created." } catch { "Restore Point failed (Disabled?). Continuing..." } } "Creating Restore Point..."
                     }
 
-                    # --- EXECUTE FIX (Main Thread) ---
-                    Invoke-UiCommand {
-                        param($toDelete, $bkDir) 
-                    
-                        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
-                        $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f $timestamp)
-                        $skipLogFile = Join-Path $bkDir ("DeepClean_Skipped_{0}.log" -f $timestamp)
-                        $fixed = 0; $skipped = 0
-                        $backedUpKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                        $backupState = [pscustomobject]@{
-                            Created = $false
-                            Count   = 0
-                        }
-                    
-                        # Do not create the .reg backup up front. It is created lazily only after
-                        # a selected registry item has been successfully changed/deleted and verified.
-                        Set-Content -Path $skipLogFile -Value @("WMT Registry Cleanup skipped/failed item log", "Started: $(Get-Date -Format o)", "Only successfully changed registry entries are appended to the .reg backup.", "No .reg backup is written unless at least one selected item is successfully changed.", "") -Encoding UTF8
-
-                        $writeSkippedRegistryLog = {
-                            param($Item, [string]$Reason, [string]$Detail)
-                            try {
-                                $lines = @(
-                                    "[$(Get-Date -Format o)] $Reason",
-                                    "Problem: $($Item.Problem)",
-                                    "Action: $($Item.Action)",
-                                    "Type: $($Item.Type)",
-                                    "DisplayKey: $($Item.DisplayKey)",
-                                    "RegPath: $($Item.RegPath)",
-                                    "ValueName: $($Item.ValueName)",
-                                    "Data: $($Item.Data)",
-                                    "WhyFlagged: $($Item.WhyFlagged)",
-                                    "Detail: $Detail",
-                                    ""
-                                )
-                                Add-Content -Path $skipLogFile -Value $lines -Encoding UTF8
-                            }
-                            catch {}
-                        }
-
-                        $appendVerifiedBackup = {
-                            param([string]$TempBackupFile)
-                            if ([string]::IsNullOrWhiteSpace($TempBackupFile) -or -not (Test-Path -LiteralPath $TempBackupFile -PathType Leaf -ErrorAction SilentlyContinue)) { return }
-                            try {
-                                $content = Get-Content -LiteralPath $TempBackupFile -Raw -Encoding Unicode
-                                $content = $content -replace '^\uFEFF?Windows Registry Editor Version 5\.00\r?\n\r?\n', ''
-                                if (-not [string]::IsNullOrWhiteSpace($content)) {
-                                    if (-not $backupState.Created) {
-                                        Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
-                                        $backupState.Created = $true
-                                    }
-                                    Add-Content -Path $bkFile -Value $content -Encoding Unicode
-                                    $backupState.Count++
-                                }
-                            }
-                            catch {
-                                try {
-                                    Add-Content -Path $skipLogFile -Value @("[$(Get-Date -Format o)] Backup append failed", "Detail: $($_.Exception.Message)", "") -Encoding UTF8
-                                }
-                                catch {}
-                            }
-                        }
-
-                        foreach ($item in $toDelete) {
-                            if ($item.Type -eq "ReviewOnly") {
-                                $skipped++
-                                Write-GuiLog "Review only (not changed): $($item.DisplayKey)"
-                                & $writeSkippedRegistryLog $item "ReviewOnly" "Item is informational/review-only and WMT intentionally did not modify it."
-                                continue
-                            }
-                            $uid = "$($item.RegPath):$($item.ValueName)"
-                            $itemBackupFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT_RegistryItemBackup_{0}.reg" -f ([guid]::NewGuid().ToString("N")))
-                            $shouldAppendItemBackup = $false
-                            if ($backedUpKeys.Add($uid)) {
-                                Set-Content -Path $itemBackupFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
-                                Backup-RegKey -ItemObj $item -FilePath $itemBackupFile
-                                $shouldAppendItemBackup = $true
-                            }
-                        
-                            if ($item.Type -eq "SetValue") {
-                                Write-GuiLog "Updating: $($item.DisplayKey)"
-                            }
-                            else {
-                                Write-GuiLog "Removing: $($item.DisplayKey)"
-                            }
-                            if ($item.Type -eq "SetValue") {
-                                $success = Set-WmtRegistryValueNative -Path $item.RegPath -ValueName $item.ValueName -ValueData $item.NewData
-                            }
-                            else {
-                                $isKey = ($item.Type -eq "Key")
-                                $success = Remove-RegKeyForced -Path $item.RegPath -IsKey $isKey -ValName $item.ValueName
-                            }
-                        
-                            if ($success) {
-                                $fixed++
-                                if ($shouldAppendItemBackup) { & $appendVerifiedBackup $itemBackupFile }
-                                if ($item.Type -eq "SetValue") {
-                                    Write-GuiLog "Updated: $($item.RegPath)\$($item.ValueName)"
-                                }
-                                else {
-                                    Write-GuiLog "Removed: $($item.RegPath)"
-                                }
-                            }
-                            else {
-                                $skipped++
-                                if ($item.Type -eq "SetValue") {
-                                    Write-GuiLog "Failed to update: $($item.RegPath)\$($item.ValueName)"
-                                    & $writeSkippedRegistryLog $item "Update failed" "The value was still present or could not be verified after SetValue."
-                                }
-                                else {
-                                    $deleteFailureDetail = if (-not [string]::IsNullOrWhiteSpace([string]$script:WmtLastRegistryDeleteFailure)) { $script:WmtLastRegistryDeleteFailure } else { "Delete helper returned failure but did not provide a remaining target. Run elevated and check whether another service recreated the key immediately." }
-                                    Write-GuiLog "Failed to remove: $($item.RegPath) - $deleteFailureDetail"
-                                    & $writeSkippedRegistryLog $item "Delete failed" $deleteFailureDetail
-                                }
-                            }
-                            Remove-Item -LiteralPath $itemBackupFile -Force -ErrorAction SilentlyContinue
-                        }
-
-                        if ($backupState.Count -le 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) {
-                            Remove-Item -LiteralPath $bkFile -Force -ErrorAction SilentlyContinue
-                        }
-
-                        Add-Content -Path $skipLogFile -Value "Finished: $(Get-Date -Format o)`r`nFixed: $fixed`r`nSkipped: $skipped" -Encoding UTF8
-                        if ($skipped -eq 0) {
-                            Add-Content -Path $skipLogFile -Value "No skipped/failed items." -Encoding UTF8
-                        }
-                        if ($backupState.Count -le 0) {
-                            Add-Content -Path $skipLogFile -Value "Backup: not created because no selected registry entries were successfully changed." -Encoding UTF8
-                        }
-                        else {
-                            Add-Content -Path $skipLogFile -Value "Backup: $bkFile" -Encoding UTF8
-                        }
-
-                        $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
-                        if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (details: $skipLogFile)" }
-                        if ($backupState.Count -gt 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) {
-                            $finalMsg += "`n`nBackup: $bkFile"
-                        }
-                        else {
-                            $finalMsg += "`n`nBackup: not created because nothing was successfully changed."
-                        }
-                        $finalMsg += "`nSkipped log: $skipLogFile"
-                        Show-WmtMessageBox -Message $finalMsg -Title "Result" -Image Information | Out-Null
-
-                    } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir
+                    # --- EXECUTE FIX (Background Runspace) ---
+                    Start-WmtRegistryCleanupBackground -Items $toDelete -BackupDirectory $bkDir
                 }
             }.GetNewClosure())
 
@@ -29646,6 +30179,12 @@ $onMainWindowClosing = {
     Stop-FirewallDetailLoad
     Stop-MyDeviceSectionJobs
     Stop-WmtDnsRunspaces
+    if ($script:WmtRegistryCleanupTimer) { try { $script:WmtRegistryCleanupTimer.Stop() } catch {}; $script:WmtRegistryCleanupTimer = $null }
+    if ($script:WmtRegistryCleanupPowerShell) { try { $script:WmtRegistryCleanupPowerShell.Stop() } catch {}; try { $script:WmtRegistryCleanupPowerShell.Dispose() } catch {}; $script:WmtRegistryCleanupPowerShell = $null }
+    if ($script:WmtRegistryCleanupRunspace) { try { $script:WmtRegistryCleanupRunspace.Dispose() } catch {}; $script:WmtRegistryCleanupRunspace = $null }
+    $script:WmtRegistryCleanupAsync = $null
+    $script:WmtRegistryCleanupSync = $null
+    $script:WmtRegistryCleanupActive = $false
     if ($script:BitLockerStatusTimer) { $script:BitLockerStatusTimer.Stop() }
     if ($script:BitLockerStatusRunspace) {
         try { $script:BitLockerStatusRunspace.Stop() } catch {}
