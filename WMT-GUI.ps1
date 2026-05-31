@@ -9919,7 +9919,7 @@ function Show-RegistryCleaner {
     try { $registryContextMenu.Placement = [System.Windows.Controls.Primitives.PlacementMode]::MousePoint } catch {}
     $dg.ContextMenu = $registryContextMenu
 
-    function Update-WmtRegistryContextMenuState {
+    $updateRegistryContextMenuState = {
         param([System.Windows.Controls.DataGrid]$Grid)
 
         $hasSelection = $false
@@ -9934,7 +9934,7 @@ function Show-RegistryCleaner {
         try { $mniCopyContextDetails.IsEnabled = $hasSelection } catch {}
         try { $mniCheckHighlighted.IsEnabled = $hasSelection } catch {}
         return $hasSelection
-    }
+    }.GetNewClosure()
 
     $openRegistryContextMenu = {
         param($gridSender, $mouseArgs)
@@ -9955,7 +9955,7 @@ function Show-RegistryCleaner {
                 try { Write-GuiLog "Registry result right-click selection ignored: $($_.Exception.Message)" } catch {}
             }
 
-            [void](Update-WmtRegistryContextMenuState -Grid $dg)
+            [void](& $updateRegistryContextMenuState -Grid $dg)
             try { $registryContextMenu.PlacementTarget = $dg } catch {}
 
             # Explicitly open the menu.  Some WPF-hosted PowerShell windows do not show a
@@ -9978,7 +9978,7 @@ function Show-RegistryCleaner {
     $dg.Add_ContextMenuOpening({
             param($gridSender, $menuArgs)
             try {
-                [void](Update-WmtRegistryContextMenuState -Grid $dg)
+                [void](& $updateRegistryContextMenuState -Grid $dg)
             }
             catch {
                 # Do not mark Handled here.  Even if state refresh fails, WPF should still
