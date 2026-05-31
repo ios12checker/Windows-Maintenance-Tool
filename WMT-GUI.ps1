@@ -4535,7 +4535,7 @@ namespace WmtNotifications {
 function Show-WmtMainWindowFromTray {
     try {
         if (-not $window) { return }
-        $showAction = [Action]{
+        $showAction = [Action] {
             try {
                 if ($window.ShowInTaskbar -eq $false) { $window.ShowInTaskbar = $true }
                 if ($window.Visibility -ne [System.Windows.Visibility]::Visible) { $window.Show() }
@@ -4562,7 +4562,7 @@ function Show-WmtMainWindowFromTray {
 function Invoke-WmtTrayUpdateScan {
     try {
         if (-not $window) { return }
-        $scanAction = [Action]{
+        $scanAction = [Action] {
             try {
                 Show-WmtMainWindowFromTray
                 $updatesTab = Get-Ctrl "btnTabUpdates"
@@ -4593,7 +4593,7 @@ function Invoke-WmtFinalExitFromTray {
     param($Window)
 
     try {
-        $exitAction = [Action]{
+        $exitAction = [Action] {
             try {
                 $script:WmtAllowFinalClose = $true
                 $script:WmtHiddenToTray = $false
@@ -4607,7 +4607,8 @@ function Invoke-WmtFinalExitFromTray {
                     try { $Window.ShowInTaskbar = $true } catch {}
                     try {
                         if ($Window.Visibility -ne [System.Windows.Visibility]::Visible) { $Window.Show() }
-                    } catch {}
+                    }
+                    catch {}
                     try { $Window.Close() }
                     catch { Write-GuiLog "Tray exit window close failed: $($_.Exception.Message)" }
                 }
@@ -9535,6 +9536,7 @@ function Show-RegistryCleaner {
         $type = [string]$Item.Type
         $reviewOnlyPatterns = @(
             '^ActiveX Issue$',
+            '^Protected ActiveX Issue$',
             '^Unused Extension$',
             '^Missing App Path$',
             '^Invalid App Command',
@@ -9632,7 +9634,7 @@ function Show-RegistryCleaner {
         <Border Grid.Row="0" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Padding="14" Margin="0,0,0,12">
             <StackPanel>
                 <TextBlock Name="lblStatus" FontSize="18" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-                <TextBlock Text="Review checked findings before fixing. Missing-file COM server entries are selected by default; press Enter to check all highlighted rows. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
+                <TextBlock Text="Review checked findings before fixing. Missing-file COM server entries are selected by default unless WMT classifies them as protected/merged Microsoft COM registrations. Press Enter to check highlighted rows. Review-only rows are never fixed automatically." Margin="0,4,0,0" Foreground="{DynamicResource TextSecondary}"/>
             </StackPanel>
         </Border>
 
@@ -9811,7 +9813,6 @@ function Show-RegistryCleaner {
     # --- 7. Fix Button Logic ---
     $btnFix.Add_Click({
             $toFix = [System.Collections.Generic.List[object]]::new()
-            $reviewOnlySelected = 0
             try {
                 [void]$dg.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
                 [void]$dg.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
@@ -9819,23 +9820,25 @@ function Show-RegistryCleaner {
             catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
-                    if ($row.Type -eq "ReviewOnly") {
-                        $reviewOnlySelected++
-                        continue
-                    }
                     [void]$toFix.Add([PSCustomObject]@{
-                            RegPath    = $row.FullPath
-                            ValueName  = $row.ValueName
-                            Type       = $row.Type
-                            DisplayKey = $row.Key
-                            NewData    = $row.NewData
+                            Problem       = $row.Problem
+                            Action        = $row.FixAction
+                            Risk          = $row.Risk
+                            Confidence    = $row.Confidence
+                            DefaultAction = $row.DefaultAction
+                            RegPath       = $row.FullPath
+                            ValueName     = $row.ValueName
+                            Type          = $row.Type
+                            DisplayKey    = $row.Key
+                            Data          = $row.Data
+                            WhyFlagged    = $row.Details
+                            NewData       = $row.NewData
                         })
                 }
             }
 
             if ($toFix.Count -eq 0) {
-                $msg = if ($reviewOnlySelected -gt 0) { "Only review-only findings were selected. These cannot be fixed automatically." } else { "No issues selected." }
-                [System.Windows.MessageBox]::Show($msg, "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
+                [System.Windows.MessageBox]::Show("No issues selected.", "Registry Cleaner", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                 return
             }
 
@@ -9862,7 +9865,8 @@ function Test-PathExists {
     )
     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
 
-    $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+    $rawPathText = ([string]$Path).Trim()
+    $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
     $expanded = $expanded -replace '^(?i)\\\?\?\\', ''
     $expanded = $expanded -replace '^(?i)\\\\\?\\', ''
 
@@ -9875,11 +9879,52 @@ function Test-PathExists {
         $expanded = Join-Path (Join-Path $systemRoot "System32") $Matches.SubPath
     }
 
-    if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $true }
+    if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $false }
 
     $probeCandidates = [System.Collections.Generic.List[string]]::new()
     $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    if ($seenCandidates.Add($expanded.Trim())) { [void]$probeCandidates.Add($expanded.Trim()) }
+    $addProbeCandidate = {
+        param([string]$Candidate)
+        if ([string]::IsNullOrWhiteSpace($Candidate)) { return }
+        $candidateText = ([string]$Candidate).Trim()
+        if ($candidateText -match "%.*%" -or $candidateText -match "\$\(.*\)") { return }
+        if ($seenCandidates.Add($candidateText)) { [void]$probeCandidates.Add($candidateText) }
+    }
+    $useDefaultExpandedCandidate = $true
+    if ([Environment]::Is64BitOperatingSystem -and [string]$RegistryView -eq "Registry32") {
+        $commonProgramFilesX86 = [Environment]::GetEnvironmentVariable("CommonProgramFiles(x86)")
+        if (-not [string]::IsNullOrWhiteSpace($commonProgramFilesX86) -and $rawPathText -match '(?i)%CommonProgramFiles%\\(?<Rest>.+)$') {
+            & $addProbeCandidate (Join-Path $commonProgramFilesX86 $Matches.Rest)
+            $useDefaultExpandedCandidate = $false
+        }
+        $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+        if (-not [string]::IsNullOrWhiteSpace($programFilesX86) -and $rawPathText -match '(?i)%ProgramFiles%\\(?<Rest>.+)$') {
+            & $addProbeCandidate (Join-Path $programFilesX86 $Matches.Rest)
+            $useDefaultExpandedCandidate = $false
+        }
+
+        # 32-bit COM values often store REG_EXPAND_SZ like %CommonProgramFiles%.
+        # If another helper expanded it first inside 64-bit PowerShell, it becomes
+        # C:\Program Files\Common Files, even though the 32-bit COM server normally
+        # resolves to C:\Program Files (x86)\Common Files. Probe both forms to avoid
+        # false ActiveX findings for legacy DAO/OLE DB registrations.
+        $commonProgramFiles64 = [Environment]::GetEnvironmentVariable("CommonProgramFiles")
+        if (-not [string]::IsNullOrWhiteSpace($commonProgramFiles64) -and -not [string]::IsNullOrWhiteSpace($commonProgramFilesX86)) {
+            $common64Pattern = "^(?i)$([regex]::Escape($commonProgramFiles64))\\(?<Rest>.+)$"
+            if ($rawPathText -match $common64Pattern -or $expanded -match $common64Pattern) {
+                & $addProbeCandidate (Join-Path $commonProgramFilesX86 $Matches.Rest)
+            }
+        }
+
+        $programFiles64 = [Environment]::GetEnvironmentVariable("ProgramFiles")
+        if (-not [string]::IsNullOrWhiteSpace($programFiles64) -and -not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+            $pf64Pattern = "^(?i)$([regex]::Escape($programFiles64))\\(?<Rest>.+)$"
+            if ($rawPathText -match $pf64Pattern -or $expanded -match $pf64Pattern) {
+                & $addProbeCandidate (Join-Path $programFilesX86 $Matches.Rest)
+            }
+        }
+    }
+    if ($useDefaultExpandedCandidate) { & $addProbeCandidate $expanded }
 
     if ([Environment]::Is64BitOperatingSystem) {
         $system32Pattern = "^(?i)$([regex]::Escape($systemRoot))\\System32\\(?<SubPath>.+)$"
@@ -10030,6 +10075,225 @@ function Remove-WmtRegistryValueNative {
     return $false
 }
 
+function Test-WmtRegistryKeyExistsNative {
+    param(
+        [Microsoft.Win32.RegistryHive]$Hive,
+        $View,
+        [string]$SubPath
+    )
+    if ([string]::IsNullOrWhiteSpace($SubPath)) { return $false }
+
+    $baseKey = $null
+    $key = $null
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($Hive, $View)
+        $key = $baseKey.OpenSubKey($SubPath, $false)
+        return ($null -ne $key)
+    }
+    catch {}
+    finally {
+        if ($key) { $key.Close() }
+        if ($baseKey) { $baseKey.Close() }
+    }
+
+    return $false
+}
+
+function Remove-WmtRegistryKeyNative {
+    param(
+        [Microsoft.Win32.RegistryHive]$Hive,
+        $View,
+        [string]$SubPath
+    )
+    if ([string]::IsNullOrWhiteSpace($SubPath)) { return $false }
+
+    $baseKey = $null
+    try {
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($Hive, $View)
+        $baseKey.DeleteSubKeyTree($SubPath, $false)
+        return (-not (Test-WmtRegistryKeyExistsNative -Hive $Hive -View $View -SubPath $SubPath))
+    }
+    catch {}
+    finally {
+        if ($baseKey) { $baseKey.Close() }
+    }
+
+    return (-not (Test-WmtRegistryKeyExistsNative -Hive $Hive -View $View -SubPath $SubPath))
+}
+
+
+function Grant-WmtRegistryKeyFullControlNative {
+    param(
+        [Microsoft.Win32.RegistryHive]$Hive,
+        $View,
+        [string]$SubPath
+    )
+    if ([string]::IsNullOrWhiteSpace($SubPath)) { return $false }
+
+    $root = $null
+    $changedAny = $false
+    try {
+        $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($Hive, $View)
+        $adminSid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+        $adminAccount = $adminSid.Translate([System.Security.Principal.NTAccount])
+        $rights = [System.Security.AccessControl.RegistryRights]::FullControl
+        $rule = New-Object System.Security.AccessControl.RegistryAccessRule(
+            $adminAccount,
+            $rights,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow
+        )
+        $openRights = [System.Security.AccessControl.RegistryRights]::TakeOwnership -bor `
+            [System.Security.AccessControl.RegistryRights]::ChangePermissions -bor `
+            [System.Security.AccessControl.RegistryRights]::ReadKey -bor `
+            [System.Security.AccessControl.RegistryRights]::WriteKey
+
+        $stack = [System.Collections.Generic.Stack[string]]::new()
+        $stack.Push(([string]$SubPath).TrimStart('\'))
+        $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+        while ($stack.Count -gt 0) {
+            $current = $stack.Pop()
+            if ([string]::IsNullOrWhiteSpace($current) -or -not $seen.Add($current)) { continue }
+
+            $key = $null
+            try {
+                $key = $root.OpenSubKey($current, [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree, $openRights)
+                if (-not $key) { continue }
+
+                try {
+                    $ownerSecurity = $key.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Owner)
+                    $ownerSecurity.SetOwner($adminAccount)
+                    $key.SetAccessControl($ownerSecurity)
+                    $changedAny = $true
+                }
+                catch {}
+
+                try {
+                    $accessSecurity = $key.GetAccessControl([System.Security.AccessControl.AccessControlSections]::Access)
+                    $accessSecurity.SetAccessRule($rule)
+                    $key.SetAccessControl($accessSecurity)
+                    $changedAny = $true
+                }
+                catch {}
+
+                try {
+                    foreach ($childName in @($key.GetSubKeyNames())) {
+                        if (-not [string]::IsNullOrWhiteSpace($childName)) {
+                            $stack.Push("$current\$childName")
+                        }
+                    }
+                }
+                catch {}
+            }
+            catch {}
+            finally {
+                if ($key) { $key.Close() }
+            }
+        }
+    }
+    catch {}
+    finally {
+        if ($root) { $root.Close() }
+    }
+
+    return $changedAny
+}
+
+function ConvertTo-WmtRegistryDeleteTargetSet {
+    param([string]$Path)
+
+    $targets = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $targets }
+
+    $normalized = ([string]$Path).Trim() -replace '^Registry::', '' -replace '^Computer\\', ''
+    $normalized = $normalized -replace '^HKEY_LOCAL_MACHINE\\', 'HKLM:\'
+    $normalized = $normalized -replace '^HKEY_CURRENT_USER\\', 'HKCU:\'
+    $normalized = $normalized -replace '^HKEY_CLASSES_ROOT\\', 'HKCR:\'
+    $normalized = $normalized -replace '^HKEY_USERS\\', 'HKU:\'
+
+    $addProvider = {
+        param([string]$ProviderPath)
+        if ([string]::IsNullOrWhiteSpace($ProviderPath)) { return }
+        $k = "P|$ProviderPath"
+        if ($seen.Add($k)) {
+            [void]$targets.Add([PSCustomObject]@{ Kind = "Provider"; Path = $ProviderPath })
+        }
+    }
+
+    $addNative = {
+        param([Microsoft.Win32.RegistryHive]$Hive, $View, [string]$SubPath, [string]$Label)
+        if ([string]::IsNullOrWhiteSpace($SubPath)) { return }
+        $sub = ([string]$SubPath).TrimStart('\')
+        $k = "N|$Hive|$View|$sub"
+        if ($seen.Add($k)) {
+            [void]$targets.Add([PSCustomObject]@{ Kind = "Native"; Hive = $Hive; View = $View; SubPath = $sub; Label = $Label })
+        }
+    }
+
+    & $addProvider $normalized
+
+    if ($normalized -match '^(?i)HKCR:\\WOW6432Node\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addProvider "HKLM:\SOFTWARE\WOW6432Node\Classes\$rest"
+        & $addProvider "HKLM:\SOFTWARE\Classes\WOW6432Node\$rest"
+        & $addProvider "HKCU:\Software\Classes\WOW6432Node\$rest"
+        & $addNative ([Microsoft.Win32.RegistryHive]::ClassesRoot) ([Microsoft.Win32.RegistryView]::Registry32) $rest "HKCR Registry32"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry32) "SOFTWARE\Classes\$rest" "HKLM Classes Registry32"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry64) "SOFTWARE\WOW6432Node\Classes\$rest" "HKLM physical WOW6432Node Classes"
+        & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Registry32) "Software\Classes\$rest" "HKCU Classes Registry32"
+        & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Registry64) "Software\Classes\WOW6432Node\$rest" "HKCU physical WOW6432Node Classes"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\WOW6432Node\\Classes\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addProvider "HKCR:\WOW6432Node\$rest"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry32) "SOFTWARE\Classes\$rest" "HKLM Classes Registry32"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry64) "SOFTWARE\WOW6432Node\Classes\$rest" "HKLM physical WOW6432Node Classes"
+        & $addNative ([Microsoft.Win32.RegistryHive]::ClassesRoot) ([Microsoft.Win32.RegistryView]::Registry32) $rest "HKCR Registry32"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\Classes\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addProvider "HKCR:\$rest"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry64) "SOFTWARE\Classes\$rest" "HKLM Classes Registry64"
+        & $addNative ([Microsoft.Win32.RegistryHive]::ClassesRoot) ([Microsoft.Win32.RegistryView]::Registry64) $rest "HKCR Registry64"
+    }
+    elseif ($normalized -match '^(?i)HKCR:\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addProvider "HKLM:\SOFTWARE\Classes\$rest"
+        & $addProvider "HKCU:\Software\Classes\$rest"
+        & $addNative ([Microsoft.Win32.RegistryHive]::ClassesRoot) ([Microsoft.Win32.RegistryView]::Default) $rest "HKCR default"
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry64) "SOFTWARE\Classes\$rest" "HKLM Classes Registry64"
+        & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Default) "Software\Classes\$rest" "HKCU Classes default"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Default) $rest "HKLM default"
+        if ([Environment]::Is64BitOperatingSystem) {
+            & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry64) $rest "HKLM Registry64"
+            if ($rest -match '^(?i)SOFTWARE\\WOW6432Node\\(?<WowRest>.+)$') {
+                & $addNative ([Microsoft.Win32.RegistryHive]::LocalMachine) ([Microsoft.Win32.RegistryView]::Registry32) "SOFTWARE\$($Matches.WowRest)" "HKLM Registry32 redirected"
+            }
+        }
+    }
+    elseif ($normalized -match '^(?i)HKCU:\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Default) $rest "HKCU default"
+        if ([Environment]::Is64BitOperatingSystem) {
+            & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Registry64) $rest "HKCU Registry64"
+            if ($rest -match '^(?i)Software\\Classes\\WOW6432Node\\(?<WowRest>.+)$') {
+                & $addNative ([Microsoft.Win32.RegistryHive]::CurrentUser) ([Microsoft.Win32.RegistryView]::Registry32) "Software\Classes\$($Matches.WowRest)" "HKCU Registry32 redirected"
+            }
+        }
+    }
+    elseif ($normalized -match '^(?i)HKU:\\(?<Rest>.+)$') {
+        & $addNative ([Microsoft.Win32.RegistryHive]::Users) ([Microsoft.Win32.RegistryView]::Default) $Matches.Rest "HKU default"
+    }
+
+    return $targets
+}
+
 function Set-WmtRegistryValueNative {
     param(
         [string]$Path,
@@ -10079,101 +10343,516 @@ function Remove-WmtRegistryValueRegExe {
     $regPath = Convert-WmtRegistryPathToRegExePath -Path $Path
     if ([string]::IsNullOrWhiteSpace($regPath)) { return $false }
 
-    try {
-        & reg.exe delete $regPath /v $ValueName /f 2>$null | Out-Null
-        if ($LASTEXITCODE -eq 0 -or -not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName)) { return $true }
+    foreach ($regExe in @(Get-WmtRegExeCandidatePaths)) {
+        try {
+            & $regExe delete $regPath /v $ValueName /f 1>$null 2>$null
+            if ($LASTEXITCODE -eq 0 -or -not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName)) { return $true }
+        }
+        catch {}
     }
-    catch {}
 
     return (-not (Test-WmtRegistryValueExists -Path $Path -ValueName $ValueName))
 }
 
-function Remove-RegKeyForced {
-    param($Path, $IsKey, $ValName)
-    $Path = ([string]$Path).Trim() -replace "^Registry::", "" -replace "^Computer\\", ""
-    if ($Path -match "^HKEY_CLASSES_ROOT") { $Path = $Path -replace "^HKEY_CLASSES_ROOT", "HKCR:" }
-    if ($Path -match "^HKEY_LOCAL_MACHINE") { $Path = $Path -replace "^HKEY_LOCAL_MACHINE", "HKLM:" }
-    if ($Path -match "^HKEY_CURRENT_USER") { $Path = $Path -replace "^HKEY_CURRENT_USER", "HKCU:" }
-    if ($Path -match "^HKEY_USERS") { $Path = $Path -replace "^HKEY_USERS", "HKU:" }
+function Get-WmtRegExeCandidatePaths {
+    $paths = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $windir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    if ([string]::IsNullOrWhiteSpace($windir)) { $windir = $env:WINDIR }
 
-    $realPaths = @()
-    if ($Path -match "^HKLM" -or $Path -match "^HKCU") { $realPaths += $Path }
-    elseif ($Path -match "^HKU:\\(?<SubPath>.*)") { $realPaths += "Registry::HKEY_USERS\$($Matches.SubPath)" }
-    elseif ($Path -match "^HKCR:\\(?<SubPath>.*)") {
-        $sub = $Matches.SubPath
-        if ($sub -match "^(?i)WOW6432Node\\(?<Rest>.+)$") {
-            $wowRest = $Matches.Rest
-            if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$wowRest") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$wowRest" }
-            if (Test-Path "HKLM:\SOFTWARE\Classes\WOW6432Node\$wowRest") { $realPaths += "HKLM:\SOFTWARE\Classes\WOW6432Node\$wowRest" }
-            if (Test-Path "HKCU:\Software\Classes\WOW6432Node\$wowRest") { $realPaths += "HKCU:\Software\Classes\WOW6432Node\$wowRest" }
+    $candidates = @()
+    if (-not [string]::IsNullOrWhiteSpace($windir)) {
+        $candidates += (Join-Path $windir 'Sysnative\reg.exe')
+        $candidates += (Join-Path $windir 'System32\reg.exe')
+        $candidates += (Join-Path $windir 'SysWOW64\reg.exe')
+    }
+    $candidates += 'reg.exe'
+
+    foreach ($candidate in $candidates) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+        if ($candidate -ne 'reg.exe' -and -not (Test-Path -LiteralPath $candidate -PathType Leaf -ErrorAction SilentlyContinue)) { continue }
+        if ($seen.Add($candidate)) { [void]$paths.Add($candidate) }
+    }
+
+    return @($paths)
+}
+
+function ConvertTo-WmtComClassParentPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    $normalized = ([string]$Path).Trim() -replace '^Registry::', '' -replace '^Computer\\', ''
+    $normalized = $normalized -replace '^HKEY_LOCAL_MACHINE\\', 'HKLM:\'
+    $normalized = $normalized -replace '^HKEY_CURRENT_USER\\', 'HKCU:\'
+    $normalized = $normalized -replace '^HKEY_CLASSES_ROOT\\', 'HKCR:\'
+    $normalized = $normalized -replace '^HKEY_USERS\\', 'HKU:\'
+    $normalized = $normalized -replace '\\+$', ''
+
+    $serverPattern = '^(?<Parent>(?:HKLM:\\SOFTWARE\\(?:WOW6432Node\\)?Classes\\CLSID|HKCR:\\(?:WOW6432Node\\)?CLSID|HKCU:\\Software\\Classes\\(?:WOW6432Node\\)?CLSID|HKU:\\[^\\]+\\Software\\Classes\\(?:WOW6432Node\\)?CLSID)\\\{[0-9A-Fa-f-]+\})\\(?:InProcServer32|LocalServer32)$'
+    if ($normalized -match $serverPattern) { return $Matches.Parent }
+
+    return $null
+}
+
+function ConvertTo-WmtComClassServerSubPath {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+
+    $normalized = ([string]$Path).Trim() -replace '^Registry::', '' -replace '^Computer\\', ''
+    $normalized = $normalized -replace '^HKEY_LOCAL_MACHINE\\', 'HKLM:\'
+    $normalized = $normalized -replace '^HKEY_CURRENT_USER\\', 'HKCU:\'
+    $normalized = $normalized -replace '^HKEY_CLASSES_ROOT\\', 'HKCR:\'
+    $normalized = $normalized -replace '^HKEY_USERS\\', 'HKU:\'
+    $normalized = $normalized -replace '\\+$', ''
+
+    if ($normalized -match '^(?<Parent>.+?\\CLSID\\\{[0-9A-Fa-f-]+\})\\(?<Server>InProcServer32|LocalServer32)$') {
+        return [PSCustomObject]@{ ParentPath = $Matches.Parent; ServerPath = $normalized; ServerSubKey = $Matches.Server }
+    }
+
+    return $null
+}
+
+function Invoke-WmtRegExeDeleteImportFallback {
+    param([object[]]$RegTargets)
+    if ($null -eq $RegTargets -or $RegTargets.Count -eq 0) { return $false }
+
+    $deletePaths = [System.Collections.Generic.List[string]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($target in @($RegTargets)) {
+        if ($null -eq $target -or [string]::IsNullOrWhiteSpace([string]$target.RegPath)) { continue }
+        $path = ([string]$target.RegPath).Trim()
+        if ($path -match '^(?i)HKEY_CLASSES_ROOT\\WOW6432Node\\|^HKEY_LOCAL_MACHINE\\SOFTWARE\\WOW6432Node\\|^HKEY_LOCAL_MACHINE\\SOFTWARE\\Classes\\|^HKEY_CURRENT_USER\\Software\\Classes\\|^HKEY_CLASSES_ROOT\\CLSID\\') {
+            if ($seen.Add($path)) { [void]$deletePaths.Add($path) }
         }
-        if (Test-Path "HKLM:\SOFTWARE\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\Classes\$sub" }
-        if (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub") { $realPaths += "HKLM:\SOFTWARE\WOW6432Node\Classes\$sub" }
-        if (Test-Path "HKCU:\Software\Classes\$sub") { $realPaths += "HKCU:\Software\Classes\$sub" }
     }
-    if ($realPaths.Count -eq 0) { $realPaths += $Path }
-    if ($IsKey) {
-        $existingPaths = @($realPaths | Where-Object { Test-Path -LiteralPath $_ -ErrorAction SilentlyContinue })
-        if ($existingPaths.Count -eq 0) { return $true }
-        $realPaths = $existingPaths
+    if ($deletePaths.Count -eq 0) { return $false }
+
+    $tmpFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT_RegDelete_{0}.reg" -f ([guid]::NewGuid().ToString('N')))
+    try {
+        $content = [System.Text.StringBuilder]::new()
+        [void]$content.AppendLine('Windows Registry Editor Version 5.00')
+        [void]$content.AppendLine('')
+        foreach ($path in $deletePaths) {
+            [void]$content.AppendLine("[-$path]")
+            [void]$content.AppendLine('')
+        }
+        [System.IO.File]::WriteAllText($tmpFile, $content.ToString(), [System.Text.Encoding]::Unicode)
+
+        foreach ($regExe in @(Get-WmtRegExeCandidatePaths)) {
+            try { & $regExe import $tmpFile 1>$null 2>$null } catch {}
+        }
+    }
+    catch {}
+    finally {
+        Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
     }
 
-    $globalSuccess = $true
-    $literalValueName = if ($null -ne $ValName) { [System.Management.Automation.WildcardPattern]::Escape([string]$ValName) } else { $ValName }
-    foreach ($targetPath in $realPaths) {
+    return $true
+}
+
+function Add-WmtRegExeTarget {
+    param(
+        [System.Collections.Generic.List[object]]$Targets,
+        [System.Collections.Generic.HashSet[string]]$Seen,
+        [string]$RegPath,
+        [string]$View
+    )
+    if ([string]::IsNullOrWhiteSpace($RegPath)) { return }
+    $cleanPath = ([string]$RegPath).Trim()
+    $cleanView = if ([string]::IsNullOrWhiteSpace($View)) { "" } else { ([string]$View).Trim() }
+    $key = "$cleanPath`0$cleanView"
+    if ($Seen.Add($key)) {
+        [void]$Targets.Add([PSCustomObject]@{ RegPath = $cleanPath; View = $cleanView })
+    }
+}
+
+function ConvertTo-WmtRegExeKeyDeleteTargets {
+    param([string]$Path)
+
+    $targets = [System.Collections.Generic.List[object]]::new()
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $targets }
+
+    $normalized = ([string]$Path).Trim() -replace '^Registry::', '' -replace '^Computer\\', ''
+    $normalized = $normalized -replace '^HKEY_LOCAL_MACHINE\\', 'HKLM:\'
+    $normalized = $normalized -replace '^HKEY_CURRENT_USER\\', 'HKCU:\'
+    $normalized = $normalized -replace '^HKEY_CLASSES_ROOT\\', 'HKCR:\'
+    $normalized = $normalized -replace '^HKEY_USERS\\', 'HKU:\'
+
+    $baseRegPath = Convert-WmtRegistryPathToRegExePath -Path $normalized
+    Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath $baseRegPath -View $null
+
+    if ($normalized -match '^(?i)HKCR:\\WOW6432Node\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Classes\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\WOW6432Node\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CURRENT_USER\Software\Classes\WOW6432Node\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\WOW6432Node\$rest" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\WOW6432Node\\Classes\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Classes\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\WOW6432Node\$rest" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\Classes\\WOW6432Node\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\WOW6432Node\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\Classes\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\WOW6432Node\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\$rest" -View "32"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\Classes\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\Classes\$rest" -View "64"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CLASSES_ROOT\$rest" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\SOFTWARE\\WOW6432Node\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\$rest" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKLM:\\(?<Rest>.+)$') {
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_LOCAL_MACHINE\$($Matches.Rest)" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKCU:\\Software\\Classes\\WOW6432Node\\(?<Rest>.+)$') {
+        $rest = $Matches.Rest
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CURRENT_USER\Software\Classes\$rest" -View "32"
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CURRENT_USER\Software\Classes\WOW6432Node\$rest" -View "64"
+    }
+    elseif ($normalized -match '^(?i)HKCU:\\(?<Rest>.+)$') {
+        Add-WmtRegExeTarget -Targets $targets -Seen $seen -RegPath "HKEY_CURRENT_USER\$($Matches.Rest)" -View $null
+    }
+
+    return $targets
+}
+
+function Test-WmtRegExeKeyExists {
+    param(
+        [string]$RegPath,
+        [string]$View
+    )
+    if ([string]::IsNullOrWhiteSpace($RegPath)) { return $false }
+
+    $regArgs = @('query', $RegPath)
+    if ($View -eq '32') { $regArgs += '/reg:32' }
+    elseif ($View -eq '64') { $regArgs += '/reg:64' }
+
+    foreach ($regExe in @(Get-WmtRegExeCandidatePaths)) {
         try {
-            if ($IsKey) {
-                Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
-            }
-            else {
-                [void](Remove-WmtRegistryValueNative -Path $targetPath -ValueName $ValName)
-                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
-                    try { Remove-ItemProperty -LiteralPath $targetPath -Name $literalValueName -ErrorAction Stop } catch {}
-                }
-                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
-                    throw "Registry value still exists after native removal."
-                }
-            }
-            continue
+            & $regExe @regArgs 1>$null 2>$null
+            if ($LASTEXITCODE -eq 0) { return $true }
         }
         catch {}
+    }
+
+    return $false
+}
+
+function Remove-WmtRegistryKeyRegExe {
+    param(
+        [string]$RegPath,
+        [string]$View
+    )
+    if ([string]::IsNullOrWhiteSpace($RegPath)) { return $false }
+
+    $regArgs = @('delete', $RegPath, '/f')
+    if ($View -eq '32') { $regArgs += '/reg:32' }
+    elseif ($View -eq '64') { $regArgs += '/reg:64' }
+
+    $errors = [System.Collections.Generic.List[string]]::new()
+    foreach ($regExe in @(Get-WmtRegExeCandidatePaths)) {
         try {
-            $sid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
-            $adminUser = $sid.Translate([System.Security.Principal.NTAccount])
-            $rule = New-Object System.Security.AccessControl.RegistryAccessRule($adminUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
-            $UnlockItem = { 
-                param($p) 
-                try { 
-                    $acl = Get-Acl $p; $acl.SetOwner($adminUser); Set-Acl $p $acl -ErrorAction SilentlyContinue; 
-                    $acl = Get-Acl $p; $acl.SetAccessRule($rule); Set-Acl $p $acl -ErrorAction SilentlyContinue 
-                }
-                catch {} 
+            $deleteOutput = (& $regExe @regArgs 2>&1 | Out-String).Trim()
+            $exit = $LASTEXITCODE
+            $stillExistsAfterDelete = Test-WmtRegExeKeyExists -RegPath $RegPath -View $View
+            if ($exit -eq 0 -and -not $stillExistsAfterDelete) { return $true }
+            if ($exit -ne 0 -or $stillExistsAfterDelete -or -not [string]::IsNullOrWhiteSpace($deleteOutput)) {
+                $viewText = if ([string]::IsNullOrWhiteSpace($View)) { 'default' } else { "reg:$View" }
+                $statusText = if ($stillExistsAfterDelete) { 'still-exists-after-delete' } else { 'not-present-after-delete' }
+                [void]$errors.Add("$regExe $viewText exit=$exit status=$statusText output=$deleteOutput")
             }
-            if ($IsKey) { $children = Get-ChildItem -LiteralPath $targetPath -Recurse -ErrorAction SilentlyContinue; foreach ($c in $children) { & $UnlockItem -p $c.PSPath } }
-            & $UnlockItem -p $targetPath
-            if ($IsKey) { Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop }
-            else {
-                [void](Remove-WmtRegistryValueNative -Path $targetPath -ValueName $ValName)
-                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
-                    try { Remove-ItemProperty -LiteralPath $targetPath -Name $literalValueName -ErrorAction Stop } catch {}
+        }
+        catch {
+            $viewText = if ([string]::IsNullOrWhiteSpace($View)) { 'default' } else { "reg:$View" }
+            [void]$errors.Add("$regExe $viewText exception=$($_.Exception.Message)")
+        }
+    }
+
+    if ($errors.Count -gt 0) {
+        $script:WmtLastRegExeDeleteError = ($errors -join ' | ')
+    }
+    return (-not (Test-WmtRegExeKeyExists -RegPath $RegPath -View $View))
+}
+
+function Remove-RegKeyForced {
+    param($Path, $IsKey, $ValName)
+
+    $script:WmtLastRegistryDeleteFailure = $null
+    $script:WmtLastRegExeDeleteError = $null
+
+    $attemptLog = [System.Collections.Generic.List[string]]::new()
+    $AddAttempt = {
+        param([string]$Message)
+        if (-not [string]::IsNullOrWhiteSpace($Message)) { [void]$attemptLog.Add($Message) }
+    }
+    $GetElevationState = {
+        try {
+            $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+            $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+            return [bool]$principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+        }
+        catch { return $false }
+    }
+    $SetDeleteFailure = {
+        param([string]$Reason)
+        $elevated = & $GetElevationState
+        $attemptText = if ($attemptLog.Count -gt 0) { " Attempts: " + (($attemptLog | Select-Object -Unique) -join ' | ') } else { " Attempts: none captured" }
+        $regExeError = if (-not [string]::IsNullOrWhiteSpace([string]$script:WmtLastRegExeDeleteError)) { " reg.exe detail: $script:WmtLastRegExeDeleteError" } else { "" }
+        $elevationHint = if ($elevated) { "Process elevated: True." } else { "Process elevated: False. HKLM/HKCR machine keys usually require Run as administrator." }
+        $script:WmtLastRegistryDeleteFailure = "$Reason $elevationHint$attemptText$regExeError"
+    }
+
+    try {
+        if ([string]::IsNullOrWhiteSpace([string]$Path)) {
+            & $SetDeleteFailure "Registry path was blank, so WMT skipped deletion."
+            return $false
+        }
+
+        $normalizedPath = ([string]$Path).Trim() -replace "^Registry::", "" -replace "^Computer\\", ""
+        $normalizedPath = $normalizedPath -replace "^HKEY_CLASSES_ROOT\\", "HKCR:\\"
+        $normalizedPath = $normalizedPath -replace "^HKEY_LOCAL_MACHINE\\", "HKLM:\\"
+        $normalizedPath = $normalizedPath -replace "^HKEY_CURRENT_USER\\", "HKCU:\\"
+        $normalizedPath = $normalizedPath -replace "^HKEY_USERS\\", "HKU:\\"
+        & $AddAttempt "normalized=$normalizedPath"
+
+        if (-not $IsKey) {
+            $targetPaths = @()
+            foreach ($target in @(ConvertTo-WmtRegistryDeleteTargetSet -Path $normalizedPath)) {
+                if ($target.Kind -eq "Provider" -and -not [string]::IsNullOrWhiteSpace([string]$target.Path)) {
+                    $targetPaths += [string]$target.Path
                 }
-                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
-                    [void](Remove-WmtRegistryValueRegExe -Path $targetPath -ValueName $ValName)
+            }
+            if ($targetPaths.Count -eq 0) { $targetPaths = @($normalizedPath) }
+
+            $globalValueSuccess = $true
+            $literalValueName = if ($null -ne $ValName) { [System.Management.Automation.WildcardPattern]::Escape([string]$ValName) } else { $ValName }
+            foreach ($targetPath in ($targetPaths | Select-Object -Unique)) {
+                & $AddAttempt "value-target=$targetPath value=$ValName"
+                if (-not (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName)) { continue }
+                try {
+                    [void](Remove-WmtRegistryValueNative -Path $targetPath -ValueName $ValName)
+                    if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                        try { Remove-ItemProperty -LiteralPath $targetPath -Name $literalValueName -ErrorAction Stop } catch { & $AddAttempt "Remove-ItemProperty failed: $($_.Exception.Message)" }
+                    }
+                    if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                        [void](Remove-WmtRegistryValueRegExe -Path $targetPath -ValueName $ValName)
+                    }
+                    if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
+                        $globalValueSuccess = $false
+                        & $AddAttempt "value-still-exists=$targetPath value=$ValName"
+                    }
                 }
-                if (Test-WmtRegistryValueExists -Path $targetPath -ValueName $ValName) {
-                    throw "Registry value still exists after forced removal."
+                catch {
+                    $globalValueSuccess = $false
+                    & $AddAttempt "value-delete-exception=$targetPath error=$($_.Exception.Message)"
+                }
+            }
+            if (-not $globalValueSuccess) { & $SetDeleteFailure "Value deletion failed verification." }
+            return $globalValueSuccess
+        }
+
+        $comServerInfo = ConvertTo-WmtComClassServerSubPath -Path $normalizedPath
+        $comClassParentPath = if ($comServerInfo) { [string]$comServerInfo.ParentPath } else { $null }
+        $allowNativeAclUnlock = ($normalizedPath -match '^(?i)(HKLM:\\SOFTWARE\\(WOW6432Node\\)?Classes\\CLSID\\|HKCR:\\(WOW6432Node\\)?CLSID\\)' -or -not [string]::IsNullOrWhiteSpace($comClassParentPath))
+        if (-not [string]::IsNullOrWhiteSpace($comClassParentPath)) {
+            & $AddAttempt "COM server path detected; deleting parent CLSID=$comClassParentPath"
+        }
+
+        $deleteTargets = @()
+        if (-not [string]::IsNullOrWhiteSpace($comClassParentPath)) {
+            $deleteTargets += @(ConvertTo-WmtRegistryDeleteTargetSet -Path $comClassParentPath)
+        }
+        $deleteTargets += @(ConvertTo-WmtRegistryDeleteTargetSet -Path $normalizedPath)
+        if ($deleteTargets.Count -eq 0) {
+            $deleteTargets = @([PSCustomObject]@{ Kind = "Provider"; Path = $normalizedPath })
+        }
+
+        $regExeTargets = @()
+        if (-not [string]::IsNullOrWhiteSpace($comClassParentPath)) { $regExeTargets += @(ConvertTo-WmtRegExeKeyDeleteTargets -Path $comClassParentPath) }
+        $regExeTargets += @(ConvertTo-WmtRegExeKeyDeleteTargets -Path $normalizedPath)
+
+        $DescribeTarget = {
+            param($Target)
+            if ($null -eq $Target) { return "<null>" }
+            if ($Target.Kind -eq "Native") { return "$($Target.Label): $($Target.SubPath)" }
+            return [string]$Target.Path
+        }
+        $TestTargetExists = {
+            param($Target)
+            try {
+                if ($Target.Kind -eq "Native") {
+                    return (Test-WmtRegistryKeyExistsNative -Hive $Target.Hive -View $Target.View -SubPath $Target.SubPath)
+                }
+                return (Test-Path -LiteralPath ([string]$Target.Path) -ErrorAction SilentlyContinue)
+            }
+            catch {
+                & $AddAttempt "exist-check-exception=$(& $DescribeTarget $Target) error=$($_.Exception.Message)"
+                return $false
+            }
+        }
+
+        foreach ($target in @($deleteTargets)) { & $AddAttempt "candidate=$(& $DescribeTarget $target)" }
+        foreach ($target in @($regExeTargets)) {
+            $viewText = if ([string]::IsNullOrWhiteSpace([string]$target.View)) { "default" } else { "reg:$($target.View)" }
+            & $AddAttempt "reg-candidate=$viewText $($target.RegPath)"
+        }
+
+        $UnlockProviderPath = {
+            param([string]$ProviderPath)
+            if ([string]::IsNullOrWhiteSpace($ProviderPath) -or -not (Test-Path -LiteralPath $ProviderPath -ErrorAction SilentlyContinue)) { return }
+            try {
+                $sid = New-Object System.Security.Principal.SecurityIdentifier([System.Security.Principal.WellKnownSidType]::BuiltinAdministratorsSid, $null)
+                $adminUser = $sid.Translate([System.Security.Principal.NTAccount])
+                $rule = New-Object System.Security.AccessControl.RegistryAccessRule($adminUser, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow")
+                $unlockOne = {
+                    param([string]$p)
+                    try {
+                        $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
+                        $acl.SetOwner($adminUser)
+                        Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
+                        $acl = Get-Acl -LiteralPath $p -ErrorAction Stop
+                        $acl.SetAccessRule($rule)
+                        Set-Acl -LiteralPath $p -AclObject $acl -ErrorAction Stop
+                    }
+                    catch { & $AddAttempt "acl-provider-failed=$p error=$($_.Exception.Message)" }
+                }
+                try {
+                    foreach ($child in @(Get-ChildItem -LiteralPath $ProviderPath -Recurse -ErrorAction SilentlyContinue)) {
+                        & $unlockOne ([string]$child.PSPath)
+                    }
+                }
+                catch { & $AddAttempt "acl-enumerate-failed=$ProviderPath error=$($_.Exception.Message)" }
+                & $unlockOne $ProviderPath
+            }
+            catch { & $AddAttempt "acl-provider-wrapper-failed=$ProviderPath error=$($_.Exception.Message)" }
+        }
+
+        $existingTargets = @($deleteTargets | Where-Object { & $TestTargetExists $_ })
+        $existingRegExeTargets = @($regExeTargets | Where-Object { Test-WmtRegExeKeyExists -RegPath $_.RegPath -View $_.View })
+        if ($existingTargets.Count -eq 0 -and $existingRegExeTargets.Count -eq 0) { return $true }
+        & $AddAttempt "existing-provider/native=$($existingTargets.Count) existing-regexe=$($existingRegExeTargets.Count)"
+
+        foreach ($target in $existingTargets) {
+            if ($target.Kind -eq "Provider") { & $UnlockProviderPath ([string]$target.Path) }
+        }
+        if ($allowNativeAclUnlock) {
+            foreach ($target in $existingTargets) {
+                if ($target.Kind -eq "Native") {
+                    try {
+                        $aclChanged = Grant-WmtRegistryKeyFullControlNative -Hive $target.Hive -View $target.View -SubPath $target.SubPath
+                        & $AddAttempt "acl-native=$($target.Label):$($target.SubPath) changed=$aclChanged"
+                    }
+                    catch { & $AddAttempt "acl-native-exception=$($target.Label):$($target.SubPath) error=$($_.Exception.Message)" }
                 }
             }
         }
-        catch { $globalSuccess = $false }
+
+        foreach ($target in $existingTargets) {
+            if (-not (& $TestTargetExists $target)) { continue }
+            try {
+                if ($target.Kind -eq "Native") {
+                    $nativeResult = Remove-WmtRegistryKeyNative -Hive $target.Hive -View $target.View -SubPath $target.SubPath
+                    & $AddAttempt "delete-native=$($target.Label):$($target.SubPath) result=$nativeResult"
+                }
+                else {
+                    Remove-Item -LiteralPath ([string]$target.Path) -Recurse -Force -ErrorAction Stop
+                    & $AddAttempt "delete-provider=$($target.Path) result=True"
+                }
+            }
+            catch {
+                & $AddAttempt "delete-exception=$(& $DescribeTarget $target) error=$($_.Exception.Message)"
+                if ($target.Kind -eq "Provider") {
+                    try {
+                        & $UnlockProviderPath ([string]$target.Path)
+                        Remove-Item -LiteralPath ([string]$target.Path) -Recurse -Force -ErrorAction Stop
+                        & $AddAttempt "delete-provider-retry=$($target.Path) result=True"
+                    }
+                    catch { & $AddAttempt "delete-provider-retry-failed=$($target.Path) error=$($_.Exception.Message)" }
+                }
+            }
+        }
+
+        foreach ($target in $existingTargets) {
+            if ($target.Kind -eq "Native" -and (& $TestTargetExists $target)) {
+                try {
+                    if ($allowNativeAclUnlock) { [void](Grant-WmtRegistryKeyFullControlNative -Hive $target.Hive -View $target.View -SubPath $target.SubPath) }
+                    $nativeRetryResult = Remove-WmtRegistryKeyNative -Hive $target.Hive -View $target.View -SubPath $target.SubPath
+                    & $AddAttempt "delete-native-retry=$($target.Label):$($target.SubPath) result=$nativeRetryResult"
+                }
+                catch { & $AddAttempt "delete-native-retry-exception=$($target.Label):$($target.SubPath) error=$($_.Exception.Message)" }
+            }
+        }
+
+        foreach ($regTarget in $regExeTargets) {
+            try {
+                $viewText = if ([string]::IsNullOrWhiteSpace([string]$regTarget.View)) { "default" } else { "reg:$($regTarget.View)" }
+                if (Test-WmtRegExeKeyExists -RegPath $regTarget.RegPath -View $regTarget.View) {
+                    $regResult = Remove-WmtRegistryKeyRegExe -RegPath $regTarget.RegPath -View $regTarget.View
+                    & $AddAttempt "delete-regexe=$viewText $($regTarget.RegPath) result=$regResult"
+                }
+                else {
+                    & $AddAttempt "delete-regexe-skip-not-found=$viewText $($regTarget.RegPath)"
+                }
+            }
+            catch { & $AddAttempt "delete-regexe-exception=$($regTarget.RegPath) error=$($_.Exception.Message)" }
+        }
+        if ($allowNativeAclUnlock) {
+            try {
+                $importResult = Invoke-WmtRegExeDeleteImportFallback -RegTargets $regExeTargets
+                & $AddAttempt "delete-reg-import-fallback result=$importResult"
+            }
+            catch { & $AddAttempt "delete-reg-import-fallback-exception=$($_.Exception.Message)" }
+        }
+
+        $remainingTargets = @($deleteTargets | Where-Object { & $TestTargetExists $_ })
+        $remainingRegExeTargets = @($regExeTargets | Where-Object { Test-WmtRegExeKeyExists -RegPath $_.RegPath -View $_.View })
+        $success = ($remainingTargets.Count -eq 0 -and $remainingRegExeTargets.Count -eq 0)
+        if (-not $success) {
+            $remainingLabels = @(
+                foreach ($target in $remainingTargets) { & $DescribeTarget $target }
+                foreach ($target in $remainingRegExeTargets) {
+                    $viewText = if ([string]::IsNullOrWhiteSpace([string]$target.View)) { "default" } else { "reg:$($target.View)" }
+                    "reg.exe ${viewText}: $($target.RegPath)"
+                }
+            )
+            $likely = if (-not (& $GetElevationState)) {
+                "Likely cause: WMT is not elevated, so HKLM/HKCR machine keys cannot be deleted."
+            }
+            else {
+                "Likely cause: ACL protection/ownership blocked deletion, or a Windows/Office component recreated the COM registration before verification."
+            }
+            & $SetDeleteFailure "Key still exists after all delete attempts. Remaining target(s): $($remainingLabels -join '; '). $likely"
+        }
+        return $success
     }
-    return $globalSuccess
+    catch {
+        & $AddAttempt "top-level-exception=$($_.Exception.Message)"
+        & $SetDeleteFailure "Registry delete helper crashed before verification."
+        return $false
+    }
 }
 
 function Backup-RegKey {
     param($ItemObj, $FilePath)
     $path = $ItemObj.RegPath; $targetValue = $ItemObj.ValueName; $type = $ItemObj.Type
     if ([string]::IsNullOrWhiteSpace($path)) { return }
+    $comBackupParent = if ($type -eq "Key") { ConvertTo-WmtComClassParentPath -Path $path } else { $null }
+    if (-not [string]::IsNullOrWhiteSpace($comBackupParent)) { $path = $comBackupParent }
     $regKeyPath = Convert-WmtRegistryPathToRegExePath -Path $path
     if ([string]::IsNullOrWhiteSpace($regKeyPath)) { return }
     $providerPath = ([string]$path).Trim() -replace "^Registry::", "" -replace "^Computer\\", ""
@@ -10528,7 +11207,8 @@ function Invoke-RegistryTask {
                     )
                     if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
 
-                    $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+                    $rawPathText = ([string]$Path).Trim()
+                    $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
                     $expanded = $expanded -replace '^(?i)\\\?\?\\', ''
                     $expanded = $expanded -replace '^(?i)\\\\\?\\', ''
 
@@ -10540,14 +11220,55 @@ function Invoke-RegistryTask {
                         $expanded = Join-Path (Join-Path $systemRoot "System32") $Matches.SubPath
                     }
 
-                    if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $true }
+                    if ($expanded -match "%.*%" -or $expanded -match "\$\(.*\)") { return $false }
 
                     $cacheKey = "$([string]$RegistryView)`0$expanded"
                     if ($RegistryPathExistsCache.ContainsKey($cacheKey)) { return $RegistryPathExistsCache[$cacheKey] }
 
                     $probeCandidates = [System.Collections.Generic.List[string]]::new()
                     $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-                    if ($seenCandidates.Add($expanded.Trim())) { [void]$probeCandidates.Add($expanded.Trim()) }
+                    $addProbeCandidate = {
+                        param([string]$Candidate)
+                        if ([string]::IsNullOrWhiteSpace($Candidate)) { return }
+                        $candidateText = ([string]$Candidate).Trim()
+                        if ($candidateText -match "%.*%" -or $candidateText -match "\$\(.*\)") { return }
+                        if ($seenCandidates.Add($candidateText)) { [void]$probeCandidates.Add($candidateText) }
+                    }
+                    $useDefaultExpandedCandidate = $true
+                    if ([Environment]::Is64BitOperatingSystem -and [string]$RegistryView -eq "Registry32") {
+                        $commonProgramFilesX86 = [Environment]::GetEnvironmentVariable("CommonProgramFiles(x86)")
+                        if (-not [string]::IsNullOrWhiteSpace($commonProgramFilesX86) -and $rawPathText -match '(?i)%CommonProgramFiles%\\(?<Rest>.+)$') {
+                            & $addProbeCandidate (Join-Path $commonProgramFilesX86 $Matches.Rest)
+                            $useDefaultExpandedCandidate = $false
+                        }
+                        $programFilesX86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+                        if (-not [string]::IsNullOrWhiteSpace($programFilesX86) -and $rawPathText -match '(?i)%ProgramFiles%\\(?<Rest>.+)$') {
+                            & $addProbeCandidate (Join-Path $programFilesX86 $Matches.Rest)
+                            $useDefaultExpandedCandidate = $false
+                        }
+
+                        # 32-bit COM values often store REG_EXPAND_SZ like %CommonProgramFiles%.
+                        # If another helper expanded it first inside 64-bit PowerShell, it becomes
+                        # C:\Program Files\Common Files, even though the 32-bit COM server normally
+                        # resolves to C:\Program Files (x86)\Common Files. Probe both forms to avoid
+                        # false ActiveX findings for legacy DAO/OLE DB registrations.
+                        $commonProgramFiles64 = [Environment]::GetEnvironmentVariable("CommonProgramFiles")
+                        if (-not [string]::IsNullOrWhiteSpace($commonProgramFiles64) -and -not [string]::IsNullOrWhiteSpace($commonProgramFilesX86)) {
+                            $common64Pattern = "^(?i)$([regex]::Escape($commonProgramFiles64))\\(?<Rest>.+)$"
+                            if ($rawPathText -match $common64Pattern -or $expanded -match $common64Pattern) {
+                                & $addProbeCandidate (Join-Path $commonProgramFilesX86 $Matches.Rest)
+                            }
+                        }
+
+                        $programFiles64 = [Environment]::GetEnvironmentVariable("ProgramFiles")
+                        if (-not [string]::IsNullOrWhiteSpace($programFiles64) -and -not [string]::IsNullOrWhiteSpace($programFilesX86)) {
+                            $pf64Pattern = "^(?i)$([regex]::Escape($programFiles64))\\(?<Rest>.+)$"
+                            if ($rawPathText -match $pf64Pattern -or $expanded -match $pf64Pattern) {
+                                & $addProbeCandidate (Join-Path $programFilesX86 $Matches.Rest)
+                            }
+                        }
+                    }
+                    if ($useDefaultExpandedCandidate) { & $addProbeCandidate $expanded }
 
                     if ([Environment]::Is64BitOperatingSystem) {
                         $system32Pattern = "^(?i)$([regex]::Escape($systemRoot))\\System32\\(?<SubPath>.+)$"
@@ -10670,8 +11391,78 @@ function Invoke-RegistryTask {
                     return $candidate
                 }
 
+                function Get-WmtMalformedComServerCommandIssue {
+                    param(
+                        $RawString,
+                        $RegistryView = $null
+                    )
+                    if ([string]::IsNullOrWhiteSpace($RawString)) { return $null }
+
+                    $rawText = ([string]$RawString).Trim()
+                    if ([string]::IsNullOrWhiteSpace($rawText)) { return $null }
+
+                    $expanded = [Environment]::ExpandEnvironmentVariables($rawText)
+                    $expanded = $expanded -replace '^(?i)\\\?\?\\', ''
+                    $expanded = $expanded -replace '^(?i)\\\\\?\\', ''
+
+                    $systemRoot = [Environment]::GetEnvironmentVariable("SystemRoot")
+                    if ([string]::IsNullOrWhiteSpace($systemRoot)) { $systemRoot = "$env:SystemDrive\Windows" }
+                    if ($expanded -match '^(?i)\\SystemRoot\\(?<SubPath>.+)$') {
+                        $expanded = Join-Path $systemRoot $Matches.SubPath
+                    }
+                    elseif ($expanded -match '^(?i)System32\\(?<SubPath>.+)$') {
+                        $expanded = Join-Path (Join-Path $systemRoot "System32") $Matches.SubPath
+                    }
+
+                    $exePath = $null
+                    $argumentText = $null
+
+                    # Some LocalServer32 registrations are malformed as:
+                    #   C:\Program Files\App\App.exe/Automation
+                    # The executable exists, but the argument is glued directly to the .exe path.
+                    # Older WMT path parsing fell through to the first-space fallback and displayed C:\Program.
+                    if ($expanded -match '^\s*"(?<Path>[^"]+?\.(?:exe|com|bat|cmd))(?<Args>/[^"]+)"\s*$') {
+                        $exePath = $Matches.Path.Trim()
+                        $argumentText = $Matches.Args.Trim()
+                    }
+                    elseif ($expanded -match '^\s*(?<Path>[a-zA-Z]:\\.+?\.(?:exe|com|bat|cmd))(?<Args>/\S.*)$') {
+                        $exePath = $Matches.Path.Trim()
+                        $argumentText = $Matches.Args.Trim()
+                    }
+
+                    if ([string]::IsNullOrWhiteSpace($exePath) -or [string]::IsNullOrWhiteSpace($argumentText)) { return $null }
+
+                    # Keep both the displayed bad command and the rewritten COM command single-line.
+                    # Registry Editor/UI wrapping can make this look like a newline, but the value we write must be:
+                    #   "C:\Path With Spaces\App.exe" /Automation
+                    # not:
+                    #   "C:\Path With Spaces\App.exe"
+                    #   /Automation
+                    $rawCommandSingleLine = (($expanded -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+                    $exePath = (($exePath -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+                    $argumentText = (($argumentText -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+
+                    if ([string]::IsNullOrWhiteSpace($exePath) -or [string]::IsNullOrWhiteSpace($argumentText)) { return $null }
+                    if ($argumentText -notmatch '^/') { return $null }
+                    if ($exePath -notmatch '^(?i)[a-z]:\\') { return $null }
+                    if ($exePath -match '%.*%' -or $exePath -match '\$\(.*\)') { return $null }
+                    if (-not (Test-PathExists -Path $exePath -RegistryView $RegistryView)) { return $null }
+
+                    $fixedCommand = ('"{0}" {1}' -f $exePath, $argumentText).Trim()
+                    $fixedCommand = (($fixedCommand -replace '[\r\n]+', ' ') -replace '\s{2,}', ' ').Trim()
+                    return [PSCustomObject]@{
+                        RawCommand   = $rawCommandSingleLine
+                        ExePath      = $exePath
+                        Arguments    = $argumentText
+                        FixedCommand = $fixedCommand
+                    }
+                }
+
                 function Get-ServiceImageExecutablePath {
-                    param($RawString)
+                    param(
+                        $RawString,
+                        $RegistryView = $null
+                    )
                     if ([string]::IsNullOrWhiteSpace($RawString)) { return $null }
 
                     $cmd = [Environment]::ExpandEnvironmentVariables(([string]$RawString).Trim())
@@ -10691,10 +11482,10 @@ function Invoke-RegistryTask {
                     if ($cmd -match '^\s*"([^"]+)"') {
                         $candidate = $matches[1].Trim()
                     }
-                    elseif (Test-PathExists $cmd) {
+                    elseif (Test-PathExists -Path $cmd -RegistryView $RegistryView) {
                         $candidate = $cmd
                     }
-                    elseif ($cmd -match '^\s*(?<Path>[a-zA-Z]:\\.+?\.(?:exe|com|bat|cmd|sys|dll))(?=$|\s)') {
+                    elseif ($cmd -match '^\s*(?<Path>[a-zA-Z]:\\.+?\.(?:exe|com|bat|cmd|sys|dll))(?=$|[\s/])') {
                         $candidate = $matches.Path.Trim()
                     }
                     elseif ($cmd -match '^\s*(?<Path>[a-zA-Z]:\\[^\s]+)') {
@@ -10920,7 +11711,9 @@ function Invoke-RegistryTask {
 
                     $effectivePath = ([string]$SubPath).TrimStart('\')
                     if ([string]$View -eq "Registry32" -and [Environment]::Is64BitOperatingSystem) {
-                        return "HKCR:\WOW6432Node\$effectivePath"
+                        # Store the real writable backing path, not the merged HKCR\WOW6432Node view.
+                        # HKCR is merged/virtual, and deleting through HKCR\WOW6432Node can fail or hit the wrong view.
+                        return "HKLM:\SOFTWARE\WOW6432Node\Classes\$effectivePath"
                     }
                     if ([string]$View -eq "Registry64") {
                         return "HKLM:\SOFTWARE\Classes\$effectivePath"
@@ -11039,7 +11832,7 @@ function Invoke-RegistryTask {
                                     $serverKey = $clsidKey.OpenSubKey($serverName, $false)
                                     if ($serverKey) {
                                         $rawServer = [string]$serverKey.GetValue($null)
-                                        $serverPath = Get-ServiceImageExecutablePath $rawServer
+                                        $serverPath = Get-ServiceImageExecutablePath -RawString $rawServer -RegistryView $scanView
                                         if ($serverPath -and -not (Test-IsWhitelisted $serverPath) -and -not (Test-IsProtectedWindowsPath $serverPath) -and -not (Test-PathExists -Path $serverPath -RegistryView $scanView)) {
                                             return [PSCustomObject]@{ IsBroken = $true; Data = $serverPath; Details = "Referenced CLSID $normalized ($viewLabel registry view) points to missing COM server $serverPath." }
                                         }
@@ -11292,6 +12085,58 @@ function Invoke-RegistryTask {
                             }
                         }
 
+                        function Get-WmtComServerProtectionClassification {
+                            param(
+                                [string]$CleanServerPath,
+                                [string]$RawServerPath,
+                                [string]$RegPath,
+                                [string]$TargetLabel
+                            )
+
+                            $clean = [string]$CleanServerPath
+                            $raw = [string]$RawServerPath
+                            $reg = [string]$RegPath
+                            $label = [string]$TargetLabel
+
+                            $isMachineClassStore = ($reg -match '^(?i)(HKLM:\\SOFTWARE\\(WOW6432Node\\)?Classes\\CLSID\\|HKCR:\\(WOW6432Node\\)?CLSID\\)') -or ($label -match '(?i)Machine classes|HKCR merged view')
+                            $isMicrosoftSharedCom = ($clean -match '(?i)\\Common Files\\Microsoft Shared\\DAO\\dao360\.dll$') -or `
+                            ($clean -match '(?i)\\Common Files\\System\\Ole DB\\msdaora\.dll$') -or `
+                            ($raw -match '(?i)%CommonProgramFiles%\\(Microsoft Shared\\DAO|System\\Ole DB)\\')
+                            $isWindowsCrossDeviceCom = ($clean -match '(?i)\\ProgramData\\CrossDevice\\CrossDevice\.Streaming\.Source\.dll$') -or `
+                            ($raw -match '(?i)%PROGRAMDATA%\\CrossDevice\\CrossDevice\.Streaming\.Source\.dll')
+
+                            if ($isMachineClassStore -and ($isMicrosoftSharedCom -or $isWindowsCrossDeviceCom)) {
+                                $reason = if ($isWindowsCrossDeviceCom) {
+                                    "Windows CrossDevice machine COM registration. These entries are commonly ACL-protected and may be recreated by Windows components."
+                                }
+                                else {
+                                    "Legacy Microsoft DAO/OLE DB machine COM registration in the merged Classes store. These entries are often Windows/Office shared component registrations, ACL-protected, redirected between 32-bit/64-bit views, or recreated."
+                                }
+                                return [PSCustomObject]@{
+                                    IsProtected = $true
+                                    Reason      = $reason
+                                    Risk        = "Review"
+                                    Confidence  = "Medium"
+                                }
+                            }
+
+                            if ($label -match '(?i)^HKCR merged view' -and $reg -match '(?i)^HKCR:\\WOW6432Node\\CLSID\\') {
+                                return [PSCustomObject]@{
+                                    IsProtected = $true
+                                    Reason      = "HKCR WOW6432Node is a merged/redirected COM view, not a simple writable cleanup location. WMT can report the stale reference, but automatic deletion through this alias has proven unreliable on this system."
+                                    Risk        = "Review"
+                                    Confidence  = "Medium"
+                                }
+                            }
+
+                            return [PSCustomObject]@{
+                                IsProtected = $false
+                                Reason      = ""
+                                Risk        = "Medium"
+                                Confidence  = "High"
+                            }
+                        }
+
                         function Add-WmtMissingComServerFinding {
                             param(
                                 [string]$Clsid,
@@ -11305,7 +12150,30 @@ function Invoke-RegistryTask {
                             if ([string]::IsNullOrWhiteSpace($Clsid) -or [string]::IsNullOrWhiteSpace($RawServerPath)) { return }
                             if (Test-IsWhitelisted $RawServerPath) { return }
 
-                            $cleanServerPath = Get-ServiceImageExecutablePath $RawServerPath
+                            if ($ServerSubKey -eq "LocalServer32") {
+                                $malformedCommand = Get-WmtMalformedComServerCommandIssue -RawString $RawServerPath -RegistryView $RegistryView
+                                if ($malformedCommand) {
+                                    $dedupeMalformedKey = "$Clsid`0$ServerSubKey`0MalformedAttachedArgument`0$($malformedCommand.RawCommand)"
+                                    if (-not $seenComFindings.Add($dedupeMalformedKey)) { return }
+
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Invalid COM LocalServer Command"
+                                            Data       = [string]$malformedCommand.RawCommand
+                                            DisplayKey = "$Clsid (COM EXE, $TargetLabel)"
+                                            RegPath    = $RegPath
+                                            ValueName  = ""
+                                            Type       = "SetValue"
+                                            NewData    = [string]$malformedCommand.FixedCommand
+                                            SafeToFix  = $true
+                                            Risk       = "Low"
+                                            Confidence = "High"
+                                            Details    = "LocalServer32 has an argument attached directly to the executable path. Executable exists: $($malformedCommand.ExePath). WMT will rewrite the default value to: $($malformedCommand.FixedCommand). Registry view/source: $TargetLabel. Raw value: $RawServerPath"
+                                        })
+                                    return
+                                }
+                            }
+
+                            $cleanServerPath = Get-ServiceImageExecutablePath -RawString $RawServerPath -RegistryView $RegistryView
                             if ([string]::IsNullOrWhiteSpace($cleanServerPath)) { $cleanServerPath = Get-RealExePath $RawServerPath }
                             if ([string]::IsNullOrWhiteSpace($cleanServerPath)) { return }
                             if ($cleanServerPath -notmatch '^(?i)[a-z]:\\') { return }
@@ -11317,17 +12185,30 @@ function Invoke-RegistryTask {
                             if (-not $seenComFindings.Add($dedupeKey)) { return }
 
                             $serverKind = if ($ServerSubKey -eq "InProcServer32") { "COM DLL" } else { "COM EXE" }
+                            $protection = Get-WmtComServerProtectionClassification -CleanServerPath $cleanServerPath -RawServerPath $RawServerPath -RegPath $RegPath -TargetLabel $TargetLabel
+                            $isProtectedCom = [bool]$protection.IsProtected
+                            $findingProblem = if ($isProtectedCom) { "Protected ActiveX Issue" } else { "ActiveX Issue" }
+                            $findingType = if ($isProtectedCom) { "ReviewOnly" } else { "Key" }
+                            $findingRisk = if ($isProtectedCom) { [string]$protection.Risk } else { "Medium" }
+                            $findingConfidence = if ($isProtectedCom) { [string]$protection.Confidence } else { "High" }
+                            $findingDetails = if ($isProtectedCom) {
+                                "$serverKind registration points to a missing file, but WMT will not select or delete it automatically because it appears to be a protected/merged Microsoft COM registration. $($protection.Reason) Registry view/source: $TargetLabel. Raw value: $RawServerPath"
+                            }
+                            else {
+                                "$serverKind registration points to a missing file. The target file does not exist and the path is not under a protected Windows folder, so this stale COM server key is selected by default. Registry view/source: $TargetLabel. Raw value: $RawServerPath"
+                            }
+
                             [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                    Problem    = "ActiveX Issue"
+                                    Problem    = $findingProblem
                                     Data       = $cleanServerPath
                                     DisplayKey = "$Clsid ($serverKind, $TargetLabel)"
                                     RegPath    = $RegPath
                                     ValueName  = $null
-                                    Type       = "Key"
-                                    SafeToFix  = $true
-                                    Risk       = "Medium"
-                                    Confidence = "High"
-                                    Details    = "$serverKind registration points to a missing file. The target file does not exist and the path is not under a protected Windows folder, so this stale COM server key is selected by default. Registry view/source: $TargetLabel. Raw value: $RawServerPath"
+                                    Type       = $findingType
+                                    SafeToFix  = (-not $isProtectedCom)
+                                    Risk       = $findingRisk
+                                    Confidence = $findingConfidence
+                                    Details    = $findingDetails
                                 })
                         }
 
@@ -12991,20 +13872,79 @@ function Invoke-RegistryTask {
                     Invoke-UiCommand {
                         param($toDelete, $bkDir) 
                     
-                        $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f (Get-Date -Format "yyyyMMdd_HHmm"))
+                        $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                        $bkFile = Join-Path $bkDir ("DeepClean_Backup_{0}.reg" -f $timestamp)
+                        $skipLogFile = Join-Path $bkDir ("DeepClean_Skipped_{0}.log" -f $timestamp)
                         $fixed = 0; $skipped = 0
                         $backedUpKeys = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $backupState = [pscustomobject]@{
+                            Created = $false
+                            Count   = 0
+                        }
                     
-                        Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+                        # Do not create the .reg backup up front. It is created lazily only after
+                        # a selected registry item has been successfully changed/deleted and verified.
+                        Set-Content -Path $skipLogFile -Value @("WMT Registry Cleanup skipped/failed item log", "Started: $(Get-Date -Format o)", "Only successfully changed registry entries are appended to the .reg backup.", "No .reg backup is written unless at least one selected item is successfully changed.", "") -Encoding UTF8
+
+                        $writeSkippedRegistryLog = {
+                            param($Item, [string]$Reason, [string]$Detail)
+                            try {
+                                $lines = @(
+                                    "[$(Get-Date -Format o)] $Reason",
+                                    "Problem: $($Item.Problem)",
+                                    "Action: $($Item.Action)",
+                                    "Type: $($Item.Type)",
+                                    "DisplayKey: $($Item.DisplayKey)",
+                                    "RegPath: $($Item.RegPath)",
+                                    "ValueName: $($Item.ValueName)",
+                                    "Data: $($Item.Data)",
+                                    "WhyFlagged: $($Item.WhyFlagged)",
+                                    "Detail: $Detail",
+                                    ""
+                                )
+                                Add-Content -Path $skipLogFile -Value $lines -Encoding UTF8
+                            }
+                            catch {}
+                        }
+
+                        $appendVerifiedBackup = {
+                            param([string]$TempBackupFile)
+                            if ([string]::IsNullOrWhiteSpace($TempBackupFile) -or -not (Test-Path -LiteralPath $TempBackupFile -PathType Leaf -ErrorAction SilentlyContinue)) { return }
+                            try {
+                                $content = Get-Content -LiteralPath $TempBackupFile -Raw -Encoding Unicode
+                                $content = $content -replace '^\uFEFF?Windows Registry Editor Version 5\.00\r?\n\r?\n', ''
+                                if (-not [string]::IsNullOrWhiteSpace($content)) {
+                                    if (-not $backupState.Created) {
+                                        Set-Content -Path $bkFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+                                        $backupState.Created = $true
+                                    }
+                                    Add-Content -Path $bkFile -Value $content -Encoding Unicode
+                                    $backupState.Count++
+                                }
+                            }
+                            catch {
+                                try {
+                                    Add-Content -Path $skipLogFile -Value @("[$(Get-Date -Format o)] Backup append failed", "Detail: $($_.Exception.Message)", "") -Encoding UTF8
+                                }
+                                catch {}
+                            }
+                        }
 
                         foreach ($item in $toDelete) {
                             if ($item.Type -eq "ReviewOnly") {
                                 $skipped++
                                 Write-GuiLog "Review only (not changed): $($item.DisplayKey)"
+                                & $writeSkippedRegistryLog $item "ReviewOnly" "Item is informational/review-only and WMT intentionally did not modify it."
                                 continue
                             }
                             $uid = "$($item.RegPath):$($item.ValueName)"
-                            if ($backedUpKeys.Add($uid)) { Backup-RegKey -ItemObj $item -FilePath $bkFile }
+                            $itemBackupFile = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT_RegistryItemBackup_{0}.reg" -f ([guid]::NewGuid().ToString("N")))
+                            $shouldAppendItemBackup = $false
+                            if ($backedUpKeys.Add($uid)) {
+                                Set-Content -Path $itemBackupFile -Value "Windows Registry Editor Version 5.00`r`n`r`n" -Encoding Unicode
+                                Backup-RegKey -ItemObj $item -FilePath $itemBackupFile
+                                $shouldAppendItemBackup = $true
+                            }
                         
                             if ($item.Type -eq "SetValue") {
                                 Write-GuiLog "Updating: $($item.DisplayKey)"
@@ -13022,6 +13962,7 @@ function Invoke-RegistryTask {
                         
                             if ($success) {
                                 $fixed++
+                                if ($shouldAppendItemBackup) { & $appendVerifiedBackup $itemBackupFile }
                                 if ($item.Type -eq "SetValue") {
                                     Write-GuiLog "Updated: $($item.RegPath)\$($item.ValueName)"
                                 }
@@ -13033,16 +13974,41 @@ function Invoke-RegistryTask {
                                 $skipped++
                                 if ($item.Type -eq "SetValue") {
                                     Write-GuiLog "Failed to update: $($item.RegPath)\$($item.ValueName)"
+                                    & $writeSkippedRegistryLog $item "Update failed" "The value was still present or could not be verified after SetValue."
                                 }
                                 else {
-                                    Write-GuiLog "Failed to remove: $($item.RegPath)"
+                                    $deleteFailureDetail = if (-not [string]::IsNullOrWhiteSpace([string]$script:WmtLastRegistryDeleteFailure)) { $script:WmtLastRegistryDeleteFailure } else { "Delete helper returned failure but did not provide a remaining target. Run elevated and check whether another service recreated the key immediately." }
+                                    Write-GuiLog "Failed to remove: $($item.RegPath) - $deleteFailureDetail"
+                                    & $writeSkippedRegistryLog $item "Delete failed" $deleteFailureDetail
                                 }
                             }
+                            Remove-Item -LiteralPath $itemBackupFile -Force -ErrorAction SilentlyContinue
+                        }
+
+                        if ($backupState.Count -le 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) {
+                            Remove-Item -LiteralPath $bkFile -Force -ErrorAction SilentlyContinue
+                        }
+
+                        Add-Content -Path $skipLogFile -Value "Finished: $(Get-Date -Format o)`r`nFixed: $fixed`r`nSkipped: $skipped" -Encoding UTF8
+                        if ($skipped -eq 0) {
+                            Add-Content -Path $skipLogFile -Value "No skipped/failed items." -Encoding UTF8
+                        }
+                        if ($backupState.Count -le 0) {
+                            Add-Content -Path $skipLogFile -Value "Backup: not created because no selected registry entries were successfully changed." -Encoding UTF8
+                        }
+                        else {
+                            Add-Content -Path $skipLogFile -Value "Backup: $bkFile" -Encoding UTF8
                         }
 
                         $finalMsg = "Cleanup Complete.`n`nFixed: $fixed item(s)"
-                        if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (see log for paths that could not be removed)" }
-                        $finalMsg += "`n`nBackup: $bkFile"
+                        if ($skipped -gt 0) { $finalMsg += "`nSkipped: $skipped (details: $skipLogFile)" }
+                        if ($backupState.Count -gt 0 -and (Test-Path -LiteralPath $bkFile -PathType Leaf -ErrorAction SilentlyContinue)) {
+                            $finalMsg += "`n`nBackup: $bkFile"
+                        }
+                        else {
+                            $finalMsg += "`n`nBackup: not created because nothing was successfully changed."
+                        }
+                        $finalMsg += "`nSkipped log: $skipLogFile"
                         Show-WmtMessageBox -Message $finalMsg -Title "Result" -Image Information | Out-Null
 
                     } "Deep Cleaning..." -ArgumentList $toDelete, $bkDir
@@ -21864,7 +22830,8 @@ timeout /t 5
                         param([string]$Path)
                         if ([string]::IsNullOrWhiteSpace($Path)) { return }
                         try {
-                            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+                            $rawPathText = ([string]$Path).Trim()
+                            $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
                             if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) {
                                 [void]$candidates.Add($expanded)
                             }
@@ -23296,7 +24263,8 @@ function Get-WmtSteamExe {
         param([string]$Path)
         if ([string]::IsNullOrWhiteSpace($Path)) { return }
         try {
-            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+            $rawPathText = ([string]$Path).Trim()
+            $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
             if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) { [void]$candidates.Add($expanded) }
         }
         catch {}
@@ -23364,7 +24332,8 @@ function Get-WmtSteamExe {
         param([string]$Path)
         if ([string]::IsNullOrWhiteSpace($Path)) { return }
         try {
-            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+            $rawPathText = ([string]$Path).Trim()
+            $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
             if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) { [void]$candidates.Add($expanded) }
         }
         catch {}
@@ -25524,7 +26493,8 @@ $btnWingetScan.Add_Click({
                         )
 
                         if ([string]::IsNullOrWhiteSpace($Path)) { return }
-                        $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
+                        $rawPathText = ([string]$Path).Trim()
+                        $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
                         $expanded = $expanded -replace '/', '\'
                         $expanded = $expanded -replace '\\\\', '\'
                         try {
