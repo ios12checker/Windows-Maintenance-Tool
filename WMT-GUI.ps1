@@ -22443,9 +22443,6 @@ $Script:StartWingetAction = {
     $script:WingetStoreErrorLogSeen = @{}
     $script:WingetStoreFallbackSeen = @{}
     $script:WingetSteamOpenSeen = @{}
-    $script:WingetActionEventPath = Join-Path $env:TEMP ("WMT_WingetAction_{0}.events" -f ([Guid]::NewGuid().ToString("N")))
-    $script:WingetActionEventLineCount = 0
-    try { Set-Content -Path $script:WingetActionEventPath -Value "" -Encoding UTF8 -Force } catch {}
     if ($pbWingetProgress) {
         $pbWingetProgress.Minimum = 0
         $pbWingetProgress.Maximum = [Math]::Max(1, $totalItems)
@@ -22521,7 +22518,6 @@ $Script:StartWingetAction = {
         ActionName           = $ActionName
         CmdTemplate          = $CmdTemplate
         TempPath             = $env:TEMP
-        EventPath            = $script:WingetActionEventPath
         WingetIncludeUnknown = $wingetIncludeUnknown
         LegendaryExePath     = Get-WmtLegendaryExePath
         GogdlExePath         = Get-WmtGogdlExePath
@@ -22535,7 +22531,6 @@ $Script:StartWingetAction = {
         $act = $ArgsDict.ActionName
         $tmpl = $ArgsDict.CmdTemplate
         $temp = $ArgsDict.TempPath
-        $eventPath = $ArgsDict.EventPath
         $wingetIncludeUnknown = [bool]$ArgsDict.WingetIncludeUnknown
         $legendaryExePath = [string]$ArgsDict.LegendaryExePath
         $gogdlExePath = [string]$ArgsDict.GogdlExePath
@@ -22562,13 +22557,6 @@ $Script:StartWingetAction = {
             "0x80070490" = "Element Not Found"; "0x80072ee7" = "DNS Lookup Fail"; "0x80072f8f" = "SSL Cert Error"
             "0x80073d02" = "Resources Currently In Use"; "-2147009278" = "Resources Currently In Use"; "2147958018" = "Resources Currently In Use"
             "1603" = "Fatal MSI Error"
-        }
-
-        function Write-WmtActionEvent {
-            param([string]$Line)
-
-            if ([string]::IsNullOrWhiteSpace($eventPath) -or [string]::IsNullOrWhiteSpace($Line)) { return }
-            try { Add-Content -Path $eventPath -Value $Line -Encoding UTF8 -Force } catch {}
         }
 
         function Test-WmtStoreUpdateScanPreferredItem {
@@ -22659,7 +22647,6 @@ $Script:StartWingetAction = {
                 $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($json))
                 $fallbackLine = "STORE_FALLBACK:$encoded"
                 Write-Output $fallbackLine
-                Write-WmtActionEvent $fallbackLine
             }
             catch {}
 
@@ -22733,6 +22720,184 @@ $Script:StartWingetAction = {
 
             Invoke-WmtStoreFallbackPage -PackageName $displayName -ActionLabel "Update" -Reason "UpdateScan" -ReasonText $reasonText -StoreUri "ms-windows-store://downloadsandupdates" -WebUri "https://apps.microsoft.com/home"
             return [PSCustomObject]@{ ExitCode = 0; StoreUpdateScan = $scanStarted; StoreUpdatesDelegated = $true }
+        }
+
+        function Invoke-WmtStoreGuiUpdate {
+            param(
+                [string]$PackageName,
+                [int]$TimeoutSeconds = 300,
+                [ref]$Result
+            )
+
+            $Result.Value = $null
+            $displayName = ([string]$PackageName).Trim()
+            if ([string]::IsNullOrWhiteSpace($displayName)) {
+                $Result.Value = [PSCustomObject]@{ ExitCode = 1; Message = "Package name is blank." }
+                return
+            }
+
+            try {
+                Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+                Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+            }
+            catch {
+                Write-Output "LOG:[Store GUI] UI Automation is unavailable: $($_.Exception.Message)"
+                $Result.Value = [PSCustomObject]@{ ExitCode = 1; Message = "UI Automation is unavailable." }
+                return
+            }
+
+            try { Start-Process "ms-windows-store://downloadsandupdates" -ErrorAction SilentlyContinue } catch {}
+
+            $deadline = (Get-Date).AddSeconds([Math]::Max(30, $TimeoutSeconds))
+            $startedAt = Get-Date
+            $invoked = $false
+            $checkForUpdatesInvoked = $false
+            $lastStatus = ""
+            $storeWindowMissingSince = $null
+            $titleNameCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::NameProperty, $displayName)
+            $titleIdCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "ProductTitle")
+            $titleCondition = New-Object System.Windows.Automation.AndCondition($titleNameCondition, $titleIdCondition)
+            $actionButtonCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "ActionButton")
+            $checkButtonCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "CheckForUpdatesButton")
+            $root = [System.Windows.Automation.AutomationElement]::RootElement
+
+            while ((Get-Date) -lt $deadline) {
+                $storeWindow = @(
+                    $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) |
+                        Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
+                ) | Select-Object -First 1
+
+                if (-not $storeWindow) {
+                    if (-not $storeWindowMissingSince) { $storeWindowMissingSince = Get-Date }
+                    if (((Get-Date) - $storeWindowMissingSince).TotalSeconds -ge 20) {
+                        Write-Output "LOG:[Store GUI] Microsoft Store window was unavailable for 20 seconds."
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 1; Message = "Microsoft Store window is unavailable." }
+                        return
+                    }
+                    Start-Sleep -Milliseconds 500
+                    continue
+                }
+                $storeWindowMissingSince = $null
+
+                $rows = New-Object System.Collections.Generic.List[object]
+                foreach ($title in @($storeWindow.FindAll([System.Windows.Automation.TreeScope]::Descendants, $titleCondition))) {
+                    try {
+                        $row = [System.Windows.Automation.TreeWalker]::ControlViewWalker.GetParent($title)
+                        if ($row -and $row.Current.ControlType -eq [System.Windows.Automation.ControlType]::Custom) {
+                            [void]$rows.Add($row)
+                        }
+                    }
+                    catch {}
+                }
+
+                $updateRow = @($rows | Where-Object { ([string]$_.Current.Name) -match '(?i),\s*Update available\b' } | Select-Object -First 1)
+                $activeRow = @($rows | Where-Object { ([string]$_.Current.Name) -match '(?i),\s*(Downloading|Installing|Pending|Queued|Starting|Acquiring|Processing|Updating|Downloaded)\b' } | Select-Object -First 1)
+                $finishedRow = @($rows | Where-Object { ([string]$_.Current.Name) -match '(?i),\s*(Modified moments ago|Updated|Installed)\b' } | Select-Object -First 1)
+
+                if (-not $invoked -and $activeRow.Count -gt 0) {
+                    $invoked = $true
+                    Write-Output "LOG:[Store GUI] $displayName is already updating in Microsoft Store."
+                    Write-Output "LOG:  [store] Progress: 25%"
+                }
+
+                if (-not $invoked -and $updateRow.Count -gt 0) {
+                    try {
+                        $actionButton = $updateRow[0].FindFirst([System.Windows.Automation.TreeScope]::Descendants, $actionButtonCondition)
+                        if (-not $actionButton -or -not $actionButton.Current.IsEnabled) {
+                            throw "The Update button is unavailable."
+                        }
+
+                        $invokePattern = $actionButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                        $invokePattern.Invoke()
+                        $invoked = $true
+                        Write-Output "LOG:[Store GUI] Invoked the Microsoft Store Update button for $displayName."
+                        Write-Output "LOG:  [store] Progress: 10%"
+                        Start-Sleep -Seconds 1
+                        continue
+                    }
+                    catch {
+                        Write-Output "LOG:[Store GUI] Could not invoke Update for ${displayName}: $($_.Exception.Message)"
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 1; Message = $_.Exception.Message }
+                        return
+                    }
+                }
+
+                if ($invoked) {
+                    if ($activeRow.Count -gt 0) {
+                        $status = ([string]$activeRow[0].Current.Name).Trim()
+                        if ($status -ne $lastStatus) {
+                            $lastStatus = $status
+                            Write-Output "LOG:[Store GUI] $status"
+                            $progress = if ($status -match '(?i)Installing|Processing|Downloaded') { 85 } else { 50 }
+                            Write-Output "LOG:  [store] Progress: $progress%"
+                        }
+                    }
+                    elseif ($updateRow.Count -eq 0 -and ((Get-Date) - $startedAt).TotalSeconds -ge 2) {
+                        Write-Output "LOG:  [store] Progress: 100%"
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 0; GuiUpdateInvoked = $true; Completed = $true }
+                        return
+                    }
+                    elseif ($finishedRow.Count -gt 0) {
+                        Write-Output "LOG:  [store] Progress: 100%"
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 0; GuiUpdateInvoked = $true; Completed = $true }
+                        return
+                    }
+                }
+                elseif (-not $checkForUpdatesInvoked -and ((Get-Date) - $startedAt).TotalSeconds -ge 2) {
+                    try {
+                        $checkButton = $storeWindow.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $checkButtonCondition)
+                        if ($checkButton -and $checkButton.Current.IsEnabled) {
+                            $checkPattern = $checkButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                            $checkPattern.Invoke()
+                            Write-Output "LOG:[Store GUI] Invoked Check for updates while locating $displayName."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:[Store GUI] Check for updates could not be invoked: $($_.Exception.Message)"
+                    }
+                    $checkForUpdatesInvoked = $true
+                }
+                elseif ($checkForUpdatesInvoked -and ((Get-Date) - $startedAt).TotalSeconds -ge 15) {
+                    Write-Output "LOG:[Store GUI] No available Update button was found for $displayName; it may already be current."
+                    $Result.Value = [PSCustomObject]@{ ExitCode = 0; AlreadyCurrent = $true; Completed = $true }
+                    return
+                }
+
+                Start-Sleep -Milliseconds 750
+            }
+
+            Write-Output "LOG:[Store GUI] Timed out waiting for $displayName to finish updating."
+            $Result.Value = [PSCustomObject]@{ ExitCode = 1; TimedOut = $true; Message = "Store GUI update timed out." }
+        }
+
+        function Close-WmtStoreGui {
+            try {
+                Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
+                Add-Type -AssemblyName UIAutomationTypes -ErrorAction Stop
+
+                $root = [System.Windows.Automation.AutomationElement]::RootElement
+                $storeWindow = @(
+                    $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) |
+                        Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
+                ) | Select-Object -First 1
+                if (-not $storeWindow) {
+                    Write-Output "LOG:[Store GUI] Microsoft Store window is already closed."
+                    return
+                }
+
+                $closeCondition = New-Object System.Windows.Automation.PropertyCondition([System.Windows.Automation.AutomationElement]::AutomationIdProperty, "Close")
+                $closeButton = $storeWindow.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $closeCondition)
+                if (-not $closeButton -or -not $closeButton.Current.IsEnabled) {
+                    throw "The Microsoft Store Close button is unavailable."
+                }
+
+                $closePattern = $closeButton.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern)
+                $closePattern.Invoke()
+                Write-Output "LOG:[Store GUI] Closed Microsoft Store after Store updates completed."
+            }
+            catch {
+                Write-Output "LOG:[Store GUI] Could not close Microsoft Store: $($_.Exception.Message)"
+            }
         }
 
         # Helper: Execute Command & Stream Output in Real-Time
@@ -22886,8 +23051,7 @@ $Script:StartWingetAction = {
                 [string]$TempPath,
                 [string]$ActionLabel = "Update",
                 [string]$StoreFallbackUri = "",
-                [string]$StoreFallbackWebUri = "",
-                [string]$EventPath = ""
+                [string]$StoreFallbackWebUri = ""
             )
 
             $rand = [Guid]::NewGuid().ToString("N")
@@ -23681,12 +23845,10 @@ exit /b %WMT_EXIT%
             }
         }
 
-        $storeUpdatesDelegated = $false
-        $hasStoreUpdateItems = @($items | Where-Object { $act -eq "Update" -and ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -gt 0
-        if ($hasStoreUpdateItems) {
-            Write-Output "LOG:[Store] Microsoft Store updates will run through the Store app while other installers continue."
-            [void](Invoke-WmtStoreAppUpdateScan -PackageName "Microsoft Store Updates")
-            $storeUpdatesDelegated = $true
+        $storeUpdateTotal = @($items | Where-Object { $act -eq "Update" -and ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count
+        $storeUpdateDone = 0
+        if ($storeUpdateTotal -gt 0) {
+            Write-Output "LOG:[Store] Microsoft Store updates will be invoked and monitored through the Store GUI."
         }
 
         $total = @($items).Count
@@ -23709,12 +23871,25 @@ exit /b %WMT_EXIT%
             Write-Output "PROGRESS:${index}/${total}:$name"
 
             if ($act -eq "Update" -and ([string]$src).ToLowerInvariant() -eq "msstore") {
-                if (-not $storeUpdatesDelegated) {
-                    [void](Invoke-WmtStoreAppUpdateScan -PackageName "Microsoft Store Updates")
-                    $storeUpdatesDelegated = $true
+                $storeGuiResult = $null
+                Invoke-WmtStoreGuiUpdate -PackageName $name -Result ([ref]$storeGuiResult)
+                if ($storeGuiResult -and $storeGuiResult.ExitCode -eq 0) {
+                    if ($storeGuiResult.AlreadyCurrent) {
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (Microsoft Store reports no available Update button)"
+                    }
+                    else {
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (updated through Microsoft Store GUI)"
+                    }
+                    Write-Output "RESULT:${index}:SUCCESS:$name"
                 }
-                Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (delegated to Microsoft Store Updates)"
-                Write-Output "RESULT:${index}:SUCCESS:$name"
+                else {
+                    Write-Output "LOG:[$act][$index/$total] FAILED: $name (Microsoft Store GUI update did not complete)"
+                    Write-Output "RESULT:${index}:FAILED:$name"
+                }
+                $storeUpdateDone++
+                if ($storeUpdateDone -ge $storeUpdateTotal) {
+                    Close-WmtStoreGui
+                }
                 continue
             }
 
@@ -24061,7 +24236,7 @@ exit /b %WMT_EXIT%
                     $p = Invoke-WmtStoreAppUpdateScan -PackageName $name
                 }
                 elseif ($storeCliArgs) {
-                    $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act -StoreFallbackUri $storeFallbackUri -StoreFallbackWebUri $storeFallbackWebUri -EventPath $eventPath
+                    $p = Invoke-StoreCliInteractive -Arguments $storeCliArgs -PackageName $name -TempPath $temp -ActionLabel $act -StoreFallbackUri $storeFallbackUri -StoreFallbackWebUri $storeFallbackWebUri
                 }
                 elseif ($windowsUpdateItem) {
                     $p = Invoke-WmtWindowsUpdateInstall -Item $windowsUpdateItem
@@ -24145,7 +24320,6 @@ exit /b %WMT_EXIT%
                             if (-not ($p.PSObject.Properties["ResourcesInUse"] -and $p.ResourcesInUse)) {
                                 $resourcesInUseLog = "LOG:[Store CLI] Error 0x80073d02: The package could not be installed because resources it modifies are currently in use. Close the app and related Store/Xbox windows, then try again."
                                 Write-Output $resourcesInUseLog
-                                Write-WmtActionEvent $resourcesInUseLog
                             }
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Microsoft Store says resources are currently in use; close the app and related Store/Xbox windows, then try again)"
                         }
@@ -24621,24 +24795,9 @@ del "%~f0" >nul 2>nul
         }
     }
 
-    $script:ReadWingetActionEvents = {
-        if ([string]::IsNullOrWhiteSpace($script:WingetActionEventPath)) { return }
-        if (-not (Test-Path $script:WingetActionEventPath)) { return }
-
-        try {
-            $eventLines = @(Get-Content -Path $script:WingetActionEventPath -ErrorAction SilentlyContinue)
-            if ($eventLines.Count -le $script:WingetActionEventLineCount) { return }
-            $newLines = @($eventLines | Select-Object -Skip $script:WingetActionEventLineCount)
-            $script:WingetActionEventLineCount = $eventLines.Count
-            if ($newLines.Count -gt 0) { & $script:ProcessWingetLines $newLines }
-        }
-        catch {}
-    }
-     
     $script:WingetTimer.Add_Tick({
             try {
                 if (-not $script:WingetJob) { return }
-                & $script:ReadWingetActionEvents
                 if ($script:WingetJob.HasMoreData) {
                     $results = Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue
                     if ($results) {
@@ -24660,7 +24819,6 @@ del "%~f0" >nul 2>nul
                     if ($results) {
                         & $script:ProcessWingetLines $results
                     }
-                    & $script:ReadWingetActionEvents
                     Remove-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue
                     $script:WingetJob = $null
                     if ($script:WingetActiveAction) {
