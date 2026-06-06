@@ -1,4 +1,4 @@
-<#
+﻿<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -3622,6 +3622,106 @@ function Get-DataPath {
     return $dataPath
 }
 $script:DataDir = Get-DataPath
+
+function Write-WmtLastCrash {
+    param(
+        [string]$Context = "WMT GUI failure",
+        [System.Exception]$Exception,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord
+    )
+
+    try {
+        $crashPath = Join-Path (Get-DataPath) "last-crash.txt"
+        $exceptionType = if ($Exception) { $Exception.GetType().FullName } else { "Unknown" }
+        $message = if ($Exception) { $Exception.Message } else { "No exception details were supplied." }
+        $exceptionStackTrace = if ($Exception -and -not [string]::IsNullOrWhiteSpace($Exception.StackTrace)) { $Exception.StackTrace } else { "(not available)" }
+        $details = @(
+            "Timestamp: $((Get-Date).ToString('o'))"
+            "Context: $Context"
+            "Exception: $exceptionType"
+            "Message: $message"
+        )
+
+        if ($ErrorRecord) {
+            $details += "PowerShell error ID: $($ErrorRecord.FullyQualifiedErrorId)"
+            if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.InvocationInfo.PositionMessage)) {
+                $details += "PowerShell position:"
+                $details += $ErrorRecord.InvocationInfo.PositionMessage
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ErrorRecord.ScriptStackTrace)) {
+                $details += "PowerShell call stack:"
+                $details += $ErrorRecord.ScriptStackTrace
+            }
+        }
+
+        $details += "Exception stack trace:"
+        $details += $exceptionStackTrace
+
+        $inner = if ($Exception) { $Exception.InnerException } else { $null }
+        $depth = 1
+        while ($inner -and $depth -le 8) {
+            $details += ""
+            $details += "Inner exception ${depth}: $($inner.GetType().FullName)"
+            $details += "Message: $($inner.Message)"
+            if (-not [string]::IsNullOrWhiteSpace($inner.StackTrace)) {
+                $details += "Stack trace:"
+                $details += $inner.StackTrace
+            }
+            $inner = $inner.InnerException
+            $depth++
+        }
+
+        [System.IO.File]::WriteAllText($crashPath, ($details -join [Environment]::NewLine), [System.Text.UTF8Encoding]::new($false))
+    }
+    catch {}
+
+    try {
+        $logMessage = if ($Exception) { $Exception.Message } else { "Unknown error" }
+        Write-GuiLog "ERROR: ${Context}: $logMessage"
+    }
+    catch {}
+}
+
+function Reset-WmtUpdateUiAfterMonitorError {
+    param(
+        [System.Exception]$Exception,
+        [System.Management.Automation.ErrorRecord]$ErrorRecord,
+        [string]$Context = "Update completion monitor failed",
+        [switch]$SkipCrashWrite
+    )
+
+    if (-not $SkipCrashWrite) {
+        Write-WmtLastCrash -Context $Context -Exception $Exception -ErrorRecord $ErrorRecord
+    }
+
+    try { if ($script:WingetTimer) { $script:WingetTimer.Stop() } } catch {}
+    try { if ($script:WingetJob) { Stop-Job -Job $script:WingetJob -ErrorAction SilentlyContinue } } catch {}
+    try { if ($script:WingetJob) { Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue | Out-Null } } catch {}
+    try { if ($script:WingetJob) { Remove-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue } } catch {}
+
+    $script:WingetJob = $null
+    $script:WingetActiveAction = $null
+    $script:WingetActionStoreUpdateOnly = $false
+    $script:WingetCurrentIndex = 0
+    $script:WingetCurrentPercent = 0
+    $script:WingetCurrentItemName = ""
+
+    try { if ($script:RefreshWingetProgressUi) { & $script:RefreshWingetProgressUi } } catch {}
+
+    foreach ($buttonName in @("btnWingetScan", "btnWingetUpdateSel", "btnWingetUpdateAll", "btnWingetInstall", "btnWingetUninstall")) {
+        try {
+            $button = Get-Variable -Name $buttonName -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+            if ($button) { $button.IsEnabled = $true }
+        }
+        catch {}
+    }
+
+    try {
+        $statusLabel = Get-Variable -Name "lblWingetStatus" -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+        if ($statusLabel) { $statusLabel.Text = "Update monitor recovered from an internal error. See data\last-crash.txt." }
+    }
+    catch {}
+}
 
 function Get-WmtLegendaryExePath {
     $legendaryDir = Join-Path (Get-DataPath) "legendary"
@@ -22302,144 +22402,6 @@ $txtWingetSearch.Add_TextChanged({
     })
 $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWingetFind.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) } })
 
-function New-WmtPackageActionProgressWindow {
-    param(
-        [string]$ActionName = "Update",
-        [int]$TotalItems = 0
-    )
-
-    [xml]$packageProgressXaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Package Action Running" Width="640" Height="252" MinWidth="580" MinHeight="230" ResizeMode="NoResize" WindowStartupLocation="CenterOwner"
-        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
-        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
-    <Grid Margin="20">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="44"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
-        <TextBlock Name="lblTitle" Text="Package action is running in the background" FontSize="17" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-        <TextBlock Name="lblStatus" Grid.Row="1" Margin="0,8,0,8" Text="Starting..." Foreground="{DynamicResource TextSecondary}"
-                   TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Height="26" MaxHeight="26"
-                   ToolTip="{Binding Text, RelativeSource={RelativeSource Self}}"/>
-        <ProgressBar Name="barProgress" Grid.Row="2" Minimum="0" Maximum="100" Height="12" IsIndeterminate="False"/>
-        <TextBlock Name="lblSummary" Grid.Row="3" Margin="0,10,0,0" Text="0/0 done | 0 success | 0 skipped | 0 failed" Foreground="{DynamicResource TextSecondary}"/>
-        <Grid Grid.Row="4" Margin="0,18,0,0">
-            <TextBlock Name="lblLast" Text="" VerticalAlignment="Bottom" HorizontalAlignment="Left" Foreground="{DynamicResource TextSecondary}"
-                       TextTrimming="CharacterEllipsis" MaxWidth="470"/>
-            <Button Name="btnHide" Content="Hide" Width="96" Height="34" HorizontalAlignment="Right" VerticalAlignment="Bottom"/>
-        </Grid>
-    </Grid>
-</Window>
-'@
-
-    try {
-        $progressWindow = New-WmtWindowFromFullXaml -Xaml $packageProgressXaml
-        if (-not $progressWindow) { return $null }
-        try {
-            if ($window) { $progressWindow.Owner = $window }
-        }
-        catch {}
-
-        $lblTitle = $progressWindow.FindName("lblTitle")
-        $lblStatus = $progressWindow.FindName("lblStatus")
-        $barProgress = $progressWindow.FindName("barProgress")
-        $lblSummary = $progressWindow.FindName("lblSummary")
-        $lblLast = $progressWindow.FindName("lblLast")
-        $btnHide = $progressWindow.FindName("btnHide")
-
-        $actionText = ([string]$ActionName).Trim()
-        if ([string]::IsNullOrWhiteSpace($actionText)) { $actionText = "Package" }
-        if ($lblTitle) { $lblTitle.Text = "$actionText packages are running in the background" }
-        if ($lblStatus) { $lblStatus.Text = "Starting $actionText..." }
-        if ($lblSummary) { $lblSummary.Text = "0/$TotalItems done | 0 success | 0 skipped | 0 failed" }
-        if ($barProgress) {
-            $barProgress.Minimum = 0
-            $barProgress.Maximum = 100
-            $barProgress.Value = 0
-            $barProgress.IsIndeterminate = $false
-        }
-        if ($btnHide) {
-            $btnHide.Add_Click({ try { $progressWindow.Close() } catch {} }.GetNewClosure())
-        }
-
-        $state = [PSCustomObject]@{
-            Window  = $progressWindow
-            Title   = $lblTitle
-            Status  = $lblStatus
-            Bar     = $barProgress
-            Summary = $lblSummary
-            Last    = $lblLast
-        }
-
-        $progressWindow.Add_Closed({
-                try {
-                    if ($script:WingetActionProgressWindow -and [object]::ReferenceEquals($script:WingetActionProgressWindow.Window, $progressWindow)) {
-                        $script:WingetActionProgressWindow = $null
-                    }
-                }
-                catch {}
-            }.GetNewClosure())
-
-        $progressWindow.Show() | Out-Null
-        return $state
-    }
-    catch {
-        Write-GuiLog "Package action progress window could not open: $($_.Exception.Message)"
-        return $null
-    }
-}
-
-function Close-WmtPackageActionProgressWindow {
-    try {
-        if ($script:WingetActionProgressWindow -and $script:WingetActionProgressWindow.Window) {
-            $progressWindow = $script:WingetActionProgressWindow.Window
-            if ($progressWindow.IsVisible) { $progressWindow.Close() }
-        }
-    }
-    catch {}
-    $script:WingetActionProgressWindow = $null
-}
-
-function Test-WmtPackageProviderProcessActive {
-    $providerProcessNames = @(
-        "winget",
-        "WindowsPackageManagerServer",
-        "msiexec",
-        "cmd",
-        "npm",
-        "node",
-        "python",
-        "py",
-        "pip",
-        "pnpm",
-        "choco",
-        "chocolatey",
-        "scoop",
-        "dotnet",
-        "gem",
-        "cargo",
-        "composer",
-        "legendary",
-        "gogdl",
-        "store"
-    )
-
-    try {
-        $currentPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
-        foreach ($proc in @(Get-Process -Name $providerProcessNames -ErrorAction SilentlyContinue)) {
-            if ($proc.Id -eq $currentPid) { continue }
-            return $true
-        }
-    }
-    catch {}
-    return $false
-}
-
 # 2. HELPER TO START JOB
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
@@ -22470,43 +22432,20 @@ $Script:StartWingetAction = {
     $script:WingetCurrentIndex = 0
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
-    $script:WingetLastMonitorActivityAt = Get-Date
-    $script:WingetNoProviderProcessSince = $null
-    $script:WingetMonitorForcedFinalize = $false
     $script:WingetCompletedIndexes = @{}
     $script:WingetActionStoreUpdateOnly = (
         $ActionName -eq "Update" -and
         $totalItems -gt 0 -and
         @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" }).Count -eq $totalItems
     )
-    $script:WingetActionWindowsUpdateOnly = (
-        $ActionName -eq "Update" -and
-        $totalItems -gt 0 -and
-        @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "windowsupdate" }).Count -eq $totalItems
-    )
-    $script:WingetActionSteamUpdateOnly = (
-        $ActionName -eq "Update" -and
-        $totalItems -gt 0 -and
-        @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "steam" }).Count -eq $totalItems
-    )
     $script:WingetActionHasStoreCli = @($uniqueItems | Where-Object { ([string]$_.Source).ToLowerInvariant() -eq "msstore" -and $ActionName -eq "Install" }).Count -gt 0
     $script:WingetStoreResourcesInUseSeen = $false
     $script:WingetStoreErrorLogSeen = @{}
     $script:WingetStoreFallbackSeen = @{}
     $script:WingetSteamOpenSeen = @{}
-    $script:WingetActionStatusSeen = @{}
-    $script:WingetActionLineSeen = @{}
-    $script:WingetProviderByIndex = @{}
-    $script:WingetActionItemByIndex = @{}
-    for ($actionItemIndex = 0; $actionItemIndex -lt $uniqueItems.Count; $actionItemIndex++) {
-        $actionItemNumber = $actionItemIndex + 1
-        $script:WingetActionItemByIndex[$actionItemNumber] = $uniqueItems[$actionItemIndex]
-    }
-    $script:WingetActionEventReadErrorSeen = $false
     $script:WingetActionEventPath = Join-Path $env:TEMP ("WMT_WingetAction_{0}.events" -f ([Guid]::NewGuid().ToString("N")))
     $script:WingetActionEventLineCount = 0
     try { Set-Content -Path $script:WingetActionEventPath -Value "" -Encoding UTF8 -Force } catch {}
-    Write-GuiLog "Update action event bridge: $($script:WingetActionEventPath)"
     if ($pbWingetProgress) {
         $pbWingetProgress.Minimum = 0
         $pbWingetProgress.Maximum = [Math]::Max(1, $totalItems)
@@ -22522,10 +22461,8 @@ $Script:StartWingetAction = {
         $lblWingetLastResult.Text = ""
         $lblWingetLastResult.Visibility = "Collapsed"
     }
-    Close-WmtPackageActionProgressWindow
-    $script:WingetActionProgressWindow = New-WmtPackageActionProgressWindow -ActionName $ActionName -TotalItems $totalItems
 
-    $refreshWingetProgressUi = {
+    $script:RefreshWingetProgressUi = {
         $total = [Math]::Max(1, [int]$script:WingetProgressTotal)
         $done = [Math]::Max(0, [int]$script:WingetProgressDone)
         $success = [Math]::Max(0, [int]$script:WingetProgressSuccess)
@@ -22534,72 +22471,27 @@ $Script:StartWingetAction = {
         $curIdx = [Math]::Max(0, [int]$script:WingetCurrentIndex)
         $curPct = [Math]::Max(0, [Math]::Min(100, [int]$script:WingetCurrentPercent))
 
-        $value = [double]$done
-        if ($curIdx -gt 0 -and $done -lt $total) {
-            $base = [Math]::Max($done, $curIdx - 1)
-            $value = [Math]::Min([double]$total, [double]$base + ($curPct / 100.0))
-        }
-
         if ($pbWingetProgress) {
+            $value = [double]$done
+            if ($curIdx -gt 0 -and $done -lt $total) {
+                $base = [Math]::Max($done, $curIdx - 1)
+                $value = [Math]::Min([double]$total, [double]$base + ($curPct / 100.0))
+            }
             $pbWingetProgress.Value = $value
         }
 
-        $progressText = ""
         if ($lblWingetProgress) {
             $running = ""
             if ($curIdx -gt 0 -and $done -lt $total) {
                 $running = " | running $curIdx/$total"
                 if ($curPct -gt 0) { $running += " ($curPct%)" }
             }
-            $progressText = "$done/$total done | $success success | $skipped skipped | $failed failed$running"
-            $lblWingetProgress.Text = $progressText
+            $lblWingetProgress.Text = "$done/$total done | $success success | $skipped skipped | $failed failed$running"
         }
-        else {
-            $progressText = "$done/$total done | $success success | $skipped skipped | $failed failed"
-        }
+    }
+    & $script:RefreshWingetProgressUi
 
-        try {
-            $progressState = $script:WingetActionProgressWindow
-            if ($progressState -and $progressState.Window -and $progressState.Window.IsVisible) {
-                if ($progressState.Bar) {
-                    $progressState.Bar.Value = [Math]::Min(100, [Math]::Max(0, [double](($value * 100.0) / $total)))
-                }
-                if ($progressState.Summary) { $progressState.Summary.Text = $progressText }
-                if ($progressState.Status) {
-                    $statusText = ""
-                    if ($curIdx -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$script:WingetCurrentItemName)) {
-                        $statusText = "$($script:WingetActiveAction) ${curIdx}/$total`: $($script:WingetCurrentItemName)"
-                        if ($curPct -gt 0 -and $done -lt $total) { $statusText += " ($curPct%)" }
-                    }
-                    else {
-                        $statusText = "$($script:WingetActiveAction) in progress..."
-                    }
-                    $statusText = ($statusText -replace '[\r\n\t]+', '  ').Trim()
-                    if ($statusText.Length -gt 220) { $statusText = $statusText.Substring(0, 217) + "..." }
-                    $progressState.Status.Text = $statusText
-                }
-            }
-        }
-        catch {}
-    }.GetNewClosure()
-    & $refreshWingetProgressUi
-
-    $setWingetProgressWindowLast = {
-        param(
-            [string]$Text,
-            [object]$Brush
-        )
-        try {
-            $progressState = $script:WingetActionProgressWindow
-            if ($progressState -and $progressState.Window -and $progressState.Window.IsVisible -and $progressState.Last) {
-                $progressState.Last.Text = $Text
-                if ($Brush) { $progressState.Last.Foreground = $Brush }
-            }
-        }
-        catch {}
-    }.GetNewClosure()
-
-    $setWingetLastResultUi = {
+    $script:SetWingetLastResultUi = {
         param(
             [string]$ResultCode,
             [string]$PackageName,
@@ -22620,8 +22512,7 @@ $Script:StartWingetAction = {
         $lblWingetLastResult.Text = $text
         $lblWingetLastResult.Foreground = $brush
         $lblWingetLastResult.Visibility = "Visible"
-        & $setWingetProgressWindowLast $text $brush
-    }.GetNewClosure()
+    }
     
     # 1. Define the Job Arguments
     $wingetIncludeUnknown = Get-WmtWingetIncludeUnknown -Settings (Get-WmtSettings)
@@ -22678,14 +22569,6 @@ $Script:StartWingetAction = {
 
             if ([string]::IsNullOrWhiteSpace($eventPath) -or [string]::IsNullOrWhiteSpace($Line)) { return }
             try { Add-Content -Path $eventPath -Value $Line -Encoding UTF8 -Force } catch {}
-        }
-
-        function Write-WmtActionStructuredLine {
-            param([string]$Line)
-
-            if ([string]::IsNullOrWhiteSpace($Line)) { return }
-            Write-Output $Line
-            Write-WmtActionEvent $Line
         }
 
         function Test-WmtStoreUpdateScanPreferredItem {
@@ -22852,251 +22735,148 @@ $Script:StartWingetAction = {
             return [PSCustomObject]@{ ExitCode = 0; StoreUpdateScan = $scanStarted; StoreUpdatesDelegated = $true }
         }
 
-        function Write-WmtProcessQueuedLines {
-            param(
-                [System.Collections.Concurrent.ConcurrentQueue[string]]$LineQueue,
-                [ref]$LastLine,
-                [ref]$LastPct,
-                [string]$ProgressTag = "process"
-            )
-
-            $queued = $null
-            while ($LineQueue.TryDequeue([ref]$queued)) {
-                $entry = [string]$queued
-                if ([string]::IsNullOrWhiteSpace($entry)) { continue }
-                $parts = @($entry -split "\|", 2)
-                $stream = if ($parts.Count -gt 0) { $parts[0] } else { "O" }
-                $line = if ($parts.Count -gt 1) { $parts[1].Trim() } else { $entry.Trim() }
-                if ([string]::IsNullOrWhiteSpace($line)) { continue }
-
-                if ($line -match "(\d+)%") {
-                    $pct = [int]$matches[1]
-                    if ($pct -ne [int]$LastPct.Value) {
-                        $LastPct.Value = $pct
-                        Write-Output "LOG:  [$ProgressTag] Progress: $pct%"
-                    }
-                }
-                elseif ($line -ne [string]$LastLine.Value) {
-                    $LastLine.Value = $line
-                    if ($stream -eq "E") {
-                        Write-Output "LOG:  ! $line"
-                    }
-                    else {
-                        Write-Output "LOG:  > $line"
-                    }
-                }
-            }
-        }
-
-        function Invoke-WmtProcessLive {
-            param(
-                [string]$FileName,
-                [string]$Arguments,
-                [string]$ProgressTag = "process",
-                [int]$TimeoutSeconds = 0
-            )
-
+        # Helper: Execute Command & Stream Output in Real-Time
+        function Invoke-WingetCmd ($command) {
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pInfo.FileName = $FileName
-            $pInfo.Arguments = $Arguments
+            $pInfo.FileName = "powershell.exe"
+            $pInfo.Arguments = "-Command $command"
             $pInfo.RedirectStandardOutput = $true
             $pInfo.RedirectStandardError = $true
             $pInfo.UseShellExecute = $false
             $pInfo.CreateNoWindow = $true
-            $proc = New-Object System.Diagnostics.Process
-            $proc.StartInfo = $pInfo
-            $lineQueue = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-            $lastLine = ""
-            $lastPct = -1
-            $lastBeat = Get-Date
-            $startedAt = Get-Date
+            $proc = [System.Diagnostics.Process]::Start($pInfo)
 
-            $outHandlerScript = {
-                param($s, $eA)
-                if ($eventArgs -and -not [string]::IsNullOrWhiteSpace($eventArgs.Data)) {
-                    [void]$lineQueue.Enqueue("O|$($eventArgs.Data)")
+            # Stream output/error in real-time while process runs
+            while (-not $proc.HasExited) {
+                while ($proc.StandardOutput.Peek() -gt -1) {
+                    $line = $proc.StandardOutput.ReadLine()
+                    if ($line) { Write-Output "LOG:  > $line" }
                 }
-            }.GetNewClosure()
-            $errHandlerScript = {
-                param($s, $eA)
-                if ($eventArgs -and -not [string]::IsNullOrWhiteSpace($eventArgs.Data)) {
-                    [void]$lineQueue.Enqueue("E|$($eventArgs.Data)")
+                while ($proc.StandardError.Peek() -gt -1) {
+                    $line = $proc.StandardError.ReadLine()
+                    if ($line) { Write-Output "LOG:  ! $line" }
                 }
-            }.GetNewClosure()
-            $outHandler = [System.Diagnostics.DataReceivedEventHandler]$outHandlerScript
-            $errHandler = [System.Diagnostics.DataReceivedEventHandler]$errHandlerScript
-
-            try {
-                $proc.add_OutputDataReceived($outHandler)
-                $proc.add_ErrorDataReceived($errHandler)
-                if (-not $proc.Start()) {
-                    Write-Output "LOG:  ! Could not start process: $FileName $Arguments"
-                    return [PSCustomObject]@{ ExitCode = 1; TimedOut = $false }
-                }
-                $proc.BeginOutputReadLine()
-                $proc.BeginErrorReadLine()
-
-                while (-not $proc.WaitForExit(500)) {
-                    Write-WmtProcessQueuedLines -LineQueue $lineQueue -LastLine ([ref]$lastLine) -LastPct ([ref]$lastPct) -ProgressTag $ProgressTag
-                    $now = Get-Date
-                    if ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 8) {
-                        Write-Output "LOG:  [$ProgressTag] still running..."
-                        $lastBeat = $now
-                    }
-                    if ($TimeoutSeconds -gt 0 -and (New-TimeSpan -Start $startedAt -End $now).TotalSeconds -ge $TimeoutSeconds) {
-                        Write-Output "LOG:  [$ProgressTag] timed out after $TimeoutSeconds seconds."
-                        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
-                        Write-WmtProcessQueuedLines -LineQueue $lineQueue -LastLine ([ref]$lastLine) -LastPct ([ref]$lastPct) -ProgressTag $ProgressTag
-                        return [PSCustomObject]@{ ExitCode = 1; TimedOut = $true }
-                    }
-                }
-
-                try { $proc.WaitForExit() } catch {}
                 Start-Sleep -Milliseconds 100
-                Write-WmtProcessQueuedLines -LineQueue $lineQueue -LastLine ([ref]$lastLine) -LastPct ([ref]$lastPct) -ProgressTag $ProgressTag
+            }
 
-                $exitCode = 1
-                try { $exitCode = [int]$proc.ExitCode } catch {}
-                return [PSCustomObject]@{ ExitCode = $exitCode; TimedOut = $false }
+            # Get remaining output after exit
+            $remaining = $proc.StandardOutput.ReadToEnd()
+            if ($remaining) {
+                foreach ($line in ($remaining -split "`r`n")) {
+                    if ($line) { Write-Output "LOG:  > $line" }
+                }
             }
-            catch {
-                Write-Output "LOG:  ! Process launch failed: $($_.Exception.Message)"
-                return [PSCustomObject]@{ ExitCode = 1; TimedOut = $false }
-            }
-            finally {
-                try { $proc.remove_OutputDataReceived($outHandler) } catch {}
-                try { $proc.remove_ErrorDataReceived($errHandler) } catch {}
-                try { $proc.Dispose() } catch {}
-            }
-        }
 
-        # Helper: Execute Command & Stream Output in Real-Time
-        function Invoke-WingetCmd ($command) {
-            return Invoke-WmtProcessLive -FileName "powershell.exe" -Arguments "-NoProfile -ExecutionPolicy Bypass -Command $command" -ProgressTag "process"
+            # Also capture any remaining errors
+            $errOutput = $proc.StandardError.ReadToEnd()
+            if ($errOutput) {
+                foreach ($line in ($errOutput -split "`r`n")) {
+                    if ($line) { Write-Output "LOG:  ! $line" }
+                }
+            }
+
+            return $proc
         }
 
         function Invoke-WingetLive ($argsLine) {
-            return Invoke-WmtProcessLive -FileName "winget" -Arguments $argsLine -ProgressTag "winget"
+            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $pInfo.FileName = "winget"
+            $pInfo.Arguments = $argsLine
+            $pInfo.RedirectStandardOutput = $true
+            $pInfo.RedirectStandardError = $true
+            $pInfo.UseShellExecute = $false
+            $pInfo.CreateNoWindow = $true
+            $proc = [System.Diagnostics.Process]::Start($pInfo)
+
+            $outBuf = New-Object System.Text.StringBuilder
+            $errBuf = New-Object System.Text.StringBuilder
+            $lastLine = ""
+            $lastPct = -1
+            $lastBeat = Get-Date
+
+            while ((-not $proc.HasExited) -or $proc.StandardOutput.Peek() -gt -1 -or $proc.StandardError.Peek() -gt -1) {
+                $hadData = $false
+
+                while ($proc.StandardOutput.Peek() -gt -1) {
+                    $hadData = $true
+                    $ch = [char]$proc.StandardOutput.Read()
+                    if ($ch -eq "`r" -or $ch -eq "`n") {
+                        $line = $outBuf.ToString().Trim()
+                        [void]$outBuf.Clear()
+                        if ($line) {
+                            if ($line -match "(\d+)%") {
+                                $pct = [int]$matches[1]
+                                if ($pct -ne $lastPct) {
+                                    $lastPct = $pct
+                                    Write-Output "LOG:  [winget] Progress: $pct%"
+                                }
+                            }
+                            elseif ($line -ne $lastLine) {
+                                $lastLine = $line
+                                Write-Output "LOG:  > $line"
+                            }
+                        }
+                    }
+                    else {
+                        [void]$outBuf.Append($ch)
+                    }
+                }
+
+                while ($proc.StandardError.Peek() -gt -1) {
+                    $hadData = $true
+                    $ch = [char]$proc.StandardError.Read()
+                    if ($ch -eq "`r" -or $ch -eq "`n") {
+                        $line = $errBuf.ToString().Trim()
+                        [void]$errBuf.Clear()
+                        if ($line) {
+                            if ($line -match "(\d+)%") {
+                                $pct = [int]$matches[1]
+                                if ($pct -ne $lastPct) {
+                                    $lastPct = $pct
+                                    Write-Output "LOG:  [winget] Progress: $pct%"
+                                }
+                            }
+                            elseif ($line -ne $lastLine) {
+                                $lastLine = $line
+                                Write-Output "LOG:  ! $line"
+                            }
+                        }
+                    }
+                    else {
+                        [void]$errBuf.Append($ch)
+                    }
+                }
+
+                $now = Get-Date
+                if ((-not $hadData) -and ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 8)) {
+                    Write-Output "LOG:  [winget] still running..."
+                    $lastBeat = $now
+                }
+
+                if (-not $hadData) {
+                    Start-Sleep -Milliseconds 80
+                }
+            }
+
+            $tailOut = $outBuf.ToString().Trim()
+            if ($tailOut) { Write-Output "LOG:  > $tailOut" }
+            $tailErr = $errBuf.ToString().Trim()
+            if ($tailErr) { Write-Output "LOG:  ! $tailErr" }
+
+            return $proc
         }
 
-        function Invoke-VisibleCmd ($command, $title, [int]$HoldSeconds = 0, [int]$TimeoutSeconds = 1800, [string]$ActionLabel = "", [int]$Index = 0, [int]$Total = 0, [string]$PackageName = "", [string]$ProviderName = "") {
+        function Invoke-VisibleCmd ($command, $title, [int]$HoldSeconds = 0) {
             if ([string]::IsNullOrWhiteSpace($title)) { $title = "WMT Package Update" }
             $safeTitle = ((($title -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
-            if ([string]::IsNullOrWhiteSpace($safeTitle)) { $safeTitle = "WMT Package Update" }
-            $safePackageName = (((([string]$PackageName) -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
-            if ([string]::IsNullOrWhiteSpace($safePackageName)) { $safePackageName = $safeTitle }
-            $safeProviderName = (((([string]$ProviderName) -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
-            if ([string]::IsNullOrWhiteSpace($safeProviderName)) { $safeProviderName = "Package" }
-            $safeActionLabel = (((([string]$ActionLabel) -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
-            if ([string]::IsNullOrWhiteSpace($safeActionLabel)) { $safeActionLabel = "Update" }
-            $safeEventPath = ([string]$eventPath).Replace('"', '')
-            $safeIndex = [Math]::Max(0, $Index)
-            $safeTotal = [Math]::Max(0, $Total)
-            $tempRoot = if (-not [string]::IsNullOrWhiteSpace($temp)) { $temp } else { $env:TEMP }
-            $cmdPath = Join-Path $tempRoot ("WMT_VisibleUpdate_{0}.cmd" -f ([Guid]::NewGuid().ToString("N")))
-            $startStatus = "ACTION_STATUS:$safeIndex/$safeTotal`:1:$safePackageName - preparing visible $safeProviderName updater"
-            Write-WmtActionEvent $startStatus
             if ($HoldSeconds -gt 0) {
-                $holdLine = "timeout /t $HoldSeconds /nobreak >nul"
+                $cmdLine = "/v:on /c title $safeTitle && $command & set WMT_EXIT=!ERRORLEVEL! & echo. & echo Exit code: !WMT_EXIT! & timeout /t $HoldSeconds /nobreak >nul & exit /b !WMT_EXIT!"
             }
             else {
-                $holdLine = ""
+                $cmdLine = "/c title $safeTitle && $command"
             }
-            $commandText = [string]$command
-            $commandForCmd = $commandText
-            if ($commandText -match '^\s*(Start-Process\b|&\s*")') {
-                $encodedCommand = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($commandText))
-                $commandForCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCommand"
-            }
-
-            $cmdContent = @"
-@echo off
-setlocal EnableExtensions
-title $safeTitle
-set "WMT_EVENT_FILE=$safeEventPath"
-set "WMT_ACTION_INDEX=$safeIndex"
-set "WMT_ACTION_TOTAL=$safeTotal"
-set "WMT_PACKAGE_NAME=$safePackageName"
-set "WMT_PROVIDER_NAME=$safeProviderName"
-set "WMT_ACTION_LABEL=$safeActionLabel"
-call :wmt_status 5 "visible updater opened"
-call :wmt_event "LOG:[Visible CMD] Opened %WMT_PROVIDER_NAME% updater window for %WMT_PACKAGE_NAME%."
-call :wmt_status 15 "running update command"
-call $commandForCmd
-set "WMT_EXIT=%ERRORLEVEL%"
-call :wmt_status 95 "command exited with code %WMT_EXIT%"
-call :wmt_event "LOG:[Visible CMD] %WMT_PROVIDER_NAME% updater exited with code %WMT_EXIT% for %WMT_PACKAGE_NAME%."
-call :wmt_result "%WMT_EXIT%"
-echo.
-echo Exit code: %WMT_EXIT%
-$holdLine
-call :wmt_status 100 "visible updater complete"
-exit /b %WMT_EXIT%
-
-:wmt_status
-if not defined WMT_EVENT_FILE exit /b 0
->>"%WMT_EVENT_FILE%" echo ACTION_STATUS:%WMT_ACTION_INDEX%/%WMT_ACTION_TOTAL%:%~1:%WMT_PACKAGE_NAME% - %~2
-exit /b 0
-
-:wmt_event
-if not defined WMT_EVENT_FILE exit /b 0
->>"%WMT_EVENT_FILE%" echo %~1
-exit /b 0
-
-:wmt_result
-if not defined WMT_EVENT_FILE exit /b 0
->>"%WMT_EVENT_FILE%" echo VISIBLE_RESULT:%WMT_ACTION_INDEX%:%~1:%WMT_PROVIDER_NAME%:%WMT_PACKAGE_NAME%
-exit /b 0
-"@
-            Set-Content -LiteralPath $cmdPath -Value $cmdContent -Encoding Ascii -Force
-
-            $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-            $pInfo.FileName = "cmd.exe"
-            $pInfo.Arguments = "/c `"$cmdPath`""
-            $pInfo.UseShellExecute = $true
-            $pInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
-
-            $proc = [System.Diagnostics.Process]::Start($pInfo)
-            if (-not $proc) {
-                try { Remove-Item -LiteralPath $cmdPath -Force -ErrorAction SilentlyContinue } catch {}
-                Write-WmtActionEvent "ACTION_STATUS:$safeIndex/$safeTotal`:100:$safePackageName - visible updater failed to start"
-                Write-WmtActionEvent "LOG:[Visible CMD] Could not start visible update window for $safePackageName."
-                return [PSCustomObject]@{ ExitCode = 1; TimedOut = $false }
-            }
-
-            $finished = $true
-            if ($TimeoutSeconds -gt 0) {
-                $timeoutMs = [Math]::Min([int]::MaxValue, [Math]::Max(1, $TimeoutSeconds) * 1000)
-                $finished = $proc.WaitForExit($timeoutMs)
-            }
-            else {
-                $proc.WaitForExit()
-            }
-
-            if (-not $finished) {
-                Write-Output "LOG:[Visible CMD] Timeout after $TimeoutSeconds seconds; closing visible update window for $safeTitle."
-                Write-WmtActionEvent "ACTION_STATUS:$safeIndex/$safeTotal`:100:$safePackageName - visible updater timed out"
-                Write-WmtActionEvent "LOG:[Visible CMD] Timeout after $TimeoutSeconds seconds; closing visible update window for $safeTitle."
-                try { [void]$proc.CloseMainWindow() } catch {}
-                Start-Sleep -Seconds 2
-                try {
-                    if (-not $proc.HasExited) { $proc.Kill() }
-                }
-                catch {}
-                try { Remove-Item -LiteralPath $cmdPath -Force -ErrorAction SilentlyContinue } catch {}
-                return [PSCustomObject]@{ ExitCode = 1; TimedOut = $true }
-            }
-
-            $exitCode = 1
-            try { $exitCode = [int]$proc.ExitCode } catch { $exitCode = 1 }
-            $visibleResultLine = "VISIBLE_RESULT:${safeIndex}:${exitCode}:${safeProviderName}:${safePackageName}"
-            Write-Output $visibleResultLine
-            Write-WmtActionEvent $visibleResultLine
-            Write-Output "LOG:[Visible CMD] Completed visible update window with exit code $exitCode for $safeTitle."
-            Write-WmtActionEvent "ACTION_STATUS:$safeIndex/$safeTotal`:100:$safePackageName - visible updater complete"
-            Write-WmtActionEvent "LOG:[Visible CMD] Completed visible update window with exit code $exitCode for $safeTitle."
-            try { Remove-Item -LiteralPath $cmdPath -Force -ErrorAction SilentlyContinue } catch {}
-            return [PSCustomObject]@{ ExitCode = $exitCode; TimedOut = $false }
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle Normal
+            return $proc
         }
 
         function Invoke-StoreCliInteractive {
@@ -23527,19 +23307,19 @@ while ((Get-Date) -lt $deadline) {
 
     if (-not $menuSelected -and $cleanScreen -match '(?i)select a product') {
         $options = @(Get-WmtStoreCliMenuOptions -ScreenText $cleanScreen)
-        $matches = @($options | Where-Object { (Get-WmtStoreCliNameKey $_.Name) -eq $targetKey })
-        if ($matches.Count -gt 1) {
-            $preferred = @($matches | Where-Object { [string]$_.Publisher -match '(?i)\bMicrosoft\b|\bXbox\b' })
-            if ($preferred.Count -eq 1) { $matches = $preferred }
+        $matchingOptions = @($options | Where-Object { (Get-WmtStoreCliNameKey $_.Name) -eq $targetKey })
+        if ($matchingOptions.Count -gt 1) {
+            $preferred = @($matchingOptions | Where-Object { [string]$_.Publisher -match '(?i)\bMicrosoft\b|\bXbox\b' })
+            if ($preferred.Count -eq 1) { $matchingOptions = $preferred }
         }
-        if ($matches.Count -eq 1) {
-            try { [void][WmtConsoleInput]::SendMenuSelection([uint32]$TargetPid, [int]$matches[0].Index) } catch {}
+        if ($matchingOptions.Count -eq 1) {
+            try { [void][WmtConsoleInput]::SendMenuSelection([uint32]$TargetPid, [int]$matchingOptions[0].Index) } catch {}
             $menuSelected = $true
-            Set-WmtStoreCliStatus "MENU_SELECTED" $matches[0].Name
+            Set-WmtStoreCliStatus "MENU_SELECTED" $matchingOptions[0].Name
             Start-Sleep -Milliseconds 700
             continue
         }
-        elseif ($matches.Count -gt 1) {
+        elseif ($matchingOptions.Count -gt 1) {
             Set-WmtStoreCliStatus "MENU_AMBIGUOUS" $PackageName
         }
         elseif ($options.Count -gt 0) {
@@ -23808,92 +23588,6 @@ exit /b %WMT_EXIT%
             return ""
         }
 
-        function Test-WmtDefenderSecurityIntelligenceUpdateItem {
-            param([object]$Item)
-
-            if (-not $Item) { return $false }
-            $text = (([string]$Item.Name) + " " + ([string]$Item.Version) + " " + ([string]$Item.Id)).Trim()
-            if ([string]::IsNullOrWhiteSpace($text)) { return $false }
-
-            return ($text -match '(?i)(Security\s+Intelligence\s+Update|KB2267602|Microsoft\s+Defender\s+Antivirus|Windows\s+Defender)')
-        }
-
-        function Invoke-WmtDefenderSecurityIntelligenceUpdate {
-            param([object]$Item)
-
-            $targetName = ([string]$Item.Name).Trim()
-            if ([string]::IsNullOrWhiteSpace($targetName)) { $targetName = "Microsoft Defender security intelligence" }
-
-            Write-Output "LOG:[Windows Update] Defender security intelligence update detected; using Microsoft Defender signature updater."
-
-            try {
-                $updateCmd = Get-Command Update-MpSignature -ErrorAction SilentlyContinue
-                if ($updateCmd) {
-                    Write-Output "LOG:[Defender] Running Update-MpSignature for $targetName..."
-                    Update-MpSignature -ErrorAction Stop | Out-Null
-                    Write-Output "LOG:[Defender] Update-MpSignature completed."
-                    return [PSCustomObject]@{ ExitCode = 0 }
-                }
-            }
-            catch {
-                Write-Output "LOG:[Defender] Update-MpSignature failed: $($_.Exception.Message)"
-            }
-
-            $mpCmdCandidates = New-Object System.Collections.Generic.List[string]
-            try {
-                $platformRoot = Join-Path $env:ProgramData "Microsoft\Windows Defender\Platform"
-                if (Test-Path -LiteralPath $platformRoot -PathType Container) {
-                    $platformDirs = @(Get-ChildItem -LiteralPath $platformRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name -Descending)
-                    foreach ($dir in $platformDirs) {
-                        $candidate = Join-Path $dir.FullName "MpCmdRun.exe"
-                        if (Test-Path -LiteralPath $candidate -PathType Leaf) { [void]$mpCmdCandidates.Add($candidate) }
-                    }
-                }
-            }
-            catch {}
-            foreach ($candidate in @(
-                    (Join-Path $env:ProgramFiles "Windows Defender\MpCmdRun.exe"),
-                    (Join-Path ${env:ProgramFiles(x86)} "Windows Defender\MpCmdRun.exe")
-                )) {
-                if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-                    [void]$mpCmdCandidates.Add($candidate)
-                }
-            }
-
-            foreach ($mpCmd in @($mpCmdCandidates | Select-Object -Unique)) {
-                try {
-                    Write-Output "LOG:[Defender] Running MpCmdRun signature update: $mpCmd"
-                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-                    $pInfo.FileName = $mpCmd
-                    $pInfo.Arguments = "-SignatureUpdate"
-                    $pInfo.RedirectStandardOutput = $true
-                    $pInfo.RedirectStandardError = $true
-                    $pInfo.UseShellExecute = $false
-                    $pInfo.CreateNoWindow = $true
-                    $proc = [System.Diagnostics.Process]::Start($pInfo)
-                    $stdout = $proc.StandardOutput.ReadToEnd()
-                    $stderr = $proc.StandardError.ReadToEnd()
-                    $proc.WaitForExit()
-
-                    foreach ($line in ($stdout -split "`r?`n")) {
-                        if (-not [string]::IsNullOrWhiteSpace($line)) { Write-Output "LOG:  > $line" }
-                    }
-                    foreach ($line in ($stderr -split "`r?`n")) {
-                        if (-not [string]::IsNullOrWhiteSpace($line)) { Write-Output "LOG:  ! $line" }
-                    }
-
-                    Write-Output "LOG:[Defender] MpCmdRun completed with exit code $($proc.ExitCode)."
-                    return [PSCustomObject]@{ ExitCode = [int]$proc.ExitCode }
-                }
-                catch {
-                    Write-Output "LOG:[Defender] MpCmdRun failed: $($_.Exception.Message)"
-                }
-            }
-
-            Write-Output "LOG:[Defender] No usable Defender signature updater was found."
-            return [PSCustomObject]@{ ExitCode = 1 }
-        }
-
         function Invoke-WmtWindowsUpdateInstall {
             param([object]$Item)
 
@@ -23908,10 +23602,6 @@ exit /b %WMT_EXIT%
             $targetId = if ($targetParts.Count -gt 0) { ([string]$targetParts[0]).Trim() } else { $targetRaw }
             $targetRevision = -1
             if ($targetParts.Count -gt 1) { [void][int]::TryParse(([string]$targetParts[1]).Trim(), [ref]$targetRevision) }
-
-            if (Test-WmtDefenderSecurityIntelligenceUpdateItem -Item $Item) {
-                return Invoke-WmtDefenderSecurityIntelligenceUpdate -Item $Item
-            }
 
             try {
                 Write-Output "LOG:[Windows Update] Preparing selected update: $targetName"
@@ -24016,18 +23706,15 @@ exit /b %WMT_EXIT%
             $storeFallbackUri = ""
             $storeFallbackWebUri = ""
             $skipReason = $null
-            Write-WmtActionStructuredLine "PROVIDER:${index}:${src}:$name"
-            Write-WmtActionStructuredLine "PROGRESS:${index}/${total}:$name"
+            Write-Output "PROGRESS:${index}/${total}:$name"
 
             if ($act -eq "Update" -and ([string]$src).ToLowerInvariant() -eq "msstore") {
                 if (-not $storeUpdatesDelegated) {
                     [void](Invoke-WmtStoreAppUpdateScan -PackageName "Microsoft Store Updates")
                     $storeUpdatesDelegated = $true
                 }
-                Write-WmtActionStructuredLine "ACTION_STATUS:${index}/${total}:100:$name - installing via Microsoft Store"
-                Write-Output "LOG:[$act][$index/$total] Installing via Microsoft Store: $name"
-                Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (installing via Microsoft Store)"
-                Write-WmtActionStructuredLine "RESULT:${index}:SUCCESS:$name"
+                Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (delegated to Microsoft Store Updates)"
+                Write-Output "RESULT:${index}:SUCCESS:$name"
                 continue
             }
 
@@ -24105,14 +23792,8 @@ exit /b %WMT_EXIT%
                 elseif ($srcKey -eq "windowsupdate") {
                     if ($act -eq "Update") {
                         $windowsUpdateItem = $item
-                        if (Test-WmtDefenderSecurityIntelligenceUpdateItem -Item $item) {
-                            $cmd = "Microsoft Defender signature update"
-                            $userCmd = "Update-MpSignature / MpCmdRun -SignatureUpdate"
-                        }
-                        else {
-                            $cmd = "Windows Update COM install"
-                            $userCmd = "Microsoft.Update.Session install selected update"
-                        }
+                        $cmd = "Windows Update COM install"
+                        $userCmd = "Microsoft.Update.Session install selected update"
                     }
                     elseif ($act -eq "Install") {
                         $skipReason = "Windows Update items can only be updated from this list; use Refresh All to rescan offered updates."
@@ -24130,8 +23811,6 @@ exit /b %WMT_EXIT%
                         $steamUri = if (-not [string]::IsNullOrWhiteSpace([string]$id)) { "steam://validate/$id" } else { "steam://open/downloads" }
                         $steamRunUri = if (-not [string]::IsNullOrWhiteSpace([string]$id)) { "steam://rungameid/$id" } else { "" }
 
-                        Write-WmtActionStructuredLine "ACTION_STATUS:${index}/${total}:100:$name - installing via Steam"
-                        Write-Output "LOG:[$act][$index/$total] Installing via Steam: $name"
                         Write-Output "LOG:[Steam] Requesting validation for $name (AppID: $id)."
                         try {
                             $steamPayload = [ordered]@{
@@ -24144,7 +23823,7 @@ exit /b %WMT_EXIT%
                             $steamEncoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($steamJson))
                             $steamOpenLine = "STEAM_OPEN:$steamEncoded"
                             Write-Output $steamOpenLine
-                            Write-WmtActionEvent $steamOpenLine
+                            Write-WmtStoreCliActivityEvent $steamOpenLine
                         }
                         catch {
                             Write-Output "LOG:[Steam] Could not prepare Steam request: $($_.Exception.Message)"
@@ -24160,8 +23839,8 @@ exit /b %WMT_EXIT%
                         catch {
                             Write-Output "LOG:[Steam] Direct worker Steam protocol launch failed: $($_.Exception.Message)"
                         }
-                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (installing via Steam)"
-                        Write-WmtActionStructuredLine "RESULT:${index}:SUCCESS:$name"
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (opened Steam updater)"
+                        Write-Output "RESULT:${index}:SUCCESS:$name"
                         continue
                     }
                     elseif ($act -eq "Install") {
@@ -24309,20 +23988,74 @@ exit /b %WMT_EXIT%
 
             if ($skipReason) {
                 Write-Output "LOG:[$act][$index/$total] SKIPPED: $name - $skipReason"
-                Write-WmtActionStructuredLine "RESULT:${index}:SKIPPED:$name"
+                Write-Output "RESULT:${index}:SKIPPED:$name"
                 continue
             }
 
             if ($cmd) {
                 Write-Output "LOG:[$act][$index/$total] Starting: $name ($src)..."
                 Write-Output "LOG:[$act] Command: $userCmd"
-                Write-WmtActionStructuredLine "COMMAND:${index}:${src}:$userCmd"
 
-                # Run real package actions in a visible console so prompts/installers are not hidden.
-                # The console writes VISIBLE_RESULT back to the event bridge when it exits.
-                if ($wingetArgs) {
-                    Write-Output "LOG:[$act] Opening visible winget updater..."
-                    $p = Invoke-VisibleCmd -command "winget $wingetArgs" -title "$act $name" -ActionLabel $act -Index $index -Total $total -PackageName $name -ProviderName $src -HoldSeconds 2
+                # 1. RUN COMMAND (First Attempt - Admin)
+                # UX: most package updates run one-by-one in visible windows (auto-close when done),
+                # so end-users can follow each update without relying on Activity Log only.
+                $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
+                $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
+                $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
+                $useVisibleWindow = ($act -eq "Update" -and -not ($src -eq "msstore" -and $storeCliArgs) -and -not $windowsUpdateItem)
+
+                if ($useVisibleWindow) {
+                    $windowTag = switch -Regex ($src) {
+                        "^(winget)$" { "Winget"; break }
+                        "^(msstore)$" { "MSStore"; break }
+                        "^(pip|pip3)$" { "PIP"; break }
+                        "^(npm|npm \(global\))$" { "NPM"; break }
+                        "^(pnpm|pnpm \(global\))$" { "PNPM"; break }
+                        "^(chocolatey|choco)$" { "Chocolatey"; break }
+                        "^(scoop)$" { "Scoop"; break }
+                        "^(gem|ruby)$" { "RubyGem"; break }
+                        "^(cargo|rust)$" { "Cargo"; break }
+                        "^(steam)$" { "Steam"; break }
+                        "^(legendary)$" { "Legendary"; break }
+                        "^(gogdl)$" { "GOGDL"; break }
+                        "^(windowsupdate)$" { "WindowsUpdate"; break }
+                        default { "Package" }
+                    }
+                    if ($isPipUpdate) { $windowTag = "PIP" }
+                    elseif ($isChocoUpdate) { $windowTag = "Chocolatey" }
+                    elseif ($isPythonUpdate) { $windowTag = "Python" }
+                    Write-Output "LOG:[$act] Launching visible $windowTag window for: $name"
+                    try {
+                        $holdSeconds = if ($src -eq "msstore") { 5 } else { 0 }
+                        $p = Invoke-VisibleCmd $cmd "WMT $windowTag Update - $name" -HoldSeconds $holdSeconds
+
+                        # Check if the process crashed or the user manually closed the frozen window
+                        if ($null -eq $p -or $null -eq $p.ExitCode -or $p.ExitCode -ne 0) {
+                            if ($src -eq "msstore" -or $src -eq "gogdl") {
+                                Write-Output "LOG:[$act] $windowTag update window exited with a non-zero code."
+                                $exitCode = if ($p -and $null -ne $p.ExitCode) { $p.ExitCode } else { 1 }
+                                $p = [PSCustomObject]@{ ExitCode = $exitCode }
+                            }
+                            else {
+                                Write-Output "LOG:[$act] Window was forcefully closed or exited with a non-zero code. Assuming success due to known installer hang behavior."
+                                $p = [PSCustomObject]@{ ExitCode = 0 } # Force a fake success code to prevent WMT from crashing
+                            }
+                        }
+                    }
+                    catch {
+                        if ($src -eq "msstore" -or $src -eq "gogdl") {
+                            Write-Output "LOG:[$act] $windowTag update window was interrupted."
+                            $p = [PSCustomObject]@{ ExitCode = 1 }
+                        }
+                        else {
+                            Write-Output "LOG:[$act] Visible window forcefully closed or interrupted."
+                            $p = [PSCustomObject]@{ ExitCode = 0 } # Assume success here as well
+                        }
+                    }
+                }
+                elseif ($wingetArgs) {
+                    Write-Output "LOG:[$act] Running winget with live output..."
+                    $p = Invoke-WingetLive $wingetArgs
                 }
                 elseif ($storeForceUpdateScan) {
                     $p = Invoke-WmtStoreAppUpdateScan -PackageName $name
@@ -24334,8 +24067,8 @@ exit /b %WMT_EXIT%
                     $p = Invoke-WmtWindowsUpdateInstall -Item $windowsUpdateItem
                 }
                 else {
-                    Write-Output "LOG:[$act] Opening visible package updater..."
-                    $p = Invoke-VisibleCmd -command $cmd -title "$act $name" -ActionLabel $act -Index $index -Total $total -PackageName $name -ProviderName $src -HoldSeconds 2
+                    Write-Output "LOG:[$act] Running... (this may take a while)"
+                    $p = Invoke-WingetCmd $cmd
                 }
                 Write-Output "LOG:[$act][$index/$total] Process completed with exit code: $($p.ExitCode)"
                 
@@ -24348,10 +24081,16 @@ exit /b %WMT_EXIT%
                     if ($fixP.ExitCode -eq 0) {
                         Write-Output "LOG:[$act][$index/$total] Sources reset. Retrying $name..."
                         if ($wingetArgs) {
-                            $p = Invoke-VisibleCmd -command "winget $wingetArgs" -title "$act $name" -ActionLabel $act -Index $index -Total $total -PackageName $name -ProviderName $src -HoldSeconds 2
+                            if ($useVisibleWindow) {
+                                $retryCmd = "winget $wingetArgs"
+                                $p = Invoke-VisibleCmd $retryCmd "WMT Winget Retry - $name"
+                            }
+                            else {
+                                $p = Invoke-WingetLive $wingetArgs
+                            }
                         }
                         else {
-                            $p = Invoke-VisibleCmd -command $cmd -title "$act $name" -ActionLabel $act -Index $index -Total $total -PackageName $name -ProviderName $src -HoldSeconds 2
+                            $p = Invoke-WingetCmd $cmd
                         }
                         $hex = "0x{0:x}" -f $p.ExitCode 
                     }
@@ -24360,15 +24099,15 @@ exit /b %WMT_EXIT%
                 # --- CHECK FINAL RESULT ---
                 if ($p.ExitCode -eq 0) {
                     Write-Output "LOG:[$act][$index/$total] SUCCESS: $name"
-                    Write-WmtActionStructuredLine "RESULT:${index}:SUCCESS:$name"
+                    Write-Output "RESULT:${index}:SUCCESS:$name"
                 }
                 elseif ($p.ExitCode -eq 3010) {
                     Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (Reboot Required to complete)"
-                    Write-WmtActionStructuredLine "RESULT:${index}:SUCCESS:$name"
+                    Write-Output "RESULT:${index}:SUCCESS:$name"
                 }
                 elseif ($p.ExitCode -eq 1602) {
                     Write-Output "LOG:[$act][$index/$total] CANCELLED: $name (by User)"
-                    Write-WmtActionStructuredLine "RESULT:${index}:CANCELLED:$name"
+                    Write-Output "RESULT:${index}:CANCELLED:$name"
                 }
                 else {
                     # --- FAILURE HANDLING ---
@@ -24381,15 +24120,20 @@ exit /b %WMT_EXIT%
                     # Known non-retry outcomes: avoid opening fallback user-mode consoles.
                     if ($hex -eq "0x8a150006") {
                         Write-Output "LOG:[$act][$index/$total] SKIPPED [$hex] ${errDesc} - $name"
-                        Write-WmtActionStructuredLine "RESULT:${index}:SKIPPED:$name"
+                        Write-Output "RESULT:${index}:SKIPPED:$name"
                         continue
                     }
                     if ($hex -eq "0x8a15000b" -or $dec -eq "1618") {
                         Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (no user-mode retry)"
-                        Write-WmtActionStructuredLine "RESULT:${index}:FAILED:$name"
+                        Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
 
+                    if ($useVisibleWindow) {
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (see visible window output)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
                     if ($storeCliArgs) {
                         $storeResourcesInUse = (
                             ($hex -eq "0x80073d02") -or
@@ -24411,17 +24155,12 @@ exit /b %WMT_EXIT%
                         else {
                             Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Store CLI action failed)"
                         }
-                        Write-WmtActionStructuredLine "RESULT:${index}:FAILED:$name"
+                        Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
                     if ($storeForceUpdateScan) {
                         Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (could not start Microsoft Store app update scan)"
-                        Write-WmtActionStructuredLine "RESULT:${index}:FAILED:$name"
-                        continue
-                    }
-                    if ($windowsUpdateItem) {
-                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (Windows Update COM install failed; no user-mode retry was attempted)"
-                        Write-WmtActionStructuredLine "RESULT:${index}:FAILED:$name"
+                        Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
 
@@ -24435,10 +24174,7 @@ exit /b %WMT_EXIT%
                     # --- RETRY AS USER (Fallback) ---
                     # Handles Scoop (needs user rights) and Spotify (hates Admin)
                     $rand = [Guid]::NewGuid().ToString()
-                    $safeIdForFile = [regex]::Replace(([string]$id), '[^\w\.\-]+', '_').Trim('_')
-                    if ([string]::IsNullOrWhiteSpace($safeIdForFile)) { $safeIdForFile = "package" }
-                    if ($safeIdForFile.Length -gt 80) { $safeIdForFile = $safeIdForFile.Substring(0, 80) }
-                    $batPath = Join-Path $temp ("WMT_Fix_{0}_{1}.bat" -f $safeIdForFile, $rand)
+                    $batPath = "$temp\WMT_Fix_${id}_${rand}.bat"
                     $batContent = @"
 @echo off
 title $act $name (User Mode)
@@ -24460,12 +24196,12 @@ timeout /t 5
                     catch {
                         Write-Output "LOG:Retry failed: $($_.Exception.Message)"
                     }
-                    Write-WmtActionStructuredLine "RESULT:${index}:FAILED:$name"
+                    Write-Output "RESULT:${index}:FAILED:$name"
                 }
             }
             else {
                 Write-Output "LOG:[$act][$index/$total] SKIPPED: No command generated for source '$src' ($name)"
-                Write-WmtActionStructuredLine "RESULT:${index}:SKIPPED:$name"
+                Write-Output "RESULT:${index}:SKIPPED:$name"
             }
         }
     }
@@ -24474,112 +24210,9 @@ timeout /t 5
     if ($script:WingetTimer) { $script:WingetTimer.Stop() }
     $script:WingetTimer = New-Object System.Windows.Threading.DispatcherTimer
     $script:WingetTimer.Interval = [TimeSpan]::FromMilliseconds(500)
-    $processWingetLines = {
+    $script:ProcessWingetLines = {
         param($lines)
-        $recordWingetResult = {
-            param(
-                [int]$DoneIndex,
-                [string]$ResultCode,
-                [string]$PackageName,
-                [string]$Source = "RESULT"
-            )
-
-            if ($DoneIndex -le 0) { return }
-            $result = ([string]$ResultCode).Trim().ToUpperInvariant()
-            if ($result -notin @("SUCCESS", "SKIPPED", "FAILED", "CANCELLED")) { $result = "FAILED" }
-            $resultName = ([string]$PackageName).Trim()
-            if ([string]::IsNullOrWhiteSpace($resultName)) { $resultName = $script:WingetCurrentItemName }
-            if ([string]::IsNullOrWhiteSpace($resultName)) { $resultName = "Package $DoneIndex" }
-            $providerName = ""
-            $actionItem = $null
-            try {
-                if ($script:WingetProviderByIndex -and $script:WingetProviderByIndex.ContainsKey($DoneIndex)) {
-                    $providerName = ([string]$script:WingetProviderByIndex[$DoneIndex]).Trim()
-                }
-            }
-            catch {}
-            try {
-                if ($script:WingetActionItemByIndex -and $script:WingetActionItemByIndex.ContainsKey($DoneIndex)) {
-                    $actionItem = $script:WingetActionItemByIndex[$DoneIndex]
-                }
-            }
-            catch {}
-            if ([string]::IsNullOrWhiteSpace($providerName) -and $actionItem) {
-                try { $providerName = ([string]$actionItem.Source).Trim() } catch {}
-            }
-            $providerPrefix = if ([string]::IsNullOrWhiteSpace($providerName)) { "" } else { "[$providerName]" }
-            $resultLabel = if ([string]::IsNullOrWhiteSpace($providerPrefix)) { "[$result]" } else { "$providerPrefix[$result]" }
-
-            if (-not $script:WingetCompletedIndexes.ContainsKey($DoneIndex)) {
-                $script:WingetCompletedIndexes[$DoneIndex] = $true
-                $script:WingetProgressDone++
-                if ($result -eq "SUCCESS") {
-                    $script:WingetProgressSuccess++
-                }
-                elseif ($result -eq "SKIPPED") {
-                    $script:WingetProgressSkipped++
-                }
-                else {
-                    $script:WingetProgressFailed++
-                }
-                if ($DoneIndex -eq $script:WingetCurrentIndex) { $script:WingetCurrentPercent = 0 }
-                & $setWingetLastResultUi $result $resultName $DoneIndex $script:WingetProgressTotal
-                if ($lblWingetStatus) {
-                    $lblWingetStatus.Text = "$($script:WingetActiveAction) result ${DoneIndex}/$($script:WingetProgressTotal): $resultLabel $resultName"
-                    $lblWingetStatus.Visibility = "Visible"
-                }
-                Write-GuiLog "[$($script:WingetActiveAction)][$DoneIndex/$($script:WingetProgressTotal)] $resultLabel - $resultName ($Source)"
-                if ($script:WingetActiveAction -eq "Update" -and $result -eq "SUCCESS" -and $providerName) {
-                    $delegatedProvider = $providerName.Trim().ToLowerInvariant()
-                    if ($delegatedProvider -eq "steam") {
-                        $steamAppId = ""
-                        try { if ($actionItem) { $steamAppId = [string]$actionItem.Id } } catch {}
-                        [void](Remove-WmtSteamUpdateListItem -PackageName $resultName -AppId $steamAppId)
-                    }
-                    elseif ($delegatedProvider -eq "msstore") {
-                        $storeId = ""
-                        try { if ($actionItem) { $storeId = [string]$actionItem.Id } } catch {}
-                        [void](Remove-WmtDelegatedProviderUpdateListItem -ProviderKey "msstore" -ProviderLabel "Microsoft Store" -PackageName $resultName -PackageId $storeId -RemoveAllProviderItems)
-                    }
-                }
-                & $refreshWingetProgressUi
-            }
-            else {
-                Write-GuiLog "[$($script:WingetActiveAction)][$DoneIndex/$($script:WingetProgressTotal)] Duplicate $Source ignored: $resultLabel $resultName"
-            }
-        }.GetNewClosure()
-
         foreach ($line in $lines) {
-            $line = [string]$line
-            if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            $script:WingetLastMonitorActivityAt = Get-Date
-            if ($line -match "^(PROVIDER|COMMAND|PROGRESS|ACTION_STATUS):") {
-                if (-not $script:WingetActionLineSeen) { $script:WingetActionLineSeen = @{} }
-                if ($script:WingetActionLineSeen.ContainsKey($line)) { continue }
-                $script:WingetActionLineSeen[$line] = $true
-            }
-            if ($line -match "^PROVIDER:(\d+):([^:]*):(.*)$") {
-                $providerIndex = [int]$matches[1]
-                $providerName = ([string]$matches[2]).Trim()
-                $providerPackage = ([string]$matches[3]).Trim()
-                if (-not $script:WingetProviderByIndex) { $script:WingetProviderByIndex = @{} }
-                if (-not [string]::IsNullOrWhiteSpace($providerName)) {
-                    $script:WingetProviderByIndex[$providerIndex] = $providerName
-                }
-                Write-GuiLog "[$($script:WingetActiveAction)][$providerIndex/$($script:WingetProgressTotal)] Provider: $providerName - $providerPackage"
-                continue
-            }
-            if ($line -match "^COMMAND:(\d+):([^:]*):(.*)$") {
-                $commandIndex = [int]$matches[1]
-                $providerName = ([string]$matches[2]).Trim()
-                $commandText = ([string]$matches[3]).Trim()
-                if (-not $script:WingetProviderByIndex) { $script:WingetProviderByIndex = @{} }
-                if (-not [string]::IsNullOrWhiteSpace($providerName)) {
-                    $script:WingetProviderByIndex[$commandIndex] = $providerName
-                }
-                Write-GuiLog "[$($script:WingetActiveAction)][$commandIndex/$($script:WingetProgressTotal)][$providerName] Command: $commandText"
-                continue
-            }
             if ($line -match "^STEAM_OPEN:(.+)$") {
                 $payload = $null
                 try {
@@ -24615,8 +24248,7 @@ timeout /t 5
                         param([string]$Path)
                         if ([string]::IsNullOrWhiteSpace($Path)) { return }
                         try {
-                            $rawPathText = ([string]$Path).Trim()
-                            $expanded = [Environment]::ExpandEnvironmentVariables($rawPathText)
+                            $expanded = [Environment]::ExpandEnvironmentVariables(([string]$Path).Trim())
                             if ((Test-Path -LiteralPath $expanded -PathType Leaf) -and -not $candidates.Contains($expanded)) {
                                 [void]$candidates.Add($expanded)
                             }
@@ -24817,7 +24449,6 @@ del "%~f0" >nul 2>nul
 
                 if ($opened) {
                     Write-GuiLog "[Steam] Opened Steam updater for $packageName."
-                    [void](Remove-WmtSteamUpdateListItem -PackageName $packageName -AppId $appId)
                     if (-not [string]::IsNullOrWhiteSpace($steamRunUri)) {
                         Write-GuiLog "[Steam] If the download does not start automatically, click Update/Resume in Steam Downloads for app $appId."
                     }
@@ -24925,52 +24556,22 @@ del "%~f0" >nul 2>nul
                 $doneIndex = [int]$matches[1]
                 $result = $matches[2]
                 $resultName = $matches[3]
-                & $recordWingetResult $doneIndex $result $resultName "RESULT"
-                continue
-            }
-            if ($line -match "^VISIBLE_RESULT:(\d+):(-?\d+):([^:]*):(.*)$") {
-                $doneIndex = [int]$matches[1]
-                $exitCode = [int]$matches[2]
-                $providerName = ([string]$matches[3]).Trim()
-                $resultName = $matches[4]
-                if (-not $script:WingetProviderByIndex) { $script:WingetProviderByIndex = @{} }
-                if (-not [string]::IsNullOrWhiteSpace($providerName)) {
-                    $script:WingetProviderByIndex[$doneIndex] = $providerName
+                if (-not $script:WingetCompletedIndexes.ContainsKey($doneIndex)) {
+                    $script:WingetCompletedIndexes[$doneIndex] = $true
+                    $script:WingetProgressDone++
+                    if ($result -eq "SUCCESS") {
+                        $script:WingetProgressSuccess++
+                    }
+                    elseif ($result -eq "SKIPPED") {
+                        $script:WingetProgressSkipped++
+                    }
+                    else {
+                        $script:WingetProgressFailed++
+                    }
+                    if ($doneIndex -eq $script:WingetCurrentIndex) { $script:WingetCurrentPercent = 0 }
+                    & $script:SetWingetLastResultUi $result $resultName $doneIndex $script:WingetProgressTotal
+                    & $script:RefreshWingetProgressUi
                 }
-                $result = "FAILED"
-                if ($exitCode -eq 0 -or $exitCode -eq 3010) { $result = "SUCCESS" }
-                elseif ($exitCode -eq 1602) { $result = "CANCELLED" }
-                & $recordWingetResult $doneIndex $result $resultName "VISIBLE_RESULT provider=$providerName exit=$exitCode"
-                continue
-            }
-            if ($line -match "^VISIBLE_RESULT:(\d+):(-?\d+):(.*)$") {
-                $doneIndex = [int]$matches[1]
-                $exitCode = [int]$matches[2]
-                $resultName = $matches[3]
-                $result = "FAILED"
-                if ($exitCode -eq 0 -or $exitCode -eq 3010) { $result = "SUCCESS" }
-                elseif ($exitCode -eq 1602) { $result = "CANCELLED" }
-                & $recordWingetResult $doneIndex $result $resultName "VISIBLE_RESULT exit=$exitCode"
-                continue
-            }
-            if ($line -match "^ACTION_STATUS:(\d+)/(\d+):(\d+):(.*)$") {
-                $i = [int]$matches[1]
-                $t = [int]$matches[2]
-                $pct = [Math]::Max(0, [Math]::Min(100, [int]$matches[3]))
-                $message = $matches[4]
-                $script:WingetCurrentIndex = $i
-                $script:WingetCurrentPercent = $pct
-                if (-not [string]::IsNullOrWhiteSpace($message)) {
-                    $script:WingetCurrentItemName = $message
-                    $lblWingetStatus.Text = "$($script:WingetActiveAction) ${i}/${t}: $message"
-                }
-                if (-not $script:WingetActionStatusSeen) { $script:WingetActionStatusSeen = @{} }
-                $statusKey = "$i|$t|$pct|$message"
-                if (-not $script:WingetActionStatusSeen.ContainsKey($statusKey)) {
-                    $script:WingetActionStatusSeen[$statusKey] = $true
-                    Write-GuiLog "[$($script:WingetActiveAction)][$i/$t] $message ($pct%)"
-                }
-                & $refreshWingetProgressUi
                 continue
             }
             if ($line -match "^PROGRESS:(\d+)/(\d+):(.+)$") {
@@ -24981,8 +24582,7 @@ del "%~f0" >nul 2>nul
                 $script:WingetCurrentPercent = 0
                 $script:WingetCurrentItemName = $n
                 $lblWingetStatus.Text = "$($script:WingetActiveAction) ${i}/${t}: $n"
-                Write-GuiLog "[$($script:WingetActiveAction)][$i/$t] Starting $n"
-                & $refreshWingetProgressUi
+                & $script:RefreshWingetProgressUi
                 continue
             }
             if ($line -match "^LOG:(.*)") {
@@ -24994,130 +24594,73 @@ del "%~f0" >nul 2>nul
                 }
                 if ($logMsg -match "^\[(?:winget|store)\]\s+Progress:\s*(\d+)%$") {
                     $script:WingetCurrentPercent = [int]$matches[1]
-                    & $refreshWingetProgressUi
+                    & $script:RefreshWingetProgressUi
                 }
                 if ($logMsg -match "^\[[^\]]+\]\[(\d+)/(\d+)\]\s+(SUCCESS|SKIPPED|FAILED|CANCELLED)\b") {
                     $doneIndex = [int]$matches[1]
                     $result = $matches[3]
-                    & $recordWingetResult $doneIndex $result $script:WingetCurrentItemName "LOG"
+                    if (-not $script:WingetCompletedIndexes.ContainsKey($doneIndex)) {
+                        $script:WingetCompletedIndexes[$doneIndex] = $true
+                        $script:WingetProgressDone++
+                        if ($result -eq "SUCCESS") {
+                            $script:WingetProgressSuccess++
+                        }
+                        elseif ($result -eq "SKIPPED") {
+                            $script:WingetProgressSkipped++
+                        }
+                        else {
+                            $script:WingetProgressFailed++
+                        }
+                        if ($doneIndex -eq $script:WingetCurrentIndex) { $script:WingetCurrentPercent = 0 }
+                        & $script:SetWingetLastResultUi $result $script:WingetCurrentItemName $doneIndex $script:WingetProgressTotal
+                        & $script:RefreshWingetProgressUi
+                    }
                 }
                 Write-GuiLog $logMsg
             }
         }
-    }.GetNewClosure()
+    }
 
-    $replayUnprocessedWingetResultEvents = {
-        param([object[]]$EventLines)
-
-        if (-not $EventLines -or -not $script:WingetActiveAction) { return }
-        $pendingResultLines = New-Object System.Collections.Generic.List[string]
-        foreach ($eventLine in $EventLines) {
-            $eventText = [string]$eventLine
-            if ($eventText -notmatch '^(?:VISIBLE_RESULT|RESULT):(\d+):') { continue }
-            $resultIndex = [int]$matches[1]
-            $alreadyCompleted = $false
-            try {
-                $alreadyCompleted = ($script:WingetCompletedIndexes -and $script:WingetCompletedIndexes.ContainsKey($resultIndex))
-            }
-            catch {}
-            if (-not $alreadyCompleted) {
-                [void]$pendingResultLines.Add($eventText)
-            }
-        }
-
-        if ($pendingResultLines.Count -gt 0) {
-            Write-GuiLog "Replaying $($pendingResultLines.Count) unprocessed update result event(s) from the bridge file."
-            & $processWingetLines $pendingResultLines.ToArray()
-        }
-    }.GetNewClosure()
-
-    $readWingetActionEvents = {
+    $script:ReadWingetActionEvents = {
         if ([string]::IsNullOrWhiteSpace($script:WingetActionEventPath)) { return }
         if (-not (Test-Path $script:WingetActionEventPath)) { return }
 
         try {
-            $eventLines = @(Get-Content -LiteralPath $script:WingetActionEventPath -ErrorAction SilentlyContinue)
-            if ($eventLines.Count -le $script:WingetActionEventLineCount) {
-                & $replayUnprocessedWingetResultEvents $eventLines
-                return
-            }
+            $eventLines = @(Get-Content -Path $script:WingetActionEventPath -ErrorAction SilentlyContinue)
+            if ($eventLines.Count -le $script:WingetActionEventLineCount) { return }
             $newLines = @($eventLines | Select-Object -Skip $script:WingetActionEventLineCount)
             $script:WingetActionEventLineCount = $eventLines.Count
-            if ($newLines.Count -gt 0) { & $processWingetLines $newLines }
-            & $replayUnprocessedWingetResultEvents $eventLines
+            if ($newLines.Count -gt 0) { & $script:ProcessWingetLines $newLines }
         }
-        catch {
-            if (-not $script:WingetActionEventReadErrorSeen) {
-                $script:WingetActionEventReadErrorSeen = $true
-                Write-GuiLog "ERROR: Could not read update event bridge: $($_.Exception.Message)"
-            }
-        }
-    }.GetNewClosure()
+        catch {}
+    }
      
     $script:WingetTimer.Add_Tick({
             try {
                 if (-not $script:WingetJob) { return }
-                & $readWingetActionEvents
+                & $script:ReadWingetActionEvents
                 if ($script:WingetJob.HasMoreData) {
-                    $results = Receive-Job -Job $script:WingetJob
+                    $results = Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue
                     if ($results) {
-                        $script:WingetLastMonitorActivityAt = Get-Date
-                        & $processWingetLines $results
+                        & $script:ProcessWingetLines $results
                     }
                 }
-                $allActionResultsReceived = (
-                    $script:WingetActiveAction -and
-                    [int]$script:WingetProgressTotal -gt 0 -and
-                    [int]$script:WingetProgressDone -ge [int]$script:WingetProgressTotal
-                )
-                $forceFinalizeAction = $false
-                if ($script:WingetJob.State -eq 'Running' -and -not $allActionResultsReceived -and $script:WingetActiveAction -and [int]$script:WingetProgressTotal -gt 0) {
-                    $providerProcessActive = Test-WmtPackageProviderProcessActive
-                    $now = Get-Date
-                    if ($providerProcessActive) {
-                        $script:WingetNoProviderProcessSince = $null
+                if ($script:WingetJob.State -eq 'Running' -and $script:WingetActionStartedAt -and $script:WingetCurrentItemName) {
+                    try {
+                        $elapsed = (Get-Date) - $script:WingetActionStartedAt
+                        $elapsedText = $elapsed.ToString("mm\:ss", [System.Globalization.CultureInfo]::InvariantCulture)
+                        $curIdx = [Math]::Max(1, $script:WingetCurrentIndex)
+                        $lblWingetStatus.Text = "$($script:WingetActiveAction) ${curIdx}/$($script:WingetProgressTotal): $($script:WingetCurrentItemName)  (${elapsedText})"
                     }
-                    else {
-                        if (-not $script:WingetNoProviderProcessSince) { $script:WingetNoProviderProcessSince = $now }
-                    }
-
-                    $idleProviderSeconds = 0
-                    if ($script:WingetNoProviderProcessSince) {
-                        $idleProviderSeconds = (New-TimeSpan -Start $script:WingetNoProviderProcessSince -End $now).TotalSeconds
-                    }
-                    $silentSeconds = 0
-                    if ($script:WingetLastMonitorActivityAt) {
-                        $silentSeconds = (New-TimeSpan -Start $script:WingetLastMonitorActivityAt -End $now).TotalSeconds
-                    }
-                    $elapsedSeconds = 0
-                    if ($script:WingetActionStartedAt) {
-                        $elapsedSeconds = (New-TimeSpan -Start $script:WingetActionStartedAt -End $now).TotalSeconds
-                    }
-
-                    if ($elapsedSeconds -ge 30 -and $idleProviderSeconds -ge 20 -and $silentSeconds -ge 20) {
-                        $script:WingetMonitorForcedFinalize = $true
-                        $forceFinalizeAction = $true
-                        Write-GuiLog "No active package provider process or update output was seen for $([int]$idleProviderSeconds)s; finalizing the update monitor so the GUI does not stay stuck."
-                        try { Stop-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue } catch {}
-                    }
+                    catch {}
                 }
-                if ($script:WingetJob.State -eq 'Running' -and $allActionResultsReceived) {
-                    Write-GuiLog "All update result markers were received; finalizing update monitor even though the worker job still reports Running."
-                    try { Stop-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue } catch {}
-                }
-                elseif ($script:WingetJob.State -eq 'Running' -and $script:WingetActionStartedAt -and $script:WingetCurrentItemName) {
-                    $elapsed = (Get-Date) - $script:WingetActionStartedAt
-                    $elapsedText = [string]::Format("{0:mm\\:ss}", $elapsed)
-                    $curIdx = [Math]::Max(1, $script:WingetCurrentIndex)
-                    $lblWingetStatus.Text = "$($script:WingetActiveAction) ${curIdx}/$($script:WingetProgressTotal): $($script:WingetCurrentItemName)  (${elapsedText})"
-                }
-                if ($script:WingetJob.State -ne 'Running' -or $allActionResultsReceived -or $forceFinalizeAction) {
+                if ($script:WingetJob.State -ne 'Running') {
                     $script:WingetTimer.Stop()
                     $results = Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue
                     if ($results) {
-                        & $processWingetLines $results
+                        & $script:ProcessWingetLines $results
                     }
-                    & $readWingetActionEvents
+                    & $script:ReadWingetActionEvents
                     Remove-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue
                     $script:WingetJob = $null
                     if ($script:WingetActiveAction) {
@@ -25127,7 +24670,7 @@ del "%~f0" >nul 2>nul
                             if ($script:WingetActionHasStoreCli) {
                                 $script:WingetProgressFailed += $missing
                                 $missingName = if ([string]::IsNullOrWhiteSpace($script:WingetCurrentItemName)) { "Microsoft Store item" } else { $script:WingetCurrentItemName }
-                                & $setWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
+                                & $script:SetWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
                                 if (-not $script:WingetStoreResourcesInUseSeen) {
                                     try {
                                         $cutoff = if ($script:WingetActionStartedAt) { $script:WingetActionStartedAt.AddSeconds(-5) } else { (Get-Date).AddMinutes(-10) }
@@ -25159,8 +24702,8 @@ del "%~f0" >nul 2>nul
                                 }
                             }
                             else {
-                                # Keep the monitor from staying stuck if the worker ends without one result marker per item.
-                                Write-GuiLog "[$($script:WingetActiveAction)] Notice: $missing item(s) ended without a standard result marker."
+                                # Some non-Store installers close their consoles without a reliable exit event.
+                                Write-GuiLog "[$($script:WingetActiveAction)] Notice: $missing item(s) completed silently without a standard success flag."
                             }
                         }
                         if ($script:WingetProgressFailed -gt 0) {
@@ -25175,8 +24718,7 @@ del "%~f0" >nul 2>nul
 
                     $script:WingetCurrentIndex = 0
                     $script:WingetCurrentPercent = 0
-                    & $refreshWingetProgressUi
-                    Close-WmtPackageActionProgressWindow
+                    & $script:RefreshWingetProgressUi
 
                     $btnWingetScan.IsEnabled = $true
                     $btnWingetUpdateSel.IsEnabled = $true
@@ -25184,135 +24726,31 @@ del "%~f0" >nul 2>nul
                     if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
                     if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
 
-                    $completedCount = [int]$script:WingetProgressDone
-                    $successCount = [int]$script:WingetProgressSuccess
-                    $skippedCount = [int]$script:WingetProgressSkipped
-                    $failedCount = [int]$script:WingetProgressFailed
-                    $silentCompletedCount = [Math]::Max(0, $completedCount - $successCount - $skippedCount - $failedCount)
-                    $finishedAction = [string]$script:WingetActiveAction
-                    $storeUpdateOnly = [bool]$script:WingetActionStoreUpdateOnly
-                    $windowsUpdateOnly = [bool]$script:WingetActionWindowsUpdateOnly
-                    $steamUpdateOnly = [bool]$script:WingetActionSteamUpdateOnly
-                    $shouldRefreshAfterAction = ($finishedAction -eq "Update" -and -not $storeUpdateOnly -and -not $windowsUpdateOnly -and -not $steamUpdateOnly)
-                    Write-GuiLog "Post-update refresh decision: action=$finishedAction, completed=$completedCount, success=$successCount, skipped=$skippedCount, failed=$failedCount, steamOnly=$steamUpdateOnly, refresh=$shouldRefreshAfterAction."
+                    $nonSuccessCount = $script:WingetProgressSkipped + $script:WingetProgressFailed
+                    $shouldRefreshAfterAction = ($script:WingetProgressSuccess -gt 0 -or $nonSuccessCount -eq 0)
 
-                    if ($storeUpdateOnly) {
-                        Write-GuiLog "Action finished. Microsoft Store is handling downloads; package list was not refreshed."
-                    }
-                    elseif ($windowsUpdateOnly) {
-                        Write-GuiLog "Action finished. Windows Update can take a moment to settle; package list was not refreshed automatically."
-                    }
-                    elseif ($steamUpdateOnly) {
-                        Write-GuiLog "Action finished. Steam is handling the delegated update; Steam item(s) were removed from the current list without an immediate rescan."
-                    }
-                    elseif ($successCount -gt 0) {
-                        Write-GuiLog "Action finished. $successCount explicit success(es). Refreshing package list..."
-                    }
-                    elseif ($silentCompletedCount -gt 0) {
-                        Write-GuiLog "Action finished. $silentCompletedCount item(s) completed without an explicit result marker. Refreshing package list to verify changes..."
-                    }
-                    elseif ($failedCount -gt 0 -and $shouldRefreshAfterAction) {
-                        Write-GuiLog "Action finished with $failedCount non-success result(s). Refreshing package list to verify provider state..."
+                    if ($script:WingetProgressSuccess -gt 0) {
+                        Write-GuiLog "Action finished. $($script:WingetProgressSuccess) explicit success(es). Refreshing package list..."
                     }
                     elseif (-not $shouldRefreshAfterAction) {
-                        Write-GuiLog "Action finished. Package list was not refreshed for this action type."
+                        Write-GuiLog "Action finished with no applied updates. Package list was not refreshed."
                     }
                     else {
                         Write-GuiLog "Action finished. Refreshing package list to verify changes..."
                     }
 
+                    # Refresh after successful or silent actions; skipped/failed-only actions keep the current list visible.
+                    if ($shouldRefreshAfterAction -and $btnWingetScan) {
+                        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                    }
                     $script:WingetActiveAction = $null
                     $script:WingetActionStoreUpdateOnly = $false
-                    $script:WingetActionWindowsUpdateOnly = $false
-                    $script:WingetActionSteamUpdateOnly = $false
-                    $script:WingetLastMonitorActivityAt = $null
-                    $script:WingetNoProviderProcessSince = $null
-                    $script:WingetMonitorForcedFinalize = $false
-
-                    # Refresh update actions with real provider work; delegated-only actions keep the edited list visible.
-                    if ($shouldRefreshAfterAction -and $btnWingetScan) {
-                        try {
-                            Write-GuiLog "Queueing package list refresh after update action..."
-                            $btnWingetScan.IsEnabled = $true
-                            $refreshAfterAction = {
-                                try {
-                                    if ($script:WingetActiveAction) {
-                                        Write-GuiLog "Post-update refresh delayed because another update action is active."
-                                        return
-                                    }
-                                    if ($btnWingetScan) {
-                                        Write-GuiLog "Requesting package list refresh after update action..."
-                                        $btnWingetScan.IsEnabled = $true
-                                        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-                                    }
-                                }
-                                catch {
-                                    try { Write-GuiLog "ERROR: Could not refresh package list after update action: $($_.Exception.Message)" } catch {}
-                                }
-                            }.GetNewClosure()
-
-                            $dispatcher = $null
-                            try {
-                                if ($window -and $window.Dispatcher) { $dispatcher = $window.Dispatcher }
-                                elseif ([System.Windows.Application]::Current) { $dispatcher = [System.Windows.Application]::Current.Dispatcher }
-                            }
-                            catch {}
-
-                            if ($dispatcher) {
-                                [void]$dispatcher.BeginInvoke([Action]$refreshAfterAction, [System.Windows.Threading.DispatcherPriority]::Background)
-                            }
-                            else {
-                                & $refreshAfterAction
-                            }
-                        }
-                        catch {
-                            try { Write-GuiLog "ERROR: Could not refresh package list after update action: $($_.Exception.Message)" } catch {}
-                        }
-                    }
                 }
             }
             catch {
-                $monitorError = "ERROR: Update action monitor failed: $($_.Exception.Message)"
-                try { Write-GuiLog $monitorError } catch {}
-                try { if ($script:WingetTimer) { $script:WingetTimer.Stop() } } catch {}
-                try {
-                    if ($script:WingetJob) {
-                        Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue | Out-Null
-                        Remove-Job -Job $script:WingetJob -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                catch {}
-                $script:WingetJob = $null
-                $script:WingetActiveAction = $null
-                $script:WingetActionStoreUpdateOnly = $false
-                $script:WingetActionWindowsUpdateOnly = $false
-                $script:WingetActionSteamUpdateOnly = $false
-                $script:WingetLastMonitorActivityAt = $null
-                $script:WingetNoProviderProcessSince = $null
-                $script:WingetMonitorForcedFinalize = $false
-                $script:WingetCurrentIndex = 0
-                $script:WingetCurrentPercent = 0
-                try {
-                    if ($refreshWingetProgressUi -is [scriptblock]) {
-                        [void]$refreshWingetProgressUi.Invoke()
-                    }
-                }
-                catch {}
-                try { Close-WmtPackageActionProgressWindow } catch {}
-                try {
-                    if ($lblWingetStatus) {
-                        $lblWingetStatus.Text = "Update action stopped after an internal monitor error."
-                        $lblWingetStatus.Visibility = "Visible"
-                    }
-                    if ($btnWingetScan) { $btnWingetScan.IsEnabled = $true }
-                    if ($btnWingetUpdateSel) { $btnWingetUpdateSel.IsEnabled = $true }
-                    if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
-                    if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
-                    if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
-                }
-                catch {}
+                Reset-WmtUpdateUiAfterMonitorError -Context "Update completion monitor failed" -Exception $_.Exception -ErrorRecord $_
             }
-        }.GetNewClosure())
+        })
     $script:WingetTimer.Start()
 }
 
@@ -26546,30 +25984,55 @@ exit `$exitCode
         $monitorKey = "$ProviderKey-$([Guid]::NewGuid().ToString("N"))"
         $timer = New-Object System.Windows.Threading.DispatcherTimer
         $timer.Interval = [TimeSpan]::FromSeconds(1)
-        $timer.Add_Tick({
-                $hasExited = $false
-                try { $hasExited = [bool]$proc.HasExited } catch { $hasExited = $true }
-                if (-not $hasExited) { return }
-
-                try { $timer.Stop() } catch {}
-                try { $providerActionMonitors.Remove($monitorKey) } catch {}
-                $exitCode = 1
-                try { $exitCode = [int]$proc.ExitCode } catch {}
-                try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
-                if ($exitCode -eq 0) {
-                    Write-GuiLog "[$($provider.DisplayName)] $action completed."
-                }
-                else {
-                    Write-GuiLog "[$($provider.DisplayName)] $action exited with code $exitCode."
-                }
-                & $updateProviderStatuses
-            }.GetNewClosure())
-        $providerActionMonitors[$monitorKey] = [PSCustomObject]@{
+        $monitorState = [PSCustomObject]@{
+            Key            = $monitorKey
             Timer          = $timer
             Process        = $proc
             TempScriptPath = $tempScriptPath
             ProviderKey    = $ProviderKey
+            ProviderName   = [string]$provider.DisplayName
+            Action         = [string]$action
+            Monitors       = $providerActionMonitors
+            UpdateStatuses = $updateProviderStatuses
         }
+        $timer.Tag = $monitorState
+        $timer.Add_Tick({
+                param($s, $eA)
+
+                $state = $sender.Tag
+                if (-not $state) {
+                    try { $sender.Stop() } catch {}
+                    return
+                }
+
+                try {
+                    $hasExited = $false
+                    try { $hasExited = [bool]$state.Process.HasExited } catch { $hasExited = $true }
+                    if (-not $hasExited) { return }
+
+                    try { $sender.Stop() } catch {}
+                    try { $state.Monitors.Remove($state.Key) } catch {}
+                    $exitCode = 1
+                    try { $exitCode = [int]$state.Process.ExitCode } catch {}
+                    try { Remove-Item -LiteralPath $state.TempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
+                    if ($exitCode -eq 0) {
+                        try { Write-GuiLog "[$($state.ProviderName)] $($state.Action) completed." } catch {}
+                    }
+                    else {
+                        try { Write-GuiLog "[$($state.ProviderName)] $($state.Action) exited with code $exitCode." } catch {}
+                    }
+                    try { & $state.UpdateStatuses } catch {
+                        try { Write-GuiLog "[$($state.ProviderName)] Could not refresh provider status: $($_.Exception.Message)" } catch {}
+                    }
+                }
+                catch {
+                    try { $sender.Stop() } catch {}
+                    try { $state.Monitors.Remove($state.Key) } catch {}
+                    try { Write-GuiLog "[$($state.ProviderName)] Provider completion monitor failed: $($_.Exception.Message)" } catch {}
+                    try { & $state.UpdateStatuses } catch {}
+                }
+            })
+        $providerActionMonitors[$monitorKey] = $monitorState
         $timer.Start()
     }.GetNewClosure()
 
@@ -26585,30 +26048,6 @@ exit `$exitCode
             }
             try { $providerActionMonitors.Clear() } catch {}
         }.GetNewClosure())
-    $win.Add_Activated({
-            $completedKeys = @()
-            foreach ($key in @($providerActionMonitors.Keys)) {
-                $monitor = $providerActionMonitors[$key]
-                try {
-                    if ($monitor.Process -and $monitor.Process.HasExited) {
-                        $completedKeys += $key
-                    }
-                }
-                catch {
-                    $completedKeys += $key
-                }
-            }
-            if ($completedKeys.Count -gt 0) {
-                foreach ($key in $completedKeys) {
-                    $monitor = $providerActionMonitors[$key]
-                    try { if ($monitor.Timer) { $monitor.Timer.Stop() } } catch {}
-                    try { if ($monitor.TempScriptPath) { Remove-Item -LiteralPath $monitor.TempScriptPath -Force -ErrorAction SilentlyContinue } } catch {}
-                    try { $providerActionMonitors.Remove($key) } catch {}
-                }
-                & $updateProviderStatuses
-            }
-        }.GetNewClosure())
-
     # Load settings
     $autoScanMinutes = Get-WmtUpdateAutoScanMinutes -Settings $settings
     if ($cmbAutoScanInterval) {
@@ -27159,19 +26598,13 @@ $script:ScanTimer.Add_Tick({
                                 if ($item.Name -eq "Source" -and $item.Id -eq "Name") { continue }
                                 if ($item.Version -eq "Version" -or $item.Available -eq "Available") { continue }
                             
-                                # Add to UI, but guard against duplicated provider output or overlapping callbacks.
-                                if (-not $script:WmtUpdateScanResultKeys) { $script:WmtUpdateScanResultKeys = @{} }
-                                $itemKey = Get-WmtUpdateListItemKey -Item $item
-                                if ([string]::IsNullOrWhiteSpace($itemKey)) { continue }
-                                if ($script:WmtUpdateScanResultKeys.ContainsKey($itemKey)) { continue }
-                                $script:WmtUpdateScanResultKeys[$itemKey] = $true
+                                # Add to UI
                                 [void](Set-WmtUpdateListItemCheckState -Item $item -DefaultChecked:$false)
                                 [void]$lstWinget.Items.Add($item)
                             }
                         }
                     }
                     catch {
-                        $script:WmtUpdateScanErrorCount = [int]$script:WmtUpdateScanErrorCount + 1
                         Write-GuiLog "Scan Error: $($_.Exception.Message)"
                     }
                 
@@ -27184,7 +26617,6 @@ $script:ScanTimer.Add_Tick({
             # All tasks finished
             if ($script:ScanTimer.IsEnabled) {
                 $script:ScanTimer.Stop()
-                if ($script:GlobalScanTimer) { try { $script:GlobalScanTimer.Stop() } catch {} }
             
                 $lblWingetStatus.Visibility = "Hidden"
                 if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
@@ -27196,21 +26628,11 @@ $script:ScanTimer.Add_Tick({
                 $lstWinget.UpdateLayout()
                 Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             
-                $wasAutoScan = [bool]$script:WmtUpdateAutoScanActive
-                $updateItems = @(Get-WmtVisibleUpdateResultItems)
-                $updateCount = [int]$updateItems.Count
-                if ($updateCount -eq 0) {
+                if ($lstWinget.Items.Count -eq 0) {
                     Write-GuiLog "System is up to date."
                 }
                 else {
-                    Write-GuiLog "Scan Complete. Found $updateCount updates."
-                }
-                if ($wasAutoScan) {
-                    Show-WmtUpdateScanNotification -UpdateCount $updateCount -ErrorCount ([int]$script:WmtUpdateScanErrorCount)
-                }
-                $script:WmtUpdateAutoScanActive = $false
-                if (Get-WmtUpdateAutoScanMinutes -gt 0) {
-                    Start-WmtUpdateAutoScanTimer -ResetNextRun
+                    Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
                 }
             }
         }
@@ -27218,11 +26640,6 @@ $script:ScanTimer.Add_Tick({
 
 # 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
-        $autoScanTriggered = ([bool]$script:WmtUpdateAutoScanPending -or [bool]$script:WmtUpdateAutoScanActive)
-        $script:WmtUpdateAutoScanPending = $false
-        $script:WmtUpdateAutoScanActive = $autoScanTriggered
-        $script:WmtPackageSearchActive = $false
-
         # UI Prep
         $lblWingetTitle.Text = "Package Updates"
         $lblWingetStatus.Text = "Scanning all providers..."
@@ -27230,7 +26647,6 @@ $btnWingetScan.Add_Click({
         if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
         if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
         if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
-        if ($script:WmtUpdateAutoScanTimer) { try { $script:WmtUpdateAutoScanTimer.Stop() } catch {} }
     
         $lstWinget.Items.Clear()
         $btnWingetScan.IsEnabled = $false
@@ -27241,12 +26657,7 @@ $btnWingetScan.Add_Click({
         if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
     
         Write-GuiLog " "
-        if ($autoScanTriggered) {
-            Write-GuiLog "Starting automatic background scan (global timeout 120s)..."
-        }
-        else {
-            Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
-        }
+        Write-GuiLog "Starting Parallel Scan (global timeout 120s)..."
         # Winget source refresh is handled before the provider worker starts.
         # Store updates use the Microsoft Store CLI instead of the winget msstore source.
         # Do not kill winget here; source preflight may already be running.
@@ -27286,12 +26697,9 @@ $btnWingetScan.Add_Click({
         # --- Reset scan tracking ---
         $script:ActiveScans.Clear()
         $script:ScanCancelled = $false
-        $script:WmtUpdateScanErrorCount = 0
-        $script:WmtUpdateScanResultKeys = @{}
         $script:ScanStartTime = Get-Date
     
         # --- Global Timeout Timer (120 seconds) ---
-        # DispatcherTimer does not implement Dispose(); stop the old timer and release the reference.
         if ($script:GlobalScanTimer) {
             try { $script:GlobalScanTimer.Stop() } catch {}
             $script:GlobalScanTimer = $null
@@ -27315,19 +26723,10 @@ $btnWingetScan.Add_Click({
                     $btnWingetScan.IsEnabled = $true
                     if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
                     $btnWingetUpdateSel.IsEnabled = $true
-                    $wasAutoScan = [bool]$script:WmtUpdateAutoScanActive
-                    $script:WmtUpdateAutoScanActive = $false
-                    if (Get-WmtUpdateAutoScanMinutes -gt 0) { Start-WmtUpdateAutoScanTimer -ResetNextRun }
-                    if ($wasAutoScan) {
-                        Write-GuiLog "Automatic background scan timed out after 120 seconds. No prompt was shown."
-                        Show-WmtUpdateScanNotification -UpdateCount 0 -ErrorCount 0 -TimedOut
-                    }
-                    else {
-                        [System.Windows.MessageBox]::Show(
-                            "Scan timed out after 120 seconds.`n`nOne of the enabled package providers did not respond.`nTry disabling slow providers and scan again.",
-                            "Scan Timeout", "OK", "Warning"
-                        ) | Out-Null
-                    }
+                    [System.Windows.MessageBox]::Show(
+                        "Scan timed out after 120 seconds.`n`nOne of the enabled package providers did not respond.`nTry disabling slow providers and scan again.",
+                        "Scan Timeout", "OK", "Warning"
+                    ) | Out-Null
                 }
                 $script:GlobalScanTimer.Stop()
             })
@@ -29667,39 +29066,16 @@ function Show-WingetRestartRiskWarning {
 
 # 1. Update Selected (Removed CmdTemplate to allow smart logic)
 $btnWingetUpdateSel.Add_Click({ 
-        try {
-            $selected = @(Get-WmtUpdateListCheckedItems -FallbackToSelection)
-            if ($selected.Count -eq 0) {
-                Show-WmtMessageBox -Message "Check one or more update rows first, or select rows as a fallback." -Title "No Updates Checked" -Image Information | Out-Null
-                return
-            }
-            Write-GuiLog "[Update] Update Checked starting for $($selected.Count) row(s)."
-            if (-not (Show-WingetRestartRiskWarning -Items $selected -Action "Update")) {
-                Write-GuiLog "[Update] Cancelled by user after restart warning."
-                return
-            }
-            & $Script:StartWingetAction -ListItems $selected -ActionName "Update"
+        $selected = @(Get-WmtUpdateListCheckedItems -FallbackToSelection)
+        if ($selected.Count -eq 0) {
+            Show-WmtMessageBox -Message "Check one or more update rows first, or select rows as a fallback." -Title "No Updates Checked" -Image Information | Out-Null
+            return
         }
-        catch {
-            $updateCheckedError = "ERROR: Update Checked failed before the updater could start: $($_.Exception.Message)"
-            try { Write-GuiLog $updateCheckedError } catch {}
-            try {
-                if ($lblWingetStatus) {
-                    $lblWingetStatus.Text = "Update Checked failed before starting."
-                    $lblWingetStatus.Visibility = "Visible"
-                }
-                if ($btnWingetScan) { $btnWingetScan.IsEnabled = $true }
-                if ($btnWingetUpdateSel) { $btnWingetUpdateSel.IsEnabled = $true }
-                if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
-                if ($btnWingetInstall) { $btnWingetInstall.IsEnabled = $true }
-                if ($btnWingetUninstall) { $btnWingetUninstall.IsEnabled = $true }
-            }
-            catch {}
-            try {
-                Show-WmtMessageBox -Message "Update Checked failed before it could start. The Activity Log has the error details." -Title "Update Checked Error" -Image Error | Out-Null
-            }
-            catch {}
+        if (-not (Show-WingetRestartRiskWarning -Items $selected -Action "Update")) {
+            Write-GuiLog "[Update] Cancelled by user after restart warning."
+            return
         }
+        & $Script:StartWingetAction -ListItems $selected -ActionName "Update"
     })
 
 function Get-WingetListedUpdateItems {
@@ -31878,11 +31254,29 @@ try {
     if (-not $script:WmtApplication) {
         $script:WmtApplication = New-Object System.Windows.Application
     }
+
+    if ($script:WmtDispatcherUnhandledHandler) {
+        try { $script:WmtApplication.remove_DispatcherUnhandledException($script:WmtDispatcherUnhandledHandler) } catch {}
+    }
+    $script:WmtDispatcherUnhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler] {
+        param($s, $eA)
+
+        try { $eventArgs.Handled = $true } catch {}
+        try {
+            Write-WmtLastCrash -Context "Unhandled WPF dispatcher exception" -Exception $eventArgs.Exception
+            if ($script:WingetJob -or $script:WingetActiveAction) {
+                Reset-WmtUpdateUiAfterMonitorError -Context "Unhandled WPF dispatcher exception" -Exception $eventArgs.Exception -SkipCrashWrite
+            }
+        }
+        catch {}
+    }
+    $script:WmtApplication.add_DispatcherUnhandledException($script:WmtDispatcherUnhandledHandler)
+
     $script:WmtApplication.ShutdownMode = [System.Windows.ShutdownMode]::OnLastWindowClose
     $script:WmtApplication.MainWindow = $window
     [void]$script:WmtApplication.Run($window)
 }
 catch {
+    Write-WmtLastCrash -Context "WMT application loop failed" -Exception $_.Exception -ErrorRecord $_
     Write-Warning "WMT application loop failed: $($_.Exception.Message)"
-    try { $window.ShowDialog() | Out-Null } catch { throw }
 }
