@@ -86,7 +86,7 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
         }
         elseif ($script:WmtScriptPath -and (Test-Path -LiteralPath $script:WmtScriptPath)) {
             $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ('"{0}"' -f $script:WmtScriptPath))
-            Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -WorkingDirectory $script:WmtRootPath
+            Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Verb RunAs -WindowStyle Hidden -WorkingDirectory $script:WmtRootPath
         }
         else {
             throw "Could not resolve the WMT launch path."
@@ -22870,6 +22870,177 @@ $Script:StartWingetAction = {
             $Result.Value = [PSCustomObject]@{ ExitCode = 1; TimedOut = $true; Message = "Store GUI update timed out." }
         }
 
+        # steam.exe and its main window stay open after updates, so completion is
+        # confirmed through the same per-app manifest fields used by the Steam scan.
+        function Get-WmtSteamActionManifestValue {
+            param(
+                [string]$Text,
+                [string]$Key
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Text) -or [string]::IsNullOrWhiteSpace($Key)) { return "" }
+            $match = [regex]::Match($Text, ('"' + [regex]::Escape($Key) + '"\s+"([^"]*)"'))
+            if ($match.Success) { return [string]$match.Groups[1].Value }
+            return ""
+        }
+
+        function Get-WmtSteamActionManifestNumber {
+            param(
+                [string]$Text,
+                [string]$Key
+            )
+
+            $value = Get-WmtSteamActionManifestValue -Text $Text -Key $Key
+            $number = [long]0
+            if ([long]::TryParse(([string]$value), [ref]$number)) { return $number }
+            return [long]0
+        }
+
+        function Get-WmtSteamActionManifestState {
+            param([string]$ManifestPath)
+
+            if ([string]::IsNullOrWhiteSpace($ManifestPath) -or -not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
+                return [PSCustomObject]@{ Readable = $false; ErrorMessage = "Steam app manifest was not found." }
+            }
+
+            try {
+                $text = Get-Content -LiteralPath $ManifestPath -Raw -ErrorAction Stop
+                if ([string]::IsNullOrWhiteSpace($text)) { throw "Steam app manifest is empty." }
+
+                $stateFlags = Get-WmtSteamActionManifestNumber -Text $text -Key "StateFlags"
+                $bytesToDownload = Get-WmtSteamActionManifestNumber -Text $text -Key "BytesToDownload"
+                $bytesDownloaded = Get-WmtSteamActionManifestNumber -Text $text -Key "BytesDownloaded"
+                $bytesToStage = Get-WmtSteamActionManifestNumber -Text $text -Key "BytesToStage"
+                $bytesStaged = Get-WmtSteamActionManifestNumber -Text $text -Key "BytesStaged"
+                $buildId = Get-WmtSteamActionManifestValue -Text $text -Key "buildid"
+                $targetBuildId = Get-WmtSteamActionManifestValue -Text $text -Key "TargetBuildID"
+
+                $downloadRemaining = [Math]::Max([long]0, $bytesToDownload - $bytesDownloaded)
+                $stageRemaining = [Math]::Max([long]0, $bytesToStage - $bytesStaged)
+                $hasTargetBuild = (-not [string]::IsNullOrWhiteSpace($targetBuildId) -and $targetBuildId -ne "0" -and $targetBuildId -ne $buildId)
+                $isPending = (
+                    ($stateFlags -ne 0 -and $stateFlags -ne 4) -or
+                    $downloadRemaining -gt 0 -or
+                    $stageRemaining -gt 0 -or
+                    $hasTargetBuild
+                )
+
+                $totalWork = [Math]::Max([long]0, $bytesToDownload) + [Math]::Max([long]0, $bytesToStage)
+                $completedWork = [Math]::Min([Math]::Max([long]0, $bytesDownloaded), [Math]::Max([long]0, $bytesToDownload)) +
+                    [Math]::Min([Math]::Max([long]0, $bytesStaged), [Math]::Max([long]0, $bytesToStage))
+                $progress = -1
+                if ($totalWork -gt 0) {
+                    $progress = [int][Math]::Floor(($completedWork * 100.0) / $totalWork)
+                    if ($isPending -and $progress -ge 100) { $progress = 99 }
+                }
+
+                $status = if (-not $isPending) {
+                    "current"
+                }
+                elseif ($downloadRemaining -gt 0) {
+                    "{0:N1} MB download remaining" -f ($downloadRemaining / 1MB)
+                }
+                elseif ($stageRemaining -gt 0) {
+                    "{0:N1} MB staging remaining" -f ($stageRemaining / 1MB)
+                }
+                elseif ($hasTargetBuild) {
+                    "waiting for target build $targetBuildId"
+                }
+                else {
+                    "Steam state $stateFlags"
+                }
+
+                return [PSCustomObject]@{
+                    Readable          = $true
+                    IsPending         = $isPending
+                    StateFlags        = $stateFlags
+                    BuildId           = $buildId
+                    TargetBuildId     = $targetBuildId
+                    DownloadRemaining = $downloadRemaining
+                    StageRemaining    = $stageRemaining
+                    Progress          = $progress
+                    Status            = $status
+                }
+            }
+            catch {
+                return [PSCustomObject]@{ Readable = $false; ErrorMessage = $_.Exception.Message }
+            }
+        }
+
+        function Wait-WmtSteamActionCompletion {
+            param(
+                [string]$ManifestPath,
+                [string]$PackageName,
+                [int]$TimeoutSeconds = 14400,
+                [ref]$Result
+            )
+
+            $Result.Value = $null
+            if ([string]::IsNullOrWhiteSpace($ManifestPath)) {
+                Write-Output "LOG:[Steam] Cannot monitor $PackageName because its app manifest path is unavailable."
+                $Result.Value = [PSCustomObject]@{ ExitCode = 2; Message = "Steam app manifest path is unavailable." }
+                return
+            }
+
+            $deadline = (Get-Date).AddSeconds([Math]::Max(60, $TimeoutSeconds))
+            $missingSince = $null
+            $stableCompleteReads = 0
+            $lastSignature = ""
+            $lastProgress = -2
+            $lastHeartbeat = Get-Date
+            Write-Output "LOG:[Steam] Monitoring the app manifest for $PackageName update completion (timeout: 4 hours)."
+
+            while ((Get-Date) -lt $deadline) {
+                $state = Get-WmtSteamActionManifestState -ManifestPath $ManifestPath
+                if (-not $state.Readable) {
+                    if (-not $missingSince) {
+                        $missingSince = Get-Date
+                        Write-Output "LOG:[Steam] Waiting for the app manifest to become readable for $PackageName."
+                    }
+                    elseif (((Get-Date) - $missingSince).TotalSeconds -ge 30) {
+                        Write-Output "LOG:[Steam] App manifest remained unavailable for 30 seconds: $($state.ErrorMessage)"
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 1; Message = $state.ErrorMessage }
+                        return
+                    }
+                    Start-Sleep -Seconds 1
+                    continue
+                }
+
+                $missingSince = $null
+                $signature = "$($state.StateFlags)|$($state.BuildId)|$($state.TargetBuildId)|$($state.DownloadRemaining)|$($state.StageRemaining)"
+                if ($signature -ne $lastSignature) {
+                    $lastSignature = $signature
+                    Write-Output "LOG:[Steam] $PackageName status: $($state.Status)."
+                }
+
+                if ($state.Progress -ge 0 -and $state.Progress -ne $lastProgress) {
+                    $lastProgress = $state.Progress
+                    Write-Output "LOG:  [steam] Progress: $($state.Progress)%"
+                }
+
+                if (-not $state.IsPending) {
+                    $stableCompleteReads++
+                    if ($stableCompleteReads -ge 3) {
+                        Write-Output "LOG:  [steam] Progress: 100%"
+                        $Result.Value = [PSCustomObject]@{ ExitCode = 0; Completed = $true; BuildId = $state.BuildId }
+                        return
+                    }
+                }
+                else {
+                    $stableCompleteReads = 0
+                }
+
+                if (((Get-Date) - $lastHeartbeat).TotalSeconds -ge 30) {
+                    $lastHeartbeat = Get-Date
+                    Write-Output "LOG:[Steam] Still waiting for $PackageName to finish in Steam ($($state.Status))."
+                }
+                Start-Sleep -Seconds 1
+            }
+
+            Write-Output "LOG:[Steam] Timed out waiting for $PackageName to finish updating."
+            $Result.Value = [PSCustomObject]@{ ExitCode = 1; TimedOut = $true; Message = "Steam update completion monitor timed out." }
+        }
+
         function Close-WmtStoreGui {
             try {
                 Add-Type -AssemblyName UIAutomationClient -ErrorAction Stop
@@ -24004,18 +24175,22 @@ exit /b %WMT_EXIT%
                             Write-Output "LOG:[Steam] Could not prepare Steam request: $($_.Exception.Message)"
                         }
 
-                        # Backup path: request Steam directly from this worker process too.
-                        # The GUI still receives STEAM_OPEN and runs the visible launcher, but this
-                        # catches cases where the UI timer/event reader misses the worker output.
-                        try {
-                            Start-Process -FilePath $steamUri -ErrorAction Stop | Out-Null
-                            Write-Output "LOG:[Steam] Direct worker Steam protocol launch requested."
+                        Write-Output "LOG:[Steam] Steam launch was delegated to the headless GUI launcher."
+
+                        $steamResult = $null
+                        Wait-WmtSteamActionCompletion -ManifestPath ([string]$item.ManifestPath) -PackageName $name -Result ([ref]$steamResult)
+                        if ($steamResult -and $steamResult.ExitCode -eq 0) {
+                            Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (Steam manifest confirms update completion)"
+                            Write-Output "RESULT:${index}:SUCCESS:$name"
                         }
-                        catch {
-                            Write-Output "LOG:[Steam] Direct worker Steam protocol launch failed: $($_.Exception.Message)"
+                        elseif ($steamResult -and $steamResult.ExitCode -eq 2) {
+                            Write-Output "LOG:[$act][$index/$total] SKIPPED: $name (opened Steam updater, but completion cannot be monitored)"
+                            Write-Output "RESULT:${index}:SKIPPED:$name"
                         }
-                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (opened Steam updater)"
-                        Write-Output "RESULT:${index}:SUCCESS:$name"
+                        else {
+                            Write-Output "LOG:[$act][$index/$total] FAILED: $name (Steam update completion was not confirmed)"
+                            Write-Output "RESULT:${index}:FAILED:$name"
+                        }
                         continue
                     }
                     elseif ($act -eq "Install") {
@@ -24452,125 +24627,35 @@ timeout /t 5
                     return @($candidates) | Select-Object -First 1
                 }
 
-                function Invoke-WmtSteamVisiblePowerShellLauncher {
+                function Invoke-WmtSteamHeadlessLauncher {
                     param(
                         [string]$Uri,
                         [string]$Label
                     )
 
                     if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
+                    $steamExe = Find-WmtSteamExeForLaunch
+                    if ([string]::IsNullOrWhiteSpace($steamExe)) {
+                        Write-GuiLog "[Steam] Headless launch skipped because steam.exe was not found."
+                        return $false
+                    }
 
-                    # This is intentionally a visible PowerShell child process because the same
-                    # Start-Process "steam://..." command works when the user runs it manually.
-                    # If this window does not appear, the GUI did not receive/process STEAM_OPEN.
                     try {
-                        $safeUriForScript = ([string]$Uri).Replace("'", "''")
-                        $launcherPath = Join-Path $env:TEMP ("WMT_OpenSteam_{0}.ps1" -f ([Guid]::NewGuid().ToString('N')))
-                        $launcherContent = @"
-`$ErrorActionPreference = 'Continue'
-[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(`$false)
-Write-Host 'WMT Steam launcher'
-Write-Host 'Opening: $Uri'
-Write-Host ''
-try {
-    Start-Process -FilePath '$safeUriForScript'
-    Write-Host 'Steam protocol request was sent with Start-Process.'
-}
-catch {
-    Write-Host "Start-Process steam URI failed: `$(`$_.Exception.Message)"
-    try {
-        `$cmdArgs = '/c start "" "$safeUriForScript"'
-        Start-Process -FilePath `$env:ComSpec -ArgumentList `$cmdArgs -WindowStyle Normal
-        Write-Host 'Visible cmd fallback was started.'
-    }
-    catch {
-        Write-Host "Visible cmd fallback failed: `$(`$_.Exception.Message)"
-    }
-}
-Write-Host ''
-Write-Host 'Closing this launcher in 6 seconds...'
-Start-Sleep -Seconds 6
-try { Remove-Item -LiteralPath `$PSCommandPath -Force -ErrorAction SilentlyContinue } catch {}
-"@
-                        Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding UTF8 -Force
-
+                        $isValidationUri = $Uri -match '^(?i)steam://validate/'
                         $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName = "powershell.exe"
-                        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$launcherPath`""
-                        $psi.UseShellExecute = $true
-                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
+                        $psi.FileName = $steamExe
+                        $psi.Arguments = if ($isValidationUri) { "`"$Uri`"" } else { "-silent -minimized `"$Uri`"" }
+                        $psi.UseShellExecute = $false
+                        $psi.CreateNoWindow = $true
+                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
                         [void][System.Diagnostics.Process]::Start($psi)
 
-                        Write-GuiLog "[Steam] Started visible PowerShell Steam launcher for $Label ($Uri)."
+                        $launchText = if ($isValidationUri) { "steam.exe $Uri" } else { "steam.exe -silent -minimized $Uri" }
+                        Write-GuiLog "[Steam] Started headless Steam launcher for $Label`: $launchText"
                         return $true
                     }
                     catch {
-                        Write-GuiLog "[Steam] Visible PowerShell launcher failed for $Label`: $($_.Exception.Message)"
-                    }
-
-                    return $false
-                }
-
-                function Invoke-WmtSteamVisibleCmdLauncher {
-                    param(
-                        [string]$Uri,
-                        [string]$Label
-                    )
-
-                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
-
-                    try {
-                        $safeUri = ([string]$Uri).Replace('"', '')
-                        $launcherPath = Join-Path $env:TEMP ("WMT_OpenSteam_{0}.cmd" -f ([Guid]::NewGuid().ToString('N')))
-                        $launcherContent = @"
-@echo off
-title WMT Steam launcher
-echo WMT Steam launcher
-echo Opening: $safeUri
-echo.
-start "" "$safeUri"
-echo Steam protocol request sent.
-echo Closing this launcher in 6 seconds...
-timeout /t 6 /nobreak >nul
-del "%~f0" >nul 2>nul
-"@
-                        Set-Content -LiteralPath $launcherPath -Value $launcherContent -Encoding Ascii -Force
-
-                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName = $launcherPath
-                        $psi.UseShellExecute = $true
-                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
-                        [void][System.Diagnostics.Process]::Start($psi)
-
-                        Write-GuiLog "[Steam] Started visible cmd Steam launcher for $Label ($Uri)."
-                        return $true
-                    }
-                    catch {
-                        Write-GuiLog "[Steam] Visible cmd launcher failed for $Label`: $($_.Exception.Message)"
-                    }
-
-                    return $false
-                }
-
-                function Invoke-WmtSteamShellExecuteUri {
-                    param(
-                        [string]$Uri,
-                        [string]$Label
-                    )
-
-                    if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
-
-                    try {
-                        $psi = New-Object System.Diagnostics.ProcessStartInfo
-                        $psi.FileName = $Uri
-                        $psi.UseShellExecute = $true
-                        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Normal
-                        [void][System.Diagnostics.Process]::Start($psi)
-                        Write-GuiLog "[Steam] Sent Steam protocol with ShellExecute for $Label ($Uri)."
-                        return $true
-                    }
-                    catch {
-                        Write-GuiLog "[Steam] ShellExecute URI failed for $Label`: $($_.Exception.Message)"
+                        Write-GuiLog "[Steam] Headless Steam launch failed for $Label`: $($_.Exception.Message)"
                     }
 
                     return $false
@@ -24584,34 +24669,10 @@ del "%~f0" >nul 2>nul
                     )
 
                     if ([string]::IsNullOrWhiteSpace($Uri)) { return $false }
-                    $steamExe = Find-WmtSteamExeForLaunch
 
                     Write-GuiLog "[Steam] Launch request received for $Label ($Uri)."
 
-                    # First try the visible child PowerShell, because that exactly mirrors the
-                    # manual PowerShell command path that is known to work on the user's machine.
-                    if (Invoke-WmtSteamVisiblePowerShellLauncher -Uri $Uri -Label $Label) { return $true }
-
-                    # Then try ShellExecute and a visible .cmd fallback. These are intentionally
-                    # not hidden so failures are visible instead of being swallowed silently.
-                    if (Invoke-WmtSteamShellExecuteUri -Uri $Uri -Label $Label) { return $true }
-                    if (Invoke-WmtSteamVisibleCmdLauncher -Uri $Uri -Label $Label) { return $true }
-
-                    if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
-                        try {
-                            Start-Process -FilePath $steamExe -ArgumentList "-silent" -ErrorAction Stop | Out-Null
-                            Write-GuiLog "[Steam] Started steam.exe fallback: $steamExe"
-                            Start-Sleep -Milliseconds 1000
-                            if (Invoke-WmtSteamVisiblePowerShellLauncher -Uri $Uri -Label $Label) { return $true }
-                            if (Invoke-WmtSteamVisibleCmdLauncher -Uri $Uri -Label $Label) { return $true }
-                        }
-                        catch {
-                            Write-GuiLog "[Steam] Steam.exe startup fallback failed for $Label`: $($_.Exception.Message)"
-                        }
-                    }
-                    else {
-                        Write-GuiLog "[Steam] steam.exe fallback was skipped because Steam was not found in registry/common paths."
-                    }
+                    if (Invoke-WmtSteamHeadlessLauncher -Uri $Uri -Label $Label) { return $true }
 
                     return $false
                 }
@@ -25884,18 +25945,8 @@ if ([string]::IsNullOrWhiteSpace($steamExe)) {
 
 $steamExe = Get-WmtSteamExe
 if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
-    Start-Process -FilePath $steamExe -ArgumentList "-silent"
-    Start-Sleep -Seconds 2
-    try {
-        Start-Process "steam://open/downloads"
-        Write-Host "Steam Downloads protocol request was sent."
-    }
-    catch {
-        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
-        $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
-        Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
-    }
-    Write-Host "Steam was started. Use the Downloads page to process pending game updates."
+    Start-Process -FilePath $steamExe -ArgumentList "-silent", "-minimized", '"steam://open/downloads"' -WindowStyle Hidden
+    Write-Host "Steam Downloads was requested with steam.exe -silent -minimized."
 }
 else {
     Start-Process "https://store.steampowered.com/about/"
@@ -25940,35 +25991,12 @@ function Get-WmtSteamExe {
 
 $steamExe = Get-WmtSteamExe
 if (-not [string]::IsNullOrWhiteSpace($steamExe)) {
-    Start-Process -FilePath $steamExe -ArgumentList "-silent"
-    Start-Sleep -Seconds 2
-    try {
-        Start-Process "steam://open/downloads"
-        Write-Host "Steam Downloads protocol request was sent."
-    }
-    catch {
-        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
-        $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
-        Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
-    }
-    Write-Host "Steam was started. Use the Downloads page to process pending game updates."
+    Start-Process -FilePath $steamExe -ArgumentList "-silent", "-minimized", '"steam://open/downloads"' -WindowStyle Hidden
+    Write-Host "Steam Downloads was requested with steam.exe -silent -minimized."
 }
 else {
-    try {
-        Start-Process "steam://open/downloads"
-        Write-Host "Steam Downloads protocol request was sent."
-    }
-    catch {
-        Write-Host "Direct Steam protocol launch failed: $($_.Exception.Message)"
-        try {
-            $cmdArgs = '/k echo WMT Steam launcher & start "" "steam://open/downloads" & echo Steam protocol request sent. & timeout /t 6 & exit'
-            Start-Process -FilePath "cmd.exe" -ArgumentList $cmdArgs -WindowStyle Normal
-        }
-        catch {
-            Start-Process "https://store.steampowered.com/about/"
-            throw "Steam was not found. Opened the Steam download page."
-        }
-    }
+    Start-Process "https://store.steampowered.com/about/"
+    throw "Steam was not found. Opened the Steam download page."
 }
 '@
                 }
@@ -26130,7 +26158,8 @@ exit `$exitCode
         try {
             Set-Content -Path $tempScriptPath -Value $scriptText -Encoding UTF8 -Force
             Write-GuiLog "[$($provider.DisplayName)] $action started."
-            $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScriptPath`"" -WindowStyle Normal -PassThru
+            $providerWindowStyle = if ($ProviderKey -eq "steam") { "Hidden" } else { "Normal" }
+            $proc = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$tempScriptPath`"" -WindowStyle $providerWindowStyle -PassThru
         }
         catch {
             Write-GuiLog "[$($provider.DisplayName)] $action failed to start: $($_.Exception.Message)"
