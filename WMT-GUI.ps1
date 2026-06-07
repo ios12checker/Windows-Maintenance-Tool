@@ -3694,6 +3694,8 @@ function Reset-WmtUpdateUiAfterMonitorError {
         Write-WmtLastCrash -Context $Context -Exception $Exception -ErrorRecord $ErrorRecord
     }
 
+    $autoInstallWasActive = [bool]$script:WmtAutoInstallActive
+
     try { if ($script:WingetTimer) { $script:WingetTimer.Stop() } } catch {}
     try { if ($script:WingetJob) { Stop-Job -Job $script:WingetJob -ErrorAction SilentlyContinue } } catch {}
     try { if ($script:WingetJob) { Receive-Job -Job $script:WingetJob -ErrorAction SilentlyContinue | Out-Null } } catch {}
@@ -3702,9 +3704,13 @@ function Reset-WmtUpdateUiAfterMonitorError {
     $script:WingetJob = $null
     $script:WingetActiveAction = $null
     $script:WingetActionStoreUpdateOnly = $false
+    $script:WmtAutoInstallActive = $false
     $script:WingetCurrentIndex = 0
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
+    $script:WingetCurrentItemSource = ""
+    $script:WingetCurrentItemStartedAt = $null
+    $script:WingetActionForcedTimeout = $false
 
     try { if ($script:RefreshWingetProgressUi) { & $script:RefreshWingetProgressUi } } catch {}
 
@@ -3721,6 +3727,10 @@ function Reset-WmtUpdateUiAfterMonitorError {
         if ($statusLabel) { $statusLabel.Text = "Update monitor recovered from an internal error. See data\last-crash.txt." }
     }
     catch {}
+
+    if ($autoInstallWasActive) {
+        try { Show-WmtBackgroundInstallNotification -Status Interrupted } catch {}
+    }
 }
 
 function Get-WmtLegendaryExePath {
@@ -4084,6 +4094,8 @@ function Save-WmtSettings {
             WingetIncludeUnknown       = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
             UpdateAutoScanMinutes      = [int](Get-WmtUpdateAutoScanMinutes -Settings $Settings)
             UpdateNotificationsEnabled = [bool](Get-WmtUpdateNotificationsEnabled -Settings $Settings)
+            UpdateSilentInstallEnabled = [bool](Get-WmtUpdateSilentInstallEnabled -Settings $Settings)
+            UpdateAutoInstallEnabled   = [bool](Get-WmtUpdateAutoInstallEnabled -Settings $Settings)
             RunInTrayOnClose           = [bool](Get-WmtRunInTrayOnClose -Settings $Settings)
             ReduceRamInTray            = [bool](Get-WmtReduceRamInTray -Settings $Settings)
             LoadWinapp2                = [bool]$Settings.LoadWinapp2
@@ -4117,6 +4129,8 @@ function Get-WmtSettings {
         WingetIncludeUnknown       = $true
         UpdateAutoScanMinutes      = 0
         UpdateNotificationsEnabled = $true
+        UpdateSilentInstallEnabled = $false
+        UpdateAutoInstallEnabled   = $false
         RunInTrayOnClose           = $false
         ReduceRamInTray            = $true
         LoadWinapp2                = $false 
@@ -4157,6 +4171,8 @@ function Get-WmtSettings {
                 if ($defaults.UpdateAutoScanMinutes -lt 0) { $defaults.UpdateAutoScanMinutes = 0 }
             }
             if ($json.PSObject.Properties["UpdateNotificationsEnabled"]) { $defaults.UpdateNotificationsEnabled = [bool]$json.UpdateNotificationsEnabled }
+            if ($json.PSObject.Properties["UpdateSilentInstallEnabled"]) { $defaults.UpdateSilentInstallEnabled = [bool]$json.UpdateSilentInstallEnabled }
+            if ($json.PSObject.Properties["UpdateAutoInstallEnabled"]) { $defaults.UpdateAutoInstallEnabled = [bool]$json.UpdateAutoInstallEnabled }
             if ($json.PSObject.Properties["RunInTrayOnClose"]) { $defaults.RunInTrayOnClose = [bool]$json.RunInTrayOnClose }
             if ($json.PSObject.Properties["ReduceRamInTray"]) { $defaults.ReduceRamInTray = [bool]$json.ReduceRamInTray }
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
@@ -4309,6 +4325,74 @@ function Set-WmtUpdateNotificationsEnabled {
     }
     else {
         $settings | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value $Enabled -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtUpdateSilentInstallEnabled {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("UpdateSilentInstallEnabled")) {
+            return [bool]$Settings["UpdateSilentInstallEnabled"]
+        }
+        if ($Settings.PSObject.Properties["UpdateSilentInstallEnabled"]) {
+            return [bool]$Settings.UpdateSilentInstallEnabled
+        }
+    }
+    catch {}
+
+    return $false
+}
+
+function Set-WmtUpdateSilentInstallEnabled {
+    param([bool]$Enabled)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["UpdateSilentInstallEnabled"] = $Enabled
+    }
+    elseif ($settings.PSObject.Properties["UpdateSilentInstallEnabled"]) {
+        $settings.UpdateSilentInstallEnabled = $Enabled
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "UpdateSilentInstallEnabled" -Value $Enabled -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtUpdateAutoInstallEnabled {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    try {
+        if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("UpdateAutoInstallEnabled")) {
+            return [bool]$Settings["UpdateAutoInstallEnabled"]
+        }
+        if ($Settings.PSObject.Properties["UpdateAutoInstallEnabled"]) {
+            return [bool]$Settings.UpdateAutoInstallEnabled
+        }
+    }
+    catch {}
+
+    return $false
+}
+
+function Set-WmtUpdateAutoInstallEnabled {
+    param([bool]$Enabled)
+
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["UpdateAutoInstallEnabled"] = $Enabled
+    }
+    elseif ($settings.PSObject.Properties["UpdateAutoInstallEnabled"]) {
+        $settings.UpdateAutoInstallEnabled = $Enabled
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "UpdateAutoInstallEnabled" -Value $Enabled -Force
     }
     Save-WmtSettings -Settings $settings
 }
@@ -5031,6 +5115,40 @@ function Show-WmtUpdateScanNotification {
         $noun = if ($ErrorCount -eq 1) { "provider" } else { "providers" }
         [void](Show-WmtNativeNotification -Title "Update scan incomplete" -Message "$ErrorCount package $noun returned an error. Check the WMT log for details." -Kind Warning)
     }
+}
+
+function Show-WmtBackgroundInstallNotification {
+    param(
+        [ValidateSet("Started", "Completed", "Interrupted")][string]$Status,
+        [int]$TotalCount = 0,
+        [int]$SuccessCount = 0,
+        [int]$SkippedCount = 0,
+        [int]$FailedCount = 0
+    )
+
+    if (-not (Get-WmtUpdateNotificationsEnabled)) { return }
+
+    if ($Status -eq "Started") {
+        $noun = if ($TotalCount -eq 1) { "update" } else { "updates" }
+        [void](Show-WmtNativeNotification -Title "Background updates installing" -Message "WMT is automatically installing $TotalCount available $noun." -Kind Info)
+        return
+    }
+
+    if ($Status -eq "Interrupted") {
+        [void](Show-WmtNativeNotification -Title "Background updates interrupted" -Message "Automatic update installation stopped because the WMT update monitor encountered an error. Check the WMT log for details." -Kind Warning)
+        return
+    }
+
+    if ($FailedCount -gt 0) {
+        $message = "Background installation finished: $SuccessCount succeeded, $SkippedCount skipped, and $FailedCount failed. Check the WMT log for details."
+        [void](Show-WmtNativeNotification -Title "Background updates completed with failures" -Message $message -Kind Warning)
+        return
+    }
+
+    $message = "Background installation finished: $SuccessCount succeeded"
+    if ($SkippedCount -gt 0) { $message += " and $SkippedCount skipped" }
+    $message += "."
+    [void](Show-WmtNativeNotification -Title "Background updates complete" -Message $message -Kind Info)
 }
 
 function Show-DownloadStats {
@@ -22432,6 +22550,9 @@ $Script:StartWingetAction = {
     $script:WingetCurrentIndex = 0
     $script:WingetCurrentPercent = 0
     $script:WingetCurrentItemName = ""
+    $script:WingetCurrentItemSource = ""
+    $script:WingetCurrentItemStartedAt = $null
+    $script:WingetActionForcedTimeout = $false
     $script:WingetCompletedIndexes = @{}
     $script:WingetActionStoreUpdateOnly = (
         $ActionName -eq "Update" -and
@@ -22513,15 +22634,23 @@ $Script:StartWingetAction = {
     
     # 1. Define the Job Arguments
     $wingetIncludeUnknown = Get-WmtWingetIncludeUnknown -Settings (Get-WmtSettings)
+    $pythonExePath = "python.exe"
+    try {
+        $resolvedPython = Get-Command "python.exe" -ErrorAction Stop
+        if ($resolvedPython.Source) { $pythonExePath = [string]$resolvedPython.Source }
+    }
+    catch {}
     $jobArgs = @{
-        Items                = $uniqueItems
-        ActionName           = $ActionName
-        CmdTemplate          = $CmdTemplate
-        TempPath             = $env:TEMP
-        WingetIncludeUnknown = $wingetIncludeUnknown
-        LegendaryExePath     = Get-WmtLegendaryExePath
-        GogdlExePath         = Get-WmtGogdlExePath
-        GogdlAuthConfigPath  = Get-WmtGogdlAuthConfigPath
+        Items                      = $uniqueItems
+        ActionName                 = $ActionName
+        CmdTemplate                = $CmdTemplate
+        TempPath                   = $env:TEMP
+        WingetIncludeUnknown       = $wingetIncludeUnknown
+        SilentUpdateInstallEnabled = [bool](Get-WmtUpdateSilentInstallEnabled)
+        PythonExePath              = $pythonExePath
+        LegendaryExePath           = Get-WmtLegendaryExePath
+        GogdlExePath               = Get-WmtGogdlExePath
+        GogdlAuthConfigPath        = Get-WmtGogdlAuthConfigPath
     }
 
     # 2. Start the Background Job
@@ -22532,6 +22661,8 @@ $Script:StartWingetAction = {
         $tmpl = $ArgsDict.CmdTemplate
         $temp = $ArgsDict.TempPath
         $wingetIncludeUnknown = [bool]$ArgsDict.WingetIncludeUnknown
+        $silentUpdateInstallEnabled = [bool]$ArgsDict.SilentUpdateInstallEnabled
+        $pythonExePath = [string]$ArgsDict.PythonExePath
         $legendaryExePath = [string]$ArgsDict.LegendaryExePath
         $gogdlExePath = [string]$ArgsDict.GogdlExePath
         $gogdlAuthConfigPath = [string]$ArgsDict.GogdlAuthConfigPath
@@ -23071,47 +23202,124 @@ $Script:StartWingetAction = {
             }
         }
 
-        # Helper: Execute Command & Stream Output in Real-Time
-        function Invoke-WingetCmd ($command) {
+        function Stop-WmtChildProcessTree {
+            param([object]$Process)
+
+            if (-not $Process) { return }
+            try {
+                $Process.Refresh()
+                if ($Process.HasExited) { return }
+            }
+            catch { return }
+
+            try {
+                $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $killInfo.FileName = "taskkill.exe"
+                $killInfo.Arguments = "/PID $($Process.Id) /T /F"
+                $killInfo.UseShellExecute = $false
+                $killInfo.CreateNoWindow = $true
+                $killInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                $killProc = [System.Diagnostics.Process]::Start($killInfo)
+                if ($killProc) { [void]$killProc.WaitForExit(5000) }
+            }
+            catch {
+                try { $Process.Kill() } catch {}
+            }
+        }
+
+        # Executes headless commands without blocking on a quiet stdout/stderr stream.
+        function Invoke-WingetCmd {
+            param(
+                [string]$Command,
+                [int]$TimeoutSeconds = 0,
+                [string]$CommandLabel = "Command"
+            )
+
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "powershell.exe"
-            $pInfo.Arguments = "-Command $command"
+            $pInfo.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command $Command"
             $pInfo.RedirectStandardOutput = $true
             $pInfo.RedirectStandardError = $true
             $pInfo.UseShellExecute = $false
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
 
-            # Stream output/error in real-time while process runs
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            $startedAt = Get-Date
+            $lastHeartbeat = $startedAt
+            $timedOut = $false
             while (-not $proc.HasExited) {
-                while ($proc.StandardOutput.Peek() -gt -1) {
-                    $line = $proc.StandardOutput.ReadLine()
-                    if ($line) { Write-Output "LOG:  > $line" }
+                $now = Get-Date
+                if ($TimeoutSeconds -gt 0 -and (($now - $startedAt).TotalSeconds -ge $TimeoutSeconds)) {
+                    $timedOut = $true
+                    Write-Output "LOG:$CommandLabel timed out after $TimeoutSeconds seconds. Stopping its process tree."
+                    Stop-WmtChildProcessTree -Process $proc
+                    break
                 }
-                while ($proc.StandardError.Peek() -gt -1) {
-                    $line = $proc.StandardError.ReadLine()
-                    if ($line) { Write-Output "LOG:  ! $line" }
+                if (($now - $lastHeartbeat).TotalSeconds -ge 15) {
+                    Write-Output "LOG:$CommandLabel still running..."
+                    $lastHeartbeat = $now
                 }
                 Start-Sleep -Milliseconds 100
             }
 
-            # Get remaining output after exit
-            $remaining = $proc.StandardOutput.ReadToEnd()
-            if ($remaining) {
-                foreach ($line in ($remaining -split "`r`n")) {
+            try { [void]$proc.WaitForExit(5000) } catch {}
+            try {
+                $proc.Refresh()
+                if (-not $proc.HasExited) {
+                    try { $proc.Kill() } catch {}
+                    try { [void]$proc.WaitForExit(2000) } catch {}
+                }
+            }
+            catch {}
+            $outText = ""
+            $errText = ""
+            try { if ($outTask.IsCompleted) { $outText = $outTask.GetAwaiter().GetResult() } } catch {}
+            try { if ($errTask.IsCompleted) { $errText = $errTask.GetAwaiter().GetResult() } } catch {}
+
+            if ($outText) {
+                foreach ($line in ($outText -split "`r?`n")) {
                     if ($line) { Write-Output "LOG:  > $line" }
                 }
             }
-
-            # Also capture any remaining errors
-            $errOutput = $proc.StandardError.ReadToEnd()
-            if ($errOutput) {
-                foreach ($line in ($errOutput -split "`r`n")) {
+            if ($errText) {
+                foreach ($line in ($errText -split "`r?`n")) {
                     if ($line) { Write-Output "LOG:  ! $line" }
                 }
             }
 
+            if ($timedOut) {
+                return [PSCustomObject]@{ ExitCode = 124; TimedOut = $true }
+            }
             return $proc
+        }
+
+        # Pip can remain alive indefinitely when launched with ProcessStartInfo from inside Start-Job.
+        # Direct native invocation lets the job host drain pip's output reliably while remaining headless.
+        function Invoke-WmtPipDirect {
+            param(
+                [string]$PythonPath,
+                [object[]]$ArgumentList
+            )
+
+            if ([string]::IsNullOrWhiteSpace($PythonPath)) { $PythonPath = "python.exe" }
+            try {
+                $outputLines = @(& $PythonPath @ArgumentList 2>&1)
+                $exitCode = $LASTEXITCODE
+                return [PSCustomObject]@{
+                    ExitCode   = if ($null -eq $exitCode) { 1 } else { [int]$exitCode }
+                    OutputLines = @($outputLines | ForEach-Object { $_.ToString() })
+                    TimedOut   = $false
+                }
+            }
+            catch {
+                return [PSCustomObject]@{
+                    ExitCode   = 1
+                    OutputLines = @($_.Exception.Message)
+                    TimedOut   = $false
+                }
+            }
         }
 
         function Invoke-WingetLive ($argsLine) {
@@ -23211,7 +23419,8 @@ $Script:StartWingetAction = {
             else {
                 $cmdLine = "/c title $safeTitle && $command"
             }
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle Normal
+            $windowStyle = if ($silentUpdateInstallEnabled) { "Hidden" } else { "Normal" }
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle $windowStyle
             return $proc
         }
 
@@ -23724,9 +23933,11 @@ exit /b %WMT_EXIT%
                 Set-Content -Path $runnerPath -Value $runnerContent -Encoding UTF8 -Force
                 Set-Content -Path $sendKeysPath -Value $sendKeysContent -Encoding Ascii -Force
                 Set-Content -Path $batPath -Value $batContent -Encoding Ascii -Force
-                Write-Output "LOG:[Store CLI] Launching interactive $($ActionLabel.ToLowerInvariant()) window for: $PackageName"
-                $cmdProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -PassThru -WindowStyle Normal
-                Show-WmtStoreCliWindow $cmdProc
+                $storeWindowStyle = if ($silentUpdateInstallEnabled) { "Hidden" } else { "Normal" }
+                $storeWindowLabel = if ($silentUpdateInstallEnabled) { "headless" } else { "interactive" }
+                Write-Output "LOG:[Store CLI] Launching $storeWindowLabel $($ActionLabel.ToLowerInvariant()) window for: $PackageName"
+                $cmdProc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$batPath`"" -PassThru -WindowStyle $storeWindowStyle
+                if (-not $silentUpdateInstallEnabled) { Show-WmtStoreCliWindow $cmdProc }
                 $safePackageArg = ([string]$PackageName).Replace('"', '')
                 Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$sendKeysPath`" -TargetPid $($cmdProc.Id) -PackageName `"$safePackageArg`" -StatusPath `"$statusPath`" -ResourcesInUsePath `"$resourcesInUsePath`" -ScreenPath `"$screenPath`" -EventPath `"$EventPath`"" -WindowStyle Hidden
                 Write-Output "LOG:  [store] Progress: 5%"
@@ -24032,6 +24243,7 @@ exit /b %WMT_EXIT%
             $srcKey = ([string]$src).ToLowerInvariant()
             $cmd = ""
             $userCmd = "" 
+            $pipArguments = $null
             $wingetArgs = $null
             $storeCliArgs = $null
             $windowsUpdateItem = $null
@@ -24040,6 +24252,7 @@ exit /b %WMT_EXIT%
             $storeFallbackWebUri = ""
             $skipReason = $null
             Write-Output "PROGRESS:${index}/${total}:$name"
+            Write-Output "ITEM_SOURCE:$srcKey"
 
             if ($act -eq "Update" -and ([string]$src).ToLowerInvariant() -eq "msstore") {
                 $storeGuiResult = $null
@@ -24297,9 +24510,19 @@ exit /b %WMT_EXIT%
                 }
                 # --- PYTHON PIP ---
                 elseif ($src -eq "pip" -or $src -eq "pip3") {
-                    if ($act -eq "Install") { $cmd = "python -m pip install `"$id`"" }
-                    if ($act -eq "Update") { $cmd = "python -m pip install --upgrade `"$id`"" }
-                    if ($act -eq "Uninstall") { $cmd = "python -m pip uninstall -y `"$id`"" }
+                    $pipSafetyFlags = "--disable-pip-version-check --no-input --timeout 30 --retries 2"
+                    if ($act -eq "Install") {
+                        $cmd = "python -m pip $pipSafetyFlags install `"$id`""
+                        $pipArguments = @("-m", "pip", "--disable-pip-version-check", "--no-input", "--timeout", "30", "--retries", "2", "install", [string]$id)
+                    }
+                    if ($act -eq "Update") {
+                        $cmd = "python -m pip $pipSafetyFlags install --upgrade `"$id`""
+                        $pipArguments = @("-m", "pip", "--disable-pip-version-check", "--no-input", "--timeout", "30", "--retries", "2", "install", "--upgrade", [string]$id)
+                    }
+                    if ($act -eq "Uninstall") {
+                        $cmd = "python -m pip --disable-pip-version-check --no-input uninstall -y `"$id`""
+                        $pipArguments = @("-m", "pip", "--disable-pip-version-check", "--no-input", "uninstall", "-y", [string]$id)
+                    }
                     $userCmd = $cmd
                 }
                 # --- NODE NPM & PNPM ---
@@ -24352,7 +24575,7 @@ exit /b %WMT_EXIT%
                 $isPipUpdate = (($src -eq "pip" -or $src -eq "pip3") -and $act -eq "Update")
                 $isChocoUpdate = (($src -eq "chocolatey" -or $src -eq "choco") -and $act -eq "Update")
                 $isPythonUpdate = ($act -eq "Update" -and (([string]$id -match "(?i)\bpython([0-9\.]*)\b") -or ([string]$name -match "(?i)\bpython([0-9\.]*)\b")))
-                $useVisibleWindow = ($act -eq "Update" -and -not ($src -eq "msstore" -and $storeCliArgs) -and -not $windowsUpdateItem)
+                $useVisibleWindow = ($act -eq "Update" -and -not $silentUpdateInstallEnabled -and -not ($src -eq "msstore" -and $storeCliArgs) -and -not $windowsUpdateItem)
 
                 if ($useVisibleWindow) {
                     $windowTag = switch -Regex ($src) {
@@ -24416,9 +24639,20 @@ exit /b %WMT_EXIT%
                 elseif ($windowsUpdateItem) {
                     $p = Invoke-WmtWindowsUpdateInstall -Item $windowsUpdateItem
                 }
+                elseif ($pipArguments) {
+                    Write-Output "LOG:[$act] Running pip directly with $pythonExePath..."
+                    $p = Invoke-WmtPipDirect -PythonPath $pythonExePath -ArgumentList $pipArguments
+                    foreach ($pipLine in @($p.OutputLines)) {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$pipLine)) {
+                            Write-Output "LOG:  > $pipLine"
+                        }
+                    }
+                }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
-                    $p = Invoke-WingetCmd $cmd
+                    $commandTimeoutSeconds = if ($isPipUpdate -or ($src -eq "pip" -or $src -eq "pip3")) { 600 } else { 0 }
+                    $commandLabel = if ($isPipUpdate -or ($src -eq "pip" -or $src -eq "pip3")) { "Pip $act for $name" } else { "$src $act for $name" }
+                    $p = Invoke-WingetCmd -Command $cmd -TimeoutSeconds $commandTimeoutSeconds -CommandLabel $commandLabel
                 }
                 Write-Output "LOG:[$act][$index/$total] Process completed with exit code: $($p.ExitCode)"
                 
@@ -24509,6 +24743,11 @@ exit /b %WMT_EXIT%
                     }
                     if ($storeForceUpdateScan) {
                         Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (could not start Microsoft Store app update scan)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+                    if ($srcKey -eq "pip" -or $srcKey -eq "pip3") {
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (pip user-mode retry disabled)"
                         Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
@@ -24809,6 +25048,11 @@ timeout /t 5
                 }
                 continue
             }
+            if ($line -match "^ITEM_SOURCE:(.*)$") {
+                $script:WingetCurrentItemSource = ([string]$matches[1]).Trim().ToLowerInvariant()
+                $script:WingetCurrentItemStartedAt = Get-Date
+                continue
+            }
             if ($line -match "^PROGRESS:(\d+)/(\d+):(.+)$") {
                 $i = [int]$matches[1]
                 $t = [int]$matches[2]
@@ -24865,6 +25109,19 @@ timeout /t 5
                         & $script:ProcessWingetLines $results
                     }
                 }
+                $pipItemRunning = (
+                    $script:WingetJob.State -eq 'Running' -and
+                    $script:WingetCurrentItemSource -in @("pip", "pip3") -and
+                    $script:WingetCurrentItemStartedAt
+                )
+                if ($pipItemRunning -and -not $script:WingetActionForcedTimeout) {
+                    $pipElapsedSeconds = ((Get-Date) - $script:WingetCurrentItemStartedAt).TotalSeconds
+                    if ($pipElapsedSeconds -ge 600) {
+                        $script:WingetActionForcedTimeout = $true
+                        Write-GuiLog "[Pip] $($script:WingetCurrentItemName) exceeded the 10-minute action timeout. Stopping the background job."
+                        try { Stop-Job -Job $script:WingetJob -ErrorAction SilentlyContinue } catch {}
+                    }
+                }
                 if ($script:WingetJob.State -eq 'Running' -and $script:WingetActionStartedAt -and $script:WingetCurrentItemName) {
                     try {
                         $elapsed = (Get-Date) - $script:WingetActionStartedAt
@@ -24886,7 +25143,13 @@ timeout /t 5
                         if ($script:WingetProgressDone -lt $script:WingetProgressTotal) {
                             $missing = $script:WingetProgressTotal - $script:WingetProgressDone
                             $script:WingetProgressDone = $script:WingetProgressTotal
-                            if ($script:WingetActionHasStoreCli) {
+                            if ($script:WingetActionForcedTimeout) {
+                                $script:WingetProgressFailed += $missing
+                                $missingName = if ([string]::IsNullOrWhiteSpace($script:WingetCurrentItemName)) { "Pip item" } else { $script:WingetCurrentItemName }
+                                & $script:SetWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
+                                Write-GuiLog "[$($script:WingetActiveAction)] FAILED: $missing item(s) stopped after the pip action timeout."
+                            }
+                            elseif ($script:WingetActionHasStoreCli) {
                                 $script:WingetProgressFailed += $missing
                                 $missingName = if ([string]::IsNullOrWhiteSpace($script:WingetCurrentItemName)) { "Microsoft Store item" } else { $script:WingetCurrentItemName }
                                 & $script:SetWingetLastResultUi "FAILED" $missingName $script:WingetProgressTotal $script:WingetProgressTotal
@@ -24937,6 +25200,8 @@ timeout /t 5
 
                     $script:WingetCurrentIndex = 0
                     $script:WingetCurrentPercent = 0
+                    $script:WingetCurrentItemSource = ""
+                    $script:WingetCurrentItemStartedAt = $null
                     & $script:RefreshWingetProgressUi
 
                     $btnWingetScan.IsEnabled = $true
@@ -24958,12 +25223,28 @@ timeout /t 5
                         Write-GuiLog "Action finished. Refreshing package list to verify changes..."
                     }
 
-                    # Refresh after successful or silent actions; skipped/failed-only actions keep the current list visible.
-                    if ($shouldRefreshAfterAction -and $btnWingetScan) {
-                        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                    $autoInstallCompleted = [bool]$script:WmtAutoInstallActive
+                    if ($autoInstallCompleted) {
+                        Show-WmtBackgroundInstallNotification -Status Completed `
+                            -TotalCount $script:WingetProgressTotal `
+                            -SuccessCount $script:WingetProgressSuccess `
+                            -SkippedCount $script:WingetProgressSkipped `
+                            -FailedCount $script:WingetProgressFailed
                     }
+
+                    # Clear action ownership before starting the verification scan.
+                    $script:WmtAutoInstallActive = $false
                     $script:WingetActiveAction = $null
                     $script:WingetActionStoreUpdateOnly = $false
+                    $script:WingetActionForcedTimeout = $false
+
+                    # Refresh after successful or silent actions; skipped/failed-only actions keep the current list visible.
+                    if ($shouldRefreshAfterAction -and $btnWingetScan) {
+                        if (Get-WmtUpdateAutoInstallEnabled) {
+                            $script:WmtAutoInstallSuppressNextScan = $true
+                        }
+                        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+                    }
                 }
             }
             catch {
@@ -25016,9 +25297,9 @@ function Show-ProviderManager {
         <ScrollViewer Grid.Row="1" Margin="0,15,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
             <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
-                    ToolTip="Automatically re-run the Updates scan while WMT remains open. This only scans; it does not install updates.">
+                    ToolTip="Configure automatic update scans, installation behavior, and background operation.">
                 <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                     <TextBlock Text="Auto scan" FontWeight="Bold" Grid.Row="0" Grid.Column="0"/>
                     <ComboBox Name="cmbAutoScanInterval" Grid.Row="0" Grid.Column="1" Height="28" Width="210" HorizontalAlignment="Left" SelectedValuePath="Tag" Foreground="#111827" Background="#FFFFFF">
@@ -25036,8 +25317,12 @@ function Show-ProviderManager {
                               ToolTip="When enabled, closing the main window hides WMT to the system tray so background scans and notifications can continue."/>
                     <CheckBox Name="chkReduceRamInTray" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Content="Reduce RAM while hidden in tray" Margin="0,8,0,0"
                               ToolTip="When WMT is hidden to the tray, clear short-lived caches, trim the log, run garbage collection, and ask Windows to release unused working-set pages."/>
-                    <TextBlock Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
-                               Text="Auto scan runs while WMT is open or hidden in the tray. It only scans for available updates and can notify you through Windows notifications when updates are found."
+                    <CheckBox Name="chkUpdateSilentInstall" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Content="Run update/install commands headless" Margin="0,8,0,0"
+                              ToolTip="Hide CLI, PowerShell, and cmd update windows. Providers that require their own GUI, including Steam validation and Microsoft Store GUI updates, can still appear."/>
+                    <CheckBox Name="chkUpdateAutoInstall" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="Automatically install available updates after scans" Margin="0,8,0,0"
+                              ToolTip="After each completed scan, automatically update listed packages without confirmation. Packages known to risk an automatic restart are skipped."/>
+                    <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                               Text="Auto scan runs while WMT is open or hidden in the tray. Auto install runs after completed manual, startup, and scheduled scans; restart-risk packages are skipped."
                                Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
                 </Grid>
             </Border>
@@ -25193,6 +25478,8 @@ function Show-ProviderManager {
     $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
     $chkRunInTrayOnClose = Get-WinCtrl "chkRunInTrayOnClose"
     $chkReduceRamInTray = Get-WinCtrl "chkReduceRamInTray"
+    $chkUpdateSilentInstall = Get-WinCtrl "chkUpdateSilentInstall"
+    $chkUpdateAutoInstall = Get-WinCtrl "chkUpdateAutoInstall"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
     $chkMsStore = Get-WinCtrl "chkMsStore"
     $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
@@ -26254,6 +26541,8 @@ exit `$exitCode
     if ($chkUpdateNotifications) { $chkUpdateNotifications.IsChecked = (Get-WmtUpdateNotificationsEnabled -Settings $settings) }
     if ($chkRunInTrayOnClose) { $chkRunInTrayOnClose.IsChecked = (Get-WmtRunInTrayOnClose -Settings $settings) }
     if ($chkReduceRamInTray) { $chkReduceRamInTray.IsChecked = (Get-WmtReduceRamInTray -Settings $settings) }
+    if ($chkUpdateSilentInstall) { $chkUpdateSilentInstall.IsChecked = (Get-WmtUpdateSilentInstallEnabled -Settings $settings) }
+    if ($chkUpdateAutoInstall) { $chkUpdateAutoInstall.IsChecked = (Get-WmtUpdateAutoInstallEnabled -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
     if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
     if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
@@ -26314,6 +26603,8 @@ exit `$exitCode
             if ($current -is [System.Collections.IDictionary]) {
                 $current["UpdateAutoScanMinutes"] = $selectedAutoScanMinutes
                 $current["UpdateNotificationsEnabled"] = [bool]$chkUpdateNotifications.IsChecked
+                $current["UpdateSilentInstallEnabled"] = [bool]$chkUpdateSilentInstall.IsChecked
+                $current["UpdateAutoInstallEnabled"] = [bool]$chkUpdateAutoInstall.IsChecked
                 $current["RunInTrayOnClose"] = [bool]$chkRunInTrayOnClose.IsChecked
                 $current["ReduceRamInTray"] = [bool]$chkReduceRamInTray.IsChecked
             }
@@ -26324,6 +26615,18 @@ exit `$exitCode
                 }
                 else {
                     $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
+                }
+                if ($current.PSObject.Properties["UpdateSilentInstallEnabled"]) {
+                    $current.UpdateSilentInstallEnabled = [bool]$chkUpdateSilentInstall.IsChecked
+                }
+                else {
+                    $current | Add-Member -MemberType NoteProperty -Name "UpdateSilentInstallEnabled" -Value ([bool]$chkUpdateSilentInstall.IsChecked) -Force
+                }
+                if ($current.PSObject.Properties["UpdateAutoInstallEnabled"]) {
+                    $current.UpdateAutoInstallEnabled = [bool]$chkUpdateAutoInstall.IsChecked
+                }
+                else {
+                    $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoInstallEnabled" -Value ([bool]$chkUpdateAutoInstall.IsChecked) -Force
                 }
                 if ($current.PSObject.Properties["RunInTrayOnClose"]) {
                     $current.RunInTrayOnClose = [bool]$chkRunInTrayOnClose.IsChecked
@@ -26341,6 +26644,8 @@ exit `$exitCode
             else {
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoScanMinutes" -Value $selectedAutoScanMinutes -Force
                 $current | Add-Member -MemberType NoteProperty -Name "UpdateNotificationsEnabled" -Value ([bool]$chkUpdateNotifications.IsChecked) -Force
+                $current | Add-Member -MemberType NoteProperty -Name "UpdateSilentInstallEnabled" -Value ([bool]$chkUpdateSilentInstall.IsChecked) -Force
+                $current | Add-Member -MemberType NoteProperty -Name "UpdateAutoInstallEnabled" -Value ([bool]$chkUpdateAutoInstall.IsChecked) -Force
                 $current | Add-Member -MemberType NoteProperty -Name "RunInTrayOnClose" -Value ([bool]$chkRunInTrayOnClose.IsChecked) -Force
                 $current | Add-Member -MemberType NoteProperty -Name "ReduceRamInTray" -Value ([bool]$chkReduceRamInTray.IsChecked) -Force
             }
@@ -26757,6 +27062,8 @@ $script:ScanTimer = New-Object System.Windows.Threading.DispatcherTimer
 $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
 # We now use a LIST of active scanners instead of just one
 $script:ActiveScans = [System.Collections.ArrayList]::new()
+$script:WmtAutoInstallSuppressNextScan = $false
+$script:WmtAutoInstallActive = $false
 
 $script:ScanTimer.Add_Tick({
         if ($script:ActiveScans.Count -gt 0) {
@@ -26820,6 +27127,16 @@ $script:ScanTimer.Add_Tick({
                 }
                 else {
                     Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
+                }
+
+                if (Get-WmtUpdateAutoInstallEnabled) {
+                    if ($script:WmtAutoInstallSuppressNextScan) {
+                        $script:WmtAutoInstallSuppressNextScan = $false
+                        Write-GuiLog "Auto install skipped for this verification scan."
+                    }
+                    else {
+                        Invoke-WmtAutoInstallAvailableUpdates
+                    }
                 }
             }
         }
@@ -27345,27 +27662,62 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
     
-        # B. PIP WORKER (unchanged, but included for completeness)
+        # B. PIP WORKER
         if ("pip" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
                     param($IgnoreList)
                     Write-Output "LOG:Scanning Pip..."
                     try {
-                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pip list --outdated --format=json")
-                        $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                        $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Pip scan timed out."; return }
-                        $json = $p.StandardOutput.ReadToEnd()
+                        $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                        $pInfo.FileName = "python.exe"
+                        $pInfo.Arguments = "-m pip --disable-pip-version-check --no-input --timeout 20 --retries 1 list --outdated --format=json"
+                        $pInfo.RedirectStandardOutput = $true
+                        $pInfo.RedirectStandardError = $true
+                        $pInfo.UseShellExecute = $false
+                        $pInfo.CreateNoWindow = $true
+                        $pInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+
+                        $pipProcess = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $pipProcess.StandardOutput.ReadToEndAsync()
+                        $errTask = $pipProcess.StandardError.ReadToEndAsync()
+                        if (-not $pipProcess.WaitForExit(60000)) {
+                            Write-Output "LOG:Pip scan timed out after 60 seconds. Stopping its process tree."
+                            try {
+                                $killInfo = New-Object System.Diagnostics.ProcessStartInfo
+                                $killInfo.FileName = "taskkill.exe"
+                                $killInfo.Arguments = "/PID $($pipProcess.Id) /T /F"
+                                $killInfo.UseShellExecute = $false
+                                $killInfo.CreateNoWindow = $true
+                                $killInfo.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                                $killProcess = [System.Diagnostics.Process]::Start($killInfo)
+                                if ($killProcess) { [void]$killProcess.WaitForExit(5000) }
+                            }
+                            catch {
+                                try { $pipProcess.Kill() } catch {}
+                            }
+                            return
+                        }
+
+                        try { [void]$pipProcess.WaitForExit() } catch {}
+                        $json = ""
+                        $pipError = ""
+                        try { if ($outTask.IsCompleted) { $json = $outTask.GetAwaiter().GetResult() } } catch {}
+                        try { if ($errTask.IsCompleted) { $pipError = $errTask.GetAwaiter().GetResult() } } catch {}
+                        if ($pipProcess.ExitCode -ne 0) {
+                            $detail = if ([string]::IsNullOrWhiteSpace($pipError)) { "exit code $($pipProcess.ExitCode)" } else { $pipError.Trim() }
+                            Write-Output "LOG:Pip scan failed: $detail"
+                            return
+                        }
                         if ($json.Trim().StartsWith("[")) { 
                             $pkgs = $json | ConvertFrom-Json
-                            foreach ($p in $pkgs) { 
-                                if ($IgnoreList -contains $p.name) { continue }
-                                [PSCustomObject]@{Source = "pip"; Name = $p.name; Id = $p.name; Version = $p.version; Available = $p.latest_version } 
+                            foreach ($pkg in $pkgs) {
+                                if ($IgnoreList -contains $pkg.name) { continue }
+                                [PSCustomObject]@{Source = "pip"; Name = $pkg.name; Id = $pkg.name; Version = $pkg.version; Available = $pkg.latest_version }
                             }
                         }
                     }
-                    catch { Write-Output "LOG:Pip check failed." }
+                    catch { Write-Output "LOG:Pip check failed: $($_.Exception.Message)" }
                 }).AddArgument($ignoreList)
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
@@ -29323,6 +29675,41 @@ function Get-WingetListedUpdateItems {
             -not [string]::IsNullOrWhiteSpace($source) -and
             $name -notin @("No results found", "No updates available")
         })
+}
+
+function Invoke-WmtAutoInstallAvailableUpdates {
+    if (-not (Get-WmtUpdateAutoInstallEnabled)) { return }
+    if ($script:WmtAutoInstallActive -or $script:WingetActiveAction) {
+        Write-GuiLog "Auto install skipped because a package action is already running."
+        return
+    }
+
+    $items = @(Get-WingetListedUpdateItems)
+    if ($items.Count -eq 0) {
+        Write-GuiLog "Auto install found no available updates."
+        return
+    }
+
+    $restartRiskItems = @($items | Where-Object { Test-WingetRestartRiskItem $_ })
+    $eligibleItems = @($items | Where-Object { -not (Test-WingetRestartRiskItem $_) })
+    if ($restartRiskItems.Count -gt 0) {
+        $restartRiskNames = @($restartRiskItems | ForEach-Object {
+                if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
+            } | Select-Object -Unique)
+        Write-GuiLog "Auto install skipped $($restartRiskItems.Count) restart-risk update(s): $($restartRiskNames -join ', ')."
+    }
+    if ($eligibleItems.Count -eq 0) {
+        Write-GuiLog "Auto install had no eligible updates after safety filtering."
+        return
+    }
+
+    $actionItems = @(ConvertTo-WmtUpdateAllActionItems -Items $eligibleItems)
+    if ($actionItems.Count -eq 0) { return }
+
+    $script:WmtAutoInstallActive = $true
+    Write-GuiLog "Auto install starting $($eligibleItems.Count) available update(s)."
+    Show-WmtBackgroundInstallNotification -Status Started -TotalCount $eligibleItems.Count
+    & $Script:StartWingetAction -ListItems $actionItems -ActionName "Update"
 }
 
 function ConvertTo-WmtUpdateAllActionItems {
