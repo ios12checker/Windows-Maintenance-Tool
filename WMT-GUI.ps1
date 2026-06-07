@@ -27647,18 +27647,65 @@ $btnWingetScan.Add_Click({
                             return
                         }
 
-                        $nameList = @($installed | ForEach-Object { [string]$_.Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                        $nameList = @(
+                            $installed |
+                                ForEach-Object { [string]$_.Name } |
+                                Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $IgnoreList -notcontains $_ } |
+                                Sort-Object -Unique
+                        )
+                        if ($nameList.Count -eq 0) {
+                            Write-Output "LOG:All PowerShellGet-managed modules are ignored."
+                            return
+                        }
+
                         $latestMap = @{}
+                        $galleryApiSucceeded = $false
+                        $lookupTimer = [Diagnostics.Stopwatch]::StartNew()
                         try {
-                            foreach ($found in @(Find-Module -Name $nameList -Repository PSGallery -ErrorAction SilentlyContinue)) {
-                                if ($found -and $found.Name -and -not $latestMap.ContainsKey([string]$found.Name)) {
-                                    $latestMap[[string]$found.Name] = [string]$found.Version
+                            # PowerShellGet routes discovery through PackageManagement and can be
+                            # slow even for one Name array. PSGallery's OData feed can resolve a
+                            # small batch of exact IDs in a single request.
+                            for ($offset = 0; $offset -lt $nameList.Count; $offset += 25) {
+                                $last = [Math]::Min($offset + 24, $nameList.Count - 1)
+                                $batch = @($nameList[$offset..$last])
+                                $clauses = @($batch | ForEach-Object { "Id eq '$(([string]$_).Replace("'", "''"))'" })
+                                $filter = "IsLatestVersion eq true and ($($clauses -join ' or '))"
+                                $uri = 'https://www.powershellgallery.com/api/v2/Packages?$filter=' +
+                                    [uri]::EscapeDataString($filter) + '&$select=Id,Version'
+
+                                foreach ($entry in @(Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop)) {
+                                    $foundName = [string]$entry.properties.Id
+                                    $foundVersion = [string]$entry.properties.Version
+                                    if (-not [string]::IsNullOrWhiteSpace($foundName) -and
+                                        -not [string]::IsNullOrWhiteSpace($foundVersion) -and
+                                        -not $latestMap.ContainsKey($foundName)) {
+                                        $latestMap[$foundName] = $foundVersion
+                                    }
                                 }
                             }
+                            $galleryApiSucceeded = $true
                         }
                         catch {
-                            Write-Output "LOG:PSGallery lookup failed: $($_.Exception.Message)"
+                            $latestMap.Clear()
+                            Write-Output "LOG:Fast PSGallery metadata lookup failed; retrying with PowerShellGet."
                         }
+
+                        if (-not $galleryApiSucceeded) {
+                            try {
+                                foreach ($found in @(Find-Module -Name $nameList -Repository PSGallery -ErrorAction SilentlyContinue)) {
+                                    if ($found -and $found.Name -and -not $latestMap.ContainsKey([string]$found.Name)) {
+                                        $latestMap[[string]$found.Name] = [string]$found.Version
+                                    }
+                                }
+                            }
+                            catch {
+                                Write-Output "LOG:PSGallery lookup failed: $($_.Exception.Message)"
+                            }
+                        }
+                        $lookupTimer.Stop()
+                        $lookupSeconds = [Math]::Round($lookupTimer.Elapsed.TotalSeconds, 2)
+                        $lookupMethod = if ($galleryApiSucceeded) { "batched Gallery API" } else { "PowerShellGet fallback" }
+                        Write-Output "LOG:PowerShell module metadata loaded via $lookupMethod in ${lookupSeconds}s."
 
                         foreach ($module in $installed) {
                             $name = [string]$module.Name
