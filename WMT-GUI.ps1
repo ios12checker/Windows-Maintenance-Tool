@@ -4471,6 +4471,7 @@ $script:WmtNativeToastUnavailable = $false
 $script:WmtNativeToastShortcutWarningShown = $false
 $script:WmtNotificationFallbackTimers = New-Object System.Collections.ArrayList
 $script:WmtTrayIcon = $null
+$script:WmtTrayIconImage = $null
 $script:WmtTrayMenu = $null
 $script:WmtAllowFinalClose = $false
 $script:WmtTrayHideNotificationShown = $false
@@ -4916,6 +4917,21 @@ function Invoke-WmtFinalExitFromTray {
     }
 }
 
+function Get-WmtTrayIconImage {
+    try {
+        if (
+            $script:WmtIsCompiledExe -and
+            -not [string]::IsNullOrWhiteSpace($script:WmtProcessPath) -and
+            (Test-Path -LiteralPath $script:WmtProcessPath -PathType Leaf)
+        ) {
+            return [System.Drawing.Icon]::ExtractAssociatedIcon($script:WmtProcessPath)
+        }
+    }
+    catch {}
+
+    return $null
+}
+
 function Initialize-WmtTrayIcon {
     param($Window)
 
@@ -4924,6 +4940,7 @@ function Initialize-WmtTrayIcon {
         return $true
     }
 
+    $trayIconImage = $null
     try {
         Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
         Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
@@ -4938,7 +4955,8 @@ function Initialize-WmtTrayIcon {
         [void]$menu.Items.Add($exitItem)
 
         $notifyIcon = New-Object System.Windows.Forms.NotifyIcon
-        $notifyIcon.Icon = [System.Drawing.SystemIcons]::Application
+        $trayIconImage = Get-WmtTrayIconImage
+        $notifyIcon.Icon = if ($trayIconImage) { $trayIconImage } else { [System.Drawing.SystemIcons]::Application }
         $notifyIcon.Text = "Windows Maintenance Tool"
         $notifyIcon.ContextMenuStrip = $menu
         $notifyIcon.Visible = $true
@@ -4963,10 +4981,13 @@ function Initialize-WmtTrayIcon {
         $notifyIcon.Add_BalloonTipClicked({ Show-WmtMainWindowFromTray }.GetNewClosure())
 
         $script:WmtTrayIcon = $notifyIcon
+        $script:WmtTrayIconImage = $trayIconImage
+        $trayIconImage = $null
         $script:WmtTrayMenu = $menu
         return $true
     }
     catch {
+        try { if ($trayIconImage) { $trayIconImage.Dispose() } } catch {}
         Write-GuiLog "System tray initialization failed: $($_.Exception.Message)"
         return $false
     }
@@ -4997,7 +5018,12 @@ function Remove-WmtTrayIcon {
         if ($script:WmtTrayMenu) { $script:WmtTrayMenu.Dispose() }
     }
     catch {}
+    try {
+        if ($script:WmtTrayIconImage) { $script:WmtTrayIconImage.Dispose() }
+    }
+    catch {}
     $script:WmtTrayIcon = $null
+    $script:WmtTrayIconImage = $null
     $script:WmtTrayMenu = $null
 }
 
