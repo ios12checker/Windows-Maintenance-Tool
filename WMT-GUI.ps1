@@ -22969,7 +22969,7 @@ $Script:StartWingetAction = {
             while ((Get-Date) -lt $deadline) {
                 $storeWindow = @(
                     $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) |
-                        Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
+                    Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
                 ) | Select-Object -First 1
 
                 if (-not $storeWindow) {
@@ -23132,7 +23132,7 @@ $Script:StartWingetAction = {
 
                 $totalWork = [Math]::Max([long]0, $bytesToDownload) + [Math]::Max([long]0, $bytesToStage)
                 $completedWork = [Math]::Min([Math]::Max([long]0, $bytesDownloaded), [Math]::Max([long]0, $bytesToDownload)) +
-                    [Math]::Min([Math]::Max([long]0, $bytesStaged), [Math]::Max([long]0, $bytesToStage))
+                [Math]::Min([Math]::Max([long]0, $bytesStaged), [Math]::Max([long]0, $bytesToStage))
                 $progress = -1
                 if ($totalWork -gt 0) {
                     $progress = [int][Math]::Floor(($completedWork * 100.0) / $totalWork)
@@ -23254,7 +23254,7 @@ $Script:StartWingetAction = {
                 $root = [System.Windows.Automation.AutomationElement]::RootElement
                 $storeWindow = @(
                     $root.FindAll([System.Windows.Automation.TreeScope]::Children, [System.Windows.Automation.Condition]::TrueCondition) |
-                        Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
+                    Where-Object { ([string]$_.Current.Name) -eq "Microsoft Store" }
                 ) | Select-Object -First 1
                 if (-not $storeWindow) {
                     Write-Output "LOG:[Store GUI] Microsoft Store window is already closed."
@@ -23301,6 +23301,48 @@ $Script:StartWingetAction = {
             }
         }
 
+        function Get-WmtProcessTreeActivitySignature {
+            param(
+                [int]$RootProcessId,
+                [string]$ProcessNamePattern = "",
+                [switch]$ExcludeRootProcess
+            )
+
+            try {
+                $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+                $processIds = New-Object "System.Collections.Generic.HashSet[int]"
+                $pendingIds = New-Object "System.Collections.Generic.Queue[int]"
+                $pendingIds.Enqueue($RootProcessId)
+
+                while ($pendingIds.Count -gt 0) {
+                    $currentId = $pendingIds.Dequeue()
+                    if (-not $processIds.Add($currentId)) { continue }
+                    foreach ($child in @($processes | Where-Object { [int]$_.ParentProcessId -eq $currentId })) {
+                        $pendingIds.Enqueue([int]$child.ProcessId)
+                    }
+                }
+
+                $activityProcesses = @($processes | Where-Object {
+                        $processIds.Contains([int]$_.ProcessId) -and
+                        (-not $ExcludeRootProcess -or [int]$_.ProcessId -ne $RootProcessId)
+                    })
+                if (-not [string]::IsNullOrWhiteSpace($ProcessNamePattern)) {
+                    $matchingProcesses = @($activityProcesses | Where-Object { ([string]$_.Name) -match $ProcessNamePattern })
+                    if ($matchingProcesses.Count -gt 0) { $activityProcesses = $matchingProcesses }
+                }
+
+                $activity = @($activityProcesses |
+                    Sort-Object ProcessId |
+                    ForEach-Object {
+                        "$($_.ProcessId):$($_.KernelModeTime):$($_.UserModeTime):$($_.ReadTransferCount):$($_.WriteTransferCount):$($_.OtherTransferCount)"
+                    })
+                return ($activity -join "|")
+            }
+            catch {
+                return ""
+            }
+        }
+
         # Executes headless commands without blocking on a quiet stdout/stderr stream.
         function Invoke-WingetCmd {
             param(
@@ -23313,44 +23355,6 @@ $Script:StartWingetAction = {
             )
 
             $Result.Value = $null
-
-            function Get-WmtProcessTreeActivitySignature {
-                param(
-                    [int]$RootProcessId,
-                    [string]$ProcessNamePattern = ""
-                )
-
-                try {
-                    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
-                    $processIds = New-Object "System.Collections.Generic.HashSet[int]"
-                    $pendingIds = New-Object "System.Collections.Generic.Queue[int]"
-                    $pendingIds.Enqueue($RootProcessId)
-
-                    while ($pendingIds.Count -gt 0) {
-                        $currentId = $pendingIds.Dequeue()
-                        if (-not $processIds.Add($currentId)) { continue }
-                        foreach ($child in @($processes | Where-Object { [int]$_.ParentProcessId -eq $currentId })) {
-                            $pendingIds.Enqueue([int]$child.ProcessId)
-                        }
-                    }
-
-                    $activityProcesses = @($processes | Where-Object { $processIds.Contains([int]$_.ProcessId) })
-                    if (-not [string]::IsNullOrWhiteSpace($ProcessNamePattern)) {
-                        $matchingProcesses = @($activityProcesses | Where-Object { ([string]$_.Name) -match $ProcessNamePattern })
-                        if ($matchingProcesses.Count -gt 0) { $activityProcesses = $matchingProcesses }
-                    }
-
-                    $activity = @($activityProcesses |
-                        Sort-Object ProcessId |
-                        ForEach-Object {
-                            "$($_.ProcessId):$($_.KernelModeTime):$($_.UserModeTime):$($_.ReadTransferCount):$($_.WriteTransferCount):$($_.OtherTransferCount)"
-                        })
-                    return ($activity -join "|")
-                }
-                catch {
-                    return ""
-                }
-            }
 
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "powershell.exe"
@@ -23478,105 +23482,157 @@ $Script:StartWingetAction = {
                 $outputLines = @(& $PythonPath @ArgumentList 2>&1)
                 $exitCode = $LASTEXITCODE
                 return [PSCustomObject]@{
-                    ExitCode   = if ($null -eq $exitCode) { 1 } else { [int]$exitCode }
+                    ExitCode    = if ($null -eq $exitCode) { 1 } else { [int]$exitCode }
                     OutputLines = @($outputLines | ForEach-Object { $_.ToString() })
-                    TimedOut   = $false
+                    TimedOut    = $false
                 }
             }
             catch {
                 return [PSCustomObject]@{
-                    ExitCode   = 1
+                    ExitCode    = 1
                     OutputLines = @($_.Exception.Message)
-                    TimedOut   = $false
+                    TimedOut    = $false
                 }
             }
         }
 
-        function Invoke-WingetLive ($argsLine) {
+        function Invoke-WingetLive {
+            param(
+                [string]$ArgsLine,
+                [int]$TimeoutSeconds = 7200,
+                [int]$IdleTimeoutSeconds = 900
+            )
+
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "winget"
-            $pInfo.Arguments = $argsLine
+            $pInfo.Arguments = $ArgsLine
             $pInfo.RedirectStandardOutput = $true
             $pInfo.RedirectStandardError = $true
             $pInfo.UseShellExecute = $false
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
 
-            $outBuf = New-Object System.Text.StringBuilder
-            $errBuf = New-Object System.Text.StringBuilder
-            $lastLine = ""
-            $lastPct = -1
-            $lastBeat = Get-Date
+            $state = [PSCustomObject]@{ LastLine = ""; LastPct = -1; MeaningfulActivity = $false }
+            function Write-WmtWingetLiveLine {
+                param(
+                    [string]$Line,
+                    [bool]$IsError,
+                    [object]$State
+                )
 
-            while ((-not $proc.HasExited) -or $proc.StandardOutput.Peek() -gt -1 -or $proc.StandardError.Peek() -gt -1) {
-                $hadData = $false
-
-                while ($proc.StandardOutput.Peek() -gt -1) {
-                    $hadData = $true
-                    $ch = [char]$proc.StandardOutput.Read()
-                    if ($ch -eq "`r" -or $ch -eq "`n") {
-                        $line = $outBuf.ToString().Trim()
-                        [void]$outBuf.Clear()
-                        if ($line) {
-                            if ($line -match "(\d+)%") {
-                                $pct = [int]$matches[1]
-                                if ($pct -ne $lastPct) {
-                                    $lastPct = $pct
-                                    Write-Output "LOG:  [winget] Progress: $pct%"
-                                }
-                            }
-                            elseif ($line -ne $lastLine) {
-                                $lastLine = $line
-                                Write-Output "LOG:  > $line"
-                            }
-                        }
+                $trimmed = ([string]$Line).Trim()
+                $State.MeaningfulActivity = $false
+                if ([string]::IsNullOrWhiteSpace($trimmed)) { return }
+                if ($trimmed -match '^[-\\|/]$') { return }
+                $State.MeaningfulActivity = $true
+                if ($trimmed -match "(\d+)%") {
+                    $pct = [int]$matches[1]
+                    if ($pct -ne $State.LastPct) {
+                        $State.LastPct = $pct
+                        Write-Output "LOG:  [winget] Progress: $pct%"
                     }
-                    else {
-                        [void]$outBuf.Append($ch)
-                    }
+                    return
                 }
-
-                while ($proc.StandardError.Peek() -gt -1) {
-                    $hadData = $true
-                    $ch = [char]$proc.StandardError.Read()
-                    if ($ch -eq "`r" -or $ch -eq "`n") {
-                        $line = $errBuf.ToString().Trim()
-                        [void]$errBuf.Clear()
-                        if ($line) {
-                            if ($line -match "(\d+)%") {
-                                $pct = [int]$matches[1]
-                                if ($pct -ne $lastPct) {
-                                    $lastPct = $pct
-                                    Write-Output "LOG:  [winget] Progress: $pct%"
-                                }
-                            }
-                            elseif ($line -ne $lastLine) {
-                                $lastLine = $line
-                                Write-Output "LOG:  ! $line"
-                            }
-                        }
-                    }
-                    else {
-                        [void]$errBuf.Append($ch)
-                    }
-                }
-
-                $now = Get-Date
-                if ((-not $hadData) -and ((New-TimeSpan -Start $lastBeat -End $now).TotalSeconds -ge 8)) {
-                    Write-Output "LOG:  [winget] still running..."
-                    $lastBeat = $now
-                }
-
-                if (-not $hadData) {
-                    Start-Sleep -Milliseconds 80
+                if ($trimmed -ne $State.LastLine) {
+                    $State.LastLine = $trimmed
+                    $prefix = if ($IsError) { "!" } else { ">" }
+                    Write-Output "LOG:  $prefix $trimmed"
                 }
             }
 
-            $tailOut = $outBuf.ToString().Trim()
-            if ($tailOut) { Write-Output "LOG:  > $tailOut" }
-            $tailErr = $errBuf.ToString().Trim()
-            if ($tailErr) { Write-Output "LOG:  ! $tailErr" }
+            $outTask = $proc.StandardOutput.ReadLineAsync()
+            $errTask = $proc.StandardError.ReadLineAsync()
+            $startedAt = Get-Date
+            $lastBeat = $startedAt
+            $lastActivityAt = $startedAt
+            $lastActivitySignature = ""
+            $nextActivityCheck = $startedAt
+            $timedOut = $false
+            $timeoutReason = ""
 
+            while (-not $proc.HasExited) {
+                $now = Get-Date
+                while ($outTask -and $outTask.IsCompleted) {
+                    $line = $null
+                    try { $line = $outTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $line) {
+                        $outTask = $null
+                        break
+                    }
+                    Write-WmtWingetLiveLine -Line $line -IsError:$false -State $state
+                    if ($state.MeaningfulActivity) { $lastActivityAt = $now }
+                    $outTask = $proc.StandardOutput.ReadLineAsync()
+                }
+                while ($errTask -and $errTask.IsCompleted) {
+                    $line = $null
+                    try { $line = $errTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $line) {
+                        $errTask = $null
+                        break
+                    }
+                    Write-WmtWingetLiveLine -Line $line -IsError:$true -State $state
+                    if ($state.MeaningfulActivity) { $lastActivityAt = $now }
+                    $errTask = $proc.StandardError.ReadLineAsync()
+                }
+
+                if ($TimeoutSeconds -gt 0 -and (($now - $startedAt).TotalSeconds -ge $TimeoutSeconds)) {
+                    $timedOut = $true
+                    $timeoutReason = "Winget exceeded the $TimeoutSeconds-second runtime limit"
+                    Write-Output "LOG:$timeoutReason. Stopping its process tree."
+                    Stop-WmtChildProcessTree -Process $proc
+                    break
+                }
+                if ($IdleTimeoutSeconds -gt 0 -and $now -ge $nextActivityCheck) {
+                    $activitySignature = Get-WmtProcessTreeActivitySignature -RootProcessId $proc.Id -ExcludeRootProcess
+                    if (-not [string]::IsNullOrWhiteSpace($activitySignature) -and $activitySignature -ne $lastActivitySignature) {
+                        $lastActivitySignature = $activitySignature
+                        $lastActivityAt = $now
+                    }
+                    elseif (($now - $lastActivityAt).TotalSeconds -ge $IdleTimeoutSeconds) {
+                        $timedOut = $true
+                        $timeoutReason = "Winget showed no output or process activity for $IdleTimeoutSeconds seconds"
+                        Write-Output "LOG:$timeoutReason. Stopping its process tree."
+                        Stop-WmtChildProcessTree -Process $proc
+                        break
+                    }
+                    $nextActivityCheck = $now.AddSeconds(15)
+                }
+                if (($now - $lastBeat).TotalSeconds -ge 15) {
+                    Write-Output "LOG:  [winget] still running..."
+                    $lastBeat = $now
+                }
+                Start-Sleep -Milliseconds 100
+            }
+
+            try { [void]$proc.WaitForExit(5000) } catch {}
+            $drainDeadline = (Get-Date).AddSeconds(5)
+            while (($outTask -or $errTask) -and (Get-Date) -lt $drainDeadline) {
+                if ($outTask -and $outTask.IsCompleted) {
+                    $line = $null
+                    try { $line = $outTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $line) { $outTask = $null }
+                    else {
+                        Write-WmtWingetLiveLine -Line $line -IsError:$false -State $state
+                        $outTask = $proc.StandardOutput.ReadLineAsync()
+                    }
+                }
+                if ($errTask -and $errTask.IsCompleted) {
+                    $line = $null
+                    try { $line = $errTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $line) { $errTask = $null }
+                    else {
+                        Write-WmtWingetLiveLine -Line $line -IsError:$true -State $state
+                        $errTask = $proc.StandardError.ReadLineAsync()
+                    }
+                }
+                if (($outTask -and -not $outTask.IsCompleted) -or ($errTask -and -not $errTask.IsCompleted)) {
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+
+            if ($timedOut) {
+                return [PSCustomObject]@{ ExitCode = 124; TimedOut = $true; TimeoutReason = $timeoutReason }
+            }
             return $proc
         }
 
@@ -23658,8 +23714,8 @@ exit /b %WMT_EXIT%
                     $wrapperInfo = $null
                     try {
                         $wrapperInfo = Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
-                            Where-Object { ([string]$_.CommandLine) -like "*$batchLeaf*" } |
-                            Select-Object -First 1
+                        Where-Object { ([string]$_.CommandLine) -like "*$batchLeaf*" } |
+                        Select-Object -First 1
                     }
                     catch {}
 
@@ -24440,6 +24496,7 @@ exit /b %WMT_EXIT%
             $targetId = if ($targetParts.Count -gt 0) { ([string]$targetParts[0]).Trim() } else { $targetRaw }
             $targetRevision = -1
             if ($targetParts.Count -gt 1) { [void][int]::TryParse(([string]$targetParts[1]).Trim(), [ref]$targetRevision) }
+            $completedIdentity = if ($targetRevision -ge 0) { "$targetId|$targetRevision" } else { $targetRaw }
 
             try {
                 Write-Output "LOG:[Windows Update] Preparing selected update: $targetName"
@@ -24449,7 +24506,7 @@ exit /b %WMT_EXIT%
                 $result = $searcher.Search("IsInstalled=0 and IsHidden=0")
                 if (-not $result -or -not $result.Updates) {
                     Write-Output "LOG:[Windows Update] No pending updates were returned."
-                    return [PSCustomObject]@{ ExitCode = 0 }
+                    return [PSCustomObject]@{ ExitCode = 0; CompletedWindowsUpdateId = $completedIdentity }
                 }
 
                 $updatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
@@ -24469,6 +24526,12 @@ exit /b %WMT_EXIT%
                     $nameMatches = ([string]::IsNullOrWhiteSpace($targetId) -and -not [string]::IsNullOrWhiteSpace($targetName) -and $title -eq $targetName)
 
                     if (($idMatches -and $revisionMatches) -or $nameMatches) {
+                        $updateRebootRequired = $false
+                        try { $updateRebootRequired = [bool]$update.RebootRequired } catch {}
+                        if ($updateRebootRequired) {
+                            Write-Output "LOG:[Windows Update] $title is already pending a reboot; skipping another install attempt."
+                            return [PSCustomObject]@{ ExitCode = 3010; CompletedWindowsUpdateId = $completedIdentity }
+                        }
                         try {
                             if (-not [bool]$update.EulaAccepted) { $update.AcceptEula() }
                         }
@@ -24482,7 +24545,7 @@ exit /b %WMT_EXIT%
 
                 if ($updatesToInstall.Count -eq 0) {
                     Write-Output "LOG:[Windows Update] $targetName is no longer offered, already installed, or hidden."
-                    return [PSCustomObject]@{ ExitCode = 0 }
+                    return [PSCustomObject]@{ ExitCode = 0; CompletedWindowsUpdateId = $completedIdentity }
                 }
 
                 Write-Output "LOG:[Windows Update] Downloading $($updatesToInstall.Count) update(s)..."
@@ -24507,8 +24570,8 @@ exit /b %WMT_EXIT%
                 Write-Output "LOG:[Windows Update] Install result code: $installCode | Reboot required: $rebootRequired"
 
                 if ($installCode -in @(2, 3)) {
-                    if ($rebootRequired) { return [PSCustomObject]@{ ExitCode = 3010 } }
-                    return [PSCustomObject]@{ ExitCode = 0 }
+                    if ($rebootRequired) { return [PSCustomObject]@{ ExitCode = 3010; CompletedWindowsUpdateId = $completedIdentity } }
+                    return [PSCustomObject]@{ ExitCode = 0; CompletedWindowsUpdateId = $completedIdentity }
                 }
 
                 return [PSCustomObject]@{ ExitCode = 1 }
@@ -24930,6 +24993,12 @@ exit /b %WMT_EXIT%
                 }
                 elseif ($windowsUpdateItem) {
                     $p = Invoke-WmtWindowsUpdateInstall -Item $windowsUpdateItem
+                    if ($p -and $p.ExitCode -in @(0, 3010) -and $p.PSObject.Properties["CompletedWindowsUpdateId"]) {
+                        $completedWindowsUpdateId = ([string]$p.CompletedWindowsUpdateId).Trim()
+                        if (-not [string]::IsNullOrWhiteSpace($completedWindowsUpdateId)) {
+                            Write-Output "WINDOWS_UPDATE_COMPLETED:$completedWindowsUpdateId"
+                        }
+                    }
                 }
                 elseif ($pipArguments) {
                     Write-Output "LOG:[$act] Running pip directly with $pythonExePath..."
@@ -25335,6 +25404,17 @@ exit /b %WMT_EXIT%
                 }
                 $msg = "Store CLI isn't working for $packageName. $reasonText.`r`n`r`nA Microsoft Store page was opened so you can download or update it directly."
                 [System.Windows.MessageBox]::Show($msg, "Microsoft Store CLI Stalled", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
+                continue
+            }
+            if ($line -match "^WINDOWS_UPDATE_COMPLETED:(.+)$") {
+                $completedWindowsUpdateId = ([string]$matches[1]).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($completedWindowsUpdateId)) {
+                    if (-not $script:WmtCompletedWindowsUpdateIds) { $script:WmtCompletedWindowsUpdateIds = @{} }
+                    if (-not $script:WmtCompletedWindowsUpdateIds.ContainsKey($completedWindowsUpdateId)) {
+                        $script:WmtCompletedWindowsUpdateIds[$completedWindowsUpdateId] = $true
+                        Write-GuiLog "[Windows Update] This exact update revision will be suppressed from later scans during this Windows session."
+                    }
+                }
                 continue
             }
             if ($line -match "^RESULT:(\d+):(SUCCESS|SKIPPED|FAILED|CANCELLED):(.*)$") {
@@ -27375,6 +27455,7 @@ $script:ScanTimer.Interval = [TimeSpan]::FromMilliseconds(200)
 $script:ActiveScans = [System.Collections.ArrayList]::new()
 $script:WmtAutoInstallSuppressNextScan = $false
 $script:WmtAutoInstallActive = $false
+$script:WmtCompletedWindowsUpdateIds = @{}
 
 $script:ScanTimer.Add_Tick({
         if ($script:ActiveScans.Count -gt 0) {
@@ -27488,6 +27569,7 @@ $btnWingetScan.Add_Click({
         }
         $ignoreList = if ($settings.WingetIgnore) { $settings.WingetIgnore } else { @() }
         $includeUnknown = Get-WmtWingetIncludeUnknown -Settings $settings
+        $completedWindowsUpdateIds = if ($script:WmtCompletedWindowsUpdateIds) { @($script:WmtCompletedWindowsUpdateIds.Keys) } else { @() }
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
         Write-GuiLog "Winget include unknown: $includeUnknown"
@@ -27861,7 +27943,7 @@ $btnWingetScan.Add_Click({
         if ("windowsupdate" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
-                    param($IgnoreList)
+                    param($IgnoreList, $CompletedUpdateIds)
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
                     function Test-Ignored($n, $i) {
@@ -27896,6 +27978,46 @@ $btnWingetScan.Add_Click({
                         return $isOptional
                     }
 
+                    function Get-WmtWuSuccessfulInstallIdsSinceBoot {
+                        param($Searcher)
+
+                        $ids = New-Object "System.Collections.Generic.HashSet[string]" ([System.StringComparer]::OrdinalIgnoreCase)
+                        try {
+                            $lastBootUtc = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime()
+                            $historyCount = [int]$Searcher.GetTotalHistoryCount()
+                            $take = [Math]::Min(1000, $historyCount)
+                            if ($take -le 0) { return , $ids }
+
+                            $history = $Searcher.QueryHistory(0, $take)
+                            for ($historyIndex = 0; $historyIndex -lt $history.Count; $historyIndex++) {
+                                $entry = $history.Item($historyIndex)
+                                if (-not $entry) { continue }
+
+                                $entryDate = [DateTime]::MinValue
+                                try { $entryDate = [DateTime]$entry.Date } catch {}
+                                if ($entryDate -lt $lastBootUtc) { continue }
+
+                                $operation = -1
+                                $resultCode = -1
+                                try { $operation = [int]$entry.Operation } catch {}
+                                try { $resultCode = [int]$entry.ResultCode } catch {}
+                                if ($operation -ne 1 -or $resultCode -ne 2) { continue }
+
+                                $historyId = ""
+                                $historyRevision = -1
+                                try { $historyId = ([string]$entry.UpdateIdentity.UpdateID).Trim() } catch {}
+                                try { $historyRevision = [int]$entry.UpdateIdentity.RevisionNumber } catch {}
+                                if (-not [string]::IsNullOrWhiteSpace($historyId) -and $historyRevision -ge 0) {
+                                    [void]$ids.Add("$historyId|$historyRevision")
+                                }
+                            }
+                        }
+                        catch {
+                            Write-Output "LOG:Windows Update successful-history check failed: $($_.Exception.Message)"
+                        }
+                        return , $ids
+                    }
+
                     Write-Output "LOG:Scanning Windows Update, including optional updates..."
                     try {
                         $session = New-Object -ComObject Microsoft.Update.Session
@@ -27908,9 +28030,17 @@ $btnWingetScan.Add_Click({
                             return
                         }
 
+                        $completedIds = Get-WmtWuSuccessfulInstallIdsSinceBoot -Searcher $searcher
+                        foreach ($completedId in @($CompletedUpdateIds)) {
+                            $trimmedCompletedId = ([string]$completedId).Trim()
+                            if (-not [string]::IsNullOrWhiteSpace($trimmedCompletedId)) { [void]$completedIds.Add($trimmedCompletedId) }
+                        }
+
                         $count = [int]$result.Updates.Count
                         $visibleCount = 0
                         $optionalCount = 0
+                        $completedSuppressedCount = 0
+                        $rebootSuppressedCount = 0
                         for ($i = 0; $i -lt $count; $i++) {
                             $update = $result.Updates.Item($i)
                             if (-not $update) { continue }
@@ -27924,6 +28054,18 @@ $btnWingetScan.Add_Click({
                             if ([string]::IsNullOrWhiteSpace($updateId)) { $updateId = $title }
                             $rowId = "$updateId|$revision"
                             if (Test-Ignored $title $rowId) { continue }
+                            if ($completedIds.Contains($rowId)) {
+                                $completedSuppressedCount++
+                                Write-Output "LOG:Windows Update suppressed already successful revision: $title"
+                                continue
+                            }
+                            $updateRebootRequired = $false
+                            try { $updateRebootRequired = [bool]$update.RebootRequired } catch {}
+                            if ($updateRebootRequired) {
+                                $rebootSuppressedCount++
+                                Write-Output "LOG:Windows Update suppressed reboot-pending revision: $title"
+                                continue
+                            }
 
                             $categoryText = Get-WmtWuCategoryText -Update $update
                             $kbText = ""
@@ -27964,11 +28106,17 @@ $btnWingetScan.Add_Click({
                         else {
                             Write-Output "LOG:Windows Update found $visibleCount item(s), including $optionalCount optional item(s)."
                         }
+                        if ($completedSuppressedCount -gt 0) {
+                            Write-Output "LOG:Windows Update suppressed $completedSuppressedCount exact revision(s) already recorded successful since boot or during this WMT session."
+                        }
+                        if ($rebootSuppressedCount -gt 0) {
+                            Write-Output "LOG:Windows Update suppressed $rebootSuppressedCount update(s) that are already waiting for a reboot."
+                        }
                     }
                     catch {
                         Write-Output "LOG:Windows Update scan failed: $($_.Exception.Message)"
                     }
-                }).AddArgument($ignoreList)
+                }).AddArgument($ignoreList).AddArgument($completedWindowsUpdateIds)
 
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
@@ -28312,9 +28460,9 @@ $btnWingetScan.Add_Click({
 
                         $nameList = @(
                             $installed |
-                                ForEach-Object { [string]$_.Name } |
-                                Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $IgnoreList -notcontains $_ } |
-                                Sort-Object -Unique
+                            ForEach-Object { [string]$_.Name } |
+                            Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $IgnoreList -notcontains $_ } |
+                            Sort-Object -Unique
                         )
                         if ($nameList.Count -eq 0) {
                             Write-Output "LOG:All PowerShellGet-managed modules are ignored."
@@ -28334,7 +28482,7 @@ $btnWingetScan.Add_Click({
                                 $clauses = @($batch | ForEach-Object { "Id eq '$(([string]$_).Replace("'", "''"))'" })
                                 $filter = "IsLatestVersion eq true and ($($clauses -join ' or '))"
                                 $uri = 'https://www.powershellgallery.com/api/v2/Packages?$filter=' +
-                                    [uri]::EscapeDataString($filter) + '&$select=Id,Version'
+                                [uri]::EscapeDataString($filter) + '&$select=Id,Version'
 
                                 foreach ($entry in @(Invoke-RestMethod -Uri $uri -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop)) {
                                     $foundName = [string]$entry.properties.Id
