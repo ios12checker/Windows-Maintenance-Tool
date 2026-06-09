@@ -102,13 +102,42 @@ if (-not $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Adm
     exit
 }
 
-# KILL HANGING PACKAGE MANAGERS
-# This silently clears any stuck winget or installer processes before the tool starts.
-# (Removed Write-GuiLog here since the GUI hasn't been built yet)
+# Keep one elevated WMT process per interactive Windows session. A later launch
+# signals the existing window to restore/focus, then exits before doing any work.
+$script:WmtSingleInstanceMutexName = "Local\WindowsMaintenanceTool.SingleInstance"
+$script:WmtSingleInstanceActivationEventName = "Local\WindowsMaintenanceTool.Activate"
+$script:WmtSingleInstanceMutex = $null
+$script:WmtSingleInstanceActivationEvent = $null
+$script:WmtSingleInstanceMutexOwned = $false
 try {
-    Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
+    $script:WmtSingleInstanceActivationEvent = [System.Threading.EventWaitHandle]::new(
+        $false,
+        [System.Threading.EventResetMode]::AutoReset,
+        $script:WmtSingleInstanceActivationEventName
+    )
+
+    $createdNew = $false
+    $script:WmtSingleInstanceMutex = [System.Threading.Mutex]::new(
+        $true,
+        $script:WmtSingleInstanceMutexName,
+        [ref]$createdNew
+    )
+    $script:WmtSingleInstanceMutexOwned = [bool]$createdNew
+
+    if (-not $createdNew) {
+        try { [void]$script:WmtSingleInstanceActivationEvent.Set() } catch {}
+        try { $script:WmtSingleInstanceActivationEvent.Dispose() } catch {}
+        try { $script:WmtSingleInstanceMutex.Dispose() } catch {}
+        exit
+    }
 }
-catch {}
+catch {
+    try { if ($script:WmtSingleInstanceActivationEvent) { $script:WmtSingleInstanceActivationEvent.Dispose() } } catch {}
+    try { if ($script:WmtSingleInstanceMutex) { $script:WmtSingleInstanceMutex.Dispose() } } catch {}
+    $script:WmtSingleInstanceActivationEvent = $null
+    $script:WmtSingleInstanceMutex = $null
+    $script:WmtSingleInstanceMutexOwned = $false
+}
 
 # ENABLE HIGH-DPI AWARENESS (Safe Check)
 if ([Environment]::OSVersion.Version.Major -ge 6) {
@@ -4832,6 +4861,29 @@ function Show-WmtMainWindowFromTray {
         else { [void]$window.Dispatcher.BeginInvoke($showAction) }
     }
     catch {}
+}
+
+function Start-WmtSingleInstanceActivationListener {
+    if (-not $script:WmtSingleInstanceActivationEvent -or $script:WmtSingleInstanceActivationTimer) { return }
+
+    $script:WmtSingleInstanceActivationTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtSingleInstanceActivationTimer.Interval = [TimeSpan]::FromMilliseconds(350)
+    $script:WmtSingleInstanceActivationTimer.Add_Tick({
+            try {
+                if ($script:WmtSingleInstanceActivationEvent.WaitOne(0)) {
+                    Show-WmtMainWindowFromTray
+                }
+            }
+            catch {}
+        })
+    $script:WmtSingleInstanceActivationTimer.Start()
+}
+
+function Stop-WmtSingleInstanceActivationListener {
+    if ($script:WmtSingleInstanceActivationTimer) {
+        try { $script:WmtSingleInstanceActivationTimer.Stop() } catch {}
+        $script:WmtSingleInstanceActivationTimer = $null
+    }
 }
 
 function Invoke-WmtTrayUpdateScan {
@@ -22550,10 +22602,6 @@ $txtWingetSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq "Return") { $btnWing
 $Script:StartWingetAction = {
     param($ListItems, $ActionName, $CmdTemplate)
     if (-not $ListItems -or $ListItems.Count -eq 0) { return }
-    try {
-        Stop-Process -Name "winget", "msiexec" -Force -ErrorAction SilentlyContinue
-    }
-    catch {}
 
     $uniqueItems = @($ListItems | Select-Object -Property Source, Name, Id, Version, Available, VersionSort, AvailableSort, IsChecked, LibraryPath, InstallDir, ManifestPath, ExecutablePath, Platform, RawAvailable, WUIsOptional -Unique)
     $totalItems = $uniqueItems.Count
@@ -23258,8 +23306,51 @@ $Script:StartWingetAction = {
             param(
                 [string]$Command,
                 [int]$TimeoutSeconds = 0,
-                [string]$CommandLabel = "Command"
+                [int]$IdleTimeoutSeconds = 0,
+                [string]$ActivityProcessNamePattern = "",
+                [string]$CommandLabel = "Command",
+                [ref]$Result
             )
+
+            $Result.Value = $null
+
+            function Get-WmtProcessTreeActivitySignature {
+                param(
+                    [int]$RootProcessId,
+                    [string]$ProcessNamePattern = ""
+                )
+
+                try {
+                    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+                    $processIds = New-Object "System.Collections.Generic.HashSet[int]"
+                    $pendingIds = New-Object "System.Collections.Generic.Queue[int]"
+                    $pendingIds.Enqueue($RootProcessId)
+
+                    while ($pendingIds.Count -gt 0) {
+                        $currentId = $pendingIds.Dequeue()
+                        if (-not $processIds.Add($currentId)) { continue }
+                        foreach ($child in @($processes | Where-Object { [int]$_.ParentProcessId -eq $currentId })) {
+                            $pendingIds.Enqueue([int]$child.ProcessId)
+                        }
+                    }
+
+                    $activityProcesses = @($processes | Where-Object { $processIds.Contains([int]$_.ProcessId) })
+                    if (-not [string]::IsNullOrWhiteSpace($ProcessNamePattern)) {
+                        $matchingProcesses = @($activityProcesses | Where-Object { ([string]$_.Name) -match $ProcessNamePattern })
+                        if ($matchingProcesses.Count -gt 0) { $activityProcesses = $matchingProcesses }
+                    }
+
+                    $activity = @($activityProcesses |
+                        Sort-Object ProcessId |
+                        ForEach-Object {
+                            "$($_.ProcessId):$($_.KernelModeTime):$($_.UserModeTime):$($_.ReadTransferCount):$($_.WriteTransferCount):$($_.OtherTransferCount)"
+                        })
+                    return ($activity -join "|")
+                }
+                catch {
+                    return ""
+                }
+            }
 
             $pInfo = New-Object System.Diagnostics.ProcessStartInfo
             $pInfo.FileName = "powershell.exe"
@@ -23270,18 +23361,60 @@ $Script:StartWingetAction = {
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
 
-            $outTask = $proc.StandardOutput.ReadToEndAsync()
-            $errTask = $proc.StandardError.ReadToEndAsync()
+            $outTask = $proc.StandardOutput.ReadLineAsync()
+            $errTask = $proc.StandardError.ReadLineAsync()
             $startedAt = Get-Date
             $lastHeartbeat = $startedAt
             $timedOut = $false
+            $timeoutReason = ""
+            $lastActivityAt = $startedAt
+            $lastActivitySignature = ""
+            $nextActivityCheck = $startedAt
             while (-not $proc.HasExited) {
                 $now = Get-Date
+                while ($outTask -and $outTask.IsCompleted) {
+                    $outLine = $null
+                    try { $outLine = $outTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $outLine) {
+                        $outTask = $null
+                        break
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$outLine)) { Write-Output "LOG:  > $outLine" }
+                    $outTask = $proc.StandardOutput.ReadLineAsync()
+                }
+                while ($errTask -and $errTask.IsCompleted) {
+                    $errLine = $null
+                    try { $errLine = $errTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $errLine) {
+                        $errTask = $null
+                        break
+                    }
+                    if (-not [string]::IsNullOrWhiteSpace([string]$errLine)) { Write-Output "LOG:  ! $errLine" }
+                    $errTask = $proc.StandardError.ReadLineAsync()
+                }
                 if ($TimeoutSeconds -gt 0 -and (($now - $startedAt).TotalSeconds -ge $TimeoutSeconds)) {
                     $timedOut = $true
+                    $timeoutReason = "total runtime"
                     Write-Output "LOG:$CommandLabel timed out after $TimeoutSeconds seconds. Stopping its process tree."
                     Stop-WmtChildProcessTree -Process $proc
                     break
+                }
+                if ($IdleTimeoutSeconds -gt 0 -and $now -ge $nextActivityCheck) {
+                    $activitySignature = Get-WmtProcessTreeActivitySignature -RootProcessId $proc.Id -ProcessNamePattern $ActivityProcessNamePattern
+                    if (-not [string]::IsNullOrWhiteSpace($activitySignature)) {
+                        if ($activitySignature -ne $lastActivitySignature) {
+                            $lastActivitySignature = $activitySignature
+                            $lastActivityAt = $now
+                        }
+                        elseif (($now - $lastActivityAt).TotalSeconds -ge $IdleTimeoutSeconds) {
+                            $timedOut = $true
+                            $timeoutReason = "no process activity"
+                            Write-Output "LOG:$CommandLabel showed no process activity for $IdleTimeoutSeconds seconds. Stopping its process tree."
+                            Stop-WmtChildProcessTree -Process $proc
+                            break
+                        }
+                    }
+                    $nextActivityCheck = $now.AddSeconds(15)
                 }
                 if (($now - $lastHeartbeat).TotalSeconds -ge 15) {
                     Write-Output "LOG:$CommandLabel still running..."
@@ -23299,26 +23432,37 @@ $Script:StartWingetAction = {
                 }
             }
             catch {}
-            $outText = ""
-            $errText = ""
-            try { if ($outTask.IsCompleted) { $outText = $outTask.GetAwaiter().GetResult() } } catch {}
-            try { if ($errTask.IsCompleted) { $errText = $errTask.GetAwaiter().GetResult() } } catch {}
 
-            if ($outText) {
-                foreach ($line in ($outText -split "`r?`n")) {
-                    if ($line) { Write-Output "LOG:  > $line" }
+            $drainDeadline = (Get-Date).AddSeconds(5)
+            while (($outTask -or $errTask) -and (Get-Date) -lt $drainDeadline) {
+                if ($outTask -and $outTask.IsCompleted) {
+                    $outLine = $null
+                    try { $outLine = $outTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $outLine) { $outTask = $null }
+                    else {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$outLine)) { Write-Output "LOG:  > $outLine" }
+                        $outTask = $proc.StandardOutput.ReadLineAsync()
+                    }
                 }
-            }
-            if ($errText) {
-                foreach ($line in ($errText -split "`r?`n")) {
-                    if ($line) { Write-Output "LOG:  ! $line" }
+                if ($errTask -and $errTask.IsCompleted) {
+                    $errLine = $null
+                    try { $errLine = $errTask.GetAwaiter().GetResult() } catch {}
+                    if ($null -eq $errLine) { $errTask = $null }
+                    else {
+                        if (-not [string]::IsNullOrWhiteSpace([string]$errLine)) { Write-Output "LOG:  ! $errLine" }
+                        $errTask = $proc.StandardError.ReadLineAsync()
+                    }
+                }
+                if (($outTask -and -not $outTask.IsCompleted) -or ($errTask -and -not $errTask.IsCompleted)) {
+                    Start-Sleep -Milliseconds 50
                 }
             }
 
             if ($timedOut) {
-                return [PSCustomObject]@{ ExitCode = 124; TimedOut = $true }
+                $Result.Value = [PSCustomObject]@{ ExitCode = 124; TimedOut = $true; TimeoutReason = $timeoutReason }
+                return
             }
-            return $proc
+            $Result.Value = $proc
         }
 
         # Pip can remain alive indefinitely when launched with ProcessStartInfo from inside Start-Job.
@@ -23448,6 +23592,128 @@ $Script:StartWingetAction = {
             $windowStyle = if ($silentUpdateInstallEnabled) { "Hidden" } else { "Normal" }
             $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle $windowStyle
             return $proc
+        }
+
+        function Invoke-WmtUserModeRetry {
+            param(
+                [string]$Command,
+                [string]$ActionLabel,
+                [string]$PackageName,
+                [string]$TempPath,
+                [int]$TimeoutSeconds = 14400
+            )
+
+            $rand = [Guid]::NewGuid().ToString("N")
+            $batchPath = Join-Path $TempPath "WMT_UserRetry_$rand.cmd"
+            $resultPath = Join-Path $TempPath "WMT_UserRetry_$rand.exit"
+            $batchLeaf = Split-Path -Leaf $batchPath
+            $safeTitle = ((("$ActionLabel $PackageName (User Mode)" -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
+            if ([string]::IsNullOrWhiteSpace($safeTitle)) { $safeTitle = "WMT User Mode Retry" }
+            $safePackageName = (([string]$PackageName -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
+            if ([string]::IsNullOrWhiteSpace($safePackageName)) { $safePackageName = "package" }
+
+            $batchContent = @"
+@echo off
+setlocal
+title $safeTitle
+echo WMT-GUI: Re-launching $safePackageName in user mode...
+echo.
+echo If an installer window appears, please click through it.
+echo.
+$Command
+set "WMT_EXIT=%ERRORLEVEL%"
+> "$resultPath" echo %WMT_EXIT%
+echo.
+echo Done. Exit code: %WMT_EXIT%
+exit /b %WMT_EXIT%
+"@
+
+            try {
+                Set-Content -LiteralPath $batchPath -Value $batchContent -Encoding Ascii -Force
+                Start-Process "explorer.exe" -ArgumentList "`"$batchPath`""
+            }
+            catch {
+                try { Remove-Item -LiteralPath $batchPath, $resultPath -Force -ErrorAction SilentlyContinue } catch {}
+                return [PSCustomObject]@{ ExitCode = 1; LaunchFailed = $true; TimedOut = $false; Message = $_.Exception.Message }
+            }
+
+            $startedAt = Get-Date
+            $launchDeadline = $startedAt.AddSeconds(15)
+            $deadline = $startedAt.AddSeconds([Math]::Max(60, $TimeoutSeconds))
+            $lastHeartbeat = $startedAt
+            $wrapperSeen = $false
+            $wrapperProcessId = 0
+            $wrapperProcess = $null
+            $timedOut = $false
+
+            while (-not (Test-Path -LiteralPath $resultPath -PathType Leaf)) {
+                if ($wrapperSeen) {
+                    try {
+                        $wrapperProcess.Refresh()
+                        if ($wrapperProcess.HasExited) { break }
+                    }
+                    catch { break }
+                }
+                else {
+                    $wrapperInfo = $null
+                    try {
+                        $wrapperInfo = Get-CimInstance Win32_Process -Filter "Name = 'cmd.exe'" -ErrorAction SilentlyContinue |
+                            Where-Object { ([string]$_.CommandLine) -like "*$batchLeaf*" } |
+                            Select-Object -First 1
+                    }
+                    catch {}
+
+                    if ($wrapperInfo) {
+                        $wrapperProcessId = [int]$wrapperInfo.ProcessId
+                        try { $wrapperProcess = Get-Process -Id $wrapperProcessId -ErrorAction Stop } catch { $wrapperProcess = $null }
+                        if ($wrapperProcess) { $wrapperSeen = $true }
+                    }
+                    elseif ((Get-Date) -ge $launchDeadline) {
+                        break
+                    }
+                }
+
+                $now = Get-Date
+                if ($now -ge $deadline) {
+                    $timedOut = $true
+                    try { if ($wrapperProcess) { Stop-WmtChildProcessTree -Process $wrapperProcess } } catch {}
+                    break
+                }
+                if (($now - $lastHeartbeat).TotalSeconds -ge 30) {
+                    Write-Output "LOG:User-mode retry for $PackageName still running..."
+                    $lastHeartbeat = $now
+                }
+                Start-Sleep -Milliseconds 500
+            }
+
+            $exitCode = 1
+            $resultCaptured = $false
+            if (Test-Path -LiteralPath $resultPath -PathType Leaf) {
+                try {
+                    $resultText = (Get-Content -LiteralPath $resultPath -Raw -ErrorAction Stop).Trim()
+                    $parsedExitCode = 1
+                    if ([int]::TryParse($resultText, [ref]$parsedExitCode)) {
+                        $exitCode = $parsedExitCode
+                        $resultCaptured = $true
+                    }
+                    else {
+                        $unsignedExitCode = [uint32]0
+                        if ([uint32]::TryParse($resultText, [ref]$unsignedExitCode)) {
+                            $exitCode = [BitConverter]::ToInt32([BitConverter]::GetBytes($unsignedExitCode), 0)
+                            $resultCaptured = $true
+                        }
+                    }
+                }
+                catch {}
+            }
+
+            try { Remove-Item -LiteralPath $batchPath, $resultPath -Force -ErrorAction SilentlyContinue } catch {}
+            return [PSCustomObject]@{
+                ExitCode       = $exitCode
+                LaunchFailed   = (-not $wrapperSeen -and -not $resultCaptured)
+                TimedOut       = $timedOut
+                ResultCaptured = $resultCaptured
+            }
         }
 
         function Invoke-StoreCliInteractive {
@@ -24444,7 +24710,7 @@ exit /b %WMT_EXIT%
                 elseif ($src -eq "legendary") {
                     $legendaryCommand = Get-WmtLegendaryCommandText -ForPowerShell:($act -ne "Update")
                     if ($act -eq "Install") { $cmd = "$legendaryCommand -y install `"$id`"" }
-                    if ($act -eq "Update") { $cmd = "$legendaryCommand -y update `"$id`"" }
+                    if ($act -eq "Update") { $cmd = "$legendaryCommand -y update `"$id`" --update-only --skip-sdl --skip-dlcs" }
                     if ($act -eq "Uninstall") { $cmd = "$legendaryCommand -y uninstall `"$id`"" }
                     $userCmd = $cmd
                 }
@@ -24676,9 +24942,15 @@ exit /b %WMT_EXIT%
                 }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
-                    $commandTimeoutSeconds = if ($isPipUpdate -or ($src -eq "pip" -or $src -eq "pip3")) { 600 } else { 0 }
+                    $commandTimeoutSeconds = if ($isPipUpdate -or ($srcKey -in @("pip", "pip3"))) { 600 } elseif ($srcKey -eq "legendary") { 43200 } else { 0 }
+                    $commandIdleTimeoutSeconds = if ($srcKey -eq "legendary") { 900 } else { 0 }
+                    $activityProcessNamePattern = if ($srcKey -eq "legendary") { '^legendary(?:\.exe)?$' } else { "" }
                     $commandLabel = if ($isPipUpdate -or ($src -eq "pip" -or $src -eq "pip3")) { "Pip $act for $name" } else { "$src $act for $name" }
-                    $p = Invoke-WingetCmd -Command $cmd -TimeoutSeconds $commandTimeoutSeconds -CommandLabel $commandLabel
+                    if ($srcKey -eq "legendary") {
+                        Write-Output "LOG:[Legendary] Inactivity watchdog enabled: stop after 15 minutes without Legendary CPU or I/O activity."
+                    }
+                    $p = $null
+                    Invoke-WingetCmd -Command $cmd -TimeoutSeconds $commandTimeoutSeconds -IdleTimeoutSeconds $commandIdleTimeoutSeconds -ActivityProcessNamePattern $activityProcessNamePattern -CommandLabel $commandLabel -Result ([ref]$p)
                 }
                 Write-Output "LOG:[$act][$index/$total] Process completed with exit code: $($p.ExitCode)"
                 
@@ -24687,7 +24959,8 @@ exit /b %WMT_EXIT%
                 # --- AUTO-FIX: SOURCE CORRUPTION ---
                 if ($wingetArgs -and $hex -eq "0x8a150003") {
                     Write-Output "LOG:[$act] WARNING: Detected Winget Source Corruption. Auto-fixing..."
-                    $fixP = Invoke-WingetCmd "winget source reset --force"
+                    $fixP = $null
+                    Invoke-WingetCmd -Command "winget source reset --force" -Result ([ref]$fixP)
                     if ($fixP.ExitCode -eq 0) {
                         Write-Output "LOG:[$act][$index/$total] Sources reset. Retrying $name..."
                         if ($wingetArgs) {
@@ -24700,7 +24973,8 @@ exit /b %WMT_EXIT%
                             }
                         }
                         else {
-                            $p = Invoke-WingetCmd $cmd
+                            $p = $null
+                            Invoke-WingetCmd -Command $cmd -Result ([ref]$p)
                         }
                         $hex = "0x{0:x}" -f $p.ExitCode 
                     }
@@ -24735,6 +25009,12 @@ exit /b %WMT_EXIT%
                     }
                     if ($hex -eq "0x8a15000b" -or $dec -eq "1618") {
                         Write-Output "LOG:[$act][$index/$total] FAILED [$hex] ${errDesc} - $name (no user-mode retry)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                        continue
+                    }
+                    if ($p.PSObject.Properties["TimedOut"] -and $p.TimedOut) {
+                        $timeoutReason = if ($p.PSObject.Properties["TimeoutReason"] -and -not [string]::IsNullOrWhiteSpace([string]$p.TimeoutReason)) { [string]$p.TimeoutReason } else { "timeout" }
+                        Write-Output "LOG:[$act][$index/$total] FAILED: $name ($timeoutReason; no user-mode retry)"
                         Write-Output "RESULT:${index}:FAILED:$name"
                         continue
                     }
@@ -24779,38 +25059,43 @@ exit /b %WMT_EXIT%
                     }
 
                     if ($dec -eq "1603") {
-                        Write-Output "LOG:[$act][$index/$total] FAILED (1603): $name - Retrying in Interactive Mode (Look for popup)..."
+                        Write-Output "LOG:[$act] Initial attempt failed (1603) for $name. Retrying in interactive user mode..."
                     }
                     else {
-                        Write-Output "LOG:[$act][$index/$total] FAILED [$hex] $errDesc - Retrying as User..."
+                        Write-Output "LOG:[$act] Initial attempt failed [$hex] $errDesc for $name. Retrying in user mode..."
                     }
                     
                     # --- RETRY AS USER (Fallback) ---
                     # Handles Scoop (needs user rights) and Spotify (hates Admin)
-                    $rand = [Guid]::NewGuid().ToString()
-                    $batPath = "$temp\WMT_Fix_${id}_${rand}.bat"
-                    $batContent = @"
-@echo off
-title $act $name (User Mode)
-echo WMT-GUI: Re-launching $name...
-echo.
-echo NOTE: If this is Scoop or Spotify, this usually fixes the error.
-echo If an installer window appears, please click through it.
-echo.
-$userCmd
-echo.
-echo Done.
-timeout /t 5
-(goto) 2>nul & del "%~f0"
-"@
-                    Set-Content -Path $batPath -Value $batContent -Encoding Ascii
-                    try {
-                        Start-Process "explorer.exe" -ArgumentList "`"$batPath`""
+                    $retryResult = Invoke-WmtUserModeRetry -Command $userCmd -ActionLabel $act -PackageName $name -TempPath $temp
+                    if ($retryResult.TimedOut) {
+                        Write-Output "LOG:[$act][$index/$total] FAILED: $name (user-mode retry timed out and was stopped)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
                     }
-                    catch {
-                        Write-Output "LOG:Retry failed: $($_.Exception.Message)"
+                    elseif ($retryResult.LaunchFailed) {
+                        Write-Output "LOG:[$act][$index/$total] FAILED: $name (user-mode retry could not be started)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
                     }
-                    Write-Output "RESULT:${index}:FAILED:$name"
+                    elseif ($retryResult.ExitCode -eq 0) {
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (user-mode retry completed)"
+                        Write-Output "RESULT:${index}:SUCCESS:$name"
+                    }
+                    elseif ($retryResult.ExitCode -eq 3010) {
+                        Write-Output "LOG:[$act][$index/$total] SUCCESS: $name (user-mode retry completed; reboot required)"
+                        Write-Output "RESULT:${index}:SUCCESS:$name"
+                    }
+                    elseif ($retryResult.ExitCode -eq 1602) {
+                        Write-Output "LOG:[$act][$index/$total] CANCELLED: $name (user-mode retry cancelled by user)"
+                        Write-Output "RESULT:${index}:CANCELLED:$name"
+                    }
+                    else {
+                        $retryHex = "0x{0:x}" -f $retryResult.ExitCode
+                        $retryDescription = "Unknown Error"
+                        if ($ErrorCodes.ContainsKey($retryHex)) { $retryDescription = $ErrorCodes[$retryHex] }
+                        elseif ($ErrorCodes.ContainsKey("$($retryResult.ExitCode)")) { $retryDescription = $ErrorCodes["$($retryResult.ExitCode)"] }
+                        Write-Output "LOG:[$act][$index/$total] FAILED [$retryHex] ${retryDescription} - $name (user-mode retry)"
+                        Write-Output "RESULT:${index}:FAILED:$name"
+                    }
                 }
             }
             else {
@@ -31739,6 +32024,8 @@ function Start-WmtStartupBackgroundPreload {
 }
 
 # --- LAUNCH ---
+Start-WmtSingleInstanceActivationListener
+
 $onMainWindowContentRendered = {
     $settings = Get-WmtSettings
 
@@ -31884,6 +32171,18 @@ $onMainWindowClosing = {
 $onMainWindowClosed = {
     try { Remove-WmtTrayIcon } catch {}
     try { Stop-WmtNotificationFallbackTimers } catch {}
+    try { Stop-WmtSingleInstanceActivationListener } catch {}
+    try { if ($script:WmtSingleInstanceActivationEvent) { $script:WmtSingleInstanceActivationEvent.Dispose() } } catch {}
+    try {
+        if ($script:WmtSingleInstanceMutexOwned -and $script:WmtSingleInstanceMutex) {
+            $script:WmtSingleInstanceMutex.ReleaseMutex()
+        }
+    }
+    catch {}
+    try { if ($script:WmtSingleInstanceMutex) { $script:WmtSingleInstanceMutex.Dispose() } } catch {}
+    $script:WmtSingleInstanceActivationEvent = $null
+    $script:WmtSingleInstanceMutex = $null
+    $script:WmtSingleInstanceMutexOwned = $false
     try {
         $app = $script:WmtApplication
         if (-not $app) { $app = [System.Windows.Application]::Current }
