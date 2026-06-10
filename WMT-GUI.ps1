@@ -23365,8 +23365,26 @@ $Script:StartWingetAction = {
             $pInfo.CreateNoWindow = $true
             $proc = [System.Diagnostics.Process]::Start($pInfo)
 
-            $outTask = $proc.StandardOutput.ReadLineAsync()
-            $errTask = $proc.StandardError.ReadLineAsync()
+            function Write-WmtCommandOutputChunk {
+                param(
+                    [string]$Text,
+                    [string]$Prefix
+                )
+
+                if ([string]::IsNullOrWhiteSpace($Text)) { return }
+                foreach ($line in @($Text -split "\r\n|\r|\n")) {
+                    $trimmed = ([string]$line).Trim()
+                    if (-not [string]::IsNullOrWhiteSpace($trimmed)) {
+                        Write-Output "LOG:  $Prefix $trimmed"
+                    }
+                }
+            }
+
+            # Read raw chunks so progress output that uses carriage returns cannot fill the pipe and deadlock.
+            $outBuffer = New-Object char[] 4096
+            $errBuffer = New-Object char[] 4096
+            $outTask = $proc.StandardOutput.ReadAsync($outBuffer, 0, $outBuffer.Length)
+            $errTask = $proc.StandardError.ReadAsync($errBuffer, 0, $errBuffer.Length)
             $startedAt = Get-Date
             $lastHeartbeat = $startedAt
             $timedOut = $false
@@ -23377,24 +23395,26 @@ $Script:StartWingetAction = {
             while (-not $proc.HasExited) {
                 $now = Get-Date
                 while ($outTask -and $outTask.IsCompleted) {
-                    $outLine = $null
-                    try { $outLine = $outTask.GetAwaiter().GetResult() } catch {}
-                    if ($null -eq $outLine) {
+                    $outCount = 0
+                    try { $outCount = [int]$outTask.GetAwaiter().GetResult() } catch {}
+                    if ($outCount -le 0) {
                         $outTask = $null
                         break
                     }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$outLine)) { Write-Output "LOG:  > $outLine" }
-                    $outTask = $proc.StandardOutput.ReadLineAsync()
+                    Write-WmtCommandOutputChunk -Text (-join $outBuffer[0..($outCount - 1)]) -Prefix ">"
+                    $outBuffer = New-Object char[] 4096
+                    $outTask = $proc.StandardOutput.ReadAsync($outBuffer, 0, $outBuffer.Length)
                 }
                 while ($errTask -and $errTask.IsCompleted) {
-                    $errLine = $null
-                    try { $errLine = $errTask.GetAwaiter().GetResult() } catch {}
-                    if ($null -eq $errLine) {
+                    $errCount = 0
+                    try { $errCount = [int]$errTask.GetAwaiter().GetResult() } catch {}
+                    if ($errCount -le 0) {
                         $errTask = $null
                         break
                     }
-                    if (-not [string]::IsNullOrWhiteSpace([string]$errLine)) { Write-Output "LOG:  ! $errLine" }
-                    $errTask = $proc.StandardError.ReadLineAsync()
+                    Write-WmtCommandOutputChunk -Text (-join $errBuffer[0..($errCount - 1)]) -Prefix "!"
+                    $errBuffer = New-Object char[] 4096
+                    $errTask = $proc.StandardError.ReadAsync($errBuffer, 0, $errBuffer.Length)
                 }
                 if ($TimeoutSeconds -gt 0 -and (($now - $startedAt).TotalSeconds -ge $TimeoutSeconds)) {
                     $timedOut = $true
@@ -23440,21 +23460,23 @@ $Script:StartWingetAction = {
             $drainDeadline = (Get-Date).AddSeconds(5)
             while (($outTask -or $errTask) -and (Get-Date) -lt $drainDeadline) {
                 if ($outTask -and $outTask.IsCompleted) {
-                    $outLine = $null
-                    try { $outLine = $outTask.GetAwaiter().GetResult() } catch {}
-                    if ($null -eq $outLine) { $outTask = $null }
+                    $outCount = 0
+                    try { $outCount = [int]$outTask.GetAwaiter().GetResult() } catch {}
+                    if ($outCount -le 0) { $outTask = $null }
                     else {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$outLine)) { Write-Output "LOG:  > $outLine" }
-                        $outTask = $proc.StandardOutput.ReadLineAsync()
+                        Write-WmtCommandOutputChunk -Text (-join $outBuffer[0..($outCount - 1)]) -Prefix ">"
+                        $outBuffer = New-Object char[] 4096
+                        $outTask = $proc.StandardOutput.ReadAsync($outBuffer, 0, $outBuffer.Length)
                     }
                 }
                 if ($errTask -and $errTask.IsCompleted) {
-                    $errLine = $null
-                    try { $errLine = $errTask.GetAwaiter().GetResult() } catch {}
-                    if ($null -eq $errLine) { $errTask = $null }
+                    $errCount = 0
+                    try { $errCount = [int]$errTask.GetAwaiter().GetResult() } catch {}
+                    if ($errCount -le 0) { $errTask = $null }
                     else {
-                        if (-not [string]::IsNullOrWhiteSpace([string]$errLine)) { Write-Output "LOG:  ! $errLine" }
-                        $errTask = $proc.StandardError.ReadLineAsync()
+                        Write-WmtCommandOutputChunk -Text (-join $errBuffer[0..($errCount - 1)]) -Prefix "!"
+                        $errBuffer = New-Object char[] 4096
+                        $errTask = $proc.StandardError.ReadAsync($errBuffer, 0, $errBuffer.Length)
                     }
                 }
                 if (($outTask -and -not $outTask.IsCompleted) -or ($errTask -and -not $errTask.IsCompleted)) {
@@ -24851,16 +24873,54 @@ exit /b %WMT_EXIT%
                             $resolvedAuthConfig = ""
                             foreach ($candidateAuth in $authCandidates) {
                                 if ([string]::IsNullOrWhiteSpace([string]$candidateAuth)) { continue }
-                                if (Test-Path -LiteralPath ([string]$candidateAuth) -PathType Leaf) {
-                                    $resolvedAuthConfig = [string]$candidateAuth
+                                if (-not (Test-Path -LiteralPath ([string]$candidateAuth) -PathType Leaf)) { continue }
+                                try {
+                                    $gogClientId = "46899977096215655"
+                                    $authText = [System.IO.File]::ReadAllText([string]$candidateAuth).TrimStart([char]0xFEFF)
+                                    $authJson = $authText | ConvertFrom-Json -ErrorAction Stop
+                                    $credentials = $null
+                                    $clientProperty = $authJson.PSObject.Properties[$gogClientId]
+                                    if ($clientProperty) {
+                                        $credentials = $clientProperty.Value
+                                    }
+                                    elseif (-not [string]::IsNullOrWhiteSpace([string]$authJson.access_token) -or
+                                        -not [string]::IsNullOrWhiteSpace([string]$authJson.refresh_token)) {
+                                        if (-not $authJson.PSObject.Properties["loginTime"]) {
+                                            $loginTime = [Math]::Floor(([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds)
+                                            $authJson | Add-Member -MemberType NoteProperty -Name "loginTime" -Value $loginTime -Force
+                                        }
+                                        $wrappedAuth = @{}
+                                        $wrappedAuth[$gogClientId] = $authJson
+                                        $authText = $wrappedAuth | ConvertTo-Json -Depth 10
+                                        $credentials = $authJson
+                                    }
+                                    if (-not $credentials -or
+                                        ([string]::IsNullOrWhiteSpace([string]$credentials.access_token) -and
+                                            [string]::IsNullOrWhiteSpace([string]$credentials.refresh_token))) {
+                                        continue
+                                    }
+
+                                    $preferredAuthPath = ([string]$gogdlAuthConfigPath).Trim()
+                                    if (-not [string]::IsNullOrWhiteSpace($preferredAuthPath)) {
+                                        $preferredAuthDir = Split-Path -Parent $preferredAuthPath
+                                        if ($preferredAuthDir -and -not (Test-Path -LiteralPath $preferredAuthDir)) {
+                                            [void][System.IO.Directory]::CreateDirectory($preferredAuthDir)
+                                        }
+                                        [System.IO.File]::WriteAllText($preferredAuthPath, $authText, [System.Text.UTF8Encoding]::new($false))
+                                        $resolvedAuthConfig = $preferredAuthPath
+                                    }
+                                    else {
+                                        $resolvedAuthConfig = [string]$candidateAuth
+                                    }
                                     break
                                 }
+                                catch {}
                             }
                             if ([string]::IsNullOrWhiteSpace($resolvedAuthConfig)) {
-                                $skipReason = "GOGDL auth.json was not found. Sign into GOG in Heroic or place auth.json at $authConfig."
+                                $skipReason = "GOGDL auth.json was missing or invalid. Reinstall the GOGDL provider or sign into GOG again."
                             }
                             else {
-                                $cmd = "$gogdlCommand --auth-config-path `"$resolvedAuthConfig`" update `"$id`" --path `"$installDir`" --os $platform"
+                                $cmd = "$gogdlCommand --auth-config-path `"$resolvedAuthConfig`" update `"$id`" --path `"$installDir`" --os $platform --skip-dlcs --max-workers 4"
                                 $userCmd = $cmd
                             }
                         }
@@ -25063,12 +25123,17 @@ exit /b %WMT_EXIT%
                 }
                 else {
                     Write-Output "LOG:[$act] Running... (this may take a while)"
-                    $commandTimeoutSeconds = if ($isPipUpdate -or ($srcKey -in @("pip", "pip3"))) { 600 } elseif ($srcKey -eq "legendary") { 43200 } else { 0 }
-                    $commandIdleTimeoutSeconds = if ($srcKey -eq "legendary") { 900 } else { 0 }
-                    $activityProcessNamePattern = if ($srcKey -eq "legendary") { '^legendary(?:\.exe)?$' } else { "" }
+                    $commandTimeoutSeconds = if ($isPipUpdate -or ($srcKey -in @("pip", "pip3"))) { 600 } elseif ($srcKey -in @("legendary", "gogdl")) { 43200 } else { 7200 }
+                    $commandIdleTimeoutSeconds = if ($srcKey -eq "legendary") { 900 } elseif ($srcKey -eq "gogdl") { 300 } else { 0 }
+                    $activityProcessNamePattern = switch ($srcKey) {
+                        "legendary" { '^legendary(?:\.exe)?$' }
+                        "gogdl" { '^(?:gogdl|gogdl_windows_x86_64)(?:\.exe)?$' }
+                        default { "" }
+                    }
                     $commandLabel = if ($isPipUpdate -or ($src -eq "pip" -or $src -eq "pip3")) { "Pip $act for $name" } else { "$src $act for $name" }
-                    if ($srcKey -eq "legendary") {
-                        Write-Output "LOG:[Legendary] Inactivity watchdog enabled: stop after 15 minutes without Legendary CPU or I/O activity."
+                    if ($srcKey -in @("legendary", "gogdl")) {
+                        $idleMinutes = [Math]::Round($commandIdleTimeoutSeconds / 60, 1)
+                        Write-Output "LOG:[$src] Inactivity watchdog enabled: stop after $idleMinutes minutes without downloader CPU or I/O activity."
                     }
                     $p = $null
                     Invoke-WingetCmd -Command $cmd -TimeoutSeconds $commandTimeoutSeconds -IdleTimeoutSeconds $commandIdleTimeoutSeconds -ActivityProcessNamePattern $activityProcessNamePattern -CommandLabel $commandLabel -Result ([ref]$p)
@@ -26517,15 +26582,54 @@ Write-Host ""
 Write-Host "GOGDL auth config:"
 Write-Host $authConfig
 
+function Get-ValidGogdlAuthText {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return "" }
+    try {
+        $gogClientId = "46899977096215655"
+        $text = [System.IO.File]::ReadAllText($Path).TrimStart([char]0xFEFF)
+        $json = $text | ConvertFrom-Json -ErrorAction Stop
+        $credentials = $null
+        $clientProperty = $json.PSObject.Properties[$gogClientId]
+        if ($clientProperty) {
+            $credentials = $clientProperty.Value
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token) -or
+            -not [string]::IsNullOrWhiteSpace([string]$json.refresh_token)) {
+            if (-not $json.PSObject.Properties["loginTime"]) {
+                $loginTime = [Math]::Floor(([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds)
+                $json | Add-Member -MemberType NoteProperty -Name "loginTime" -Value $loginTime -Force
+            }
+            $wrappedAuth = @{}
+            $wrappedAuth[$gogClientId] = $json
+            $text = $wrappedAuth | ConvertTo-Json -Depth 10
+            $credentials = $json
+        }
+        if (-not $credentials -or
+            ([string]::IsNullOrWhiteSpace([string]$credentials.access_token) -and
+                [string]::IsNullOrWhiteSpace([string]$credentials.refresh_token))) {
+            return ""
+        }
+        return $text
+    }
+    catch {
+        return ""
+    }
+}
+
 # Try to auto-copy Heroic's auth.json if available
 $heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
-if ((Test-Path -LiteralPath $authConfig -PathType Leaf)) {
-    Write-Host "auth.json already exists."
+$validAuthText = Get-ValidGogdlAuthText -Path $authConfig
+if (-not [string]::IsNullOrWhiteSpace($validAuthText)) {
+    [System.IO.File]::WriteAllText($authConfig, $validAuthText, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "auth.json already exists and is valid."
 }
-elseif ($env:APPDATA -and (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf)) {
+elseif ($env:APPDATA -and -not [string]::IsNullOrWhiteSpace((Get-ValidGogdlAuthText -Path $heroicAuthPath))) {
     try {
         Write-Host "Found Heroic GOG auth. Copying to GOGDL..."
-        Copy-Item -LiteralPath $heroicAuthPath -Destination $authConfig -Force -ErrorAction Stop
+        $heroicAuthText = Get-ValidGogdlAuthText -Path $heroicAuthPath
+        [System.IO.File]::WriteAllText($authConfig, $heroicAuthText, [System.Text.UTF8Encoding]::new($false))
+        $validAuthText = $heroicAuthText
         Write-Host "Successfully copied auth from Heroic. GOGDL is ready!"
     }
     catch {
@@ -26534,8 +26638,8 @@ elseif ($env:APPDATA -and (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf
     }
 }
 
-# If this is a fresh install, or auth.json is still missing, open GOG OAuth flow
-if ($firstInstall -or -not (Test-Path -LiteralPath $authConfig -PathType Leaf)) {
+# If this is a fresh install, or auth.json is still invalid, open GOG OAuth flow
+if ($firstInstall -or [string]::IsNullOrWhiteSpace($validAuthText)) {
     Write-Host ""
     Write-Host "Starting GOG authentication..."
     Write-Host "Your browser will open. Log in, then paste the redirect URL back here."
@@ -26594,7 +26698,10 @@ try {
     `$authDir = Split-Path -Parent "$authConfig"
     if (`$authDir -and -not (Test-Path -LiteralPath `$authDir)) { [void][System.IO.Directory]::CreateDirectory(`$authDir) }
 
-    [System.IO.File]::WriteAllText("$authConfig", (`$token | ConvertTo-Json -Depth 5), [System.Text.Encoding]::UTF8)
+    `$token | Add-Member -MemberType NoteProperty -Name "loginTime" -Value ([Math]::Floor(([DateTime]::UtcNow - [DateTime]'1970-01-01').TotalSeconds)) -Force
+    `$authData = @{}
+    `$authData[`$clientId] = `$token
+    [System.IO.File]::WriteAllText("$authConfig", (`$authData | ConvertTo-Json -Depth 10), [System.Text.UTF8Encoding]::new(`$false))
 
     Write-Host ""
     Write-Host "GOG authentication successful! Tokens saved." -ForegroundColor Green
@@ -30307,12 +30414,22 @@ function Invoke-WmtAutoInstallAvailableUpdates {
     }
 
     $restartRiskItems = @($items | Where-Object { Test-WingetRestartRiskItem $_ })
-    $eligibleItems = @($items | Where-Object { -not (Test-WingetRestartRiskItem $_) })
+    $manualGameProviderItems = @($items | Where-Object { ([string]$_.Source).ToLowerInvariant() -in @("steam", "legendary", "gogdl") })
+    $eligibleItems = @($items | Where-Object {
+            -not (Test-WingetRestartRiskItem $_) -and
+            ([string]$_.Source).ToLowerInvariant() -notin @("steam", "legendary", "gogdl")
+        })
     if ($restartRiskItems.Count -gt 0) {
         $restartRiskNames = @($restartRiskItems | ForEach-Object {
                 if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
             } | Select-Object -Unique)
         Write-GuiLog "Auto install skipped $($restartRiskItems.Count) restart-risk update(s): $($restartRiskNames -join ', ')."
+    }
+    if ($manualGameProviderItems.Count -gt 0) {
+        $manualGameProviderNames = @($manualGameProviderItems | ForEach-Object {
+                if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
+            } | Select-Object -Unique)
+        Write-GuiLog "Auto install skipped $($manualGameProviderItems.Count) game-provider update(s) that require manual approval: $($manualGameProviderNames -join ', ')."
     }
     if ($eligibleItems.Count -eq 0) {
         Write-GuiLog "Auto install had no eligible updates after safety filtering."
