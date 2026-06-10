@@ -23347,7 +23347,7 @@ $Script:StartWingetAction = {
         function Invoke-WingetCmd {
             param(
                 [string]$Command,
-                [int]$TimeoutSeconds = 0,
+                [int]$TimeoutSeconds = 7200,
                 [int]$IdleTimeoutSeconds = 0,
                 [string]$ActivityProcessNamePattern = "",
                 [string]$CommandLabel = "Command",
@@ -23636,7 +23636,7 @@ $Script:StartWingetAction = {
             return $proc
         }
 
-        function Invoke-VisibleCmd ($command, $title, [int]$HoldSeconds = 0) {
+        function Invoke-VisibleCmd ($command, $title, [int]$HoldSeconds = 0, [int]$TimeoutSeconds = 7200) {
             if ([string]::IsNullOrWhiteSpace($title)) { $title = "WMT Package Update" }
             $safeTitle = ((($title -replace '"', '') -replace '[\r\n]', ' ') -replace '[&|<>^%!]', ' ').Trim()
             if ($HoldSeconds -gt 0) {
@@ -23646,7 +23646,22 @@ $Script:StartWingetAction = {
                 $cmdLine = "/c title $safeTitle && $command"
             }
             $windowStyle = if ($silentUpdateInstallEnabled) { "Hidden" } else { "Normal" }
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -Wait -WindowStyle $windowStyle
+            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList $cmdLine -PassThru -WindowStyle $windowStyle
+            $startedAt = Get-Date
+            $lastHeartbeat = $startedAt
+            while (-not $proc.HasExited) {
+                $now = Get-Date
+                if ($TimeoutSeconds -gt 0 -and ($now - $startedAt).TotalSeconds -ge $TimeoutSeconds) {
+                    Write-Output "LOG:Visible installer exceeded the $TimeoutSeconds-second runtime limit. Stopping its process tree."
+                    Stop-WmtChildProcessTree -Process $proc
+                    return [PSCustomObject]@{ ExitCode = 124; TimedOut = $true; TimeoutReason = "visible installer runtime limit" }
+                }
+                if (($now - $lastHeartbeat).TotalSeconds -ge 30) {
+                    Write-Output "LOG:Visible installer still running..."
+                    $lastHeartbeat = $now
+                }
+                Start-Sleep -Milliseconds 500
+            }
             return $proc
         }
 
@@ -24498,6 +24513,39 @@ exit /b %WMT_EXIT%
             if ($targetParts.Count -gt 1) { [void][int]::TryParse(([string]$targetParts[1]).Trim(), [ref]$targetRevision) }
             $completedIdentity = if ($targetRevision -ge 0) { "$targetId|$targetRevision" } else { $targetRaw }
 
+            function Get-WmtWuOperationResultDetail {
+                param(
+                    [object]$OperationResult,
+                    [int]$Index = 0
+                )
+
+                $aggregateCode = 0
+                $itemCode = 0
+                $hResult = 0
+                $itemRebootRequired = $false
+                try { $aggregateCode = [int]$OperationResult.ResultCode } catch {}
+
+                $itemResult = $null
+                try { $itemResult = $OperationResult.GetUpdateResult($Index) } catch {}
+                if ($itemResult) {
+                    try { $itemCode = [int]$itemResult.ResultCode } catch { $itemCode = $aggregateCode }
+                    try { $hResult = [int]$itemResult.HResult } catch {}
+                    try { $itemRebootRequired = [bool]$itemResult.RebootRequired } catch {}
+                }
+                else {
+                    $itemCode = $aggregateCode
+                    try { $hResult = [int]$OperationResult.HResult } catch {}
+                }
+
+                $hResultUnsigned = [BitConverter]::ToUInt32([BitConverter]::GetBytes([int]$hResult), 0)
+                return [PSCustomObject]@{
+                    AggregateCode      = $aggregateCode
+                    ItemCode           = $itemCode
+                    HResultHex         = ("0x{0:X8}" -f $hResultUnsigned)
+                    ItemRebootRequired = $itemRebootRequired
+                }
+            }
+
             try {
                 Write-Output "LOG:[Windows Update] Preparing selected update: $targetName"
                 $session = New-Object -ComObject Microsoft.Update.Session
@@ -24552,10 +24600,12 @@ exit /b %WMT_EXIT%
                 $downloader = $session.CreateUpdateDownloader()
                 $downloader.Updates = $updatesToInstall
                 $downloadResult = $downloader.Download()
-                $downloadCode = 0
-                try { $downloadCode = [int]$downloadResult.ResultCode } catch { $downloadCode = 0 }
-                if ($downloadCode -notin @(2, 3)) {
-                    Write-Output "LOG:[Windows Update] Download failed with WUA result code $downloadCode."
+                $downloadDetail = Get-WmtWuOperationResultDetail -OperationResult $downloadResult
+                $isDownloaded = $false
+                try { $isDownloaded = [bool]$updatesToInstall.Item(0).IsDownloaded } catch {}
+                Write-Output "LOG:[Windows Update] Download result: aggregate $($downloadDetail.AggregateCode), item $($downloadDetail.ItemCode), HRESULT $($downloadDetail.HResultHex), downloaded $isDownloaded"
+                if ($downloadDetail.ItemCode -ne 2 -and -not $isDownloaded) {
+                    Write-Output "LOG:[Windows Update] Download failed for the selected update."
                     return [PSCustomObject]@{ ExitCode = 1 }
                 }
 
@@ -24563,17 +24613,18 @@ exit /b %WMT_EXIT%
                 $installer = $session.CreateUpdateInstaller()
                 $installer.Updates = $updatesToInstall
                 $installResult = $installer.Install()
-                $installCode = 0
                 $rebootRequired = $false
-                try { $installCode = [int]$installResult.ResultCode } catch { $installCode = 0 }
+                $installDetail = Get-WmtWuOperationResultDetail -OperationResult $installResult
                 try { $rebootRequired = [bool]$installResult.RebootRequired } catch { $rebootRequired = $false }
-                Write-Output "LOG:[Windows Update] Install result code: $installCode | Reboot required: $rebootRequired"
+                $rebootRequired = ($rebootRequired -or $installDetail.ItemRebootRequired)
+                Write-Output "LOG:[Windows Update] Install result: aggregate $($installDetail.AggregateCode), item $($installDetail.ItemCode), HRESULT $($installDetail.HResultHex), reboot required $rebootRequired"
 
-                if ($installCode -in @(2, 3)) {
+                if ($installDetail.ItemCode -eq 2) {
                     if ($rebootRequired) { return [PSCustomObject]@{ ExitCode = 3010; CompletedWindowsUpdateId = $completedIdentity } }
                     return [PSCustomObject]@{ ExitCode = 0; CompletedWindowsUpdateId = $completedIdentity }
                 }
 
+                Write-Output "LOG:[Windows Update] The selected update did not report a clean successful result."
                 return [PSCustomObject]@{ ExitCode = 1 }
             }
             catch {
@@ -24965,8 +25016,9 @@ exit /b %WMT_EXIT%
                                 $p = [PSCustomObject]@{ ExitCode = $exitCode }
                             }
                             else {
-                                Write-Output "LOG:[$act] Window was forcefully closed or exited with a non-zero code. Assuming success due to known installer hang behavior."
-                                $p = [PSCustomObject]@{ ExitCode = 0 } # Force a fake success code to prevent WMT from crashing
+                                Write-Output "LOG:[$act] $windowTag update window exited with a non-zero code."
+                                $exitCode = if ($p -and $null -ne $p.ExitCode) { $p.ExitCode } else { 1 }
+                                $p = [PSCustomObject]@{ ExitCode = $exitCode }
                             }
                         }
                     }
@@ -24977,7 +25029,7 @@ exit /b %WMT_EXIT%
                         }
                         else {
                             Write-Output "LOG:[$act] Visible window forcefully closed or interrupted."
-                            $p = [PSCustomObject]@{ ExitCode = 0 } # Assume success here as well
+                            $p = [PSCustomObject]@{ ExitCode = 1 }
                         }
                     }
                 }
@@ -27456,6 +27508,7 @@ $script:ActiveScans = [System.Collections.ArrayList]::new()
 $script:WmtAutoInstallSuppressNextScan = $false
 $script:WmtAutoInstallActive = $false
 $script:WmtCompletedWindowsUpdateIds = @{}
+$script:WmtWindowsUpdateRebootPendingCount = 0
 
 $script:ScanTimer.Add_Tick({
         if ($script:ActiveScans.Count -gt 0) {
@@ -27473,7 +27526,13 @@ $script:ScanTimer.Add_Tick({
                         foreach ($item in $results) {
                             if ($null -eq $item) { continue }
 
-                            if ($item -is [string] -and $item.StartsWith("LOG:")) {
+                            if ($item -is [string] -and $item -match "^STATE:WINDOWS_UPDATE_REBOOT_REQUIRED:(\d+)$") {
+                                $script:WmtWindowsUpdateRebootPendingCount = [Math]::Max(
+                                    [int]$script:WmtWindowsUpdateRebootPendingCount,
+                                    [int]$matches[1]
+                                )
+                            }
+                            elseif ($item -is [string] -and $item.StartsWith("LOG:")) {
                                 Write-GuiLog ($item.Substring(4))
                             }
                             elseif ($item.PSObject.Properties["Name"]) {
@@ -27504,7 +27563,14 @@ $script:ScanTimer.Add_Tick({
             if ($script:ScanTimer.IsEnabled) {
                 $script:ScanTimer.Stop()
             
-                $lblWingetStatus.Visibility = "Hidden"
+                $rebootPendingCount = [Math]::Max(0, [int]$script:WmtWindowsUpdateRebootPendingCount)
+                if ($rebootPendingCount -gt 0) {
+                    $lblWingetStatus.Text = "Restart required - $rebootPendingCount Windows update(s) waiting"
+                    $lblWingetStatus.Visibility = "Visible"
+                }
+                else {
+                    $lblWingetStatus.Visibility = "Hidden"
+                }
                 if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
                 if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
                 $btnWingetScan.IsEnabled = $true
@@ -27515,7 +27581,12 @@ $script:ScanTimer.Add_Tick({
                 Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             
                 if ($lstWinget.Items.Count -eq 0) {
-                    Write-GuiLog "System is up to date."
+                    if ($rebootPendingCount -gt 0) {
+                        Write-GuiLog "No actionable updates found. Restart Windows to finish $rebootPendingCount installed update(s)."
+                    }
+                    else {
+                        Write-GuiLog "System is up to date."
+                    }
                 }
                 else {
                     Write-GuiLog "Scan Complete. Found $($lstWinget.Items.Count) updates."
@@ -27543,6 +27614,7 @@ $btnWingetScan.Add_Click({
         if ($pbWingetProgress) { $pbWingetProgress.Visibility = "Collapsed"; $pbWingetProgress.Value = 0 }
         if ($lblWingetProgress) { $lblWingetProgress.Visibility = "Collapsed"; $lblWingetProgress.Text = "" }
         if ($lblWingetLastResult) { $lblWingetLastResult.Visibility = "Collapsed"; $lblWingetLastResult.Text = "" }
+        $script:WmtWindowsUpdateRebootPendingCount = 0
     
         $lstWinget.Items.Clear()
         $btnWingetScan.IsEnabled = $false
@@ -27609,8 +27681,7 @@ $btnWingetScan.Add_Click({
                     Write-GuiLog "Global scan timeout reached (120s). Cancelling remaining provider scans."
                     # Stop all still-running runspaces
                     foreach ($task in $script:ActiveScans) {
-                        try { $task.PowerShell.Stop() } catch { }
-                        try { $task.PowerShell.Dispose() } catch { }
+                        try { $null = $task.PowerShell.BeginStop($null, $null) } catch { }
                     }
                     $script:ActiveScans.Clear()
                     # Stop result collection timer
@@ -27693,11 +27764,19 @@ $btnWingetScan.Add_Click({
                             Write-Output "LOG:$SourceName connection failed (Code: $($p.ExitCode)). Auto-accepting agreements and refreshing..."
                             $fixInfo1 = New-Object System.Diagnostics.ProcessStartInfo("winget", "search `"Spotify`" --source $SourceName --accept-source-agreements")
                             $fixInfo1.CreateNoWindow = $true; $fixInfo1.UseShellExecute = $false
-                            $fixP1 = [System.Diagnostics.Process]::Start($fixInfo1); $fixP1.WaitForExit()
+                            $fixP1 = [System.Diagnostics.Process]::Start($fixInfo1)
+                            if (-not $fixP1.WaitForExit(30000)) {
+                                try { $fixP1.Kill() } catch {}
+                                Write-Output "LOG:$SourceName agreement repair timed out."
+                            }
     
                             $fixInfo2 = New-Object System.Diagnostics.ProcessStartInfo("winget", "source update --name $SourceName")
                             $fixInfo2.CreateNoWindow = $true; $fixInfo2.UseShellExecute = $false
-                            $fixP2 = [System.Diagnostics.Process]::Start($fixInfo2); $fixP2.WaitForExit()
+                            $fixP2 = [System.Diagnostics.Process]::Start($fixInfo2)
+                            if (-not $fixP2.WaitForExit(60000)) {
+                                try { $fixP2.Kill() } catch {}
+                                Write-Output "LOG:$SourceName refresh repair timed out."
+                            }
     
                             Write-Output "LOG:$SourceName refreshed. Retrying scan..."
                             $p = [System.Diagnostics.Process]::Start($pInfo)
@@ -28110,6 +28189,7 @@ $btnWingetScan.Add_Click({
                             Write-Output "LOG:Windows Update suppressed $completedSuppressedCount exact revision(s) already recorded successful since boot or during this WMT session."
                         }
                         if ($rebootSuppressedCount -gt 0) {
+                            Write-Output "STATE:WINDOWS_UPDATE_REBOOT_REQUIRED:$rebootSuppressedCount"
                             Write-Output "LOG:Windows Update suppressed $rebootSuppressedCount update(s) that are already waiting for a reboot."
                         }
                     }
@@ -28192,8 +28272,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated --json 2>nul")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
                         if ($p.WaitForExit(30000)) { 
-                            $json = $p.StandardOutput.ReadToEnd().Trim()
+                            $json = $outTask.GetAwaiter().GetResult().Trim()
                             if ($json -and $json.StartsWith("{")) { 
                                 $pkgs = $json | ConvertFrom-Json
                                 foreach ($k in $pkgs.PSObject.Properties.Name) {
@@ -28204,7 +28285,7 @@ $btnWingetScan.Add_Click({
                             }
                         }
                         else {
-                            try { $p.Kill() } catch {}
+                            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }
                             Write-Output "LOG:Npm local scan timed out."
                         }
 
@@ -28212,8 +28293,9 @@ $btnWingetScan.Add_Click({
                         $pInfoG = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm outdated -g --json 2>nul")
                         $pInfoG.RedirectStandardOutput = $true; $pInfoG.UseShellExecute = $false; $pInfoG.CreateNoWindow = $true
                         $pg = [System.Diagnostics.Process]::Start($pInfoG)
+                        $outTaskG = $pg.StandardOutput.ReadToEndAsync()
                         if ($pg.WaitForExit(30000)) { 
-                            $jsonG = $pg.StandardOutput.ReadToEnd().Trim()
+                            $jsonG = $outTaskG.GetAwaiter().GetResult().Trim()
                             if ($jsonG -and $jsonG.StartsWith("{")) { 
                                 $pkgsG = $jsonG | ConvertFrom-Json
                                 foreach ($k in $pkgsG.PSObject.Properties.Name) {
@@ -28224,7 +28306,7 @@ $btnWingetScan.Add_Click({
                             }
                         }
                         else {
-                            try { $pg.Kill() } catch {}
+                            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $pg.Id /T /F 2>$null | Out-Null } catch { try { $pg.Kill() } catch {} }
                             Write-Output "LOG:Npm global scan timed out."
                         }
                     }
@@ -28243,8 +28325,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("choco", "outdated -r")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(60000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Chocolatey scan timed out."; return }
-                        $out = $p.StandardOutput.ReadToEnd()
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        if (-not $p.WaitForExit(60000)) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }; Write-Output "LOG:Chocolatey scan timed out."; return }
+                        $out = $outTask.GetAwaiter().GetResult()
                         $lines = $out -split "`r`n"
                         foreach ($l in $lines) { 
                             if (!$l) { continue }
@@ -28271,8 +28354,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c scoop status")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Scoop scan timed out."; return }
-                        $out = $p.StandardOutput.ReadToEnd()
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        if (-not $p.WaitForExit(30000)) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }; Write-Output "LOG:Scoop scan timed out."; return }
+                        $out = $outTask.GetAwaiter().GetResult()
                         $lines = $out -split "`r`n"
                         foreach ($line in $lines) {
                             $line = $line.Trim()
@@ -28299,8 +28383,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c gem outdated")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Gem scan timed out."; return }
-                        $out = $p.StandardOutput.ReadToEnd()
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        if (-not $p.WaitForExit(30000)) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }; Write-Output "LOG:Gem scan timed out."; return }
+                        $out = $outTask.GetAwaiter().GetResult()
                         $lines = $out -split "`r`n"
                         foreach ($line in $lines) {
                             if ($line -match '^(\S+)\s+\(([\d\.]+)\s+<\s+([\d\.]+)\)') {
@@ -28325,8 +28410,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c cargo install --list")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Cargo scan timed out."; return }
-                        $out = $p.StandardOutput.ReadToEnd()
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        if (-not $p.WaitForExit(30000)) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }; Write-Output "LOG:Cargo scan timed out."; return }
+                        $out = $outTask.GetAwaiter().GetResult()
                         $lines = $out -split "`r`n"
                         foreach ($line in $lines) {
                             if ($line -match '^([a-zA-Z0-9_\-]+)\s+v([\d\.]+):') {
@@ -28552,8 +28638,9 @@ $btnWingetScan.Add_Click({
                         $pInfo.CreateNoWindow = $true
                         $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
                         $p = [System.Diagnostics.Process]::Start($pInfo)
-                        if (-not $p.WaitForExit(45000)) { try { $p.Kill() } catch {}; Write-Output "LOG:Composer scan timed out."; return }
-                        $json = $p.StandardOutput.ReadToEnd().Trim()
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        if (-not $p.WaitForExit(45000)) { try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }; Write-Output "LOG:Composer scan timed out."; return }
+                        $json = $outTask.GetAwaiter().GetResult().Trim()
                         if ([string]::IsNullOrWhiteSpace($json) -or -not $json.StartsWith("{")) {
                             Write-Output "LOG:Composer reported no outdated global packages."
                             return
@@ -28587,8 +28674,9 @@ $btnWingetScan.Add_Click({
                         $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pnpm outdated --format json 2>nul")
                         $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
                         $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
                         if ($p.WaitForExit(35000)) {
-                            $json = $p.StandardOutput.ReadToEnd().Trim()
+                            $json = $outTask.GetAwaiter().GetResult().Trim()
                             if ($json -and $json.StartsWith("[")) {
                                 $pkgs = $json | ConvertFrom-Json
                                 foreach ($pkg in $pkgs) {
@@ -28597,12 +28685,17 @@ $btnWingetScan.Add_Click({
                                 }
                             }
                         }
+                        else {
+                            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $p.Id /T /F 2>$null | Out-Null } catch { try { $p.Kill() } catch {} }
+                            Write-Output "LOG:Pnpm local scan timed out."
+                        }
                         # Global packages
                         $pInfoG = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c pnpm outdated -g --format json 2>nul")
                         $pInfoG.RedirectStandardOutput = $true; $pInfoG.UseShellExecute = $false; $pInfoG.CreateNoWindow = $true
                         $pg = [System.Diagnostics.Process]::Start($pInfoG)
+                        $outTaskG = $pg.StandardOutput.ReadToEndAsync()
                         if ($pg.WaitForExit(15000)) {
-                            $jsonG = $pg.StandardOutput.ReadToEnd().Trim()
+                            $jsonG = $outTaskG.GetAwaiter().GetResult().Trim()
                             if ($jsonG -and $jsonG.StartsWith("[")) {
                                 $pkgsG = $jsonG | ConvertFrom-Json
                                 foreach ($pkg in $pkgsG) {
@@ -28610,6 +28703,10 @@ $btnWingetScan.Add_Click({
                                     [PSCustomObject]@{Source = "pnpm (global)"; Name = $pkg.name; Id = $pkg.name; Version = $pkg.current; Available = $pkg.latest }
                                 }
                             }
+                        }
+                        else {
+                            try { & "$env:SystemRoot\System32\taskkill.exe" /PID $pg.Id /T /F 2>$null | Out-Null } catch { try { $pg.Kill() } catch {} }
+                            Write-Output "LOG:Pnpm global scan timed out."
                         }
                     }
                     catch { Write-Output "LOG:Pnpm check failed or pnpm not installed." }
@@ -29791,8 +29888,33 @@ $script:SearchTimer.Interval = [TimeSpan]::FromMilliseconds(100)
 $script:AsyncSearch = $null
 $script:AsyncPowerShell = $null
 $script:WmtPackageSearchActive = $false
+$script:WmtPackageSearchStartedAt = $null
+$script:WmtPackageSearchTimeoutSeconds = 300
 
 $script:SearchTimer.Add_Tick({
+        if ($script:AsyncSearch -and
+            -not $script:AsyncSearch.IsCompleted -and
+            $script:WmtPackageSearchStartedAt -and
+            ((Get-Date) - $script:WmtPackageSearchStartedAt).TotalSeconds -ge $script:WmtPackageSearchTimeoutSeconds) {
+            $script:SearchTimer.Stop()
+            Write-GuiLog "Package search timed out after $($script:WmtPackageSearchTimeoutSeconds) seconds and was cancelled."
+            try { $null = $script:AsyncPowerShell.BeginStop($null, $null) } catch {}
+
+            $lblWingetStatus.Text = "Search timed out"
+            $lblWingetStatus.Visibility = "Visible"
+            $btnWingetFind.IsEnabled = $true
+            $txtWingetSearch.IsEnabled = $true
+            if ($lstWinget.Items.Count -eq 0) {
+                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "Search timed out"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false))
+            }
+            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
+
+            $script:AsyncSearch = $null
+            $script:AsyncPowerShell = $null
+            $script:WmtPackageSearchStartedAt = $null
+            return
+        }
+
         # Check if the thread has finished
         if ($script:AsyncSearch -and $script:AsyncSearch.IsCompleted) {
             $script:SearchTimer.Stop()
@@ -29832,6 +29954,7 @@ $script:SearchTimer.Add_Tick({
         
             $script:AsyncSearch = $null
             $script:AsyncPowerShell = $null
+            $script:WmtPackageSearchStartedAt = $null
         }
     })
 
@@ -29879,6 +30002,54 @@ $btnWingetFind.Add_Click({
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             function Log($msg) { Write-Output "LOG:$msg" }
 
+            function Invoke-WmtPackageSearchProcess {
+                param(
+                    [string]$FileName,
+                    [string]$Arguments,
+                    [int]$TimeoutSeconds = 60,
+                    [switch]$Utf8Output
+                )
+
+                $pInfo = New-Object System.Diagnostics.ProcessStartInfo
+                $pInfo.FileName = $FileName
+                $pInfo.Arguments = $Arguments
+                $pInfo.RedirectStandardOutput = $true
+                $pInfo.RedirectStandardError = $true
+                $pInfo.UseShellExecute = $false
+                $pInfo.CreateNoWindow = $true
+                if ($Utf8Output) {
+                    $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
+                    $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
+                }
+
+                $process = New-Object System.Diagnostics.Process
+                $process.StartInfo = $pInfo
+                try {
+                    if (-not $process.Start()) { throw "Could not start $FileName." }
+                    $outputTask = $process.StandardOutput.ReadToEndAsync()
+                    $errorTask = $process.StandardError.ReadToEndAsync()
+                    if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+                        try {
+                            $taskkill = Join-Path $env:SystemRoot "System32\taskkill.exe"
+                            & $taskkill /PID $process.Id /T /F 2>$null | Out-Null
+                        }
+                        catch {
+                            try { $process.Kill() } catch {}
+                        }
+                        throw "$FileName search timed out after $TimeoutSeconds seconds."
+                    }
+                    $process.WaitForExit()
+                    return [PSCustomObject]@{
+                        Output   = $outputTask.Result
+                        Error    = $errorTask.Result
+                        ExitCode = $process.ExitCode
+                    }
+                }
+                finally {
+                    $process.Dispose()
+                }
+            }
+
             # --- A. WINGET & MSSTORE ---
             if ("winget" -in $Enabled -or "msstore" -in $Enabled) {
                 Log "Searching Winget & Store..."
@@ -29889,22 +30060,11 @@ $btnWingetFind.Add_Click({
                 $defaultSource = if ("winget" -notin $Enabled -and "msstore" -in $Enabled) { "msstore" } else { "winget" }
             
                 $cleanQuery = $Query.Replace('"', '')
-            
-                $pInfo = New-Object System.Diagnostics.ProcessStartInfo
-                $pInfo.FileName = "winget"
-                $pInfo.Arguments = "search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements"
-            
-                $pInfo.RedirectStandardOutput = $true
-                $pInfo.RedirectStandardError = $true
-                $pInfo.UseShellExecute = $false
-                $pInfo.CreateNoWindow = $true
-                $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
                 try {
-                    $p = [System.Diagnostics.Process]::Start($pInfo)
-                    $out = $p.StandardOutput.ReadToEnd()
-                    $p.WaitForExit()
-                
+                    $result = Invoke-WmtPackageSearchProcess -FileName "winget" -Arguments "search --query `"$cleanQuery`" $sourceFlag --accept-source-agreements" -Utf8Output
+                    $out = $result.Output
+
                     if (-not [string]::IsNullOrWhiteSpace($out)) {
                         $lines = $out -split "`r`n"
                     
@@ -29975,9 +30135,8 @@ $btnWingetFind.Add_Click({
             if ("npm" -in $Enabled) {
                 Log "Searching NPM..."
                 try {
-                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c npm search `"$Query`" --json")
-                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                    $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    $result = Invoke-WmtPackageSearchProcess -FileName "cmd" -Arguments "/c npm search `"$Query`" --json"
+                    $json = $result.Output
                     if ($json.Contains("[")) {
                         $json = $json.Substring($json.IndexOf("[")); $pkgs = $json | ConvertFrom-Json
                         foreach ($pkg in $pkgs) { 
@@ -29992,9 +30151,8 @@ $btnWingetFind.Add_Click({
             if ("chocolatey" -in $Enabled) {
                 Log "Searching Chocolatey..."
                 try {
-                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("choco", "search `"$Query`" -r")
-                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                    $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    $result = Invoke-WmtPackageSearchProcess -FileName "choco" -Arguments "search `"$Query`" -r"
+                    $out = $result.Output
                     $lines = $out -split "`r`n"
                     foreach ($line in $lines) {
                         if ([string]::IsNullOrWhiteSpace($line)) { continue }
@@ -30011,9 +30169,8 @@ $btnWingetFind.Add_Click({
             if ("dotnet" -in $Enabled) {
                 Log "Searching .NET tools..."
                 try {
-                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("dotnet", "tool search `"$Query`" --take 40")
-                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                    $p = [System.Diagnostics.Process]::Start($pInfo); $out = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    $result = Invoke-WmtPackageSearchProcess -FileName "dotnet" -Arguments "tool search `"$Query`" --take 40"
+                    $out = $result.Output
                     foreach ($line in ($out -split "`r?`n")) {
                         $trimmed = ([string]$line).Trim()
                         if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
@@ -30045,9 +30202,8 @@ $btnWingetFind.Add_Click({
             if ("composer" -in $Enabled) {
                 Log "Searching Composer..."
                 try {
-                    $pInfo = New-Object System.Diagnostics.ProcessStartInfo("cmd", "/c composer search `"$Query`" --format=json 2>nul")
-                    $pInfo.RedirectStandardOutput = $true; $pInfo.UseShellExecute = $false; $pInfo.CreateNoWindow = $true
-                    $p = [System.Diagnostics.Process]::Start($pInfo); $json = $p.StandardOutput.ReadToEnd(); $p.WaitForExit()
+                    $result = Invoke-WmtPackageSearchProcess -FileName "cmd" -Arguments "/c composer search `"$Query`" --format=json 2>nul"
+                    $json = $result.Output
                     $json = $json.Trim()
                     if ($json.StartsWith("[")) {
                         $pkgs = $json | ConvertFrom-Json
@@ -30076,6 +30232,7 @@ $btnWingetFind.Add_Click({
         # 4. EXECUTE THREAD (The Magic Part)
         $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled)
         $script:AsyncSearch = $script:AsyncPowerShell.BeginInvoke()
+        $script:WmtPackageSearchStartedAt = Get-Date
         $script:SearchTimer.Start()
     })
 
@@ -32053,21 +32210,9 @@ function Get-CatalogByCategory($Category) {
 
 if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lstCatalog) {
     $btnCatalogInstall.Add_Click({
-            $selected = $lstCatalog.SelectedItems
+            $selected = @($lstCatalog.SelectedItems)
             if ($selected.Count -eq 0) { return }
-            Invoke-UiCommand {
-                param($items)
-                foreach ($item in $items) {
-                    Write-GuiLog "Installing: $($item.Name)..."
-                    $proc = Start-Process -FilePath "winget" -ArgumentList "install --id `"$($item.Id)`" --accept-source-agreements --accept-package-agreements --silent" -Wait -PassThru
-                    if ($proc.ExitCode -eq 0) {
-                        Write-GuiLog "Installed: $($item.Name)"
-                    }
-                    else {
-                        Write-GuiLog "Failed: $($item.Name)"
-                    }
-                }
-            } "Installing software..." -ArgumentList $selected
+            & $Script:StartWingetAction -ListItems $selected -ActionName "Install"
         })
 
     $btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
