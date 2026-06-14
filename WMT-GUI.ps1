@@ -24844,9 +24844,10 @@ exit /b %WMT_EXIT%
                 }
                 # --- LEGENDARY / EPIC GAMES ---
                 elseif ($src -eq "legendary") {
-                    $legendaryCommand = Get-WmtLegendaryCommandText -ForPowerShell:($act -ne "Update")
-                    if ($act -eq "Install") { $cmd = "$legendaryCommand -y install `"$id`"" }
-                    if ($act -eq "Update") { $cmd = "$legendaryCommand -y update `"$id`" --update-only --skip-sdl --skip-dlcs" }
+                    $legendaryCommand = Get-WmtLegendaryCommandText -ForPowerShell:($act -ne "Update" -or $silentUpdateInstallEnabled)
+                    $legendaryHeadlessArgs = "--max-workers 4 --dl-timeout 30 --skip-sdl --skip-dlcs"
+                    if ($act -eq "Install") { $cmd = "$legendaryCommand -y install `"$id`" $legendaryHeadlessArgs" }
+                    if ($act -eq "Update") { $cmd = "$legendaryCommand -y update `"$id`" --update-only $legendaryHeadlessArgs" }
                     if ($act -eq "Uninstall") { $cmd = "$legendaryCommand -y uninstall `"$id`"" }
                     $userCmd = $cmd
                 }
@@ -24861,7 +24862,7 @@ exit /b %WMT_EXIT%
                             $skipReason = "GOG install path no longer exists: $installDir"
                         }
                         else {
-                            $gogdlCommand = Get-WmtGogdlCommandText
+                            $gogdlCommand = Get-WmtGogdlCommandText -ForPowerShell:$silentUpdateInstallEnabled
                             $platform = ([string]$item.Platform).Trim().ToLowerInvariant()
                             if ($platform -notin @("windows", "osx", "linux")) { $platform = "windows" }
                             $authConfig = ([string]$gogdlAuthConfigPath).Trim()
@@ -24896,7 +24897,7 @@ exit /b %WMT_EXIT%
                                     }
                                     if (-not $credentials -or
                                         ([string]::IsNullOrWhiteSpace([string]$credentials.access_token) -and
-                                            [string]::IsNullOrWhiteSpace([string]$credentials.refresh_token))) {
+                                        [string]::IsNullOrWhiteSpace([string]$credentials.refresh_token))) {
                                         continue
                                     }
 
@@ -24920,7 +24921,7 @@ exit /b %WMT_EXIT%
                                 $skipReason = "GOGDL auth.json was missing or invalid. Reinstall the GOGDL provider or sign into GOG again."
                             }
                             else {
-                                $cmd = "$gogdlCommand --auth-config-path `"$resolvedAuthConfig`" update `"$id`" --path `"$installDir`" --os $platform --skip-dlcs --max-workers 4"
+                                $cmd = "$gogdlCommand --auth-config-path `"$resolvedAuthConfig`" update `"$id`" --path `"$installDir`" --os $platform --max-workers 4"
                                 $userCmd = $cmd
                             }
                         }
@@ -25825,7 +25826,7 @@ function Show-ProviderManager {
                               ToolTip="When enabled, closing the main window hides WMT to the system tray so background scans and notifications can continue."/>
                     <CheckBox Name="chkReduceRamInTray" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="3" Content="Reduce RAM while hidden in tray" Margin="0,8,0,0"
                               ToolTip="When WMT is hidden to the tray, clear short-lived caches, trim the log, run garbage collection, and ask Windows to release unused working-set pages."/>
-                    <CheckBox Name="chkUpdateSilentInstall" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Content="Run update/install commands headless" Margin="0,8,0,0"
+                    <CheckBox Name="chkUpdateSilentInstall" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="3" Content="Run update/install commands headless. ⚠️ Experimental!" Margin="0,8,0,0"
                               ToolTip="Hide CLI, PowerShell, and cmd update windows. Providers that require their own GUI, including Steam validation and Microsoft Store GUI updates, can still appear."/>
                     <CheckBox Name="chkUpdateAutoInstall" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="Automatically install available updates after scans" Margin="0,8,0,0"
                               ToolTip="After each completed scan, automatically update listed packages without confirmation. Packages known to risk an automatic restart are skipped."/>
@@ -30413,24 +30414,20 @@ function Invoke-WmtAutoInstallAvailableUpdates {
         return
     }
 
+    # Filter for restart risks only; game providers are no longer excluded
     $restartRiskItems = @($items | Where-Object { Test-WingetRestartRiskItem $_ })
-    $manualGameProviderItems = @($items | Where-Object { ([string]$_.Source).ToLowerInvariant() -in @("steam", "legendary", "gogdl") })
+    
     $eligibleItems = @($items | Where-Object {
-            -not (Test-WingetRestartRiskItem $_) -and
-            ([string]$_.Source).ToLowerInvariant() -notin @("steam", "legendary", "gogdl")
+            -not (Test-WingetRestartRiskItem $_)
         })
+
     if ($restartRiskItems.Count -gt 0) {
         $restartRiskNames = @($restartRiskItems | ForEach-Object {
                 if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
             } | Select-Object -Unique)
         Write-GuiLog "Auto install skipped $($restartRiskItems.Count) restart-risk update(s): $($restartRiskNames -join ', ')."
     }
-    if ($manualGameProviderItems.Count -gt 0) {
-        $manualGameProviderNames = @($manualGameProviderItems | ForEach-Object {
-                if ([string]::IsNullOrWhiteSpace([string]$_.Name)) { [string]$_.Id } else { [string]$_.Name }
-            } | Select-Object -Unique)
-        Write-GuiLog "Auto install skipped $($manualGameProviderItems.Count) game-provider update(s) that require manual approval: $($manualGameProviderNames -join ', ')."
-    }
+
     if ($eligibleItems.Count -eq 0) {
         Write-GuiLog "Auto install had no eligible updates after safety filtering."
         return
