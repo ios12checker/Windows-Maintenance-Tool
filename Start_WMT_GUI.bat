@@ -11,9 +11,10 @@ echo Checking for launcher updates...
 set "TEMP_BAT=%TEMP%\Start_WMT_GUI_update.bat"
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "function Convert-WmtVersion([string]$v) { $m=[regex]::Match(([string]$v).Trim(),'^\s*v?(\d+(?:\.\d+){0,3})\s*$'); if (-not $m.Success) { throw ('Invalid version: ' + $v) }; $p=@($m.Groups[1].Value.Split('.')); while ($p.Count -lt 4) { $p += '0' }; [version]::new([int]$p[0],[int]$p[1],[int]$p[2],[int]$p[3]) }; " ^
   "$remote = try { (Invoke-WebRequest -Uri '%BAT_URL%' -UseBasicParsing).Content } catch { $null }; " ^
-  "if ($remote -match 'set \"GUI_LAUNCHER_VERSION=([\d\.]+)\"') { " ^
-  "  if ([version]$matches[1] -gt [version]'%GUI_LAUNCHER_VERSION%') { " ^
+  "if ($remote -match 'GUI_LAUNCHER_VERSION=([0-9]+(?:\.[0-9]+){0,3})') { " ^
+  "  if ((Convert-WmtVersion $matches[1]) -gt (Convert-WmtVersion '%GUI_LAUNCHER_VERSION%')) { " ^
   "    [IO.File]::WriteAllText('%TEMP_BAT%', $remote); exit 43 " ^
   "  } " ^
   "}"
@@ -30,10 +31,11 @@ if "%ERRORLEVEL%"=="43" (
 :: 2. Check for updates to the GUI Script (.ps1) by comparing $AppVersion
 echo Checking for WMT-GUI.ps1 updates...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$f='%SCRIPT%'; $u='%SCRIPT_URL%'; $lv=[version]'0.0'; " ^
-  "if (Test-Path $f) { $lt=Get-Content $f -Raw -ErrorAction Ignore; if ($lt -match '\$AppVersion\s*=\s*.([\d\.]+)') { $lv=[version]$matches[1] } }; " ^
+  "function Convert-WmtVersion([string]$v) { $m=[regex]::Match(([string]$v).Trim(),'^\s*v?(\d+(?:\.\d+){0,3})\s*$'); if (-not $m.Success) { throw ('Invalid version: ' + $v) }; $p=@($m.Groups[1].Value.Split('.')); while ($p.Count -lt 4) { $p += '0' }; [version]::new([int]$p[0],[int]$p[1],[int]$p[2],[int]$p[3]) }; " ^
+  "$rx='\$AppVersion\s*=\s*.?([0-9]+(?:\.[0-9]+){0,3})'; $f='%SCRIPT%'; $u='%SCRIPT_URL%'; $lv=Convert-WmtVersion '0'; " ^
+  "if (Test-Path $f) { $lt=Get-Content $f -Raw -ErrorAction Ignore; if ($lt -match $rx) { $lv=Convert-WmtVersion $matches[1] } }; " ^
   "$rt=try { (Invoke-WebRequest -Uri $u -UseBasicParsing).Content } catch { $null }; " ^
-  "if ($rt -match '\$AppVersion\s*=\s*.([\d\.]+)') { $rv=[version]$matches[1]; if ($rv -gt $lv) { [IO.File]::WriteAllText($f, $rt); exit 45 } }; " ^
+  "if ($rt -match $rx) { $rv=Convert-WmtVersion $matches[1]; if ($rv -gt $lv) { [IO.File]::WriteAllText($f, $rt); exit 45 } }; " ^
   "if (Test-Path $f) { exit 0 } else { exit 1 }"
 
 set "PS_EXIT=%ERRORLEVEL%"

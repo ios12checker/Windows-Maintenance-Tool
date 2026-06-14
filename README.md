@@ -13,7 +13,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 - Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
 - Full dark/light theme support with a persistent theme toggle.
-- Package updater with Winget, Microsoft Store / Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, and Cargo support.
+- Package updater with Winget, Microsoft Store / Store CLI, pip, npm, pnpm, Chocolatey, Scoop, Ruby Gems, Cargo, .NET global tools, PowerShell modules, Composer, Steam game manifests, Legendary Epic Games updates, and GOGDL GOG game updates.
 - One-by-one package update flow with visible progress windows.
 - My Device dashboard with system specs, storage health, improved drive benchmark, network, battery/power, driver tools, RAM cleanup, TRIM, export, and quick shortcuts to related tools.
 - Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
@@ -40,6 +40,9 @@ It is built for technicians, power users, and end users who want practical Windo
 - Reworked Microsoft Store updates to use Store CLI / Store app update handling instead of the old Winget `msstore` source path.
 - Added Store fallback handling that opens the Microsoft Store update/download page when Store CLI cannot complete an update.
 - Added a Provider Manager option for Winget `--include-unknown` so unknown-version packages can be included in scans.
+- Added Steam game manifest scanning for locally pending Steam updates, with update actions delegated to Steam Downloads.
+- Added Legendary provider support for Epic Games updates, downloading the standalone `legendary.exe` into WMT's data folder, starting auth on first install, and enabling EGL sync to import installed Epic games.
+- GOGDL support for installed GOG game update detection and updates.
 - Improved Store CLI logging, timeout handling, and resources-in-use messages.
 
 ### Registry Cleaner
@@ -59,7 +62,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ### Updates and Software
 
-- Scan for updates from Winget, Microsoft Store / Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, and more.
+- Scan for updates from Winget, Microsoft Store / Store CLI, Chocolatey, pip, npm, pnpm, Scoop, Ruby Gems, Cargo, .NET global tools, PowerShell modules, Composer, Steam manifests, Legendary, GOGDL, and more.
 - Update packages one at a time with a visible update window.
 - Search package results before updating.
 - Ignore selected Winget packages.
@@ -67,6 +70,8 @@ It is built for technicians, power users, and end users who want practical Windo
 - Handles slow providers with timeout protection.
 - Optionally include Winget unknown-version packages with `--include-unknown`.
 - Delegates Microsoft Store app updates through Store CLI / Microsoft Store update handling where supported.
+- Delegates Steam game updates through the Steam client after detecting pending local manifests.
+- Updates Epic games through the standalone Legendary executable when authenticated; updates installed GOG games through Heroic's GOGDL when GOG auth is available.
 - Right-click supported Winget package rows to view manifest details.
 - Use **Update All** for batch update flows where available.
 
