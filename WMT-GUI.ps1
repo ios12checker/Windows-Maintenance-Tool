@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6"
+$AppVersion = "6.1"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -4130,6 +4130,7 @@ function Save-WmtSettings {
             LoadWinapp2                = [bool]$Settings.LoadWinapp2
             LoadCleanerML              = [bool]$Settings.LoadCleanerML
             EnabledProviders           = $Settings.EnabledProviders
+            ProviderToggles            = if ($Settings.ProviderToggles) { $Settings.ProviderToggles } else { @{} }
             CustomDnsServers           = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
             CustomDohTemplate          = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
             CustomDohEnabled           = [bool]$Settings.CustomDohEnabled
@@ -4165,6 +4166,7 @@ function Get-WmtSettings {
         LoadWinapp2                = $false 
         LoadCleanerML              = $false
         EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        ProviderToggles            = @{}
         CustomDnsServers           = @()
         CustomDohTemplate          = ""
         CustomDohEnabled           = $false
@@ -4207,6 +4209,7 @@ function Get-WmtSettings {
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
+            if ($json.PSObject.Properties["ProviderToggles"]) { $defaults.ProviderToggles = $json.ProviderToggles }
             if ($json.PSObject.Properties["CustomDnsServers"]) {
                 $customDnsServers = @()
                 foreach ($server in @($json.CustomDnsServers)) {
@@ -25764,22 +25767,643 @@ exit /b %WMT_EXIT%
 }
 
 # 3. EVENT HANDLERS
+# ==========================================
+# Provider capability + per-provider toggle helpers
+# ==========================================
+
+# Static capability matrix. Search = provider exposes a search/library-search
+# capability in the Providers panel. Library = the provider's owned/licensed
+# games can be enumerated for the live library search box.
+function Get-WmtProviderCapabilities {
+    return [ordered]@{
+        winget         = @{ Search = $true;  Library = $false }
+        msstore        = @{ Search = $true;  Library = $false }
+        windowsupdate  = @{ Search = $false; Library = $false }
+        pip            = @{ Search = $false; Library = $false }
+        npm            = @{ Search = $true;  Library = $false }
+        pnpm           = @{ Search = $true;  Library = $false }
+        chocolatey     = @{ Search = $true;  Library = $false }
+        scoop          = @{ Search = $true;  Library = $false }
+        gem            = @{ Search = $true;  Library = $false }
+        cargo          = @{ Search = $true;  Library = $false }
+        dotnet         = @{ Search = $true;  Library = $false }
+        psmodule       = @{ Search = $true;  Library = $false }
+        composer       = @{ Search = $true;  Library = $false }
+        steam          = @{ Search = $true;  Library = $false }
+        legendary      = @{ Search = $true;  Library = $true  }
+        gogdl          = @{ Search = $true;  Library = $true  }
+    }
+}
+
+function Get-WmtProviderToggleDefaults {
+    param([string]$ProviderKey)
+
+    $caps = Get-WmtProviderCapabilities
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $cap = if ($caps.Contains($key)) { $caps[$key] } else { @{ Search = $false; Library = $false } }
+    return [ordered]@{
+        Search     = [bool]$cap.Search
+        Scan       = $true
+        Headless   = $false
+        AutoUpdate = $false
+    }
+}
+
+function Get-WmtProviderToggles {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    $toggles = [ordered]@{}
+
+    # Helper: get a value from either an IDictionary or a PSObject.
+    function Get-WmtToggleValue($Obj, [string]$Name) {
+        if (-not $Obj) { return $null }
+        if ($Obj -is [System.Collections.IDictionary]) {
+            if ($Obj.Contains($Name)) { return $Obj[$Name] }
+            return $null
+        }
+        try {
+            if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }
+        } catch {}
+        return $null
+    }
+
+    # Helper: enumerate key-value pairs from either an IDictionary or a PSObject.
+    function Get-WmtToggleEntries($Obj) {
+        $result = @()
+        if (-not $Obj) { return $result }
+        if ($Obj -is [System.Collections.IDictionary]) {
+            foreach ($k in @($Obj.Keys)) {
+                $result += [PSCustomObject]@{ Name = [string]$k; Value = $Obj[$k] }
+            }
+        }
+        else {
+            try {
+                foreach ($prop in @($Obj.PSObject.Properties)) {
+                    $result += [PSCustomObject]@{ Name = [string]$prop.Name; Value = $prop.Value }
+                }
+            } catch {}
+        }
+        return $result
+    }
+
+    try {
+        $raw = $null
+        if ($Settings -is [System.Collections.IDictionary]) {
+            if ($Settings.Contains("ProviderToggles")) { $raw = $Settings["ProviderToggles"] }
+        }
+        else {
+            try {
+                if ($Settings.PSObject.Properties["ProviderToggles"]) { $raw = $Settings.ProviderToggles }
+            } catch {}
+        }
+
+        if ($raw) {
+            foreach ($entry_item in (Get-WmtToggleEntries $raw)) {
+                $k = ([string]$entry_item.Name).Trim().ToLowerInvariant()
+                if ([string]::IsNullOrWhiteSpace($k)) { continue }
+                $defaults = Get-WmtProviderToggleDefaults -ProviderKey $k
+                $t = [ordered]@{
+                    Search     = [bool]$defaults.Search
+                    Scan       = [bool]$defaults.Scan
+                    Headless   = [bool]$defaults.Headless
+                    AutoUpdate = [bool]$defaults.AutoUpdate
+                }
+                $val = $entry_item.Value
+                $s = Get-WmtToggleValue $val "Search"
+                if ($null -ne $s) { $t["Search"] = [bool]$s }
+                $sc = Get-WmtToggleValue $val "Scan"
+                if ($null -ne $sc) { $t["Scan"] = [bool]$sc }
+                $h = Get-WmtToggleValue $val "Headless"
+                if ($null -ne $h) { $t["Headless"] = [bool]$h }
+                $a = Get-WmtToggleValue $val "AutoUpdate"
+                if ($null -ne $a) { $t["AutoUpdate"] = [bool]$a }
+                $toggles[$k] = $t
+            }
+        }
+    }
+    catch {
+        Write-GuiLog "Failed to read ProviderToggles: $($_.Exception.Message)"
+    }
+
+    # Ensure every known provider has an entry.
+    foreach ($key in @((Get-WmtProviderCapabilities).Keys)) {
+        if (-not $toggles.Contains($key)) {
+            $toggles[$key] = (Get-WmtProviderToggleDefaults -ProviderKey $key)
+        }
+        else {
+            $defaults = Get-WmtProviderToggleDefaults -ProviderKey $key
+            if (-not $defaults.Search) { $toggles[$key]["Search"] = $false }
+        }
+    }
+
+    return $toggles
+}
+
+function Set-WmtProviderToggles {
+    param($Toggles)
+
+    $settings = Get-WmtSettings
+    $clean = [ordered]@{}
+    if ($Toggles) {
+        foreach ($key in @($Toggles.PSObject.Properties.Name)) {
+            $k = ([string]$key).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($k)) { continue }
+            $val = $Toggles.$key
+            $defaults = Get-WmtProviderToggleDefaults -ProviderKey $k
+            $entry = [ordered]@{
+                Search     = if ($defaults.Search) { [bool]$val.Search } else { $false }
+                Scan       = [bool]$val.Scan
+                Headless   = [bool]$val.Headless
+                AutoUpdate = [bool]$val.AutoUpdate
+            }
+            $clean[$k] = $entry
+        }
+    }
+
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["ProviderToggles"] = $clean
+    }
+    elseif ($settings.PSObject.Properties["ProviderToggles"]) {
+        $settings.ProviderToggles = $clean
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "ProviderToggles" -Value $clean -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtProviderToggle {
+    param($Settings, [string]$ProviderKey, [string]$ToggleName)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+    $toggles = Get-WmtProviderToggles -Settings $Settings
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $name = ([string]$ToggleName).Trim()
+    if (-not $toggles.Contains($key)) { return $false }
+    if (-not $toggles[$key].PSObject.Properties[$name]) { return $false }
+    return [bool]$toggles[$key].$name
+}
+
+# ==========================================
+# Library enumeration for Legendary / GOGDL
+# ==========================================
+
+function Get-WmtLegendaryLibrary {
+    param([switch]$Force)
+
+    if (-not $Force -and $script:WmtLegendaryLibraryCache) { return $script:WmtLegendaryLibraryCache }
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    $exe = Get-WmtLegendaryExePath
+    if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        try {
+            $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+            if ($cmd -and $cmd.Source) { $exe = [string]$cmd.Source }
+        }
+        catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        $script:WmtLegendaryLibraryCache = $result.ToArray()
+        return $script:WmtLegendaryLibraryCache
+    }
+
+    try {
+        # Try JSON output first (much more reliable than text parsing).
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = "list --json"
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        try { $proc.WaitForExit(30000) } catch {}
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+
+        $parsed = $false
+
+        # Attempt 1: JSON parsing (legendary >= 0.20.x supports --json)
+        if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+            try {
+                $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($json) {
+                    $items = @($json)
+                    foreach ($game in $items) {
+                        $title = [string]$game.app_title
+                        if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                        # Legendary JSON: is_installed boolean, version = installed version, app_version = latest
+                        $isInstalled = $false
+                        try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                        $installedVer = ""
+                        $latestVer = [string]$game.app_version
+                        if ($isInstalled) {
+                            try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                            if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                        }
+                        $result.Add([PSCustomObject]@{
+                            Provider         = "legendary"
+                            Title            = $title
+                            Id               = [string]$game.app_name
+                            Version          = $latestVer
+                            InstalledVersion = $installedVer
+                            IsInstalled      = $isInstalled
+                            Source           = "legendary"
+                            Kind             = "Library"
+                        })
+                    }
+                    if ($result.Count -gt 0) { $parsed = $true }
+                }
+            }
+            catch {
+                # JSON parse failed — fall through to text parsing
+            }
+        }
+
+        # Attempt 2: Text parsing fallback.
+        # Format:  * Game Title (App name: app_name, Version: version)
+        #          * Game Title (App name: app_name, Version: version, Installed: ...)
+        if (-not $parsed) {
+            $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+            foreach ($match in $regex.Matches($stdout)) {
+                $title = $match.Groups["title"].Value.Trim()
+                $app   = $match.Groups["app"].Value.Trim()
+                $ver   = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                $result.Add([PSCustomObject]@{
+                    Provider = "legendary"
+                    Title    = $title
+                    Id       = $app
+                    Version  = $ver
+                    Source   = "legendary"
+                    Kind     = "Library"
+                })
+            }
+        }
+
+        if ($result.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-GuiLog "Legendary library enumeration produced no results. stderr: $(([string]$stderr).Trim())"
+        }
+    }
+    catch {
+        Write-GuiLog "Legendary library enumeration failed: $($_.Exception.Message)"
+    }
+
+    $script:WmtLegendaryLibraryCache = $result.ToArray()
+
+    # Write to cache file for use by the search runspace.
+    try {
+        $cacheFile = Join-Path (Get-DataPath) "legendary_library.json"
+        $script:WmtLegendaryLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
+    catch {
+        Write-GuiLog "Failed to write Legendary library cache: $($_.Exception.Message)"
+    }
+
+    return $script:WmtLegendaryLibraryCache
+}
+
+function Get-WmtGogLibrary {
+    param([switch]$Force)
+
+    if (-not $Force -and $script:WmtGogLibraryCache) { return $script:WmtGogLibraryCache }
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    $authPath = Get-WmtGogdlAuthConfigPath
+    if ([string]::IsNullOrWhiteSpace($authPath) -or -not (Test-Path -LiteralPath $authPath -PathType Leaf)) {
+        $heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+        if ($heroicAuthPath -and (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf)) { $authPath = $heroicAuthPath }
+    }
+    if ([string]::IsNullOrWhiteSpace($authPath) -or -not (Test-Path -LiteralPath $authPath -PathType Leaf)) {
+        $script:WmtGogLibraryCache = $result.ToArray()
+        return $script:WmtGogLibraryCache
+    }
+
+    try {
+        $text = [System.IO.File]::ReadAllText($authPath).TrimStart([char]0xFEFF)
+        $json = $text | ConvertFrom-Json -ErrorAction Stop
+        $gogClientId = "46899977096215655"
+        $creds = $null
+        $clientProp = $json.PSObject.Properties[$gogClientId]
+        if ($clientProp) { $creds = $clientProp.Value }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+        if (-not $creds -or [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+            $script:WmtGogLibraryCache = $result.ToArray()
+            return $script:WmtGogLibraryCache
+        }
+
+        $token = [string]$creds.access_token
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+        $page = 1
+        $totalPages = 1
+        while ($page -le $totalPages -and $page -le 50) {
+            $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+            $headers = @{
+                "Authorization" = "Bearer $token"
+                "User-Agent"    = "Windows-Maintenance-Tool"
+            }
+            $resp = $null
+            try {
+                $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -ErrorAction Stop -TimeoutSec 20
+            }
+            catch {
+                Write-GuiLog "GOG library page $page fetch failed: $($_.Exception.Message)"
+                break
+            }
+            if (-not $resp) { break }
+            if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+            if ($resp.products) {
+                foreach ($prod in @($resp.products)) {
+                    $title = [string]$prod.title
+                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                    $result.Add([PSCustomObject]@{
+                        Provider = "gogdl"
+                        Title    = $title
+                        Id       = [string]$prod.id
+                        Version  = [string]$prod.version
+                        Source   = "gogdl"
+                        Kind     = "Library"
+                    })
+                }
+            }
+            $page++
+        }
+    }
+    catch {
+        Write-GuiLog "GOG library enumeration failed: $($_.Exception.Message)"
+    }
+
+    $script:WmtGogLibraryCache = $result.ToArray()
+
+    # Write to cache file for use by the search runspace.
+    try {
+        $cacheFile = Join-Path (Get-DataPath) "gog_library.json"
+        $script:WmtGogLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
+    catch {
+        Write-GuiLog "Failed to write GOG library cache: $($_.Exception.Message)"
+    }
+
+    return $script:WmtGogLibraryCache
+}
+
+function Clear-WmtLibraryCaches {
+    $script:WmtLegendaryLibraryCache = $null
+    $script:WmtGogLibraryCache = $null
+    try {
+        $dataPath = Get-DataPath
+        $legFile = Join-Path $dataPath "legendary_library.json"
+        $gogFile = Join-Path $dataPath "gog_library.json"
+        if (Test-Path -LiteralPath $legFile) { Remove-Item -LiteralPath $legFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $gogFile) { Remove-Item -LiteralPath $gogFile -Force -ErrorAction SilentlyContinue }
+    } catch {}
+}
+
+# ==========================================
+# Catalog search helpers (per-provider)
+# ==========================================
+
+function Invoke-WmtSearchProcess {
+    param(
+        [string]$FilePath,
+        [string]$Arguments,
+        [int]$TimeoutMs = 15000
+    )
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $FilePath
+        $psi.Arguments = $Arguments
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        try { $proc.WaitForExit($TimeoutMs) } catch {}
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+        return [string]$stdout
+    }
+    catch { return "" }
+}
+
+
+
+function Get-WmtScoopSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command scoop -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath "powershell.exe" -Arguments "-NoProfile -Command scoop search `"$Query`"" -TimeoutMs ($TimeoutSeconds * 1000)
+    $inResults = $false
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match "^Name\s") { $inResults = $true; continue }
+        if (-not $inResults) { continue }
+        if ($line -match "^-+") { continue }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $cols = $line -split '\s{2,}|\t'
+        if ($cols.Count -ge 2) {
+            $result.Add([PSCustomObject]@{ Provider = "scoop"; Title = $cols[0]; Id = $cols[0]; Version = if ($cols.Count -ge 2) { $cols[1] } else { "" }; Source = "Scoop"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+
+
+
+
+function Get-WmtCargoSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath $exe.Source -Arguments "search `"$Query`"" -TimeoutMs ($TimeoutSeconds * 1000)
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match '^(?<name>\S+)\s*=\s*"(?<version>[^"]*)"') {
+            $result.Add([PSCustomObject]@{ Provider = "cargo"; Title = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Source = "crates.io"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+function Get-WmtGemSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 20)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command gem -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath $exe.Source -Arguments "search `"$Query`" --remote" -TimeoutMs ($TimeoutSeconds * 1000)
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match '^(?<name>\S+)\s+\((?<version>[^)]+)\)') {
+            $result.Add([PSCustomObject]@{ Provider = "gem"; Title = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Source = "RubyGems"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+
+
+
+
+
+
+function Get-WmtSteamSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrWhiteSpace($Query)) { return $result.ToArray() }
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        $encoded = [Uri]::EscapeDataString($Query)
+        $url = "https://store.steampowered.com/api/storesearch/?term=$encoded&l=english&cc=US"
+        $resp = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec $TimeoutSeconds -ErrorAction Stop
+        if ($resp -and $resp.total -gt 0) {
+            foreach ($item in @($resp.items)) {
+                $result.Add([PSCustomObject]@{ Provider = "steam"; Title = [string]$item.name; Id = [string]$item.id; Version = ""; Source = "Steam Store"; Kind = "Catalog" })
+            }
+        }
+    } catch {}
+    return $result.ToArray()
+}
+
+
+
+function Get-WmtProviderCatalogSearch {
+    param([string]$ProviderKey, [string]$Query, [int]$TimeoutSeconds = 15)
+
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $query = ([string]$Query).Trim()
+    if ([string]::IsNullOrWhiteSpace($query)) { return @() }
+
+    switch ($key) {
+        "scoop"      { return @(Get-WmtScoopSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "cargo"      { return @(Get-WmtCargoSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "gem"        { return @(Get-WmtGemSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "steam"      { return @(Get-WmtSteamSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        default      { return @() }
+    }
+}
+
 function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
-    if (-not $settings.EnabledProviders) { 
+    if (-not $settings.EnabledProviders) {
         $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
     }
     $enabled = $settings.EnabledProviders
+    $providerToggles = Get-WmtProviderToggles -Settings $settings
+    $providerCapabilities = Get-WmtProviderCapabilities
 
-    # 2. Define UI
+    # 2. Provider definitions are needed BEFORE building the XAML so we can
+    # generate per-provider rows that include the Search/Scan/Headless/AutoUpdate toggles.
+    $providerDefinitions = @(
+        [PSCustomObject]@{ Key = "winget";        DisplayName = "Winget";                Commands = [string[]]@("winget");                                                                               Label = "lblProviderWingetStatus";       Button = "btnProviderWingetAction";       LockedOn = $true;  ToolTip = "Windows Package Manager" },
+        [PSCustomObject]@{ Key = "msstore";       DisplayName = "Store CLI";             Commands = [string[]]@("store");                                                                                Label = "lblProviderMsStoreStatus";      Button = "btnProviderMsStoreAction";      LockedOn = $false; ToolTip = "Microsoft Store Apps via store.exe" },
+        [PSCustomObject]@{ Key = "windowsupdate"; DisplayName = "Windows Update";        Commands = [string[]]@("powershell");                                                                           Label = "lblWindowsUpdateStatus";        Button = "btnProviderWindowsUpdateAction"; LockedOn = $false; ToolTip = "Windows Update Agent. Scans both regular and optional Windows updates, including drivers when offered." },
+        [PSCustomObject]@{ Key = "pip";           DisplayName = "Python (Pip)";          Commands = [string[]]@("pip", "pip3");                                                                          Label = "lblPipStatus";                  Button = "btnProviderPipAction";          LockedOn = $false; ToolTip = "Python package manager" },
+        [PSCustomObject]@{ Key = "npm";           DisplayName = "Node (Npm)";            Commands = [string[]]@("npm");                                                                                  Label = "lblNpmStatus";                  Button = "btnProviderNpmAction";          LockedOn = $false; ToolTip = "Node.js package manager" },
+        [PSCustomObject]@{ Key = "pnpm";          DisplayName = "pnpm";                  Commands = [string[]]@("pnpm");                                                                                 Label = "lblPnpmStatus";                 Button = "btnProviderPnpmAction";         LockedOn = $false; ToolTip = "Fast Node.js package manager" },
+        [PSCustomObject]@{ Key = "chocolatey";    DisplayName = "Chocolatey";            Commands = [string[]]@("choco");                                                                                Label = "lblChocoStatus";                Button = "btnProviderChocoAction";        LockedOn = $false; ToolTip = "Chocolatey package manager" },
+        [PSCustomObject]@{ Key = "scoop";         DisplayName = "Scoop";                 Commands = [string[]]@("scoop");                                                                                Label = "lblScoopStatus";                Button = "btnProviderScoopAction";        LockedOn = $false; ToolTip = "Scoop command-line installer" },
+        [PSCustomObject]@{ Key = "gem";           DisplayName = "Ruby (Gem)";            Commands = [string[]]@("gem");                                                                                  Label = "lblGemStatus";                  Button = "btnProviderGemAction";          LockedOn = $false; ToolTip = "RubyGems package manager" },
+        [PSCustomObject]@{ Key = "cargo";         DisplayName = "Rust (Cargo)";          Commands = [string[]]@("cargo");                                                                                Label = "lblCargoStatus";                 Button = "btnProviderCargoAction";        LockedOn = $false; ToolTip = "Rust package manager" },
+        [PSCustomObject]@{ Key = "dotnet";        DisplayName = ".NET Tools";            Commands = [string[]]@("dotnet");                                                                               Label = "lblDotnetStatus";               Button = "btnProviderDotnetAction";       LockedOn = $false; ToolTip = ".NET global tools installed with dotnet tool install -g" },
+        [PSCustomObject]@{ Key = "psmodule";      DisplayName = "PS Modules";            Commands = [string[]]@("powershell", "pwsh");                                                                   Label = "lblPsModuleStatus";             Button = "btnProviderPsModuleAction";     LockedOn = $false; ToolTip = "PowerShell modules installed from PSGallery with PowerShellGet" },
+        [PSCustomObject]@{ Key = "composer";      DisplayName = "Composer";              Commands = [string[]]@("composer");                                                                             Label = "lblComposerStatus";             Button = "btnProviderComposerAction";     LockedOn = $false; ToolTip = "PHP Composer global packages" },
+        [PSCustomObject]@{ Key = "steam";         DisplayName = "Steam Games";           Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction"; LockedOn = $false; ToolTip = "Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads." },
+        [PSCustomObject]@{ Key = "legendary";     DisplayName = "Legendary";             Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction"; LockedOn = $false; ToolTip = "Legendary CLI for Epic Games Store game updates." },
+        [PSCustomObject]@{ Key = "gogdl";         DisplayName = "GOGDL";                 Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction"; LockedOn = $false; ToolTip = "GOGDL updates installed GOG games through Heroic's gogdl downloader." }
+    )
+
+    function Format-WmtProviderRowXaml {
+        param($Provider)
+
+        $key = [string]$Provider.Key
+        $name = [string]$Provider.DisplayName
+        $tip = [string]$Provider.ToolTip
+        $locked = [bool]$Provider.LockedOn
+        $caps = $providerCapabilities[$key]
+        $searchSupported = [bool]$caps.Search
+
+        $chkAttr = if ($locked) { 'IsChecked="True" IsEnabled="False"' } else { '' }
+        $searchEnabled = if ($searchSupported) { 'True' } else { 'False' }
+        $t = $providerToggles[$key]
+        $searchVal = if ($t -is [System.Collections.IDictionary]) { $t["Search"] } else { $t.Search }
+        $scanVal   = if ($t -is [System.Collections.IDictionary]) { $t["Scan"] } else { $t.Scan }
+        $headVal   = if ($t -is [System.Collections.IDictionary]) { $t["Headless"] } else { $t.Headless }
+        $autoVal   = if ($t -is [System.Collections.IDictionary]) { $t["AutoUpdate"] } else { $t.AutoUpdate }
+        $searchIsChecked = if ($searchSupported -and [bool]$searchVal) { 'True' } else { 'False' }
+        $scanIsChecked = if ([bool]$scanVal) { 'True' } else { 'False' }
+        $headlessIsChecked = if ([bool]$headVal) { 'True' } else { 'False' }
+        $autoIsChecked = if ([bool]$autoVal) { 'True' } else { 'False' }
+
+        $searchToolTip = if ($searchSupported) {
+            "Allow searching this provider's catalog or owned library from the WMT search box."
+        } else {
+            "This provider does not expose a search capability."
+        }
+
+        # Winget gets a 5th toggle: "Include unknown" (--include-unknown flag).
+        $includeUnknownToggle = ""
+        if ($key -eq "winget") {
+            $includeUnknownToggle = '<CheckBox Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,14,0" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/>'
+        }
+
+        $row = @"
+            <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,10" ToolTip="$tip">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <CheckBox Name="chk$key" $chkAttr Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBlock Name="lbl${key}Name" Text="$name" FontWeight="Bold" Grid.Column="1" VerticalAlignment="Center"/>
+                        <TextBlock Name="$($Provider.Label)" Text="Checking..." Grid.Column="2" VerticalAlignment="Center"/>
+                        <Button Name="$($Provider.Button)" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Margin="30,6,0,0">
+                        <CheckBox Name="chk${key}Search"     Content="Search"     Margin="0,0,14,0" IsChecked="$searchIsChecked"    IsEnabled="$searchEnabled" ToolTip="$searchToolTip"/>
+                        <CheckBox Name="chk${key}Scan"       Content="Scan"       Margin="0,0,14,0" IsChecked="$scanIsChecked"       ToolTip="Include this provider in update scans. Disabling also disables Headless and Auto-update for this provider."/>
+                        <CheckBox Name="chk${key}Headless"   Content="Headless"   Margin="0,0,14,0" IsChecked="$headlessIsChecked"   ToolTip="Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."/>
+                        <CheckBox Name="chk${key}AutoUpdate" Content="Auto-update" Margin="0,0,14,0" IsChecked="$autoIsChecked"       ToolTip="After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."/>
+                        $includeUnknownToggle
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+"@
+        return $row
+    }
+
+    $providerRowsXaml = ""
+    foreach ($p in $providerDefinitions) {
+        $providerRowsXaml += (Format-WmtProviderRowXaml -Provider $p) + "`r`n"
+    }
+
+    # 3. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="790" Width="680" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="860" Width="760" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
-        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.35"/>
+                    <Setter Property="TextBlock.TextDecorations" Value="Strikethrough"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
         <Style TargetType="Button">
             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
@@ -25796,14 +26420,30 @@ function Show-ProviderManager {
             <Setter Property="Foreground" Value="#111827"/>
             <Setter Property="Background" Value="#FFFFFF"/>
         </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         
-        <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
-        <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
+        <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,8"/>
+        <TextBlock Text="Select which package managers to scan, and configure per-provider Search / Scan / Headless / Auto-update options. Search uses the main Updates search box." Foreground="{DynamicResource TextSecondary}" Margin="0,30,0,0" Grid.Row="0" TextWrapping="Wrap"/>
 
-        <ScrollViewer Grid.Row="1" Margin="0,15,0,0" VerticalScrollBarVisibility="Auto">
+        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
             <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
                     ToolTip="Configure automatic update scans, installation behavior, and background operation.">
@@ -25831,145 +26471,12 @@ function Show-ProviderManager {
                     <CheckBox Name="chkUpdateAutoInstall" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="Automatically install available updates after scans" Margin="0,8,0,0"
                               ToolTip="After each completed scan, automatically update listed packages without confirmation. Packages known to risk an automatic restart are skipped."/>
                     <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
-                               Text="Auto scan runs while WMT is open or hidden in the tray. Auto install runs after completed manual, startup, and scheduled scans; restart-risk packages are skipped."
+                               Text="Auto scan runs while WMT is open or hidden in the tray. Auto install runs after completed manual, startup, and scheduled scans; restart-risk packages are skipped. Per-provider Headless / Auto-update options above override these global settings."
                                Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
                 </Grid>
             </Border>
 
-            <Grid Margin="0,0,0,10" ToolTip="Windows Package Manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
-                <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblProviderWingetStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderWingetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="30,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkIncludeUnknown" Grid.Column="0"/>
-                <TextBlock Text="Include unknown" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Adds --include-unknown to winget scans" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Microsoft Store Apps via store.exe">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkMsStore" Grid.Column="0"/>
-                <TextBlock Text="Store CLI" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblProviderMsStoreStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderMsStoreAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Windows Update Agent. Scans both regular and optional Windows updates, including drivers when offered.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkWindowsUpdate" Grid.Column="0"/>
-                <TextBlock Text="Windows Update" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblWindowsUpdateStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderWindowsUpdateAction" Content="Open" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Python package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPip" Grid.Column="0"/>
-                <TextBlock Text="Python (Pip)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPipStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPipAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Node.js package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkNpm" Grid.Column="0"/>
-                <TextBlock Text="Node (Npm)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderNpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <!-- PNPM -->
-            <Grid Margin="0,0,0,10" ToolTip="Fast Node.js package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPnpm" Grid.Column="0"/>
-                <TextBlock Text="pnpm" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPnpmStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPnpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Chocolatey package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkChoco" Grid.Column="0"/>
-                <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblChocoStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderChocoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Scoop command-line installer">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkScoop" Grid.Column="0"/>
-                <TextBlock Text="Scoop" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblScoopStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderScoopAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="RubyGems package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkGem" Grid.Column="0"/>
-                <TextBlock Text="Ruby (Gem)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblGemStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderGemAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Rust package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkCargo" Grid.Column="0"/>
-                <TextBlock Text="Rust (Cargo)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblCargoStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderCargoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip=".NET global tools installed with dotnet tool install -g">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkDotnet" Grid.Column="0"/>
-                <TextBlock Text=".NET Tools" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblDotnetStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderDotnetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="PowerShell modules installed from PSGallery with PowerShellGet">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPsModule" Grid.Column="0"/>
-                <TextBlock Text="PS Modules" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPsModuleStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPsModuleAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="PHP Composer global packages">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkComposer" Grid.Column="0"/>
-                <TextBlock Text="Composer" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblComposerStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderComposerAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkSteam" Grid.Column="0"/>
-                <TextBlock Text="Steam Games" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblSteamStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderSteamAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Legendary CLI for Epic Games Store game updates.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkLegendary" Grid.Column="0"/>
-                <TextBlock Text="Legendary" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblLegendaryStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderLegendaryAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="GOGDL updates installed GOG games through Heroic's gogdl downloader.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkGogdl" Grid.Column="0"/>
-                <TextBlock Text="GOGDL" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblGogdlStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderGogdlAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
+            $providerRowsXaml
             </StackPanel>
         </ScrollViewer>
 
@@ -25982,7 +26489,7 @@ function Show-ProviderManager {
     $win = New-WmtWindowFromFullXaml -Xaml $pXaml
 
     function Get-WinCtrl($name) { $win.FindName($name) }
-    
+
     $cmbAutoScanInterval = Get-WinCtrl "cmbAutoScanInterval"
     $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
     $chkRunInTrayOnClose = Get-WinCtrl "chkRunInTrayOnClose"
@@ -25990,40 +26497,10 @@ function Show-ProviderManager {
     $chkUpdateSilentInstall = Get-WinCtrl "chkUpdateSilentInstall"
     $chkUpdateAutoInstall = Get-WinCtrl "chkUpdateAutoInstall"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
-    $chkMsStore = Get-WinCtrl "chkMsStore"
-    $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
-    $chkPip = Get-WinCtrl "chkPip"
-    $chkNpm = Get-WinCtrl "chkNpm"
-    $chkPnpm = Get-WinCtrl "chkPnpm"  
-    $chkChoco = Get-WinCtrl "chkChoco"
-    $chkScoop = Get-WinCtrl "chkScoop"
-    $chkGem = Get-WinCtrl "chkGem"
-    $chkCargo = Get-WinCtrl "chkCargo"
-    $chkDotnet = Get-WinCtrl "chkDotnet"
-    $chkPsModule = Get-WinCtrl "chkPsModule"
-    $chkComposer = Get-WinCtrl "chkComposer"
-    $chkSteam = Get-WinCtrl "chkSteam"
-    $chkLegendary = Get-WinCtrl "chkLegendary"
-    $chkGogdl = Get-WinCtrl "chkGogdl"
 
-    $providerDefinitions = @(
-        [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
-        [PSCustomObject]@{ Key = "msstore"; DisplayName = "Store CLI"; Commands = [string[]]@("store"); Label = "lblProviderMsStoreStatus"; Button = "btnProviderMsStoreAction" },
-        [PSCustomObject]@{ Key = "windowsupdate"; DisplayName = "Windows Update"; Commands = [string[]]@("powershell"); Label = "lblWindowsUpdateStatus"; Button = "btnProviderWindowsUpdateAction" },
-        [PSCustomObject]@{ Key = "pip"; DisplayName = "Python (Pip)"; Commands = [string[]]@("pip", "pip3"); Label = "lblPipStatus"; Button = "btnProviderPipAction" },
-        [PSCustomObject]@{ Key = "npm"; DisplayName = "Node (Npm)"; Commands = [string[]]@("npm"); Label = "lblNpmStatus"; Button = "btnProviderNpmAction" },
-        [PSCustomObject]@{ Key = "pnpm"; DisplayName = "pnpm"; Commands = [string[]]@("pnpm"); Label = "lblPnpmStatus"; Button = "btnProviderPnpmAction" },
-        [PSCustomObject]@{ Key = "chocolatey"; DisplayName = "Chocolatey"; Commands = [string[]]@("choco"); Label = "lblChocoStatus"; Button = "btnProviderChocoAction" },
-        [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
-        [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
-        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
-        [PSCustomObject]@{ Key = "dotnet"; DisplayName = ".NET Tools"; Commands = [string[]]@("dotnet"); Label = "lblDotnetStatus"; Button = "btnProviderDotnetAction" },
-        [PSCustomObject]@{ Key = "psmodule"; DisplayName = "PowerShell Modules"; Commands = [string[]]@("powershell", "pwsh"); Label = "lblPsModuleStatus"; Button = "btnProviderPsModuleAction" },
-        [PSCustomObject]@{ Key = "composer"; DisplayName = "Composer"; Commands = [string[]]@("composer"); Label = "lblComposerStatus"; Button = "btnProviderComposerAction" },
-        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" },
-        [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary (Epic Games)"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction" },
-        [PSCustomObject]@{ Key = "gogdl"; DisplayName = "GOGDL (GOG Games)"; Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction" }
-    )
+    # Map provider key -> checkbox control objects (filled in below per provider).
+    $providerControls = @{}
+
     $providerInstallState = @{}
     $providerActionMonitors = @{}
 
@@ -26714,6 +27191,7 @@ catch {
 }
 
 Write-Host ""
+
 [void](Read-Host "Press Enter to close")
 "@
 
@@ -27003,6 +27481,9 @@ exit `$exitCode
             Write-GuiLog "[$($provider.DisplayName)] $action failed to start: $($_.Exception.Message)"
             try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
             & $updateProviderStatuses
+            foreach ($prov in $providerDefinitions) {
+                & $updateProviderToggleState -ProviderKey ([string]$prov.Key)
+            }
             return
         }
 
@@ -27095,23 +27576,151 @@ exit `$exitCode
     if ($chkUpdateSilentInstall) { $chkUpdateSilentInstall.IsChecked = (Get-WmtUpdateSilentInstallEnabled -Settings $settings) }
     if ($chkUpdateAutoInstall) { $chkUpdateAutoInstall.IsChecked = (Get-WmtUpdateAutoInstallEnabled -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
-    if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
-    if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
-    if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
-    if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
-    if ("pnpm" -in $enabled) { $chkPnpm.IsChecked = $true }
-    if ("chocolatey" -in $enabled) { $chkChoco.IsChecked = $true }
-    if ("scoop" -in $enabled) { $chkScoop.IsChecked = $true }
-    if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
-    if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
-    if ("dotnet" -in $enabled) { $chkDotnet.IsChecked = $true }
-    if ("psmodule" -in $enabled) { $chkPsModule.IsChecked = $true }
-    if ("composer" -in $enabled) { $chkComposer.IsChecked = $true }
-    if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
-    if ("legendary" -in $enabled) { $chkLegendary.IsChecked = $true }
-    if ("gogdl" -in $enabled) { $chkGogdl.IsChecked = $true }
+
+    # Reflect each provider's main checkbox state from $enabled.
+    foreach ($provider in $providerDefinitions) {
+        $key = [string]$provider.Key
+        $chkMain = & $getWinCtrl "chk$key"
+        if (-not $chkMain) { continue }
+        if ($provider.PSObject.Properties["LockedOn"] -and [bool]$provider.LockedOn) {
+            $chkMain.IsChecked = $true
+        }
+        else {
+            $chkMain.IsChecked = ($key -in $enabled)
+        }
+        # Also reflect per-provider toggle state.
+        $toggles = $providerToggles[$key]
+        $searchVal = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Search"] } else { $toggles.Search }
+        $scanVal   = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Scan"] } else { $toggles.Scan }
+        $headVal   = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Headless"] } else { $toggles.Headless }
+        $autoVal   = if ($toggles -is [System.Collections.IDictionary]) { $toggles["AutoUpdate"] } else { $toggles.AutoUpdate }
+        $chkSearch = & $getWinCtrl "chk${key}Search"
+        $chkScan = & $getWinCtrl "chk${key}Scan"
+        $chkHeadless = & $getWinCtrl "chk${key}Headless"
+        $chkAuto = & $getWinCtrl "chk${key}AutoUpdate"
+        if ($chkSearch) { $chkSearch.IsChecked = [bool]$searchVal }
+        if ($chkScan)   { $chkScan.IsChecked   = [bool]$scanVal }
+        if ($chkHeadless) { $chkHeadless.IsChecked = [bool]$headVal }
+        if ($chkAuto)   { $chkAuto.IsChecked   = [bool]$autoVal }
+        # Store controls for later event wiring.
+        $providerControls[$key] = @{
+            Main       = $chkMain
+            Search     = $chkSearch
+            Scan       = $chkScan
+            Headless   = $chkHeadless
+            AutoUpdate = $chkAuto
+        }
+    }
+
+    # Helper: enable/disable the per-provider sub-toggles based on the
+    # main checkbox and the Scan toggle. The Search toggle is additionally
+    # gated by the capability matrix (it is created disabled in XAML when
+    # the provider does not support search).
+    $updateProviderToggleState = {
+        param([string]$ProviderKey)
+
+        $controls = $providerControls[$ProviderKey]
+        if (-not $controls) { return }
+        $caps = $providerCapabilities[$ProviderKey]
+        $searchSupported = [bool]$caps.Search
+        $mainChecked = [bool]$controls.Main.IsChecked
+        $scanChecked = [bool]$controls.Scan.IsChecked
+
+        # Check if the provider is installed. If not, disable the main checkbox
+        # and all sub-toggles so the user can't configure a provider that
+        # can't be used. The Install button (in $updateProviderStatuses)
+        # remains enabled so the user can install the provider.
+        $isInstalled = $true
+        if ($providerInstallState.ContainsKey($ProviderKey)) {
+            $isInstalled = [bool]$providerInstallState[$ProviderKey]
+        }
+        # Winget is always "installed" (locked on).
+        if ($ProviderKey -eq "winget") { $isInstalled = $true }
+
+        if (-not $isInstalled) {
+            # Provider not installed: disable main + all toggles.
+            if ($controls.Main) { $controls.Main.IsEnabled = $false }
+            if ($controls.Search)     { $controls.Search.IsEnabled = $false }
+            if ($controls.Scan)       { $controls.Scan.IsEnabled = $false }
+            if ($controls.Headless)   { $controls.Headless.IsEnabled = $false }
+            if ($controls.AutoUpdate) { $controls.AutoUpdate.IsEnabled = $false }
+
+            # Slash out the name.
+            $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
+            if ($nameCtrl) {
+                $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
+                $nameCtrl.Opacity = 0.35
+            }
+            return
+        }
+
+        # Provider IS installed: apply normal gray-out rules.
+        if ($controls.Main) {
+            $controls.Main.IsEnabled = (-not ($ProviderKey -eq "winget"))
+        }
+
+        if ($controls.Search) {
+            if (-not $searchSupported) {
+                $controls.Search.IsEnabled = $false
+                $controls.Search.IsChecked = $false
+            }
+            else {
+                $controls.Search.IsEnabled = $mainChecked
+            }
+        }
+        if ($controls.Scan) {
+            $controls.Scan.IsEnabled = $mainChecked
+        }
+        # Headless + AutoUpdate require Scan to be on (and main to be on).
+        if ($controls.Headless) {
+            $controls.Headless.IsEnabled = ($mainChecked -and $scanChecked)
+        }
+        if ($controls.AutoUpdate) {
+            $controls.AutoUpdate.IsEnabled = ($mainChecked -and $scanChecked)
+        }
+
+        # Visually "slash out" the provider name when the provider is disabled
+        # (unchecked) so the disabled state is immediately obvious.
+        $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
+        if ($nameCtrl) {
+            if ($mainChecked) {
+                $nameCtrl.TextDecorations = $null
+                $nameCtrl.Opacity = 1.0
+            }
+            else {
+                $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
+                $nameCtrl.Opacity = 0.45
+            }
+        }
+    }.GetNewClosure()
+
+    # Apply initial toggle state for every provider.
+    foreach ($provider in $providerDefinitions) {
+        & $updateProviderToggleState -ProviderKey ([string]$provider.Key)
+    }
+
+    # Wire up checkbox change handlers so the sub-toggles react live.
+    foreach ($provider in $providerDefinitions) {
+        $key = [string]$provider.Key
+        $controls = $providerControls[$key]
+        if (-not $controls) { continue }
+        if ($controls.Main) {
+            $controls.Main.Add_Checked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+            $controls.Main.Add_Unchecked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+        }
+        if ($controls.Scan) {
+            $controls.Scan.Add_Checked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+            $controls.Scan.Add_Unchecked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+        }
+    }
 
     & $updateProviderStatuses
+    # Re-apply toggle state for all providers now that install state is known.
+    # (Done here, not inside $updateProviderStatuses, because $updateProviderToggleState
+    # is defined below and .GetNewClosure() on $updateProviderStatuses would capture $null.)
+    foreach ($provider in $providerDefinitions) {
+        & $updateProviderToggleState -ProviderKey ([string]$provider.Key)
+    }
     foreach ($provider in $providerDefinitions) {
         $buttonCtrl = & $getWinCtrl $provider.Button
         if (-not $buttonCtrl) { continue }
@@ -27119,25 +27728,21 @@ exit `$exitCode
         $buttonCtrl.Add_Click({ & $startProviderAction -ProviderKey $providerKey }.GetNewClosure())
     }
 
-    # Save Event
+    # Library cache files for Legendary/GOGDL are populated lazily by the
+    # main Updates search box (background runspace), not here — calling
+    # Get-WmtLegendaryLibrary/Get-WmtGogLibrary synchronously on the UI
+    # thread would hang the window for up to 30+ seconds.
+
+        # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
-            $newEnabled = @("winget") 
-            if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
-            if ($chkWindowsUpdate.IsChecked) { $newEnabled += "windowsupdate" }
-            if ($chkPip.IsChecked) { $newEnabled += "pip" }
-            if ($chkNpm.IsChecked) { $newEnabled += "npm" }
-            if ($chkPnpm.IsChecked) { $newEnabled += "pnpm" } 
-            if ($chkChoco.IsChecked) { $newEnabled += "chocolatey" }
-            if ($chkScoop.IsChecked) { $newEnabled += "scoop" }
-            if ($chkGem.IsChecked) { $newEnabled += "gem" }
-            if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
-            if ($chkDotnet.IsChecked) { $newEnabled += "dotnet" }
-            if ($chkPsModule.IsChecked) { $newEnabled += "psmodule" }
-            if ($chkComposer.IsChecked) { $newEnabled += "composer" }
-            if ($chkSteam.IsChecked) { $newEnabled += "steam" }
-            if ($chkLegendary.IsChecked) { $newEnabled += "legendary" }
-            if ($chkGogdl.IsChecked) { $newEnabled += "gogdl" }
-        
+            $newEnabled = @("winget")
+            foreach ($provider in $providerDefinitions) {
+                $key = [string]$provider.Key
+                if ($provider.PSObject.Properties["LockedOn"] -and [bool]$provider.LockedOn) { continue }
+                $chkMain = & $getWinCtrl "chk$key"
+                if ($chkMain -and [bool]$chkMain.IsChecked) { $newEnabled += $key }
+            }
+
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
             if ($current -is [System.Collections.IDictionary]) {
@@ -27145,6 +27750,32 @@ exit `$exitCode
             }
             else {
                 $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
+            }
+
+            # Build the per-provider toggles object to save.
+            $togglesToSave = [ordered]@{}
+            foreach ($provider in $providerDefinitions) {
+                $key = [string]$provider.Key
+                $chkSearch = & $getWinCtrl "chk${key}Search"
+                $chkScan = & $getWinCtrl "chk${key}Scan"
+                $chkHeadless = & $getWinCtrl "chk${key}Headless"
+                $chkAuto = & $getWinCtrl "chk${key}AutoUpdate"
+                $defaults = Get-WmtProviderToggleDefaults -ProviderKey $key
+                $togglesToSave[$key] = [ordered]@{
+                    Search     = if ($defaults.Search -and $chkSearch)   { [bool]$chkSearch.IsChecked }   else { $false }
+                    Scan       = if ($chkScan)     { [bool]$chkScan.IsChecked }     else { $true }
+                    Headless   = if ($chkHeadless) { [bool]$chkHeadless.IsChecked } else { $false }
+                    AutoUpdate = if ($chkAuto)     { [bool]$chkAuto.IsChecked }     else { $false }
+                }
+            }
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["ProviderToggles"] = $togglesToSave
+            }
+            elseif ($current.PSObject.Properties["ProviderToggles"]) {
+                $current.ProviderToggles = $togglesToSave
+            }
+            else {
+                $current | Add-Member -MemberType NoteProperty -Name "ProviderToggles" -Value $togglesToSave -Force
             }
 
             $selectedAutoScanMinutes = 0
@@ -27208,6 +27839,7 @@ exit `$exitCode
         })
 
     $win.ShowDialog() | Out-Null
+
 }
 
 
@@ -27670,6 +28302,14 @@ $script:ScanTimer.Add_Tick({
             # All tasks finished
             if ($script:ScanTimer.IsEnabled) {
                 $script:ScanTimer.Stop()
+
+                # Stop the 120s global timeout timer too — the scan finished
+                # before it fired, so leaving it running would falsely report
+                # the engine as busy (Test-WmtUpdateScanEngineBusy checks
+                # $script:GlobalScanTimer.IsEnabled).
+                if ($script:GlobalScanTimer) {
+                    try { $script:GlobalScanTimer.Stop() } catch {}
+                }
             
                 $rebootPendingCount = [Math]::Max(0, [int]$script:WmtWindowsUpdateRebootPendingCount)
                 if ($rebootPendingCount -gt 0) {
@@ -27716,6 +28356,9 @@ $script:ScanTimer.Add_Tick({
 # 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
         # UI Prep
+        # Clear any stale "package search active" flag so auto-scans are no
+        # longer blocked once the user explicitly starts a new scan.
+        $script:WmtPackageSearchActive = $false
         $lblWingetTitle.Text = "Package Updates"
         $lblWingetStatus.Text = "Scanning all providers..."
         $lblWingetStatus.Visibility = "Visible"
@@ -27752,6 +28395,30 @@ $btnWingetScan.Add_Click({
         $completedWindowsUpdateIds = if ($script:WmtCompletedWindowsUpdateIds) { @($script:WmtCompletedWindowsUpdateIds.Keys) } else { @() }
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+
+        # Respect per-provider Scan toggle: providers with Scan=false are
+        # skipped during update scans (but still available for search/install).
+        $allToggles = Get-WmtProviderToggles -Settings $settings
+        $scanEnabled = @()
+        foreach ($prov in @($enabled)) {
+            $t = $null
+            if ($allToggles -is [System.Collections.IDictionary] -and $allToggles.Contains($prov)) {
+                $t = $allToggles[$prov]
+            }
+            $scanOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Scan")) { $scanOn = [bool]$t["Scan"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Scan"]) { $scanOn = [bool]$t.Scan } } catch {}
+                }
+            }
+            if ($scanOn) { $scanEnabled += $prov }
+        }
+        $enabled = $scanEnabled
+
+        Write-GuiLog "Scan-enabled providers: $($enabled -join ', ')"
         Write-GuiLog "Winget include unknown: $includeUnknown"
 
         # Gate the actual winget scan behind a completed source refresh.
@@ -30098,14 +30765,164 @@ $btnWingetFind.Add_Click({
             @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
 
-        Write-GuiLog "Enabled providers: $($enabled -join ', ')"
-        
+        # Respect per-provider Search toggle: providers with Search=false are
+        # skipped during package search (but still scanned for updates).
+        # This is computed here (main scope) because Get-WmtProviderToggles
+        # is not available inside the runspace.
+        $allToggles = Get-WmtProviderToggles -Settings $settings
+        $searchEnabled = @()
+        foreach ($prov in @($enabled)) {
+            $t = $null
+            if ($allToggles -is [System.Collections.IDictionary] -and $allToggles.Contains($prov)) {
+                $t = $allToggles[$prov]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) { $searchEnabled += $prov }
+        }
+        $enabled = $searchEnabled
+
+        Write-GuiLog "Search-enabled providers: $($enabled -join ', ')"
+
+        # Resolve library cache file paths for the runspace (Get-DataPath is
+        # not available inside the runspace).
+        $dataPath = Get-DataPath
+        $legendaryCacheFile = Join-Path $dataPath "legendary_library.json"
+        $gogCacheFile = Join-Path $dataPath "gog_library.json"
+
+        # Kick off background library cache refresh for Legendary/GOGDL if
+        # the cache files are missing. This runs in a separate runspace so
+        # the UI does not hang. The search runspace below will read from
+        # the cache files; if they are not ready yet on the first search,
+        # it logs a message and the user can search again shortly after.
+        # The runspace scriptBlock is self-contained (inline logic) because
+        # main-scope functions are NOT available in [PowerShell]::Create().
+        $needLegCache = ("legendary" -in $enabled -and -not (Test-Path -LiteralPath $legendaryCacheFile -PathType Leaf))
+        $needGogCache = ("gogdl" -in $enabled -and -not (Test-Path -LiteralPath $gogCacheFile -PathType Leaf))
+        if ($needLegCache -or $needGogCache) {
+            Write-GuiLog "Fetching game libraries in background (Legendary/GOGDL)..."
+            # Resolve paths in main scope.
+            $legExe = Get-WmtLegendaryExePath
+            if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                try {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                } catch {}
+            }
+            $gogAuth = Get-WmtGogdlAuthConfigPath
+            if ([string]::IsNullOrWhiteSpace($gogAuth) -or -not (Test-Path -LiteralPath $gogAuth -PathType Leaf)) {
+                $heroicAuth = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+                if (Test-Path -LiteralPath $heroicAuth -PathType Leaf) { $gogAuth = $heroicAuth }
+            }
+            $cachePs = [PowerShell]::Create()
+            [void]$cachePs.AddScript({
+                param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile)
+
+                if ($DoLeg) {
+                    try {
+                        $result = New-Object System.Collections.Generic.List[object]
+                        if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
+                            $psi = New-Object System.Diagnostics.ProcessStartInfo
+                            $psi.FileName = $LegendaryExe
+                            $psi.Arguments = "list --json"
+                            $psi.RedirectStandardOutput = $true
+                            $psi.RedirectStandardError = $true
+                            $psi.UseShellExecute = $false
+                            $psi.CreateNoWindow = $true
+                            $proc = [System.Diagnostics.Process]::Start($psi)
+                            $stdout = $proc.StandardOutput.ReadToEnd()
+                            try { $proc.WaitForExit(30000) } catch {}
+                            try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+                            $parsed = $false
+                            if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+                                try {
+                                    $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                                    if ($json) {
+                                        foreach ($game in @($json)) {
+                                            $title = [string]$game.app_title
+                                            if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                                            if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                            $isInstalled = $false
+                                            try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                                            $installedVer = ""
+                                            $latestVer = [string]$game.app_version
+                                            if ($isInstalled) {
+                                                try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                                                if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                                            }
+                                            $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = [string]$game.app_name; Version = $latestVer; InstalledVersion = $installedVer; IsInstalled = $isInstalled; Source = "legendary"; Kind = "Library" })
+                                        }
+                                        if ($result.Count -gt 0) { $parsed = $true }
+                                    }
+                                } catch {}
+                            }
+                            if (-not $parsed) {
+                                $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                                foreach ($match in $regex.Matches($stdout)) {
+                                    $title = $match.Groups["title"].Value.Trim()
+                                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                    $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                                    $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = $match.Groups["app"].Value.Trim(); Version = $ver; Source = "legendary"; Kind = "Library" })
+                                }
+                            }
+                        }
+                        $result.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                    } catch {}
+                }
+
+                if ($DoGog) {
+                    try {
+                        $result = New-Object System.Collections.Generic.List[object]
+                        if ($GogAuthPath -and (Test-Path -LiteralPath $GogAuthPath -PathType Leaf)) {
+                            $text = [System.IO.File]::ReadAllText($GogAuthPath).TrimStart([char]0xFEFF)
+                            $json = $text | ConvertFrom-Json -ErrorAction Stop
+                            $gogClientId = "46899977096215655"
+                            $creds = $null
+                            $clientProp = $json.PSObject.Properties[$gogClientId]
+                            if ($clientProp) { $creds = $clientProp.Value }
+                            elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+                            if ($creds -and -not [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+                                try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                                $token = [string]$creds.access_token
+                                $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Windows-Maintenance-Tool" }
+                                $page = 1
+                                $totalPages = 1
+                                while ($page -le $totalPages -and $page -le 50) {
+                                    $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+                                    $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                                    if (-not $resp) { break }
+                                    if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+                                    if ($resp.products) {
+                                        foreach ($prod in @($resp.products)) {
+                                            $title = [string]$prod.title
+                                            if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                            $result.Add([PSCustomObject]@{ Provider = "gogdl"; Title = $title; Id = [string]$prod.id; Version = [string]$prod.version; Source = "gogdl"; Kind = "Library" })
+                                        }
+                                    }
+                                    $page++
+                                }
+                            }
+                        }
+                        $result.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $GogCacheFile -Force -Encoding UTF8
+                    } catch {}
+                }
+            }).AddArgument($needLegCache).AddArgument($needGogCache).AddArgument($legExe).AddArgument($legendaryCacheFile).AddArgument($gogAuth).AddArgument($gogCacheFile)
+            try { [void]$cachePs.BeginInvoke() } catch { try { $cachePs.Dispose() } catch {} }
+        }
+
         # Reset Task List
         $script:ActiveScans.Clear()
         # 3. DEFINE THE WORKER THREAD SCRIPT
         # This contains the EXACT logic that worked for you before.
         $scriptBlock = {
-            param($Query, $Enabled)
+            param($Query, $Enabled, $LegendaryCacheFile, $GogCacheFile)
         
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             function Log($msg) { Write-Output "LOG:$msg" }
@@ -30335,10 +31152,139 @@ $btnWingetFind.Add_Click({
                 }
                 catch { Log "Composer skipped." }
             }
+
+            # --- G. SCOOP ---
+            if ("scoop" -in $Enabled) {
+                Log "Searching Scoop..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "powershell.exe" -Arguments "-NoProfile -Command scoop search `"$Query`"" -TimeoutSeconds 30
+                    $out = $result.Output
+                    $inResults = $false
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match "^Name\s") { $inResults = $true; continue }
+                        if (-not $inResults) { continue }
+                        if ($trimmed -match "^-+") { continue }
+                        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                        $parts = @($trimmed -split '\s{2,}|     ' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                        if ($parts.Count -ge 2) {
+                            [PSCustomObject]@{ Source = "scoop"; Name = [string]$parts[0]; Id = [string]$parts[0]; Version = [string]$parts[1]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Scoop skipped." }
+            }
+
+            # --- H. CARGO ---
+            if ("cargo" -in $Enabled) {
+                Log "Searching Cargo crates..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "cargo" -Arguments "search `"$Query`"" -TimeoutSeconds 30
+                    $out = $result.Output
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match '^(?<name>\S+)\s*=\s*"(?<version>[^"]*)"') {
+                            [PSCustomObject]@{ Source = "cargo"; Name = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Cargo skipped." }
+            }
+
+            # --- I. RUBYGEMS ---
+            if ("gem" -in $Enabled) {
+                Log "Searching RubyGems..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "gem" -Arguments "search `"$Query`" --remote" -TimeoutSeconds 30
+                    $out = $result.Output
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match '^(?<name>\S+)\s+\((?<version>[^)]+)\)') {
+                            [PSCustomObject]@{ Source = "gem"; Name = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "RubyGems skipped." }
+            }
+
+            # --- J. STEAM STORE ---
+            if ("steam" -in $Enabled) {
+                Log "Searching Steam Store..."
+                try {
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                    $encoded = [Uri]::EscapeDataString($Query)
+                    $url = "https://store.steampowered.com/api/storesearch/?term=$encoded&l=english&cc=US"
+                    $resp = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                    if ($resp -and $resp.total -gt 0) {
+                        foreach ($item in @($resp.items)) {
+                            [PSCustomObject]@{ Source = "steam"; Name = [string]$item.name; Id = [string]$item.id; Version = "-"; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Steam Store skipped." }
+            }
+
+            # --- K. LEGENDARY (Epic Games library) ---
+            if ("legendary" -in $Enabled) {
+                Log "Searching Legendary library..."
+                try {
+                    if ($LegendaryCacheFile -and (Test-Path -LiteralPath $LegendaryCacheFile -PathType Leaf)) {
+                        $cacheText = [System.IO.File]::ReadAllText($LegendaryCacheFile)
+                        $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                        if ($library) {
+                            $needle = $Query.ToLowerInvariant()
+                            foreach ($game in @($library)) {
+                                $title = [string]$game.Title
+                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                if ([string]::IsNullOrWhiteSpace($needle) -or $title.ToLowerInvariant().Contains($needle)) {
+                                    # Show installed version in Version column, latest in Available.
+                                    $isInst = $false
+                                    try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
+                                    $instVer = ""
+                                    try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
+                                    $latestVer = [string]$game.Version
+                                    $verCol = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "-" }
+                                    $availCol = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                                    [PSCustomObject]@{ Source = "legendary"; Name = $title; Id = [string]$game.Id; Version = $verCol; Available = $availCol }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "Legendary library cache not found. Open Providers panel to populate."
+                    }
+                }
+                catch { Log "Legendary library skipped: $($_.Exception.Message)" }
+            }
+
+            # --- L. GOGDL (GOG library) ---
+            if ("gogdl" -in $Enabled) {
+                Log "Searching GOG library..."
+                try {
+                    if ($GogCacheFile -and (Test-Path -LiteralPath $GogCacheFile -PathType Leaf)) {
+                        $cacheText = [System.IO.File]::ReadAllText($GogCacheFile)
+                        $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                        if ($library) {
+                            $needle = $Query.ToLowerInvariant()
+                            foreach ($game in @($library)) {
+                                $title = [string]$game.Title
+                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                if ([string]::IsNullOrWhiteSpace($needle) -or $title.ToLowerInvariant().Contains($needle)) {
+                                    [PSCustomObject]@{ Source = "gogdl"; Name = $title; Id = [string]$game.Id; Version = [string]$game.Version; Available = "-" }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "GOG library cache not found. Open Providers panel to populate."
+                    }
+                }
+                catch { Log "GOG library skipped: $($_.Exception.Message)" }
+            }
         }
 
         # 4. EXECUTE THREAD (The Magic Part)
-        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled)
+        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled).AddArgument($legendaryCacheFile).AddArgument($gogCacheFile)
         $script:AsyncSearch = $script:AsyncPowerShell.BeginInvoke()
         $script:WmtPackageSearchStartedAt = Get-Date
         $script:SearchTimer.Start()
@@ -32488,6 +33434,296 @@ $onMainWindowSizeChanged = {
 }.GetNewClosure()
 [void]$window.Add_SizeChanged($onMainWindowSizeChanged)
 
+# Start background library cache builder for Legendary/GOGDL on boot
+# so the main Updates search box can find owned games without a first-run delay.
+$script:WmtLibraryCacheRunspace = $null
+$script:WmtLibraryCacheAsyncResult = $null
+
+function Start-WmtLibraryCacheBuilder {
+    try {
+        $settings = Get-WmtSettings
+        $enabled = @($settings.EnabledProviders)
+        $toggles = Get-WmtProviderToggles -Settings $settings
+
+        $needLeg = $false
+        $needGog = $false
+        $dataPath = Get-DataPath
+        $legFile = Join-Path $dataPath "legendary_library.json"
+        $gogFile = Join-Path $dataPath "gog_library.json"
+
+        # Cache expiry: re-fetch if the cache file is older than 24 hours
+        # (in case the user bought more games since the cache was last updated).
+        $cacheExpiryHours = 24
+
+        if ("legendary" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("legendary")) {
+                $t = $toggles["legendary"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $legFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $legFile).LastWriteTime
+                        if ($age.TotalHours -ge $cacheExpiryHours) { $isStale = $true }
+                    } catch {}
+                }
+                $needLeg = (-not $fileExists) -or $isStale
+            }
+        }
+
+        if ("gogdl" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("gogdl")) {
+                $t = $toggles["gogdl"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $gogFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $gogFile).LastWriteTime
+                        if ($age.TotalHours -ge $cacheExpiryHours) { $isStale = $true }
+                    } catch {}
+                }
+                $needGog = (-not $fileExists) -or $isStale
+            }
+        }
+
+        if (-not $needLeg -and -not $needGog) { return }
+
+        if ($script:WmtLibraryCacheRunspace) {
+            try { $script:WmtLibraryCacheRunspace.Stop() } catch {}
+            try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+            $script:WmtLibraryCacheRunspace = $null
+        }
+
+        # Resolve all paths in the main scope — the background runspace does NOT
+        # have access to main-scope functions like Get-DataPath, Get-WmtLegendaryExePath,
+        # Get-WmtGogdlAuthConfigPath, or Get-WmtLegendaryLibrary.
+        $legendaryExe = Get-WmtLegendaryExePath
+        if ([string]::IsNullOrWhiteSpace($legendaryExe) -or -not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)) {
+            try {
+                $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                if ($cmd -and $cmd.Source) { $legendaryExe = [string]$cmd.Source }
+            } catch {}
+        }
+        $gogAuthPath = Get-WmtGogdlAuthConfigPath
+        if ([string]::IsNullOrWhiteSpace($gogAuthPath) -or -not (Test-Path -LiteralPath $gogAuthPath -PathType Leaf)) {
+            $heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+            if (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf) { $gogAuthPath = $heroicAuthPath }
+        }
+
+        Write-GuiLog "Building Legendary/GOGDL library caches in background..."
+        $ps = [PowerShell]::Create()
+
+        # Self-contained scriptBlock: all logic is inline, paths are passed as args.
+        # This runspace does NOT share the main script's functions or variables.
+        [void]$ps.AddScript({
+            param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile)
+
+            # --- Fetch Legendary library (inline, self-contained) ---
+            if ($DoLeg) {
+                try {
+                    Write-Output "LOG:Fetching Legendary library..."
+                    $result = New-Object System.Collections.Generic.List[object]
+
+                    if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
+                        $psi = New-Object System.Diagnostics.ProcessStartInfo
+                        $psi.FileName = $LegendaryExe
+                        $psi.Arguments = "list --json"
+                        $psi.RedirectStandardOutput = $true
+                        $psi.RedirectStandardError = $true
+                        $psi.UseShellExecute = $false
+                        $psi.CreateNoWindow = $true
+                        $proc = [System.Diagnostics.Process]::Start($psi)
+                        $stdout = $proc.StandardOutput.ReadToEnd()
+                        try { $proc.WaitForExit(30000) } catch {}
+                        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+
+                        $parsed = $false
+
+                        # Attempt 1: JSON parsing
+                        if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+                            try {
+                                $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                                if ($json) {
+                                    foreach ($game in @($json)) {
+                                        $title = [string]$game.app_title
+                                        if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                        $isInstalled = $false
+                                        try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                                        $installedVer = ""
+                                        $latestVer = [string]$game.app_version
+                                        if ($isInstalled) {
+                                            try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                                            if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                                        }
+                                        $result.Add([PSCustomObject]@{
+                                            Provider         = "legendary"
+                                            Title            = $title
+                                            Id               = [string]$game.app_name
+                                            Version          = $latestVer
+                                            InstalledVersion = $installedVer
+                                            IsInstalled      = $isInstalled
+                                            Source           = "legendary"
+                                            Kind             = "Library"
+                                        })
+                                    }
+                                    if ($result.Count -gt 0) { $parsed = $true }
+                                }
+                            }
+                            catch {
+                                # JSON parse failed — fall through to text parsing
+                            }
+                        }
+
+                        # Attempt 2: Text parsing fallback
+                        if (-not $parsed) {
+                            $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                            foreach ($match in $regex.Matches($stdout)) {
+                                $title = $match.Groups["title"].Value.Trim()
+                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                                $result.Add([PSCustomObject]@{
+                                    Provider = "legendary"
+                                    Title    = $title
+                                    Id       = $match.Groups["app"].Value.Trim()
+                                    Version  = $ver
+                                    Source   = "legendary"
+                                    Kind     = "Library"
+                                })
+                            }
+                        }
+                    }
+
+                    $arr = $result.ToArray()
+                    $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                    Write-Output "LOG:Legendary library cached: $($arr.Count) games."
+                }
+                catch {
+                    Write-Output "LOG:Legendary library cache failed: $($_.Exception.Message)"
+                }
+            }
+
+            # --- Fetch GOG library (inline, self-contained) ---
+            if ($DoGog) {
+                try {
+                    Write-Output "LOG:Fetching GOG library..."
+                    $result = New-Object System.Collections.Generic.List[object]
+
+                    if ($GogAuthPath -and (Test-Path -LiteralPath $GogAuthPath -PathType Leaf)) {
+                        $text = [System.IO.File]::ReadAllText($GogAuthPath).TrimStart([char]0xFEFF)
+                        $json = $text | ConvertFrom-Json -ErrorAction Stop
+                        $gogClientId = "46899977096215655"
+                        $creds = $null
+                        $clientProp = $json.PSObject.Properties[$gogClientId]
+                        if ($clientProp) { $creds = $clientProp.Value }
+                        elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+                        if ($creds -and -not [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+                            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                            $token = [string]$creds.access_token
+                            $headers = @{
+                                "Authorization" = "Bearer $token"
+                                "User-Agent"    = "Windows-Maintenance-Tool"
+                            }
+                            $page = 1
+                            $totalPages = 1
+                            while ($page -le $totalPages -and $page -le 50) {
+                                $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+                                $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                                if (-not $resp) { break }
+                                if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+                                if ($resp.products) {
+                                    foreach ($prod in @($resp.products)) {
+                                        $title = [string]$prod.title
+                                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                        $result.Add([PSCustomObject]@{
+                                            Provider = "gogdl"
+                                            Title    = $title
+                                            Id       = [string]$prod.id
+                                            Version  = [string]$prod.version
+                                            Source   = "gogdl"
+                                            Kind     = "Library"
+                                        })
+                                    }
+                                }
+                                $page++
+                            }
+                        }
+                    }
+
+                    $arr = $result.ToArray()
+                    $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $GogCacheFile -Force -Encoding UTF8
+                    Write-Output "LOG:GOG library cached: $($arr.Count) games."
+                }
+                catch {
+                    Write-Output "LOG:GOG library cache failed: $($_.Exception.Message)"
+                }
+            }
+        }).AddArgument($needLeg).AddArgument($needGog).AddArgument($legendaryExe).AddArgument($legFile).AddArgument($gogAuthPath).AddArgument($gogFile)
+
+        $script:WmtLibraryCacheRunspace = $ps
+        $script:WmtLibraryCacheAsyncResult = $ps.BeginInvoke()
+
+        # Polling timer to collect log output and dispose the runspace when done.
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds(2)
+        $timer.Add_Tick({
+            try { $timer.Stop() } catch {}
+            if (-not $script:WmtLibraryCacheAsyncResult) { return }
+            if (-not $script:WmtLibraryCacheAsyncResult.IsCompleted) {
+                try { $timer.Start() } catch {}
+                return
+            }
+            try {
+                $results = $script:WmtLibraryCacheRunspace.EndInvoke($script:WmtLibraryCacheAsyncResult)
+                foreach ($line in @($results)) {
+                    if ($line -is [string] -and $line.StartsWith("LOG:")) {
+                        Write-GuiLog ($line.Substring(4))
+                    }
+                }
+            } catch {}
+            try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+            $script:WmtLibraryCacheRunspace = $null
+            $script:WmtLibraryCacheAsyncResult = $null
+        }.GetNewClosure())
+        $timer.Start()
+    }
+    catch {
+        Write-GuiLog "Library cache builder failed to start: $($_.Exception.Message)"
+    }
+}
+
+# Kick off the background library cache builder shortly after the window opens.
+$bootCacheTimer = New-Object System.Windows.Threading.DispatcherTimer
+$bootCacheTimer.Interval = [TimeSpan]::FromSeconds(3)
+$bootCacheTimer.Add_Tick({
+    try { $bootCacheTimer.Stop() } catch {}
+    Start-WmtLibraryCacheBuilder
+}.GetNewClosure())
+$bootCacheTimer.Start()
+
 $onMainWindowClosing = {
     param($windowSender, $closeArgs)
 
@@ -32578,6 +33814,14 @@ $onMainWindowClosing = {
 $onMainWindowClosed = {
     try { Remove-WmtTrayIcon } catch {}
     try { Stop-WmtNotificationFallbackTimers } catch {}
+    try {
+        if ($script:WmtLibraryCacheRunspace) {
+            try { $script:WmtLibraryCacheRunspace.Stop() } catch {}
+            try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+            $script:WmtLibraryCacheRunspace = $null
+            $script:WmtLibraryCacheAsyncResult = $null
+        }
+    } catch {}
     try { Stop-WmtSingleInstanceActivationListener } catch {}
     try { if ($script:WmtSingleInstanceActivationEvent) { $script:WmtSingleInstanceActivationEvent.Dispose() } } catch {}
     try {
