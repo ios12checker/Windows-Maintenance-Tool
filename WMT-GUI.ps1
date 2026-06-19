@@ -4131,6 +4131,7 @@ function Save-WmtSettings {
             LoadCleanerML              = [bool]$Settings.LoadCleanerML
             EnabledProviders           = $Settings.EnabledProviders
             ProviderToggles            = if ($Settings.ProviderToggles) { $Settings.ProviderToggles } else { @{} }
+            WuCategoryToggles          = if ($Settings.WuCategoryToggles) { $Settings.WuCategoryToggles } else { @{} }
             CustomDnsServers           = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
             CustomDohTemplate          = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
             CustomDohEnabled           = [bool]$Settings.CustomDohEnabled
@@ -4166,6 +4167,7 @@ function Get-WmtSettings {
         LoadWinapp2                = $false 
         LoadCleanerML              = $false
         EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        WuCategoryToggles          = @{}
         ProviderToggles            = @{}
         CustomDnsServers           = @()
         CustomDohTemplate          = ""
@@ -4210,6 +4212,7 @@ function Get-WmtSettings {
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
             if ($json.PSObject.Properties["ProviderToggles"]) { $defaults.ProviderToggles = $json.ProviderToggles }
+            if ($json.PSObject.Properties["WuCategoryToggles"]) { $defaults.WuCategoryToggles = $json.WuCategoryToggles }
             if ($json.PSObject.Properties["CustomDnsServers"]) {
                 $customDnsServers = @()
                 foreach ($server in @($json.CustomDnsServers)) {
@@ -26689,6 +26692,55 @@ function Get-WmtProviderCatalogSearch {
     }
 }
 
+
+# ==========================================
+# Windows Update category toggle helpers
+# ==========================================
+
+function Get-WmtWuCategoryToggles {
+    param($Settings)
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+    $defaults = [ordered]@{
+        Updates  = $true
+        Optional = $true
+        Driver   = $true
+        Security = $true
+        Insider  = $false
+    }
+    try {
+        $raw = $null
+        if ($Settings -is [System.Collections.IDictionary]) {
+            if ($Settings.Contains("WuCategoryToggles")) { $raw = $Settings["WuCategoryToggles"] }
+        }
+        else {
+            try { if ($Settings.PSObject.Properties["WuCategoryToggles"]) { $raw = $Settings.WuCategoryToggles } } catch {}
+        }
+        if ($raw) {
+            foreach ($prop in @($raw.PSObject.Properties)) {
+                $k = ([string]$prop.Name).Trim()
+                if ($defaults.Contains($k)) { $defaults[$k] = [bool]$prop.Value }
+            }
+        }
+    }
+    catch {}
+    return $defaults
+}
+
+function Set-WmtWuCategoryToggles {
+    param($Toggles)
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["WuCategoryToggles"] = $Toggles
+    }
+    elseif ($settings.PSObject.Properties["WuCategoryToggles"]) {
+        $settings.WuCategoryToggles = $Toggles
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "WuCategoryToggles" -Value $Toggles -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
 function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
@@ -26752,7 +26804,22 @@ function Show-ProviderManager {
         # Winget gets a 5th toggle: "Include unknown" (--include-unknown flag).
         $includeUnknownToggle = ""
         if ($key -eq "winget") {
-            $includeUnknownToggle = '<CheckBox Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,14,0" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/>'
+            $includeUnknownToggle = '<ToggleButton Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,8,0" Padding="10,3" MinWidth="80" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/>'
+        }
+
+        # Windows Update gets an extra row of category toggle buttons.
+        $wuCategorySection = ""
+        if ($key -eq "windowsupdate") {
+            $wuCategorySection = @"
+                    <StackPanel Orientation="Horizontal" Margin="30,6,0,0">
+                        <TextBlock Text="Categories:" FontWeight="SemiBold" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                        <ToggleButton Name="btnWuCatUpdates" Content="Updates" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Regular Windows updates (important and recommended)"/>
+                        <ToggleButton Name="btnWuCatOptional" Content="Optional" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Optional updates that are not automatically installed"/>
+                        <ToggleButton Name="btnWuCatDriver" Content="Driver" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Driver updates from Windows Update"/>
+                        <ToggleButton Name="btnWuCatSecurity" Content="Security" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Security updates (Critical, Important, Moderate severity)"/>
+                        <ToggleButton Name="btnWuCatInsider" Content="Insider" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Insider Preview, beta, dev channel, and canary builds"/>
+                    </StackPanel>
+"@
         }
 
         $row = @"
@@ -26766,12 +26833,13 @@ function Show-ProviderManager {
                         <Button Name="$($Provider.Button)" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
                     </Grid>
                     <StackPanel Orientation="Horizontal" Margin="30,6,0,0">
-                        <CheckBox Name="chk${key}Search"     Content="Search"     Margin="0,0,14,0" IsChecked="$searchIsChecked"    IsEnabled="$searchEnabled" ToolTip="$searchToolTip"/>
-                        <CheckBox Name="chk${key}Scan"       Content="Scan"       Margin="0,0,14,0" IsChecked="$scanIsChecked"       ToolTip="Include this provider in update scans. Disabling also disables Headless and Auto-update for this provider."/>
-                        <CheckBox Name="chk${key}Headless"   Content="Headless"   Margin="0,0,14,0" IsChecked="$headlessIsChecked"   ToolTip="Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."/>
-                        <CheckBox Name="chk${key}AutoUpdate" Content="Auto-update" Margin="0,0,14,0" IsChecked="$autoIsChecked"       ToolTip="After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."/>
+                        <ToggleButton Name="chk${key}Search"     Content="Search"     Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$searchIsChecked"    IsEnabled="$searchEnabled" ToolTip="$searchToolTip"/>
+                        <ToggleButton Name="chk${key}Scan"       Content="Scan"       Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$scanIsChecked"       ToolTip="Include this provider in update scans. Disabling also disables Headless and Auto-update for this provider."/>
+                        <ToggleButton Name="chk${key}Headless"   Content="Headless"   Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$headlessIsChecked"   ToolTip="Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."/>
+                        <ToggleButton Name="chk${key}AutoUpdate" Content="Auto-update" Margin="0,0,8,0" Padding="10,3" MinWidth="70" IsChecked="$autoIsChecked"       ToolTip="After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."/>
                         $includeUnknownToggle
                     </StackPanel>
+                    $wuCategorySection
                 </StackPanel>
             </Border>
 "@
@@ -26837,8 +26905,10 @@ function Show-ProviderManager {
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         
-        <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,8"/>
-        <TextBlock Text="Select which package managers to scan, and configure per-provider Search / Scan / Headless / Auto-update options. Search uses the main Updates search box." Foreground="{DynamicResource TextSecondary}" Margin="0,30,0,0" Grid.Row="0" TextWrapping="Wrap"/>
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBlock Text="Select which package managers to scan, and configure per-provider Search / Scan / Headless / Auto-update options. Search uses the main Updates search box." Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
 
         <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
@@ -26856,6 +26926,9 @@ function Show-ProviderManager {
                         <ComboBoxItem Content="Every 1 hour" Tag="60" Foreground="#111827" Background="#FFFFFF"/>
                         <ComboBoxItem Content="Every 2 hours" Tag="120" Foreground="#111827" Background="#FFFFFF"/>
                         <ComboBoxItem Content="Every 4 hours" Tag="240" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 8 hours" Tag="480" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 12 hours" Tag="720" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every day" Tag="1440" Foreground="#111827" Background="#FFFFFF"/>
                     </ComboBox>
                     <CheckBox Name="chkUpdateNotifications" Grid.Row="0" Grid.Column="2" Content="Native notifications" Margin="12,0,0,0"
                               ToolTip="Show a Windows notification when an automatic background scan finds updates or fails."/>
@@ -26894,6 +26967,11 @@ function Show-ProviderManager {
     $chkUpdateSilentInstall = Get-WinCtrl "chkUpdateSilentInstall"
     $chkUpdateAutoInstall = Get-WinCtrl "chkUpdateAutoInstall"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
+    $btnWuCatUpdates = Get-WinCtrl "btnWuCatUpdates"
+    $btnWuCatOptional = Get-WinCtrl "btnWuCatOptional"
+    $btnWuCatDriver = Get-WinCtrl "btnWuCatDriver"
+    $btnWuCatSecurity = Get-WinCtrl "btnWuCatSecurity"
+    $btnWuCatInsider = Get-WinCtrl "btnWuCatInsider"
 
     # Map provider key -> checkbox control objects (filled in below per provider).
     $providerControls = @{}
@@ -27974,6 +28052,14 @@ exit `$exitCode
     if ($chkUpdateAutoInstall) { $chkUpdateAutoInstall.IsChecked = (Get-WmtUpdateAutoInstallEnabled -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
 
+    # Load Windows Update category toggle states.
+    $wuToggles = Get-WmtWuCategoryToggles -Settings $settings
+    if ($btnWuCatUpdates) { $btnWuCatUpdates.IsChecked = [bool]$wuToggles.Updates }
+    if ($btnWuCatOptional) { $btnWuCatOptional.IsChecked = [bool]$wuToggles.Optional }
+    if ($btnWuCatDriver) { $btnWuCatDriver.IsChecked = [bool]$wuToggles.Driver }
+    if ($btnWuCatSecurity) { $btnWuCatSecurity.IsChecked = [bool]$wuToggles.Security }
+    if ($btnWuCatInsider) { $btnWuCatInsider.IsChecked = [bool]$wuToggles.Insider }
+
     # Reflect each provider's main checkbox state from $enabled.
     foreach ($provider in $providerDefinitions) {
         $key = [string]$provider.Key
@@ -28023,73 +28109,136 @@ exit `$exitCode
         $mainChecked = [bool]$controls.Main.IsChecked
         $scanChecked = [bool]$controls.Scan.IsChecked
 
-        # Check if the provider is installed. If not, disable the main checkbox
-        # and all sub-toggles so the user can't configure a provider that
-        # can't be used. The Install button (in $updateProviderStatuses)
-        # remains enabled so the user can install the provider.
+        # Get provider display name for tooltip messages.
+        $provider = @($providerDefinitions | Where-Object { $_.Key -eq $ProviderKey } | Select-Object -First 1)
+        $dispName = if ($provider) { [string]$provider.DisplayName } else { $ProviderKey }
+
+        # Check if the provider is installed.
         $isInstalled = $true
         if ($providerInstallState.ContainsKey($ProviderKey)) {
             $isInstalled = [bool]$providerInstallState[$ProviderKey]
         }
-        # Winget is always "installed" (locked on).
         if ($ProviderKey -eq "winget") { $isInstalled = $true }
+
+        # Base tooltips (shown when enabled).
+        $mainTip = "Enable or disable $dispName for scanning and updates."
+        $searchTip = "Allow searching this provider's catalog or owned library from the WMT search box."
+        $scanTip = "Include this provider in update scans. Disabling also disables Headless and Auto-update."
+        $headlessTip = "Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."
+        $autoTip = "After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."
 
         if (-not $isInstalled) {
             # Provider not installed: disable main + all toggles.
-            if ($controls.Main) { $controls.Main.IsEnabled = $false }
-            if ($controls.Search) { $controls.Search.IsEnabled = $false }
-            if ($controls.Scan) { $controls.Scan.IsEnabled = $false }
-            if ($controls.Headless) { $controls.Headless.IsEnabled = $false }
-            if ($controls.AutoUpdate) { $controls.AutoUpdate.IsEnabled = $false }
+            $notInstalledMsg = "$dispName is not installed. Click the Install button to set it up."
+            if ($controls.Main) {
+                $controls.Main.IsEnabled = $false
+                $controls.Main.ToolTip = $notInstalledMsg
+            }
+            if ($controls.Search) { $controls.Search.IsEnabled = $false; $controls.Search.ToolTip = $notInstalledMsg }
+            if ($controls.Scan) { $controls.Scan.IsEnabled = $false; $controls.Scan.ToolTip = $notInstalledMsg }
+            if ($controls.Headless) { $controls.Headless.IsEnabled = $false; $controls.Headless.ToolTip = $notInstalledMsg }
+            if ($controls.AutoUpdate) { $controls.AutoUpdate.IsEnabled = $false; $controls.AutoUpdate.ToolTip = $notInstalledMsg }
 
             # Slash out the name.
             $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
             if ($nameCtrl) {
                 $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
                 $nameCtrl.Opacity = 0.35
+                $nameCtrl.ToolTip = $notInstalledMsg
             }
             return
         }
 
         # Provider IS installed: apply normal gray-out rules.
         if ($controls.Main) {
-            $controls.Main.IsEnabled = (-not ($ProviderKey -eq "winget"))
+            if ($ProviderKey -eq "winget") {
+                $controls.Main.IsEnabled = $false
+                $controls.Main.ToolTip = "Winget is the core package manager and is always enabled."
+            }
+            else {
+                $controls.Main.IsEnabled = $true
+                $controls.Main.ToolTip = $mainTip
+            }
         }
 
+        # Search toggle
         if ($controls.Search) {
             if (-not $searchSupported) {
                 $controls.Search.IsEnabled = $false
                 $controls.Search.IsChecked = $false
+                $controls.Search.ToolTip = "$dispName does not support catalog or library search."
+            }
+            elseif (-not $mainChecked) {
+                $controls.Search.IsEnabled = $false
+                $controls.Search.ToolTip = "Enable $dispName (check the box on the left) to use search."
             }
             else {
-                $controls.Search.IsEnabled = $mainChecked
+                $controls.Search.IsEnabled = $true
+                $controls.Search.ToolTip = $searchTip
             }
         }
+
+        # Scan toggle
         if ($controls.Scan) {
-            $controls.Scan.IsEnabled = $mainChecked
-        }
-        # Headless + AutoUpdate require Scan to be on (and main to be on).
-        if ($controls.Headless) {
-            $controls.Headless.IsEnabled = ($mainChecked -and $scanChecked)
-        }
-        if ($controls.AutoUpdate) {
-            $controls.AutoUpdate.IsEnabled = ($mainChecked -and $scanChecked)
+            if (-not $mainChecked) {
+                $controls.Scan.IsEnabled = $false
+                $controls.Scan.ToolTip = "Enable $dispName (check the box on the left) to use scanning."
+            }
+            else {
+                $controls.Scan.IsEnabled = $true
+                $controls.Scan.ToolTip = $scanTip
+            }
         }
 
-        # Visually "slash out" the provider name when the provider is disabled
-        # (unchecked) so the disabled state is immediately obvious.
+        # Headless toggle
+        if ($controls.Headless) {
+            if (-not $mainChecked) {
+                $controls.Headless.IsEnabled = $false
+                $controls.Headless.ToolTip = "Enable $dispName and Scan to use headless mode."
+            }
+            elseif (-not $scanChecked) {
+                $controls.Headless.IsEnabled = $false
+                $controls.Headless.ToolTip = "Enable Scan for $dispName to use headless mode."
+            }
+            else {
+                $controls.Headless.IsEnabled = $true
+                $controls.Headless.ToolTip = $headlessTip
+            }
+        }
+
+        # AutoUpdate toggle
+        if ($controls.AutoUpdate) {
+            if (-not $mainChecked) {
+                $controls.AutoUpdate.IsEnabled = $false
+                $controls.AutoUpdate.ToolTip = "Enable $dispName and Scan to use auto-update."
+            }
+            elseif (-not $scanChecked) {
+                $controls.AutoUpdate.IsEnabled = $false
+                $controls.AutoUpdate.ToolTip = "Enable Scan for $dispName to use auto-update."
+            }
+            else {
+                $controls.AutoUpdate.IsEnabled = $true
+                $controls.AutoUpdate.ToolTip = $autoTip
+            }
+        }
+
+        # Visually "slash out" the provider name when the provider is disabled.
         $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
         if ($nameCtrl) {
             if ($mainChecked) {
                 $nameCtrl.TextDecorations = $null
                 $nameCtrl.Opacity = 1.0
+                $nameCtrl.ToolTip = $dispName
             }
             else {
                 $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
                 $nameCtrl.Opacity = 0.45
+                $nameCtrl.ToolTip = "$dispName is disabled. Check the box on the left to enable it."
             }
         }
     }.GetNewClosure()
+
+    # Apply initial toggle state    }.GetNewClosure()
 
     # Apply initial toggle state for every provider.
     foreach ($provider in $providerDefinitions) {
@@ -28147,6 +28296,24 @@ exit `$exitCode
             }
             else {
                 $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
+            }
+
+            # Save Windows Update category toggles.
+            $wuTogglesToSave = [ordered]@{
+                Updates  = if ($btnWuCatUpdates) { [bool]$btnWuCatUpdates.IsChecked }  else { $true }
+                Optional = if ($btnWuCatOptional) { [bool]$btnWuCatOptional.IsChecked } else { $true }
+                Driver   = if ($btnWuCatDriver) { [bool]$btnWuCatDriver.IsChecked }   else { $true }
+                Security = if ($btnWuCatSecurity) { [bool]$btnWuCatSecurity.IsChecked } else { $true }
+                Insider  = if ($btnWuCatInsider) { [bool]$btnWuCatInsider.IsChecked }  else { $false }
+            }
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["WuCategoryToggles"] = $wuTogglesToSave
+            }
+            elseif ($current.PSObject.Properties["WuCategoryToggles"]) {
+                $current.WuCategoryToggles = $wuTogglesToSave
+            }
+            else {
+                $current | Add-Member -MemberType NoteProperty -Name "WuCategoryToggles" -Value $wuTogglesToSave -Force
             }
 
             # Build the per-provider toggles object to save.
@@ -29339,6 +29506,22 @@ $btnWingetScan.Add_Click({
                             if (-not [string]::IsNullOrWhiteSpace($kbText) -and $displayName -notmatch [regex]::Escape($kbText)) {
                                 $displayName = "$displayName ($kbText)"
                             }
+
+                            # Apply WU category filter: skip updates whose
+                            # categories are disabled in provider settings.
+                            $wuToggles = Get-WmtWuCategoryToggles
+                            $isInsider = ($title -match '(?i)insider|preview|beta|dev channel|canary')
+                            $isDriver = ($categoryText -match '(?i)driver')
+                            $isSecurity = (-not [string]::IsNullOrWhiteSpace($severity))
+                            $showThisUpdate = $false
+                            if (-not $isOptional -and -not $isDriver -and -not $isSecurity -and -not $isInsider) {
+                                if ($wuToggles.Updates) { $showThisUpdate = $true }
+                            }
+                            if ($isOptional -and $wuToggles.Optional) { $showThisUpdate = $true }
+                            if ($isDriver -and $wuToggles.Driver) { $showThisUpdate = $true }
+                            if ($isSecurity -and $wuToggles.Security) { $showThisUpdate = $true }
+                            if ($isInsider -and $wuToggles.Insider) { $showThisUpdate = $true }
+                            if (-not $showThisUpdate) { continue }
 
                             $visibleCount++
                             [PSCustomObject]@{
@@ -32807,127 +32990,112 @@ if ($btnToggleTheme) {
 }
 
 # --- Start with Windows ---
-# Uses the HKCU Run key to launch WMT on Windows startup.
-# Works in both .exe mode (direct launch) and .ps1 mode (via powershell.exe -File).
+# Uses Task Scheduler to launch WMT at logon with highest privileges,
+# which skips the UAC prompt. This works in both .exe and .ps1 mode.
+
+$script:WmtStartupTaskName = "WindowsMaintenanceTool"
 
 function Get-WmtStartupCommand {
-    # Build the correct registry value for launching WMT on startup.
-    # - .exe mode: just the exe path (quoted if spaces)
-    # - .ps1 mode: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "path.ps1"
+    # Build the command parts for Task Scheduler.
+    # Returns a hashtable: @{ FilePath; Arguments }
     if ($script:WmtIsCompiledExe) {
         $exePath = $script:WmtProcessPath
-        if ([string]::IsNullOrWhiteSpace($exePath) -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) { return "" }
-        if ($exePath -match "\s") { $exePath = "`"$exePath`"" }
-        return $exePath
+        if ([string]::IsNullOrWhiteSpace($exePath) -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) { return $null }
+        return @{ FilePath = $exePath; Arguments = "" }
     }
     else {
         $scriptPath = $script:WmtScriptPath
-        if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return "" }
-        # Find powershell.exe.
+        if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return $null }
         $psExe = "powershell.exe"
         try {
             $cmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
             if ($cmd -and $cmd.Source) { $psExe = $cmd.Source }
         }
         catch {}
-        # Build: powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\path\WMT-GUI.ps1"
-        return "$psExe -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+        return @{ FilePath = $psExe; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" }
     }
 }
 
 function Test-WmtStartWithWindows {
     try {
-        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        $props = Get-ItemProperty -LiteralPath $runKey -ErrorAction SilentlyContinue
-        if ($props -and $props.PSObject.Properties["WindowsMaintenanceTool"]) {
-            return $true
-        }
+        $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
+        if ($task -and $task.State -ne "Disabled") { return $true }
     }
     catch {}
     return $false
 }
 
 function Test-WmtStartupEntryValid {
-    # Check if the existing startup entry points to a file that still exists.
-    # Returns $true if the entry is valid, $false if it's stale (file moved/deleted).
+    # Check if the existing scheduled task points to a file that still exists.
     try {
-        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        $props = Get-ItemProperty -LiteralPath $runKey -ErrorAction SilentlyContinue
-        if (-not $props -or -not $props.PSObject.Properties["WindowsMaintenanceTool"]) { return $false }
-        $savedValue = [string]$props.WindowsMaintenanceTool
-        if ([string]::IsNullOrWhiteSpace($savedValue)) { return $false }
-
-        # Extract the file path from the saved command.
-        # It could be:
-        #   "C:\path\WMT.exe"                          (exe mode)
-        #   C:\path\WMT.exe                            (exe mode, no spaces)
-        #   powershell.exe -NoProfile ... -File "C:\path\WMT-GUI.ps1"  (ps1 mode)
-        $filePath = ""
-        if ($savedValue -match '-File\s+"([^"]+)"') {
-            # PS1 mode
-            $filePath = $matches[1]
+        $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
+        if (-not $task) { return $false }
+        foreach ($action in @($task.Actions)) {
+            $filePath = [string]$action.Execute
+            if (-not [string]::IsNullOrWhiteSpace($filePath) -and (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                return $true
+            }
         }
-        elseif ($savedValue -match '^"([^"]+)"') {
-            # Exe mode, quoted
-            $filePath = $matches[1]
-        }
-        elseif ($savedValue -match '^(\S+\.exe)') {
-            # Exe mode, unquoted
-            $filePath = $matches[1]
-        }
-
-        if ([string]::IsNullOrWhiteSpace($filePath)) { return $false }
-        return (Test-Path -LiteralPath $filePath -PathType Leaf)
+        return $false
     }
     catch {}
     return $false
 }
 
 function Repair-WmtStartupEntry {
-    # If the startup entry exists but points to a moved/deleted file,
+    # If the scheduled task exists but points to a moved/deleted file,
     # update it to the current WMT path. If the current path is also
-    # invalid, remove the entry entirely.
+    # invalid, remove the task entirely.
     try {
         if (-not (Test-WmtStartWithWindows)) { return }
-
         $isValid = Test-WmtStartupEntryValid
-        if ($isValid) { return }  # Entry is fine, nothing to do.
+        if ($isValid) { return }
 
         # Entry is stale — try to repair with the current path.
-        $newCommand = Get-WmtStartupCommand
-        if ([string]::IsNullOrWhiteSpace($newCommand)) {
-            # Can't build a valid command — remove the stale entry.
-            $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-            Remove-ItemProperty -LiteralPath $runKey -Name "WindowsMaintenanceTool" -ErrorAction SilentlyContinue
-            Write-GuiLog "Start with Windows: removed stale entry (file was moved or deleted)."
+        $cmdParts = Get-WmtStartupCommand
+        if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
+            # Can't build a valid command — remove the stale task.
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-GuiLog "Start with Windows: removed stale task (file was moved or deleted)."
             return
         }
 
-        # Update the entry with the current path.
-        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
-        Set-ItemProperty -LiteralPath $runKey -Name "WindowsMaintenanceTool" -Value $newCommand -Force
-        Write-GuiLog "Start with Windows: updated entry to current path."
+        # Recreate the task with the current path.
+        Set-WmtStartWithWindows -Enabled $true
+        Write-GuiLog "Start with Windows: updated task to current path."
     }
     catch {
-        Write-GuiLog "Failed to repair startup entry: $($_.Exception.Message)"
+        Write-GuiLog "Failed to repair startup task: $($_.Exception.Message)"
     }
 }
 
 function Set-WmtStartWithWindows {
     param([bool]$Enabled)
     try {
-        $runKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Run"
         if ($Enabled) {
-            $command = Get-WmtStartupCommand
-            if ([string]::IsNullOrWhiteSpace($command)) {
+            $cmdParts = Get-WmtStartupCommand
+            if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
                 Write-GuiLog "Start with Windows: could not determine WMT launch path."
                 return
             }
-            Set-ItemProperty -LiteralPath $runKey -Name "WindowsMaintenanceTool" -Value $command -Force
-            Write-GuiLog "Start with Windows: enabled."
+
+            # Remove existing task if it exists.
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+            # Build the scheduled task:
+            # - Trigger: At logon
+            # - Action: Run WMT (exe or powershell.exe -File script.ps1)
+            # - Settings: Run with highest privileges (skips UAC)
+            $action = New-ScheduledTaskAction -FilePath $cmdParts.FilePath -Argument $cmdParts.Arguments
+            $trigger = New-ScheduledTaskTrigger -AtLogOn
+            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+            Register-ScheduledTask -TaskName $script:WmtStartupTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+            Write-GuiLog "Start with Windows: enabled (Task Scheduler, no UAC prompt)."
         }
         else {
-            Remove-ItemProperty -LiteralPath $runKey -Name "WindowsMaintenanceTool" -ErrorAction SilentlyContinue
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
             Write-GuiLog "Start with Windows: disabled."
         }
     }
