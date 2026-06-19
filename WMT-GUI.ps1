@@ -25779,7 +25779,7 @@ function Get-WmtProviderCapabilities {
         winget         = @{ Search = $true;  Library = $false }
         msstore        = @{ Search = $true;  Library = $false }
         windowsupdate  = @{ Search = $false; Library = $false }
-        pip            = @{ Search = $false; Library = $false }
+        pip            = @{ Search = $true;  Library = $false }
         npm            = @{ Search = $true;  Library = $false }
         pnpm           = @{ Search = $true;  Library = $false }
         chocolatey     = @{ Search = $true;  Library = $false }
@@ -30679,10 +30679,11 @@ $script:SearchTimer.Add_Tick({
             $lblWingetStatus.Visibility = "Visible"
             $btnWingetFind.IsEnabled = $true
             $txtWingetSearch.IsEnabled = $true
-            if ($lstWinget.Items.Count -eq 0) {
-                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "Search timed out"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false))
+            # Don't add a placeholder row — the status label already shows
+            # "Search timed out" above the list.
+            if ($lstWinget.Items.Count -gt 0) {
+                Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             }
-            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
 
             $script:AsyncSearch = $null
             $script:AsyncPowerShell = $null
@@ -30720,11 +30721,15 @@ $script:SearchTimer.Add_Tick({
             $txtWingetSearch.IsEnabled = $true
             $lblWingetStatus.Text = "Ready"
         
-            if ($lstWinget.Items.Count -eq 0) { 
-                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "No results found"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false)) 
+            if ($lstWinget.Items.Count -eq 0) {
+                $lblWingetStatus.Text = "No results found"
+                $lblWingetStatus.Visibility = "Visible"
+                Write-GuiLog "Search Complete. No results found."
             }
-            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
-            Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+            else {
+                Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
+                Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+            }
             $script:WmtPackageSearchActive = $true
         
             $script:AsyncSearch = $null
@@ -30796,6 +30801,50 @@ $btnWingetFind.Add_Click({
         $dataPath = Get-DataPath
         $legendaryCacheFile = Join-Path $dataPath "legendary_library.json"
         $gogCacheFile = Join-Path $dataPath "gog_library.json"
+
+        # Kick off PyPI index cache refresh if pip is search-enabled and the
+        # cache is missing or stale. The search runspace reads from the cache.
+        # PyPI Simple API: https://pypi.org/simple/ with Accept header
+        # application/vnd.pypi.simple.v1+json returns a JSON index of all
+        # package names. We cache this locally and fuzzy-search it.
+        $pypiIndexFile = Join-Path $dataPath "pypi_index.json"
+        if ("pip" -in $enabled) {
+            $needPypiIndex = $false
+            $fileExists = (Test-Path -LiteralPath $pypiIndexFile -PathType Leaf)
+            $isStale = $false
+            if ($fileExists) {
+                try {
+                    $age = (Get-Date) - (Get-Item -LiteralPath $pypiIndexFile).LastWriteTime
+                    if ($age.TotalHours -ge 24) { $isStale = $true }
+                } catch {}
+            }
+            $needPypiIndex = (-not $fileExists) -or $isStale
+            if ($needPypiIndex) {
+                Write-GuiLog "Fetching PyPI package index in background..."
+                $pypiPs = [PowerShell]::Create()
+                [void]$pypiPs.AddScript({
+                    param($CacheFile)
+                    try {
+                        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                        $headers = @{
+                            "Accept"     = "application/vnd.pypi.simple.v1+json"
+                            "User-Agent" = "Windows-Maintenance-Tool"
+                        }
+                        $resp = Invoke-RestMethod -Uri "https://pypi.org/simple/" -Headers $headers -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                        if ($resp -and $resp.projects) {
+                            # Extract just the package names to keep the cache small.
+                            $names = @($resp.projects | ForEach-Object { [string]$_.name })
+                            $names | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $CacheFile -Force -Encoding UTF8
+                            Write-Output "LOG:PyPI index cached: $($names.Count) packages."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:PyPI index fetch failed: $($_.Exception.Message)"
+                    }
+                }).AddArgument($pypiIndexFile)
+                try { [void]$pypiPs.BeginInvoke() } catch { try { $pypiPs.Dispose() } catch {} }
+            }
+        }
 
         # Kick off background library cache refresh for Legendary/GOGDL if
         # the cache files are missing. This runs in a separate runspace so
@@ -30922,7 +30971,7 @@ $btnWingetFind.Add_Click({
         # 3. DEFINE THE WORKER THREAD SCRIPT
         # This contains the EXACT logic that worked for you before.
         $scriptBlock = {
-            param($Query, $Enabled, $LegendaryCacheFile, $GogCacheFile)
+            param($Query, $Enabled, $LegendaryCacheFile, $GogCacheFile, $PypiIndexFile)
         
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             function Log($msg) { Write-Output "LOG:$msg" }
@@ -31153,6 +31202,34 @@ $btnWingetFind.Add_Click({
                 catch { Log "Composer skipped." }
             }
 
+            # --- M. PIP (PyPI via cached simple index) ---
+            if ("pip" -in $Enabled) {
+                Log "Searching PyPI (cached index)..."
+                try {
+                    if ($PypiIndexFile -and (Test-Path -LiteralPath $PypiIndexFile -PathType Leaf)) {
+                        $indexText = [System.IO.File]::ReadAllText($PypiIndexFile)
+                        $index = $indexText | ConvertFrom-Json -ErrorAction Stop
+                        if ($index) {
+                            $needle = $Query.ToLowerInvariant()
+                            $count = 0
+                            foreach ($pkgName in @($index)) {
+                                $name = [string]$pkgName
+                                if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                                if ($name.ToLowerInvariant().Contains($needle)) {
+                                    [PSCustomObject]@{ Source = "pip"; Name = $name; Id = $name; Version = "-"; Available = "-" }
+                                    $count++
+                                    if ($count -ge 100) { break }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "PyPI index cache not found. It is fetched in the background on first search."
+                    }
+                }
+                catch { Log "Pip search skipped: $($_.Exception.Message)" }
+            }
+
             # --- G. SCOOP ---
             if ("scoop" -in $Enabled) {
                 Log "Searching Scoop..."
@@ -31284,7 +31361,7 @@ $btnWingetFind.Add_Click({
         }
 
         # 4. EXECUTE THREAD (The Magic Part)
-        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled).AddArgument($legendaryCacheFile).AddArgument($gogCacheFile)
+        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled).AddArgument($legendaryCacheFile).AddArgument($gogCacheFile).AddArgument($pypiIndexFile)
         $script:AsyncSearch = $script:AsyncPowerShell.BeginInvoke()
         $script:WmtPackageSearchStartedAt = Get-Date
         $script:SearchTimer.Start()
@@ -33509,7 +33586,37 @@ function Start-WmtLibraryCacheBuilder {
             }
         }
 
-        if (-not $needLeg -and -not $needGog) { return }
+        # Also check PyPI index cache if pip is enabled + search on.
+        $pypiFile = Join-Path $dataPath "pypi_index.json"
+        $needPypi = $false
+        if ("pip" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("pip")) {
+                $t = $toggles["pip"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $pypiFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $pypiFile).LastWriteTime
+                        if ($age.TotalHours -ge 24) { $isStale = $true }
+                    } catch {}
+                }
+                $needPypi = (-not $fileExists) -or $isStale
+            }
+        }
+
+        if (-not $needLeg -and -not $needGog -and -not $needPypi) { return }
 
         if ($script:WmtLibraryCacheRunspace) {
             try { $script:WmtLibraryCacheRunspace.Stop() } catch {}
@@ -33539,7 +33646,7 @@ function Start-WmtLibraryCacheBuilder {
         # Self-contained scriptBlock: all logic is inline, paths are passed as args.
         # This runspace does NOT share the main script's functions or variables.
         [void]$ps.AddScript({
-            param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile)
+            param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile, $DoPypi, $PypiCacheFile)
 
             # --- Fetch Legendary library (inline, self-contained) ---
             if ($DoLeg) {
@@ -33681,7 +33788,28 @@ function Start-WmtLibraryCacheBuilder {
                     Write-Output "LOG:GOG library cache failed: $($_.Exception.Message)"
                 }
             }
-        }).AddArgument($needLeg).AddArgument($needGog).AddArgument($legendaryExe).AddArgument($legFile).AddArgument($gogAuthPath).AddArgument($gogFile)
+
+            # --- Fetch PyPI index (inline, self-contained) ---
+            if ($DoPypi) {
+                try {
+                    Write-Output "LOG:Fetching PyPI package index..."
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                    $headers = @{
+                        "Accept"     = "application/vnd.pypi.simple.v1+json"
+                        "User-Agent" = "Windows-Maintenance-Tool"
+                    }
+                    $resp = Invoke-RestMethod -Uri "https://pypi.org/simple/" -Headers $headers -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                    if ($resp -and $resp.projects) {
+                        $names = @($resp.projects | ForEach-Object { [string]$_.name })
+                        $names | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $PypiCacheFile -Force -Encoding UTF8
+                        Write-Output "LOG:PyPI index cached: $($names.Count) packages."
+                    }
+                }
+                catch {
+                    Write-Output "LOG:PyPI index fetch failed: $($_.Exception.Message)"
+                }
+            }
+        }).AddArgument($needLeg).AddArgument($needGog).AddArgument($legendaryExe).AddArgument($legFile).AddArgument($gogAuthPath).AddArgument($gogFile).AddArgument($needPypi).AddArgument($pypiFile)
 
         $script:WmtLibraryCacheRunspace = $ps
         $script:WmtLibraryCacheAsyncResult = $ps.BeginInvoke()
