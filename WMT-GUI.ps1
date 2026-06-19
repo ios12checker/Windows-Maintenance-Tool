@@ -425,6 +425,7 @@ function Update-TweakButtonStates {
 
         $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
         $hagsOn = ($h -ne 2); Update-WmtTweakToggle $btnToggleHags $hagsOn "Disable HAGS" "Enable HAGS"
+        Update-WmtTweakToggle $btnMyDeviceHagsToggle $hagsOn "Disable HAGS" "Enable HAGS"
 
         $sm = Get-Service "SysMain" -EA Ignore
         if ($sm) {
@@ -436,6 +437,7 @@ function Update-TweakButtonStates {
         if ($null -ne $hibernate) {
             $hibernateEnabled = ([int]$hibernate -ne 0)
             $hibernateOff = (-not $hibernateEnabled); Update-WmtTweakToggle $btnToggleHibernate $hibernateOff "Enable Hibernation" "Disable Hibernation"
+            Update-WmtTweakToggle $btnMyDeviceHibernateToggle $hibernateOff "Enable Hibernation" "Disable Hibernation"
         }
 
         if (Get-Command Get-MMAgent -ErrorAction Ignore) {
@@ -443,6 +445,7 @@ function Update-TweakButtonStates {
             if ($mma -and $null -ne $mma.MemoryCompression) {
                 $memoryCompressionEnabled = [bool]$mma.MemoryCompression
                 Update-WmtTweakToggle $btnToggleMemCompress $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
+                Update-WmtTweakToggle $btnMyDeviceMemCompressToggle $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
             }
         }
 
@@ -21879,8 +21882,12 @@ $btnQuickFix = Get-Ctrl "btnQuickFix"
 $btnPerfServicesManual = Get-Ctrl "btnPerfServicesManual"
 $btnPerfServicesRevert = Get-Ctrl "btnPerfServicesRevert"
 $btnToggleHibernate = Get-Ctrl "btnToggleHibernate"
+$btnMyDeviceHibernateToggle = Get-Ctrl "btnMyDeviceHibernateToggle"
 $btnToggleSuperfetch = Get-Ctrl "btnToggleSuperfetch"
 $btnToggleMemCompress = Get-Ctrl "btnToggleMemCompress"
+$btnMyDeviceMemCompressToggle = Get-Ctrl "btnMyDeviceMemCompressToggle"
+$btnToggleHags = Get-Ctrl "btnToggleHags"
+$btnMyDeviceHagsToggle = Get-Ctrl "btnMyDeviceHagsToggle"
 $btnPerfUltimatePower = Get-Ctrl "btnPerfUltimatePower"
 
 $btnAppxLoad = Get-Ctrl "btnAppxLoad"
