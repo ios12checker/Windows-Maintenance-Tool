@@ -378,8 +378,9 @@ function New-WmtVirtualRows {
 function Update-WmtTweakToggle {
     param($Button, [bool]$IsOn, [string]$OnLabel, [string]$OffLabel, [string]$BaseToolTip = "")
     if (-not $Button) { return }
-    $colorHint = if ($IsOn) { "(Blue = active/applied. Click to undo.)" } else { "(Gray = inactive/default. Click to apply.)" }
-    $fullToolTip = if ([string]::IsNullOrWhiteSpace($BaseToolTip)) { $colorHint } else { "$BaseToolTip`n`n$colorHint" }
+    $stateDesc = if ($IsOn) { "Current state: $OnLabel (Blue = active/applied)" } else { "Current state: $OffLabel (Gray = inactive/default)" }
+    $actionDesc = if ($IsOn) { "Click to switch to: $OffLabel" } else { "Click to switch to: $OnLabel" }
+    $fullToolTip = if ([string]::IsNullOrWhiteSpace($BaseToolTip)) { "$stateDesc`n$actionDesc" } else { "$BaseToolTip`n`n$stateDesc`n$actionDesc" }
     if ($IsOn) {
         $Button.Content = $OnLabel
         $Button.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
@@ -20968,7 +20969,7 @@ function Set-WmtPowerSettingIndex {
                                                         <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
                                                         <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                             <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
-                                                            <Button Name="btnMyDeviceHibernateToggle" Content="Hibernate Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle hibernation on/off"/>
+                                                            <Button Name="btnMyDeviceHibernateToggle" Content="Hibernate Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle hibernation on/off. Blue = hibernation disabled. Gray = hibernation enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -20984,7 +20985,7 @@ function Set-WmtPowerSettingIndex {
                                                         <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
                                                         <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
-                                                            <Button Name="btnMyDeviceMemCompressToggle" Content="MC Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Windows memory compression"/>
+                                                            <Button Name="btnMyDeviceMemCompressToggle" Content="MC Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Windows memory compression. Blue = compression disabled. Gray = compression enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -21029,7 +21030,7 @@ function Set-WmtPowerSettingIndex {
                                                             <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
                                                         <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                                             <Button Name="btnMyDeviceGPUDriver" Content="Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Open GPU vendor driver download pages"/>
-                                                            <Button Name="btnMyDeviceHagsToggle" Content="HAGS Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Hardware-Accelerated GPU Scheduling"/>
+                                                            <Button Name="btnMyDeviceHagsToggle" Content="HAGS Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Hardware-Accelerated GPU Scheduling. Blue = HAGS disabled. Gray = HAGS enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -33496,6 +33497,207 @@ if ($btnHideChat) {
             Update-TweakButtonStates
         })
 }
+# --- Privacy & Search toggle click handlers ---
+$btnToggleAds = Get-Ctrl "btnToggleAds"
+if ($btnToggleAds) {
+    $btnToggleAds.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+            $currentlyOn = ([int](Get-WmtRegValue $p "Enabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSuggested = Get-Ctrl "btnToggleSuggested"
+if ($btnToggleSuggested) {
+    $btnToggleSuggested.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            $names = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+            $anyOn = $false
+            foreach ($n in $names) { if ([int](Get-WmtRegValue $p $n 1) -ne 0) { $anyOn = $true; break } }
+            if ($anyOn) {
+                Invoke-UiCommand { foreach ($n in $names) { Set-WmtRegDword $p $n 0 }; Write-GuiLog "Suggested content disabled." } "Disabling suggestions..."
+            }
+            else {
+                Invoke-UiCommand { foreach ($n in $names) { Set-WmtRegDword $p $n 1 }; Write-GuiLog "Suggested content enabled." } "Enabling suggestions..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleTailored = Get-Ctrl "btnToggleTailored"
+if ($btnToggleTailored) {
+    $btnToggleTailored.Add_Click({
+            $p1 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
+            $p2 = "HKCU:\Software\Policies\Microsoft\Windows\CloudContent"
+            $currentlyOn = ([int](Get-WmtRegValue $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $p2 "DisableTailoredExperiencesWithDiagnosticData" 0) -ne 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 0; Set-WmtRegDword $p2 "DisableTailoredExperiencesWithDiagnosticData" 1; Write-GuiLog "Tailored experiences disabled." } "Disabling tailored experiences..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 1; Set-WmtRegDword $p2 "DisableTailoredExperiencesWithDiagnosticData" 0; Write-GuiLog "Tailored experiences enabled." } "Enabling tailored experiences..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleActivity = Get-Ctrl "btnToggleActivity"
+if ($btnToggleActivity) {
+    $btnToggleActivity.Add_Click({
+            $p = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+            $currentlyOff = ([int](Get-WmtRegValue $p "EnableActivityFeed" 1) -eq 0 -and [int](Get-WmtRegValue $p "PublishUserActivities" 1) -eq 0 -and [int](Get-WmtRegValue $p "UploadUserActivities" 1) -eq 0)
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableActivityFeed" 1; Set-WmtRegDword $p "PublishUserActivities" 1; Set-WmtRegDword $p "UploadUserActivities" 1; Write-GuiLog "Activity history enabled." } "Enabling activity history..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableActivityFeed" 0; Set-WmtRegDword $p "PublishUserActivities" 0; Set-WmtRegDword $p "UploadUserActivities" 0; Write-GuiLog "Activity history disabled." } "Disabling activity history..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleAppLaunch = Get-Ctrl "btnToggleAppLaunch"
+if ($btnToggleAppLaunch) {
+    $btnToggleAppLaunch.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOn = ([int](Get-WmtRegValue $p "Start_TrackProgs" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 0; Write-GuiLog "App launch tracking disabled." } "Disabling app launch tracking..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 1; Write-GuiLog "App launch tracking enabled." } "Enabling app launch tracking..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleWebSearch = Get-Ctrl "btnToggleWebSearch"
+if ($btnToggleWebSearch) {
+    $btnToggleWebSearch.Add_Click({
+            $p1 = "HKCU:\Software\Policies\Microsoft\Windows\Explorer"
+            $p2 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
+            $currentlyOn = ([int](Get-WmtRegValue $p1 "DisableSearchBoxSuggestions" 0) -ne 1 -and [int](Get-WmtRegValue $p2 "BingSearchEnabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "DisableSearchBoxSuggestions" 1; Set-WmtRegDword $p2 "BingSearchEnabled" 0; Write-GuiLog "Web search in Start Menu disabled." } "Disabling web search..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "DisableSearchBoxSuggestions" 0; Set-WmtRegDword $p2 "BingSearchEnabled" 1; Write-GuiLog "Web search in Start Menu enabled." } "Enabling web search..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSearchIndex = Get-Ctrl "btnToggleSearchIndex"
+if ($btnToggleSearchIndex) {
+    $btnToggleSearchIndex.Add_Click({
+            $svc = Get-Service "WSearch" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -ne "Automatic") {
+                Invoke-UiCommand { Set-Service -Name WSearch -StartupType Automatic; Start-Service -Name WSearch -ErrorAction SilentlyContinue; Write-GuiLog "Search index set to Automatic." } "Enabling search index..."
+            }
+            else {
+                Invoke-UiCommand { Set-Service -Name WSearch -StartupType Manual; Write-GuiLog "Search index set to Manual." } "Reducing search index..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
+if ($btnToggleGameCapture) {
+    $btnToggleGameCapture.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+            $currentlyOn = ([int](Get-WmtRegValue $p "HistoricalCaptureEnabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "HistoricalCaptureEnabled" 0; Write-GuiLog "Game capture disabled." } "Disabling game capture..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "HistoricalCaptureEnabled" 1; Write-GuiLog "Game capture enabled." } "Enabling game capture..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleFso = Get-Ctrl "btnToggleFso"
+if ($btnToggleFso) {
+    $btnToggleFso.Add_Click({
+            $p = "HKCU:\System\GameConfigStore"
+            $currentlyOff = ([int](Get-WmtRegValue $p "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](Get-WmtRegValue $p "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "GameDVR_FSEBehaviorMode" 0; Set-WmtRegDword $p "GameDVR_HonorUserFSEBehaviorMode" 0; Write-GuiLog "Fullscreen optimizations enabled." } "Enabling FSO..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "GameDVR_FSEBehaviorMode" 2; Set-WmtRegDword $p "GameDVR_HonorUserFSEBehaviorMode" 1; Write-GuiLog "Fullscreen optimizations disabled." } "Disabling FSO..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
+if ($btnToggleLockFacts) {
+    $btnToggleLockFacts.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            $currentlyOn = ([int](Get-WmtRegValue $p "RotatingLockScreenOverlayEnabled" 1) -ne 0 -or [int](Get-WmtRegValue $p "SubscribedContent-338387Enabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "RotatingLockScreenOverlayEnabled" 0; Set-WmtRegDword $p "SubscribedContent-338387Enabled" 0; Write-GuiLog "Lock screen facts/tips disabled." } "Disabling lock screen facts..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "RotatingLockScreenOverlayEnabled" 1; Set-WmtRegDword $p "SubscribedContent-338387Enabled" 1; Write-GuiLog "Lock screen facts/tips enabled." } "Enabling lock screen facts..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
+if ($btnToggleLockSpotlight) {
+    $btnToggleLockSpotlight.Add_Click({
+            $p1 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            $p2 = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+            $currentlyOn = ([int](Get-WmtRegValue $p1 "RotatingLockScreenEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $p2 "DisableWindowsSpotlightFeatures" 0) -ne 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "RotatingLockScreenEnabled" 0; Set-WmtRegDword $p2 "DisableWindowsSpotlightFeatures" 1; Write-GuiLog "Lock screen Spotlight disabled." } "Disabling Spotlight..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "RotatingLockScreenEnabled" 1; Set-WmtRegDword $p2 "DisableWindowsSpotlightFeatures" 0; Write-GuiLog "Lock screen Spotlight enabled." } "Enabling Spotlight..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
+if ($btnToggleRestoreFolders) {
+    $btnToggleRestoreFolders.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOn = ([int](Get-WmtRegValue $p "PersistBrowsers" 0) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "PersistBrowsers" 0; Write-GuiLog "Folder restore on startup disabled." } "Disabling folder restore..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "PersistBrowsers" 1; Write-GuiLog "Folder restore on startup enabled." } "Enabling folder restore..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnTogglePcie = Get-Ctrl "btnTogglePcie"
+if ($btnTogglePcie) {
+    $btnTogglePcie.Add_Click({
+            $sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $setting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+            $ac = Get-WmtPowerSettingIndex $sub $setting "AC"; $dc = Get-WmtPowerSettingIndex $sub $setting "DC"
+            $currentlyOn = ($ac -eq 1 -and $dc -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex $sub $setting 0; Write-GuiLog "PCIe link state power management disabled." } "Disabling PCIe power management..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex $sub $setting 1; Write-GuiLog "PCIe link state power management enabled." } "Enabling PCIe power management..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
 Register-WmtTweakButton "btnSearchIndexOptions" { Start-Process "control.exe" "srchadmin.dll" }
 
 $btnToggleGameMode = Get-Ctrl "btnToggleGameMode"
