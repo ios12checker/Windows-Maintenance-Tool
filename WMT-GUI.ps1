@@ -20370,7 +20370,18 @@ function Set-WmtPowerSettingIndex {
                     <!-- Library List (initially hidden) -->
                     <Border Name="brdLibraryList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0" Visibility="Collapsed">
                         <ListView Name="lstLibrary" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0"
-                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                                  SelectionMode="Single" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                            <ListView.ContextMenu>
+                                <ContextMenu Name="ctxLibrary" StaysOpen="True">
+                                    <MenuItem Name="miLibLaunch" Header="Launch / Play" ToolTip="Launch the game if it is installed"/>
+                                    <MenuItem Name="miLibInstall" Header="Install" ToolTip="Download and install this game"/>
+                                    <MenuItem Name="miLibUninstall" Header="Uninstall / Delete" ToolTip="Remove the game from your system"/>
+                                    <Separator/>
+                                    <MenuItem Name="miLibGoToDir" Header="Go to install directory" ToolTip="Open the folder where the game is installed"/>
+                                    <MenuItem Name="miLibStorePage" Header="Open store page" ToolTip="Open the game's store page in your browser"/>
+                                    <MenuItem Name="miLibCopyId" Header="Copy ID" ToolTip="Copy the game ID to clipboard"/>
+                                </ContextMenu>
+                            </ListView.ContextMenu>
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="Source" Width="90" DisplayMemberBinding="{Binding Source}"/>
@@ -21820,6 +21831,15 @@ Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10
 Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
 Set-ButtonIcon "btnUtilMas" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "MAS Activation" "Downloads and runs Microsoft Activation Scripts"
 Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Context Menu Builder" "Create a custom right-click action for Windows 11"
+Set-ButtonIcon "btnShowCatalog" "M3,5H9V7H3V5M5,19V21H3V19H5M3,13H7V15H3V13M3,9H9V11H3V9M11,5H21V7H11V5M11,13H21V15H11V13M11,9H21V11H11V9M5,19H21V21H5V19M11,17H21V19H11V17Z" "Software Catalog" "Browse our curated catalog of popular free applications. Install multiple apps at once with one click." 16 "#00FF99"
+Set-ButtonIcon "btnShowLibrary" "M7,6A6,6 0 0,1 13,12A6,6 0 0,1 7,18A6,6 0 0,1 1,12A6,6 0 0,1 7,6M21,6A6,6 0 0,1 27,12A6,6 0 0,1 21,18A6,6 0 0,1 15,12A6,6 0 0,1 21,6M7,9A3,3 0 0,0 4,12A3,3 0 0,0 7,15A3,3 0 0,0 10,12A3,3 0 0,0 7,9M21,9A3,3 0 0,0 18,12A3,3 0 0,0 21,15A3,3 0 0,0 24,12A3,3 0 0,0 21,9M10.5,12C10.5,12 11.5,11 12,11C12.5,11 13.5,12 13.5,12C13.5,12 12.5,13 12,13C11.5,13 10.5,12 10.5,12Z" "Your Library" "Show games you own from Steam, Epic (Legendary), and GOG (GOGDL)" 16 "#00FF99"
+Set-ButtonIcon "btnCatalogSearch" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search the catalog" 16
+Set-ButtonIcon "btnCatalogInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Install all selected applications using winget. May take several minutes depending on app size." 16 "#00FF00"
+Set-ButtonIcon "btnCatalogSelectAll" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Select All" "Select all visible applications in the list" 16
+Set-ButtonIcon "btnCatalogClear" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Clear Selection" "Unselect all applications" 16
+Set-ButtonIcon "btnBackToUpdates" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Updates" "Return to the package updates view" 16
+Set-ButtonIcon "btnBackToCatalog" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Catalog" "Return to the software catalog" 16
+Set-ButtonIcon "btnLibraryRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Refresh Library" "Re-scan Steam manifests and refresh Legendary/GOGDL caches" 16
 # ==========================================
 # 5. LOGIC & EVENTS
 # ==========================================
@@ -22174,6 +22194,13 @@ $brdLibraryList = Get-Ctrl "brdLibraryList"
 $pnlCatalogActions = Get-Ctrl "pnlCatalogActions"
 $pnlLibraryActions = Get-Ctrl "pnlLibraryActions"
 $btnShowLibrary = Get-Ctrl "btnShowLibrary"
+$ctxLibrary = Get-Ctrl "ctxLibrary"
+$miLibLaunch = Get-Ctrl "miLibLaunch"
+$miLibInstall = Get-Ctrl "miLibInstall"
+$miLibUninstall = Get-Ctrl "miLibUninstall"
+$miLibGoToDir = Get-Ctrl "miLibGoToDir"
+$miLibStorePage = Get-Ctrl "miLibStorePage"
+$miLibCopyId = Get-Ctrl "miLibCopyId"
 $btnBackToCatalog = Get-Ctrl "btnBackToCatalog"
 $btnLibraryRefresh = Get-Ctrl "btnLibraryRefresh"
 $lblLibraryStatus = Get-Ctrl "lblLibraryStatus"
@@ -30982,6 +31009,39 @@ if ($lstWinget) {
     Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
 }
 
+# --- Library list column sorting ---
+$script:LibrarySortChain = New-Object System.Collections.ArrayList
+
+function Resolve-LibrarySortProperty {
+    param([string]$Header)
+    switch ($Header) {
+        "Source"    { return "Source" }
+        "Name"      { return "Name" }
+        "ID"        { return "Id" }
+        "Installed" { return "Version" }
+        "Latest"    { return "Available" }
+        default     { return $Header }
+    }
+}
+
+if ($lstLibrary) {
+    $librarySortHandler = [System.Windows.RoutedEventHandler] {
+        param($src, $e)
+        $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+        if (-not $columnHeader -or -not $columnHeader.Column) { return }
+        $header = Get-CleanHeader $columnHeader.Column.Header
+        if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+        $propName = Resolve-LibrarySortProperty $header
+        if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+        $isAscending = Set-SortChainPrimary -Chain $script:LibrarySortChain -PropertyName $propName
+        Update-GridViewHeaders -ListView $lstLibrary -ActiveHeader $header -Ascending:$isAscending
+        Set-ListViewSort -ListView $lstLibrary -Chain $script:LibrarySortChain
+    }
+    $lstLibrary.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $librarySortHandler, $true)
+}
+
 # ---------------------------------------------------------
 # HIGH-PERFORMANCE THREADED SEARCH
 # ---------------------------------------------------------
@@ -33812,11 +33872,13 @@ function Start-WmtLibraryScan {
                         $instVer = ""
                         try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
                         $all.Add([PSCustomObject]@{
-                            Source    = "Steam"
-                            Name      = $title
-                            Id        = [string]$game.Id
-                            Version   = if ($isInst) { $instVer } else { "Not installed" }
-                            Available = "-"
+                            Source      = "Steam"
+                            Name        = $title
+                            Id          = [string]$game.Id
+                            Version     = if ($isInst) { $instVer } else { "Not installed" }
+                            Available   = "-"
+                            IsInstalled = $isInst
+                            ProviderKey = "steam"
                         })
                         $steamCount++
                     }
@@ -33831,7 +33893,7 @@ function Start-WmtLibraryScan {
             Write-Output "LOG:Steam library read failed: $($_.Exception.Message)"
         }
 
-        # --- Legendary (read from cache file) ---        # --- Legendary (read from cache file) ---        # --- Legendary (read from cache file) ---
+        # --- Legendary (read from cache file) ---
         try {
             if (Test-Path -LiteralPath $LegCacheFile -PathType Leaf) {
                 $cacheText = [System.IO.File]::ReadAllText($LegCacheFile)
@@ -33846,11 +33908,13 @@ function Start-WmtLibraryScan {
                     try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
                     $latestVer = [string]$game.Version
                     $all.Add([PSCustomObject]@{
-                        Source    = "Epic"
-                        Name      = $title
-                        Id        = [string]$game.Id
-                        Version   = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "Not installed" }
-                        Available = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                        Source      = "Epic"
+                        Name        = $title
+                        Id          = [string]$game.Id
+                        Version     = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "Not installed" }
+                        Available   = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                        IsInstalled = $isInst
+                        ProviderKey = "legendary"
                     })
                     $legCount++
                 }
@@ -33874,11 +33938,13 @@ function Start-WmtLibraryScan {
                     $title = [string]$game.Title
                     if ([string]::IsNullOrWhiteSpace($title)) { continue }
                     $all.Add([PSCustomObject]@{
-                        Source    = "GOG"
-                        Name      = $title
-                        Id        = [string]$game.Id
-                        Version   = "Owned"
-                        Available = [string]$game.Version
+                        Source      = "GOG"
+                        Name        = $title
+                        Id          = [string]$game.Id
+                        Version     = "Owned"
+                        Available   = [string]$game.Version
+                        IsInstalled = $false
+                        ProviderKey = "gogdl"
                     })
                     $gogCount++
                 }
@@ -34012,6 +34078,370 @@ if ($btnShowLibrary -and $btnBackToCatalog -and $btnLibraryRefresh -and $brdCata
     $btnLibraryRefresh.Add_Click({
             Start-WmtLibraryScan
         })
+
+    # --- Library context menu ---
+    # Helper: get the selected library item.
+    function Get-WmtSelectedLibraryItem {
+        if (-not $lstLibrary) { return $null }
+        return @($lstLibrary.SelectedItems | Select-Object -First 1)[0]
+    }
+
+    # Helper: resolve the install directory for a game.
+    function Get-WmtLibraryItemInstallDir {
+        param($Item)
+        if (-not $Item) { return "" }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+
+        if ($source -eq "Steam") {
+            # Find the appmanifest for this app ID and get installdir.
+            $steamInstall = $null
+            foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+                try {
+                    $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                    if ($props) {
+                        foreach ($p in @("SteamPath", "InstallPath")) {
+                            if ($props.PSObject.Properties[$p]) {
+                                $v = [string]$props.$p
+                                if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $steamInstall = $v; break }
+                            }
+                        }
+                    }
+                } catch {}
+                if ($steamInstall) { break }
+            }
+            if (-not $steamInstall) { return "" }
+
+            # Check all library folders for the appmanifest.
+            $libRoots = @($steamInstall)
+            $libFile = Join-Path $steamInstall "steamapps\libraryfolders.vdf"
+            if (Test-Path -LiteralPath $libFile -PathType Leaf) {
+                $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+                if (-not [string]::IsNullOrWhiteSpace($libText)) {
+                    foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+                        $p = $m.Groups[1].Value -replace '\\\\', '\'
+                        if ((Test-Path -LiteralPath $p) -and $libRoots -notcontains $p) { $libRoots += $p }
+                    }
+                }
+            }
+
+            foreach ($libRoot in $libRoots) {
+                $manifestPath = Join-Path $libRoot "steamapps\appmanifest_$id.acf"
+                if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                    $mtext = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($mtext)) {
+                        $instDirMatch = [regex]::Match($mtext, '"installdir"\s+"([^"]*)"')
+                        if ($instDirMatch.Success) {
+                            $installDir = Join-Path (Join-Path $libRoot "steamapps\common") $instDirMatch.Groups[1].Value
+                            if (Test-Path -LiteralPath $installDir) { return $installDir }
+                        }
+                    }
+                }
+            }
+        }
+        elseif ($source -eq "Epic") {
+            # Check legendary installed games.
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = $legExe
+                    $psi.Arguments = "info `"$id`""
+                    $psi.RedirectStandardOutput = $true
+                    $psi.UseShellExecute = $false
+                    $psi.CreateNoWindow = $true
+                    $proc = [System.Diagnostics.Process]::Start($psi)
+                    $stdout = $proc.StandardOutput.ReadToEnd()
+                    try { $proc.WaitForExit(10000) } catch {}
+                    try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+                    # Look for "Install path:" line
+                    foreach ($line in ($stdout -split "`r?`n")) {
+                        if ($line -match "(?i)install\s*(?:path|location)\s*:?\s*(.+)") {
+                            $p = $matches[1].Trim()
+                            if ((Test-Path -LiteralPath $p)) { return $p }
+                        }
+                    }
+                }
+            } catch {}
+        }
+        elseif ($source -eq "GOG") {
+            # GOG games installed via GOGDL/Heroic — check common locations.
+            $heroicConfig = Join-Path $env:APPDATA "heroic\gog_store\library.json"
+            if (Test-Path -LiteralPath $heroicConfig -PathType Leaf) {
+                try {
+                    $lib = Get-Content -LiteralPath $heroicConfig -Raw | ConvertFrom-Json
+                    $game = @($lib | Where-Object { [string]$_.appName -eq $id -or [string]$_.id -eq $id }) | Select-Object -First 1
+                    if ($game -and $game.PSObject.Properties["install_path"]) {
+                        $p = [string]$game.install_path
+                        if ((Test-Path -LiteralPath $p)) { return $p }
+                    }
+                } catch {}
+            }
+        }
+        return ""
+    }
+
+    # Helper: launch a game.
+    function Invoke-WmtLibraryLaunch {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://run/$id"
+            Write-GuiLog "Launching Steam game: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    Start-Process -FilePath $legExe -ArgumentList "launch",$id -WindowStyle Normal
+                    Write-GuiLog "Launching Epic game: $name (app $id)"
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot launch Epic games." -Title "Launch Failed" -Image Warning | Out-Null
+                }
+            } catch {
+                Show-WmtMessageBox -Message "Failed to launch: $($_.Exception.Message)" -Title "Launch Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # GOGDL games are DRM-free — find the game executable in the
+            # install directory and launch it directly.
+            $installDir = Get-WmtLibraryItemInstallDir -Item $Item
+            if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                # Look for the most likely executable: prefer one matching
+                # the game name, then any .exe that's not an uninstaller.
+                $exes = @(Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -File -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $n = $_.Name.ToLowerInvariant()
+                        $n -notmatch "unins|uninstall|setup|redist|installer|crash|report|config|helper" -and
+                        $_.Length -gt 100KB
+                    } | Sort-Object Length -Descending)
+                if ($exes.Count -gt 0) {
+                    Start-Process -FilePath $exes[0].FullName
+                    Write-GuiLog "Launching GOG game: $name ($($exes[0].Name))"
+                }
+                else {
+                    # No exe found — open the install directory instead.
+                    Start-Process "explorer.exe" -ArgumentList "`"$installDir`""
+                    Write-GuiLog "No game executable found for: $name. Opened install directory."
+                }
+            }
+            else {
+                Show-WmtMessageBox -Message "Could not find the install directory for this GOG game." -Title "Launch Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Helper: install a game.
+    function Invoke-WmtLibraryInstall {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://install/$id"
+            Write-GuiLog "Starting Steam install for: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $msg = "Install '$name' via Legendary?`n`nThis will download the game from Epic Games."
+                    if ((Show-WmtMessageBox -Message $msg -Title "Install Game" -Button YesNo -Image Question) -eq [System.Windows.MessageBoxResult]::Yes) {
+                        Start-Process -FilePath $legExe -ArgumentList "-y","install",$id,"--max-workers","4","--dl-timeout","30","--skip-sdl","--skip-dlcs" -WindowStyle Normal
+                        Write-GuiLog "Starting Legendary install for: $name (app $id)"
+                    }
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot install Epic games." -Title "Install Failed" -Image Warning | Out-Null
+                }
+            } catch {
+                Show-WmtMessageBox -Message "Failed to start install: $($_.Exception.Message)" -Title "Install Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # Use GOGDL to download the game (DRM-free, no GOG Galaxy needed).
+            try {
+                $gogdlExe = Get-WmtGogdlExePath
+                if ([string]::IsNullOrWhiteSpace($gogdlExe) -or -not (Test-Path -LiteralPath $gogdlExe -PathType Leaf)) {
+                    foreach ($cmdName in @("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe")) {
+                        $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+                        if ($cmd -and $cmd.Source) { $gogdlExe = [string]$cmd.Source; break }
+                    }
+                }
+                if ($gogdlExe -and (Test-Path -LiteralPath $gogdlExe -PathType Leaf)) {
+                    $authConfig = Get-WmtGogdlAuthConfigPath
+                    $msg = "Download '$name' via GOGDL?`n`nThis will download the DRM-free game from GOG."
+                    if ((Show-WmtMessageBox -Message $msg -Title "Download Game" -Button YesNo -Image Question) -eq [System.Windows.MessageBoxResult]::Yes) {
+                        $installBase = Join-Path (Get-DataPath) "gog-games"
+                        $gameDir = Join-Path $installBase $id
+                        Start-Process -FilePath $gogdlExe -ArgumentList "--auth-config-path","`"$authConfig`"","download",$id,"--path","`"$gameDir`"","--os","windows","--max-workers","4" -WindowStyle Normal
+                        Write-GuiLog "Starting GOGDL download for: $name (id $id)"
+                    }
+                }
+                else {
+                    Show-WmtMessageBox -Message "GOGDL is not installed. Cannot download GOG games." -Title "Download Failed" -Image Warning | Out-Null
+                }
+            } catch {
+                Show-WmtMessageBox -Message "Failed to start download: $($_.Exception.Message)" -Title "Download Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Helper: uninstall a game.
+    function Invoke-WmtLibraryUninstall {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        $msg = "Uninstall '$name'?`n`nThis will remove the game from your system."
+        if ((Show-WmtMessageBox -Message $msg -Title "Uninstall Game" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://uninstall/$id"
+            Write-GuiLog "Starting Steam uninstall for: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    Start-Process -FilePath $legExe -ArgumentList "-y","uninstall",$id -WindowStyle Normal
+                    Write-GuiLog "Starting Legendary uninstall for: $name (app $id)"
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot uninstall Epic games." -Title "Uninstall Failed" -Image Warning | Out-Null
+                }
+            } catch {
+                Show-WmtMessageBox -Message "Failed to start uninstall: $($_.Exception.Message)" -Title "Uninstall Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # GOGDL games are DRM-free — just delete the install directory.
+            $installDir = Get-WmtLibraryItemInstallDir -Item $Item
+            if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                try {
+                    Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction Stop
+                    Write-GuiLog "Deleted GOG game directory: $installDir"
+                }
+                catch {
+                    Show-WmtMessageBox -Message "Failed to delete: $($_.Exception.Message)`n`nThe directory may be in use. Close the game and try again." -Title "Uninstall Failed" -Image Warning | Out-Null
+                }
+            }
+            else {
+                Show-WmtMessageBox -Message "Could not find the install directory for this GOG game." -Title "Uninstall Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Wire up context menu: show/hide items based on installed state.
+    if ($ctxLibrary -and $lstLibrary) {
+        $lstLibrary.Add_ContextMenuOpening({
+                $item = Get-WmtSelectedLibraryItem
+                if (-not $item) {
+                    $ctxLibrary.Items | ForEach-Object { $_.Visibility = [System.Windows.Visibility]::Collapsed }
+                    return
+                }
+
+                $isInstalled = $false
+                try { if ($item.PSObject.Properties["IsInstalled"]) { $isInstalled = [bool]$item.IsInstalled } } catch {}
+                $source = [string]$item.Source
+                $id = [string]$item.Id
+
+                # Show Launch + Uninstall + Go to Dir only if installed.
+                if ($miLibLaunch) { $miLibLaunch.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+                if ($miLibUninstall) { $miLibUninstall.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+                if ($miLibGoToDir) { $miLibGoToDir.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+
+                # Show Install only if NOT installed.
+                if ($miLibInstall) { $miLibInstall.Visibility = if (-not $isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+
+                # Store page + Copy ID always visible.
+                if ($miLibStorePage) { $miLibStorePage.Visibility = [System.Windows.Visibility]::Visible }
+                if ($miLibCopyId) { $miLibCopyId.Visibility = [System.Windows.Visibility]::Visible }
+            }.GetNewClosure())
+
+        if ($miLibLaunch) {
+            $miLibLaunch.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryLaunch -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibInstall) {
+            $miLibInstall.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryInstall -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibUninstall) {
+            $miLibUninstall.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryUninstall -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibGoToDir) {
+            $miLibGoToDir.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    $installDir = Get-WmtLibraryItemInstallDir -Item $item
+                    if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                        Start-Process "explorer.exe" -ArgumentList "`"$installDir`""
+                        Write-GuiLog "Opening: $installDir"
+                    }
+                    else {
+                        Show-WmtMessageBox -Message "Could not find the install directory for this game." -Title "Directory Not Found" -Image Information | Out-Null
+                    }
+                }.GetNewClosure())
+        }
+
+        if ($miLibStorePage) {
+            $miLibStorePage.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    if (-not $item) { return }
+                    $source = [string]$item.Source
+                    $id = [string]$item.Id
+                    $url = $null
+                    if ($source -eq "Steam") { $url = "https://store.steampowered.com/app/$id" }
+                    elseif ($source -eq "Epic") { $url = "https://www.epicgames.com/store/en-US/p/$id" }
+                    elseif ($source -eq "GOG") { $url = "https://www.gog.com/en/game/$id" }
+                    if ($url) { Start-Process $url }
+                }.GetNewClosure())
+        }
+
+        if ($miLibCopyId) {
+            $miLibCopyId.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    if (-not $item) { return }
+                    $id = [string]$item.Id
+                    try { Set-Clipboard -Value $id; Write-GuiLog "Copied ID: $id" } catch {}
+                }.GetNewClosure())
+        }
+    }
 }
 
 # My Device shortcuts point at the original page buttons so all confirmations, logging, and state checks stay in one place.
