@@ -20334,19 +20334,26 @@ function Set-WmtPowerSettingIndex {
                         </Grid>
                     </Border>
 
-                    <!-- Category Filter -->
-                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="6,0,6,12">
-                        <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
-                        <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
-                        <Button Name="btnCatDev" Content="Development" Width="Auto" MinWidth="120" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
-                        <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
-                        <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
-                        <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
-                        <Button Name="btnCatSecurity" Content="Security" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Antivirus, password managers, security tools"/>
-                    </StackPanel>
+                    <!-- Category Filter + Your Library button -->
+                    <Grid Grid.Row="1" Margin="6,0,6,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Name="pnlCategoryFilter" Grid.Column="0" Orientation="Horizontal">
+                            <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
+                            <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
+                            <Button Name="btnCatDev" Content="Development" Width="Auto" MinWidth="120" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
+                            <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
+                            <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
+                            <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
+                            <Button Name="btnCatSecurity" Content="Security" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Antivirus, password managers, security tools"/>
+                        </StackPanel>
+                        <Button Name="btnShowLibrary" Content="Your Library" Grid.Column="1" Style="{StaticResource AccentBtn}" ToolTip="Show games you own from Steam, Epic (Legendary), and GOG (GOGDL)"/>
+                    </Grid>
 
                     <!-- Catalog List -->
-                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
+                    <Border Name="brdCatalogList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
                         <ListView Name="lstCatalog" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
                                   SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
                             <ListView.View>
@@ -20360,14 +20367,43 @@ function Set-WmtPowerSettingIndex {
                         </ListView>
                     </Border>
 
+                    <!-- Library List (initially hidden) -->
+                    <Border Name="brdLibraryList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0" Visibility="Collapsed">
+                        <ListView Name="lstLibrary" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0"
+                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                            <ListView.View>
+                                <GridView>
+                                    <GridViewColumn Header="Source" Width="90" DisplayMemberBinding="{Binding Source}"/>
+                                    <GridViewColumn Header="Name" Width="280" DisplayMemberBinding="{Binding Name}"/>
+                                    <GridViewColumn Header="ID" Width="180" DisplayMemberBinding="{Binding Id}"/>
+                                    <GridViewColumn Header="Installed" Width="120" DisplayMemberBinding="{Binding Version}"/>
+                                    <GridViewColumn Header="Latest" Width="120" DisplayMemberBinding="{Binding Available}"/>
+                                </GridView>
+                            </ListView.View>
+                        </ListView>
+                    </Border>
+
                     <!-- Actions -->
                     <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Name="btnBackToUpdates" Content="Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
-                            <Button Name="btnCatalogInstall" Content="Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
-                            <Button Name="btnCatalogSelectAll" Content="Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
-                            <Button Name="btnCatalogClear" Content="Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
-                        </StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- Your Library panel (initially hidden) -->
+                            <StackPanel Name="pnlLibraryActions" Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left" Visibility="Collapsed">
+                                <Button Name="btnBackToCatalog" Content="Back to Catalog" Style="{StaticResource ActionBtn}" ToolTip="Return to the software catalog"/>
+                                <Button Name="btnLibraryRefresh" Content="Refresh Library" Style="{StaticResource ActionBtn}" ToolTip="Re-scan Steam manifests and refresh Legendary/GOGDL caches"/>
+                                <TextBlock Name="lblLibraryStatus" Text="" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Margin="12,0,0,0"/>
+                            </StackPanel>
+                            <!-- Catalog actions (default visible) -->
+                            <StackPanel Name="pnlCatalogActions" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Name="btnBackToUpdates" Content="Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
+                                <Button Name="btnCatalogInstall" Content="Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
+                                <Button Name="btnCatalogSelectAll" Content="Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
+                                <Button Name="btnCatalogClear" Content="Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
+                            </StackPanel>
+                        </Grid>
                     </Border>
                 </Grid>
 
@@ -22132,6 +22168,15 @@ if ($btnMyDeviceWinUpdate) {
         })
 }
 $lstCatalog = Get-Ctrl "lstCatalog"
+$lstLibrary = Get-Ctrl "lstLibrary"
+$brdCatalogList = Get-Ctrl "brdCatalogList"
+$brdLibraryList = Get-Ctrl "brdLibraryList"
+$pnlCatalogActions = Get-Ctrl "pnlCatalogActions"
+$pnlLibraryActions = Get-Ctrl "pnlLibraryActions"
+$btnShowLibrary = Get-Ctrl "btnShowLibrary"
+$btnBackToCatalog = Get-Ctrl "btnBackToCatalog"
+$btnLibraryRefresh = Get-Ctrl "btnLibraryRefresh"
+$lblLibraryStatus = Get-Ctrl "lblLibraryStatus"
 $txtCatalogSearch = Get-Ctrl "txtCatalogSearch"
 $btnShowCatalog = Get-Ctrl "btnShowCatalog"
 $btnBackToUpdates = Get-Ctrl "btnBackToUpdates"
@@ -33318,6 +33363,11 @@ if ($btnShowCatalog -and $btnBackToUpdates -and $btnCatalogSearch -and $btnCatal
             $pnlUpdates.Visibility = "Collapsed"
             $pnlCatalog.Visibility = "Visible"
             Add-WmtCatalogListItems -ListView $lstCatalog -Items $script:SoftwareCatalog
+            # Pre-load library scan in the background so "Your Library"
+            # results are ready when the user clicks the button.
+            if (-not $script:WmtLibraryScanResults -and -not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan -Silent
+            }
         })
 
     $btnBackToUpdates.Add_Click({
@@ -33354,6 +33404,363 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
 
     $btnCatalogSelectAll.Add_Click({ $lstCatalog.SelectAll() })
     $btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
+}
+
+# --- YOUR LIBRARY ---
+# Shows owned games from Steam (local manifests), Epic (Legendary cache),
+# and GOG (GOGDL cache). The Steam scan runs in a background runspace
+# because reading manifests can be slow; Legendary/GOGDL read from cache
+# files that are populated by the boot-time library cache builder.
+
+$script:WmtLibraryScanRunspace = $null
+$script:WmtLibraryScanAsyncResult = $null
+
+function Get-WmtSteamInstalledGames {
+    # Read Steam appmanifest_*.acf files to get installed Steam games.
+    # Returns array of [PSCustomObject]@{ Source; Name; Id; Version; Available }
+    $result = [System.Collections.Generic.List[object]]::new()
+
+    function Get-SteamManifestValue([string]$Text, [string]$Key) {
+        $m = [regex]::Match($Text, ('"' + $Key + '"\s+"([^"]*)"'))
+        if ($m.Success) { return $m.Groups[1].Value }
+        return ""
+    }
+
+    function Get-SteamInstallRoots {
+        $roots = @()
+        foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+            try {
+                $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                if ($props) {
+                    foreach ($p in @("SteamPath", "InstallPath")) {
+                        if ($props.PSObject.Properties[$p]) {
+                            $v = [string]$props.$p
+                            if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $roots += $v }
+                        }
+                    }
+                }
+            } catch {}
+        }
+        foreach ($c in @("${env:ProgramFiles(x86)}\Steam", "${env:ProgramFiles}\Steam")) {
+            if (-not [string]::IsNullOrWhiteSpace($c) -and (Test-Path -LiteralPath $c) -and $roots -notcontains $c) { $roots += $c }
+        }
+        return $roots
+    }
+
+    $installRoots = @(Get-SteamInstallRoots)
+    $libraryRoots = [System.Collections.Generic.List[string]]::new()
+    foreach ($root in $installRoots) {
+        if (Test-Path -LiteralPath (Join-Path $root "steamapps")) { [void]$libraryRoots.Add($root) }
+        $libFile = Join-Path $root "steamapps\libraryfolders.vdf"
+        if (-not (Test-Path -LiteralPath $libFile)) { continue }
+        $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($libText)) { continue }
+        foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+            $p = $m.Groups[1].Value -replace '\\', ''
+            if ((Test-Path -LiteralPath $p) -and -not $libraryRoots.Contains($p)) { [void]$libraryRoots.Add($p) }
+        }
+    }
+
+    $seenIds = @{}
+    foreach ($libRoot in $libraryRoots) {
+        $steamApps = Join-Path $libRoot "steamapps"
+        if (-not (Test-Path -LiteralPath $steamApps)) { continue }
+        foreach ($manifest in @(Get-ChildItem -LiteralPath $steamApps -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+            $text = Get-Content -LiteralPath $manifest.FullName -Raw -ErrorAction SilentlyContinue
+            if ([string]::IsNullOrWhiteSpace($text)) { continue }
+            $appId = Get-SteamManifestValue $text "appid"
+            if ([string]::IsNullOrWhiteSpace($appId)) { $appId = [regex]::Match($manifest.BaseName, '\d+').Value }
+            if ([string]::IsNullOrWhiteSpace($appId) -or $seenIds.ContainsKey($appId)) { continue }
+            $seenIds[$appId] = $true
+            $name = Get-SteamManifestValue $text "name"
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = "Steam App $appId" }
+            $buildId = Get-SteamManifestValue $text "buildid"
+            $result.Add([PSCustomObject]@{
+                Source    = "Steam"
+                Name      = $name
+                Id        = $appId
+                Version   = if (-not [string]::IsNullOrWhiteSpace($buildId) -and $buildId -ne "0") { "Build $buildId" } else { "Installed" }
+                Available = "-"
+            })
+        }
+    }
+    return $result.ToArray()
+}
+
+function Start-WmtLibraryScan {
+    param([switch]$Silent)
+
+    if ($script:WmtLibraryScanRunspace) {
+        try { $script:WmtLibraryScanRunspace.Stop() } catch {}
+        try { $script:WmtLibraryScanRunspace.Dispose() } catch {}
+        $script:WmtLibraryScanRunspace = $null
+        $script:WmtLibraryScanAsyncResult = $null
+    }
+
+    if (-not $Silent) {
+        if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
+    }
+
+    # Resolve cache file paths in main scope.
+    $dataPath = Get-DataPath
+    $legCacheFile = Join-Path $dataPath "legendary_library.json"
+    $gogCacheFile = Join-Path $dataPath "gog_library.json"
+
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+        param($LegCacheFile, $GogCacheFile)
+
+        $all = [System.Collections.Generic.List[object]]::new()
+
+        # --- Steam (read manifests directly — self-contained) ---
+        try {
+            function Get-SteamManifestValue2([string]$Text, [string]$Key) {
+                $m = [regex]::Match($Text, ('"' + $Key + '"\s+"([^"]*)"'))
+                if ($m.Success) { return $m.Groups[1].Value }
+                return ""
+            }
+
+            $installRoots = @()
+            foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+                try {
+                    $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                    if ($props) {
+                        foreach ($p in @("SteamPath", "InstallPath")) {
+                            if ($props.PSObject.Properties[$p]) {
+                                $v = [string]$props.$p
+                                if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $installRoots += $v }
+                            }
+                        }
+                    }
+                } catch {}
+            }
+            foreach ($c in @("${env:ProgramFiles(x86)}\Steam", "${env:ProgramFiles}\Steam")) {
+                if (-not [string]::IsNullOrWhiteSpace($c) -and (Test-Path -LiteralPath $c) -and $installRoots -notcontains $c) { $installRoots += $c }
+            }
+
+            $libraryRoots = [System.Collections.Generic.List[string]]::new()
+            foreach ($root in $installRoots) {
+                if (Test-Path -LiteralPath (Join-Path $root "steamapps")) { [void]$libraryRoots.Add($root) }
+                $libFile = Join-Path $root "steamapps\libraryfolders.vdf"
+                if (-not (Test-Path -LiteralPath $libFile)) { continue }
+                $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+                if ([string]::IsNullOrWhiteSpace($libText)) { continue }
+                foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+                    $p = $m.Groups[1].Value -replace '\\', ''
+                    if ((Test-Path -LiteralPath $p) -and -not $libraryRoots.Contains($p)) { [void]$libraryRoots.Add($p) }
+                }
+            }
+
+            $seenIds = @{}
+            foreach ($libRoot in $libraryRoots) {
+                $steamApps = Join-Path $libRoot "steamapps"
+                if (-not (Test-Path -LiteralPath $steamApps)) { continue }
+                foreach ($manifest in @(Get-ChildItem -LiteralPath $steamApps -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+                    $text = Get-Content -LiteralPath $manifest.FullName -Raw -ErrorAction SilentlyContinue
+                    if ([string]::IsNullOrWhiteSpace($text)) { continue }
+                    $appId = Get-SteamManifestValue2 $text "appid"
+                    if ([string]::IsNullOrWhiteSpace($appId)) { $appId = [regex]::Match($manifest.BaseName, '\d+').Value }
+                    if ([string]::IsNullOrWhiteSpace($appId) -or $seenIds.ContainsKey($appId)) { continue }
+                    $seenIds[$appId] = $true
+                    $name = Get-SteamManifestValue2 $text "name"
+                    if ([string]::IsNullOrWhiteSpace($name)) { $name = "Steam App $appId" }
+                    $buildId = Get-SteamManifestValue2 $text "buildid"
+                    $all.Add([PSCustomObject]@{
+                        Source    = "Steam"
+                        Name      = $name
+                        Id        = $appId
+                        Version   = if (-not [string]::IsNullOrWhiteSpace($buildId) -and $buildId -ne "0") { "Build $buildId" } else { "Installed" }
+                        Available = "-"
+                    })
+                }
+            }
+            Write-Output "LOG:Steam: $($seenIds.Count) games."
+        }
+        catch {
+            Write-Output "LOG:Steam scan failed: $($_.Exception.Message)"
+        }
+
+        # --- Legendary (read from cache file) ---
+        try {
+            if (Test-Path -LiteralPath $LegCacheFile -PathType Leaf) {
+                $cacheText = [System.IO.File]::ReadAllText($LegCacheFile)
+                $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                $legCount = 0
+                foreach ($game in @($library)) {
+                    $title = [string]$game.Title
+                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                    $isInst = $false
+                    try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
+                    $instVer = ""
+                    try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
+                    $latestVer = [string]$game.Version
+                    $all.Add([PSCustomObject]@{
+                        Source    = "Epic"
+                        Name      = $title
+                        Id        = [string]$game.Id
+                        Version   = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "Not installed" }
+                        Available = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                    })
+                    $legCount++
+                }
+                Write-Output "LOG:Epic (Legendary): $legCount games."
+            }
+            else {
+                Write-Output "LOG:Legendary cache not found."
+            }
+        }
+        catch {
+            Write-Output "LOG:Legendary library read failed: $($_.Exception.Message)"
+        }
+
+        # --- GOGDL (read from cache file) ---
+        try {
+            if (Test-Path -LiteralPath $GogCacheFile -PathType Leaf) {
+                $cacheText = [System.IO.File]::ReadAllText($GogCacheFile)
+                $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                $gogCount = 0
+                foreach ($game in @($library)) {
+                    $title = [string]$game.Title
+                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                    $all.Add([PSCustomObject]@{
+                        Source    = "GOG"
+                        Name      = $title
+                        Id        = [string]$game.Id
+                        Version   = "Owned"
+                        Available = [string]$game.Version
+                    })
+                    $gogCount++
+                }
+                Write-Output "LOG:GOG: $gogCount games."
+            }
+            else {
+                Write-Output "LOG:GOG cache not found."
+            }
+        }
+        catch {
+            Write-Output "LOG:GOG library read failed: $($_.Exception.Message)"
+        }
+
+        Write-Output "COUNT:$($all.Count)"
+        foreach ($item in $all) { Write-Output $item }
+    }).AddArgument($legCacheFile).AddArgument($gogCacheFile)
+
+    $script:WmtLibraryScanRunspace = $ps
+    $script:WmtLibraryScanAsyncResult = $ps.BeginInvoke()
+
+    # Polling timer to collect results. Use $script: scope so the Tick
+    # handler can restart itself without closure capture issues.
+    $script:WmtLibraryScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtLibraryScanTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:WmtLibraryScanTimer.Add_Tick({
+        if (-not $script:WmtLibraryScanTimer) { return }
+        try { $script:WmtLibraryScanTimer.Stop() } catch {}
+        if (-not $script:WmtLibraryScanAsyncResult) { return }
+        if (-not $script:WmtLibraryScanAsyncResult.IsCompleted) {
+            try { $script:WmtLibraryScanTimer.Start() } catch {}
+            return
+        }
+        try {
+            $results = $script:WmtLibraryScanRunspace.EndInvoke($script:WmtLibraryScanAsyncResult)
+            $collected = [System.Collections.Generic.List[object]]::new()
+            foreach ($line in @($results)) {
+                if ($line -is [string]) {
+                    if ($line.StartsWith("LOG:")) {
+                        Write-GuiLog ($line.Substring(4))
+                    }
+                }
+                elseif ($line -and $line.PSObject.Properties["Name"]) {
+                    [void]$collected.Add($line)
+                }
+            }
+            # Store results in script scope so "Your Library" can display instantly.
+            $script:WmtLibraryScanResults = $collected.ToArray()
+
+            # If the library list is currently visible, populate it now.
+            if ($lstLibrary -and $brdLibraryList -and $brdLibraryList.Visibility -eq [System.Windows.Visibility]::Visible) {
+                $lstLibrary.Items.Clear()
+                foreach ($item in $script:WmtLibraryScanResults) {
+                    [void]$lstLibrary.Items.Add($item)
+                }
+                if ($lblLibraryStatus) {
+                    if ($lstLibrary.Items.Count -gt 0) {
+                        $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+                    }
+                    else {
+                        $lblLibraryStatus.Text = "No games found. Install Steam/Legendary/GOGDL and enable them in Providers."
+                    }
+                }
+                Write-GuiLog "Library scan complete: $($lstLibrary.Items.Count) game(s)."
+            }
+            else {
+                Write-GuiLog "Library scan pre-loaded: $($script:WmtLibraryScanResults.Count) game(s) ready."
+            }
+        } catch {
+            Write-GuiLog "Library scan failed: $($_.Exception.Message)"
+            if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Library scan failed." }
+        }
+        try { $script:WmtLibraryScanRunspace.Dispose() } catch {}
+        $script:WmtLibraryScanRunspace = $null
+        $script:WmtLibraryScanAsyncResult = $null
+        $script:WmtLibraryScanTimer = $null
+    })
+    $script:WmtLibraryScanTimer.Start()
+}
+
+if ($btnShowLibrary -and $btnBackToCatalog -and $btnLibraryRefresh -and $brdCatalogList -and $brdLibraryList -and $pnlCatalogActions -and $pnlLibraryActions -and $lstLibrary) {
+    $btnShowLibrary.Add_Click({
+            # Switch to library view.
+            $brdCatalogList.Visibility = "Collapsed"
+            $brdLibraryList.Visibility = "Visible"
+            $pnlCatalogActions.Visibility = "Collapsed"
+            $pnlLibraryActions.Visibility = "Visible"
+            # Hide category filter buttons.
+            if ($btnCatAll) { $btnCatAll.Visibility = "Collapsed" }
+            if ($btnCatBrowsers) { $btnCatBrowsers.Visibility = "Collapsed" }
+            if ($btnCatDev) { $btnCatDev.Visibility = "Collapsed" }
+            if ($btnCatUtils) { $btnCatUtils.Visibility = "Collapsed" }
+            if ($btnCatMedia) { $btnCatMedia.Visibility = "Collapsed" }
+            if ($btnCatGames) { $btnCatGames.Visibility = "Collapsed" }
+            if ($btnCatSecurity) { $btnCatSecurity.Visibility = "Collapsed" }
+
+            # If we have pre-loaded results, display them instantly.
+            if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0) {
+                $lstLibrary.Items.Clear()
+                foreach ($item in $script:WmtLibraryScanResults) {
+                    [void]$lstLibrary.Items.Add($item)
+                }
+                if ($lblLibraryStatus) {
+                    $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+                }
+            }
+            elseif (-not $script:WmtLibraryScanRunspace) {
+                # No pre-loaded results and no scan running — start one now.
+                Start-WmtLibraryScan
+            }
+            else {
+                # Scan is running — show status.
+                if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
+            }
+        })
+
+    $btnBackToCatalog.Add_Click({
+            # Switch back to catalog view.
+            $brdLibraryList.Visibility = "Collapsed"
+            $brdCatalogList.Visibility = "Visible"
+            $pnlLibraryActions.Visibility = "Collapsed"
+            $pnlCatalogActions.Visibility = "Visible"
+            if ($btnCatAll) { $btnCatAll.Visibility = "Visible" }
+            if ($btnCatBrowsers) { $btnCatBrowsers.Visibility = "Visible" }
+            if ($btnCatDev) { $btnCatDev.Visibility = "Visible" }
+            if ($btnCatUtils) { $btnCatUtils.Visibility = "Visible" }
+            if ($btnCatMedia) { $btnCatMedia.Visibility = "Visible" }
+            if ($btnCatGames) { $btnCatGames.Visibility = "Visible" }
+            if ($btnCatSecurity) { $btnCatSecurity.Visibility = "Visible" }
+        })
+
+    $btnLibraryRefresh.Add_Click({
+            Start-WmtLibraryScan
+        })
 }
 
 # My Device shortcuts point at the original page buttons so all confirmations, logging, and state checks stay in one place.
