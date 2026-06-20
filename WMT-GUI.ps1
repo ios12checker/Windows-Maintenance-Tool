@@ -21024,10 +21024,8 @@ function Set-WmtPowerSettingIndex {
                             </WrapPanel>
                             <TextBlock Text="WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDrvDisableWU" Content="Disable Auto-Drivers" Style="{StaticResource DestructiveBtn}" ToolTip="Stop Windows Update from installing drivers"/>
-                                <Button Name="btnDrvEnableWU" Content="Enable Auto-Drivers" Style="{StaticResource PositiveBtn}" ToolTip="Allow Windows Update to install drivers"/>
-                                <Button Name="btnDrvDisableMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDrvEnableMeta" Content="Enable Metadata" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
+                                <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -21589,10 +21587,8 @@ $iconDeferTimer.Add_Tick({
         Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
         Set-ButtonIcon "btnDrvClean" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Clean Old Drivers" "Removes obsolete drivers from the Windows Driver Store"
         Set-ButtonIcon "btnDrvRestore" "M12,2L3,7V17L12,22L21,17V7L12,2M12,4.3L18.5,8L12,11.7L5.5,8L12,4.3M5,9.85L12,14L19,9.85V16.15L12,20.3L5,16.15V9.85M7,11H9V14H7V11M15,11H17V14H15V11Z" "Restore Drivers" "Imports drivers from a DriverBackup folder"
-        Set-ButtonIcon "btnDrvDisableWU" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H15V15H9V13Z" "Disable Driver Updates" "Turn off automatic driver updates"
-        Set-ButtonIcon "btnDrvEnableWU" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H13V15H9V13Z" "Enable Driver Updates" "Turn on automatic driver updates"
-        Set-ButtonIcon "btnDrvDisableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M16.59,11.17L15.17,12.59L12,9.41L8.83,12.59L7.41,11.17L12,6.58L16.59,11.17Z" "Disable Device Metadata" "Block device metadata downloads"
-        Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M11,14V9H9L12,6L15,9H13V14H11Z" "Enable Device Metadata" "Allow device metadata downloads"
+        Set-ButtonIcon "btnToggleDrvUpdates" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H15V15H9V13Z" "Driver Updates" "Toggle automatic driver updates via Windows Update"
+        Set-ButtonIcon "btnToggleDrvMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M16.59,11.17L15.17,12.59L12,9.41L8.83,12.59L7.41,11.17L12,6.58L16.59,11.17Z" "Device Metadata" "Toggle device metadata downloads from the internet"
         Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
         Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
         Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
@@ -22076,6 +22072,16 @@ function Update-TweakButtonStates {
         $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
         $btnToggleDevMode = Get-Ctrl "btnToggleDevMode"
         Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
+        $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+        $drvMetaDisabled = $false
+        try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $drvMetaDisabled = $true } } catch {}
+        $btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
+        Update-WmtTweakToggle $btnToggleDrvMeta $drvMetaDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
+        $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
+        $drvWUDisabled = $false
+        try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $drvWUDisabled = $true } } catch {}
+        $btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+        Update-WmtTweakToggle $btnToggleDrvUpdates $drvWUDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
     }
     catch {}
 }
@@ -22168,10 +22174,8 @@ if ($btnDrvClean) { $btnDrvClean.Add_Click({ Show-DriverCleanupDialog }) }
 
 $btnDrvRestore = Get-Ctrl "btnDrvRestore"
 if ($btnDrvRestore) { $btnDrvRestore.Add_Click({ Invoke-RestoreDrivers }) }
-$btnDrvDisableWU = Get-Ctrl "btnDrvDisableWU"
-$btnDrvEnableWU = Get-Ctrl "btnDrvEnableWU"
-$btnDrvDisableMeta = Get-Ctrl "btnDrvDisableMeta"
-$btnDrvEnableMeta = Get-Ctrl "btnDrvEnableMeta"
+$btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+$btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
 
 $btnCleanDisk = Get-Ctrl "btnCleanDisk"
 $btnCleanTemp = Get-Ctrl "btnCleanTemp"
@@ -22572,10 +22576,8 @@ $searchIndexDeferTimer.Add_Tick({
         Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
         Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
         Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
-        Add-SearchIndexEntry "btnDrvDisableWU"      "Disable Driver Updates"          "btnTabDrivers"
-        Add-SearchIndexEntry "btnDrvEnableWU"       "Enable Driver Updates"           "btnTabDrivers"
-        Add-SearchIndexEntry "btnDrvDisableMeta"    "Disable Device Metadata"         "btnTabDrivers"
-        Add-SearchIndexEntry "btnDrvEnableMeta"     "Enable Device Metadata"          "btnTabDrivers"
+        Add-SearchIndexEntry "btnToggleDrvUpdates"  "Toggle Driver Updates"           "btnTabDrivers"
+        Add-SearchIndexEntry "btnToggleDrvMeta"     "Toggle Device Metadata"          "btnTabDrivers"
 
         # 6. Cleanup
         Add-SearchIndexEntry "btnCleanDisk"         "Disk Cleanup Tool"               "btnTabCleanup"
@@ -33042,26 +33044,40 @@ $btnFwDefaults.Add_Click({ Invoke-FirewallDefaults; $btnFwRefresh.RaiseEvent((Ne
 $btnFwPurge.Add_Click({ Invoke-FirewallPurge; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 
 # --- Drivers ---
-$btnDrvDisableWU.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($res -ne "Yes") { return }
-        Invoke-DriverUpdates -Enable:$false
-    })
-$btnDrvEnableWU.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Enable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Invoke-DriverUpdates -Enable:$true
-    })
-$btnDrvDisableMeta.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Disable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($res -ne "Yes") { return }
-        Invoke-DeviceMetadata -Enable:$false
-    })
-$btnDrvEnableMeta.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Enable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Invoke-DeviceMetadata -Enable:$true
-    })
+$btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+if ($btnToggleDrvUpdates) {
+    $btnToggleDrvUpdates.Add_Click({
+            $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $currentlyDisabled = $true } } catch {}
+            if ($currentlyDisabled) {
+                Invoke-DriverUpdates -Enable:$true
+            }
+            else {
+                Invoke-DriverUpdates -Enable:$false
+            }
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $currentlyDisabled = $true } } catch {}
+            Update-WmtTweakToggle $btnToggleDrvUpdates $currentlyDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
+        })
+}
+$btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
+if ($btnToggleDrvMeta) {
+    $btnToggleDrvMeta.Add_Click({
+            $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $currentlyDisabled = $true } } catch {}
+            if ($currentlyDisabled) {
+                Invoke-DeviceMetadata -Enable:$true
+            }
+            else {
+                Invoke-DeviceMetadata -Enable:$false
+            }
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $currentlyDisabled = $true } } catch {}
+            Update-WmtTweakToggle $btnToggleDrvMeta $currentlyDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
+        })
+}
 
 # --- Cleanup ---
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
