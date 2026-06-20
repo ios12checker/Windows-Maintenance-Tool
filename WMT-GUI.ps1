@@ -22745,10 +22745,86 @@ if ($lstWinget) {
                         $e.Handled = $true
                     }
                 }
+                # Enter or Space toggles checkbox on selected rows
+                if ($e.Key -eq [System.Windows.Input.Key]::Enter -or $e.Key -eq [System.Windows.Input.Key]::Space) {
+                    $selected = @($s.SelectedItems)
+                    if ($selected.Count -gt 0) {
+                        $anyUnchecked = $false
+                        foreach ($item in $selected) {
+                            $currentVal = $false
+                            try { if ($item.PSObject.Properties["IsChecked"]) { $currentVal = [bool]$item.IsChecked } } catch {}
+                            if (-not $currentVal) { $anyUnchecked = $true; break }
+                        }
+                        foreach ($item in $selected) {
+                            try {
+                                if ($item.PSObject.Properties["IsChecked"]) {
+                                    $item.IsChecked = $anyUnchecked
+                                }
+                            }
+                            catch {}
+                        }
+                        try { $s.Items.Refresh() } catch {}
+                        $e.Handled = $true
+                    }
+                }
             }
             catch {
-                Write-GuiLog "ERROR: Ctrl+C copy row data failed: $($_.Exception.Message)"
+                Write-GuiLog "ERROR: Key handler failed: $($_.Exception.Message)"
             }
+        })
+
+    # Mouse drag multi-select: hold left button and drag to select a range
+    $script:WmtDragSelectStartIndex = -1
+    $lstWinget.Add_PreviewMouseLeftButtonDown({
+            param($s, $e)
+            try {
+                $hitTest = $s.InputHitTest($e.GetPosition($s))
+                if ($hitTest) {
+                    $container = $hitTest
+                    while ($container -and -not ($container -is [System.Windows.Controls.ListViewItem])) {
+                        $container = [System.Windows.Media.VisualTreeHelper]::GetParent($container)
+                    }
+                    if ($container) {
+                        $item = $s.ItemContainerGenerator.ItemFromContainer($container)
+                        if ($item) {
+                            $script:WmtDragSelectStartIndex = $s.Items.IndexOf($item)
+                        }
+                    }
+                }
+            }
+            catch {}
+        })
+    $lstWinget.Add_PreviewMouseMove({
+            param($s, $e)
+            try {
+                if ($script:WmtDragSelectStartIndex -lt 0) { return }
+                if ($e.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) {
+                    $script:WmtDragSelectStartIndex = -1
+                    return
+                }
+                $hitTest = $s.InputHitTest($e.GetPosition($s))
+                if (-not $hitTest) { return }
+                $container = $hitTest
+                while ($container -and -not ($container -is [System.Windows.Controls.ListViewItem])) {
+                    $container = [System.Windows.Media.VisualTreeHelper]::GetParent($container)
+                }
+                if (-not $container) { return }
+                $item = $s.ItemContainerGenerator.ItemFromContainer($container)
+                if (-not $item) { return }
+                $currentIndex = $s.Items.IndexOf($item)
+                if ($currentIndex -lt 0) { return }
+                $start = [Math]::Min($script:WmtDragSelectStartIndex, $currentIndex)
+                $end = [Math]::Max($script:WmtDragSelectStartIndex, $currentIndex)
+                $s.SelectedItems.Clear()
+                for ($i = $start; $i -le $end; $i++) {
+                    $s.SelectedItems.Add($s.Items[$i])
+                }
+                $e.Handled = $true
+            }
+            catch {}
+        })
+    $lstWinget.Add_PreviewMouseLeftButtonUp({
+            $script:WmtDragSelectStartIndex = -1
         })
 }
 
