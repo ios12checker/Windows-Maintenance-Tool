@@ -21477,6 +21477,9 @@ function Set-ButtonIcon {
 
 # --- ICONS & TOOLTIPS ---
 # Button icons (deferred to after window render for faster startup)
+$btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
+$btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
+
 $iconDeferTimer = New-Object System.Windows.Threading.DispatcherTimer
 $iconDeferTimer.Interval = [TimeSpan]::FromMilliseconds(300)
 $iconDeferTimer.Add_Tick({
@@ -21491,8 +21494,6 @@ $iconDeferTimer.Add_Tick({
         Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
         # Tweaks tab icon (lightning bolt / flash icon)
         Set-ButtonIcon "btnTabTweaks" "M7,2V13H10V22L17,10H13L17,2H7M10,4H14L11,10H15L10.5,17V12H7V4H10Z" "Tweaks" "System optimization and performance tweaks" 18 "#FFD700"
-        $btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
-        $btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
         # (Ban Icon for Ignore)
         Set-ButtonIcon "btnWingetIgnore" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12C4,13.85 4.63,15.55 5.68,16.91L16.91,5.68C15.55,4.63 13.85,4 12,4M12,20A8,8 0 0,0 20,12C20,10.15 19.37,8.45 18.32,7.09L7.09,18.32C8.45,19.37 10.15,20 12,20Z" "Ignore Selected" "Hide selected updates from future scans" 16 "#FFD700"
         # (List/Restore Icon for Unignore)
@@ -22889,17 +22890,19 @@ $miCopyRow.Add_Click({
 # 6. Ignore Selected
 $miIgnore = New-Object System.Windows.Controls.MenuItem
 $miIgnore.Header = "Ignore Selected"
-$miIgnore.Add_Click({ 
-        $btnWingetIgnore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-    })
+$miIgnore.Add_Click({
+        $btn = Get-Ctrl "btnWingetIgnore"
+        if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+    }.GetNewClosure())
 [void]$ctxMenu.Items.Add($miIgnore)
 
 # 7. Manage Ignored
 $miManage = New-Object System.Windows.Controls.MenuItem
 $miManage.Header = "Manage Ignored List..."
-$miManage.Add_Click({ 
-        $btnWingetUnignore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-    })
+$miManage.Add_Click({
+        $btn = Get-Ctrl "btnWingetUnignore"
+        if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+    }.GetNewClosure())
 [void]$ctxMenu.Items.Add($miManage)
 
 # --- Checkbox helpers ---
@@ -30974,6 +30977,7 @@ $btnWingetScan.Add_Click({
     })
 
 # --- IGNORE SELECTED ---
+if (-not $btnWingetIgnore) { $btnWingetIgnore = Get-Ctrl "btnWingetIgnore" }
 $btnWingetIgnore.Add_Click({
         $selected = @($lstWinget.SelectedItems)
         if ($selected.Count -eq 0) { return }
@@ -31016,6 +31020,7 @@ $btnWingetIgnore.Add_Click({
     })
 
 # --- MANAGE IGNORED (UNIGNORE) ---
+if (-not $btnWingetUnignore) { $btnWingetUnignore = Get-Ctrl "btnWingetUnignore" }
 $btnWingetUnignore.Add_Click({
         $jsonPath = Join-Path (Get-DataPath) "settings.json"
         $listItems = @()
