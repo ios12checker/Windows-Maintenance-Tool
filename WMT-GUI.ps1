@@ -29553,11 +29553,14 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
+        # Resolve WU category toggles in main scope (can't call functions inside runspace).
+        $wuCategoryTogglesForScan = Get-WmtWuCategoryToggles -Settings $settings
+
         # WINDOWS UPDATE WORKER - includes optional updates.
         if ("windowsupdate" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
-                    param($IgnoreList, $CompletedUpdateIds)
+                    param($IgnoreList, $CompletedUpdateIds, $WuCategoryToggles)
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
                     function Test-Ignored($n, $i) {
@@ -29705,18 +29708,19 @@ $btnWingetScan.Add_Click({
 
                             # Apply WU category filter: skip updates whose
                             # categories are disabled in provider settings.
-                            $wuToggles = Get-WmtWuCategoryToggles
+                            # $WuCategoryToggles was passed from the main scope
+                            # (runspaces can't call main-scope functions).
                             $isInsider = ($title -match '(?i)insider|preview|beta|dev channel|canary')
                             $isDriver = ($categoryText -match '(?i)driver')
                             $isSecurity = (-not [string]::IsNullOrWhiteSpace($severity))
                             $showThisUpdate = $false
                             if (-not $isOptional -and -not $isDriver -and -not $isSecurity -and -not $isInsider) {
-                                if ($wuToggles.Updates) { $showThisUpdate = $true }
+                                if ($WuCategoryToggles.Updates) { $showThisUpdate = $true }
                             }
-                            if ($isOptional -and $wuToggles.Optional) { $showThisUpdate = $true }
-                            if ($isDriver -and $wuToggles.Driver) { $showThisUpdate = $true }
-                            if ($isSecurity -and $wuToggles.Security) { $showThisUpdate = $true }
-                            if ($isInsider -and $wuToggles.Insider) { $showThisUpdate = $true }
+                            if ($isOptional -and $WuCategoryToggles.Optional) { $showThisUpdate = $true }
+                            if ($isDriver -and $WuCategoryToggles.Driver) { $showThisUpdate = $true }
+                            if ($isSecurity -and $WuCategoryToggles.Security) { $showThisUpdate = $true }
+                            if ($isInsider -and $WuCategoryToggles.Insider) { $showThisUpdate = $true }
                             if (-not $showThisUpdate) { continue }
 
                             $visibleCount++
@@ -29747,7 +29751,7 @@ $btnWingetScan.Add_Click({
                     catch {
                         Write-Output "LOG:Windows Update scan failed: $($_.Exception.Message)"
                     }
-                }).AddArgument($ignoreList).AddArgument($completedWindowsUpdateIds)
+                }).AddArgument($ignoreList).AddArgument($completedWindowsUpdateIds).AddArgument($wuCategoryTogglesForScan)
 
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
