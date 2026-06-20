@@ -33313,7 +33313,7 @@ $btnPerfServicesManual.Add_Click({
             }
             Write-GuiLog "Services optimization complete!"
         } "Optimizing services..."
-        Update-TweakButtonStates
+# Deferred to ContentRendered: Update-TweakButtonStates
     })
 
 $btnPerfServicesRevert.Add_Click({
@@ -35147,7 +35147,11 @@ $onMainWindowContentRendered = {
     Start-WmtUpdateAutoScanTimer -ResetNextRun
 
     # 4. Update tweak button states based on system.
-    Update-TweakButtonStates
+    # Deferred to Background priority so the window paints first.
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::Background,
+        [Action]{ Update-TweakButtonStates }
+    )
     Update-MyDeviceResponsiveLayout
 }.GetNewClosure()
 [void]$window.Add_ContentRendered($onMainWindowContentRendered)
@@ -35721,7 +35725,7 @@ function Start-WmtLibraryCacheBuilder {
 
 # Kick off the background library cache builder shortly after the window opens.
 $bootCacheTimer = New-Object System.Windows.Threading.DispatcherTimer
-$bootCacheTimer.Interval = [TimeSpan]::FromSeconds(3)
+$bootCacheTimer.Interval = [TimeSpan]::FromSeconds(1)
 $bootCacheTimer.Add_Tick({
     try { $bootCacheTimer.Stop() } catch {}
     Start-WmtLibraryCacheBuilder
