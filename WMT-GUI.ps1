@@ -1,37 +1,4 @@
-﻿$btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"
-if ($btnToggleClockFormat) {
-    $btnToggleClockFormat.Add_Click({
-            $is24 = ([int](Get-WmtRegValue "HKCU:\Control Panel\International" "iTime" 0) -eq 1)
-            $intlPath = "HKCU:\Control Panel\International"
-            if ($is24) {
-                Invoke-UiCommand {
-                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 0 -Type String -Force
-                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "h:mm tt" -Type String -Force
-                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "h:mm tt" -Type String -Force
-                    # Broadcast WM_SETTINGCHANGE so Explorer picks up the new format immediately
-                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
-                    $HWND_BROADCAST = [IntPtr]0xffff
-                    $WM_SETTINGCHANGE = 0x1A
-                    $result = [IntPtr]::Zero
-                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
-                    Write-GuiLog "Clock set to 12-hour format."
-                } "Setting 12-hour clock..."
-            } else {
-                Invoke-UiCommand {
-                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 1 -Type String -Force
-                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "H:mm" -Type String -Force
-                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "H:mm" -Type String -Force
-                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
-                    $HWND_BROADCAST = [IntPtr]0xffff
-                    $WM_SETTINGCHANGE = 0x1A
-                    $result = [IntPtr]::Zero
-                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
-                    Write-GuiLog "Clock set to 24-hour format."
-                } "Setting 24-hour clock..."
-            }
-            Update-TweakButtonStates
-        })
-}<#
+﻿<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -406,408 +373,6 @@ function New-WmtVirtualRows {
     $rows = [System.Collections.ArrayList]::new()
     foreach ($item in @($Items)) { [void]$rows.Add($item) }
     return , $rows
-}
-
-function Update-WmtTweakToggle {
-    param($Button, [bool]$IsOn, [string]$OnLabel, [string]$OffLabel, [string]$BaseToolTip = "")
-    if (-not $Button) { return }
-    $stateDesc = if ($IsOn) { "Current state: $OnLabel (Blue = active/applied)" } else { "Current state: $OffLabel (Gray = inactive/default)" }
-    $actionDesc = if ($IsOn) { "Click to switch to: $OffLabel" } else { "Click to switch to: $OnLabel" }
-    $fullToolTip = if ([string]::IsNullOrWhiteSpace($BaseToolTip)) { "$stateDesc`n$actionDesc" } else { "$BaseToolTip`n`n$stateDesc`n$actionDesc" }
-    if ($IsOn) {
-        $Button.Content = $OnLabel
-        $Button.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
-    }
-    else {
-        $Button.Content = $OffLabel
-        $Button.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
-    }
-    $Button.ToolTip = $fullToolTip
-}
-
-function Update-TweakButtonStates {
-    try {
-        $regCache = @{}
-        $getRegValue = {
-            param(
-                [string]$Path,
-                [string]$Name,
-                $Default = $null
-            )
-
-            if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
-            if (-not $regCache.ContainsKey($Path)) {
-                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
-                catch { $regCache[$Path] = $null }
-            }
-
-            $item = $regCache[$Path]
-            if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
-            return $Default
-        }.GetNewClosure()
-
-        $setButtonEnabled = {
-            param(
-                [string]$Name,
-                [bool]$Enabled
-            )
-
-            $button = Get-Ctrl $Name
-            if ($button) { $button.IsEnabled = [bool]$Enabled }
-        }
-
-        $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
-        $hagsOn = ($h -ne 2); Update-WmtTweakToggle $btnToggleHags $hagsOn "Disable HAGS" "Enable HAGS"
-        Update-WmtTweakToggle $btnMyDeviceHagsToggle $hagsOn "Disable HAGS" "Enable HAGS"
-
-        $sm = Get-Service "SysMain" -EA Ignore
-        if ($sm) {
-            $d = ($sm.StartType -eq 'Disabled')
-            $superfetchDisabled = $d; Update-WmtTweakToggle $btnToggleSuperfetch $superfetchDisabled "Enable Superfetch" "Disable Superfetch"
-        }
-
-        $hibernate = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
-        if ($null -ne $hibernate) {
-            $hibernateEnabled = ([int]$hibernate -ne 0)
-            $hibernateOff = (-not $hibernateEnabled); Update-WmtTweakToggle $btnToggleHibernate $hibernateOff "Enable Hibernation" "Disable Hibernation"
-            Update-WmtTweakToggle $btnMyDeviceHibernateToggle $hibernateOff "Enable Hibernation" "Disable Hibernation"
-        }
-
-        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
-            $mma = Get-MMAgent -ErrorAction Ignore
-            if ($mma -and $null -ne $mma.MemoryCompression) {
-                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
-                Update-WmtTweakToggle $btnToggleMemCompress $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
-                Update-WmtTweakToggle $btnMyDeviceMemCompressToggle $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
-            }
-        }
-
-        $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-        $ta = & $getRegValue $ap "TaskbarAl"; $btnToggleTaskbarAlign = Get-Ctrl "btnToggleTaskbarAlign"; $taskbarLeft = ($ta -ne 0 -and $null -ne $ta); Update-WmtTweakToggle $btnToggleTaskbarAlign $taskbarLeft "Align Taskbar Center" "Align Taskbar Left"
-        $tc = & $getRegValue $ap "TaskbarGlomLevel"; $neverCombine = ($tc -eq 2); Update-WmtTweakToggle $btnToggleCombine $neverCombine "Always Combine" "Never Combine"
-        $is24 = ([string](& $getRegValue "HKCU:\Control Panel\International" "sShortTime") -cmatch "H")
-        $btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"; Update-WmtTweakToggle $btnToggleClockFormat $is24 "12-Hour Clock" "24-Hour Clock"
-        $cs = & $getRegValue $ap "ShowSecondsInSystemClock"; $clockSecsOn = ($cs -eq 1); Update-WmtTweakToggle $btnToggleClockSecs $clockSecsOn "Hide Clock Seconds" "Show Clock Seconds"
-        $smode = & $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode"
-        $btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"; $searchHidden = ($smode -eq 0); $searchIcon = ($smode -eq 1); $searchState = if ($searchHidden) { 2 } elseif ($searchIcon) { 1 } else { 0 }; if ($searchState -eq 2) { $btnToggleSearchDisplay.Content = "Show Search Box"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } elseif ($searchState -eq 1) { $btnToggleSearchDisplay.Content = "Hide Search"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } else { $btnToggleSearchDisplay.Content = "Search as Icon"; $btnToggleSearchDisplay.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style]) }
-        $widgetsHidden = (([int](Get-WmtRegValue $ap "TaskbarDa" 1) -eq 0)); $btnMouseSpeedSlow = Get-Ctrl "btnMouseSpeedSlow"
-if ($btnMouseSpeedSlow) {
-    $btnMouseSpeedSlow.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6 (slow)." } "Setting mouse speed slow..." ; Update-TweakButtonStates })
-}
-$btnMouseSpeedDefault = Get-Ctrl "btnMouseSpeedDefault"
-if ($btnMouseSpeedDefault) {
-    $btnMouseSpeedDefault.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10 (default)." } "Setting mouse speed default..." ; Update-TweakButtonStates })
-}
-$btnMouseSpeedFast = Get-Ctrl "btnMouseSpeedFast"
-if ($btnMouseSpeedFast) {
-    $btnMouseSpeedFast.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15 (fast)." } "Setting mouse speed fast..." ; Update-TweakButtonStates })
-}
-$btnMouseSettings = Get-Ctrl "btnMouseSettings"
-if ($btnMouseSettings) { $btnMouseSettings.Add_Click({ Start-Process "main.cpl" }) }
-$btnSearchIndexRebuild = Get-Ctrl "btnSearchIndexRebuild"
-if ($btnSearchIndexRebuild) {
-    $btnSearchIndexRebuild.Add_Click({
-            Invoke-UiCommand { Start-Process "powershell.exe" -ArgumentList "-NoProfile -Command `"Get-Service WSearch | Stop-Service -Force; (Get-Service WSearch).WaitForStatus('Stopped'); Start-Service WSearch`"" -Verb RunAs; Write-GuiLog "Search index rebuild started." } "Rebuilding search index..."
-        })
-}
-
-# --- Missing toggle click handlers (found by audit) ---
-$btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
-if ($btnToggleExtensions) {
-    $btnToggleExtensions.Add_Click({
-            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            $currentlyHidden = ([int](Get-WmtRegValue $ap "HideFileExt" 1) -ne 0)
-            if ($currentlyHidden) {
-                Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 0; Write-GuiLog "File extensions shown." } "Showing file extensions..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 1; Write-GuiLog "File extensions hidden." } "Hiding file extensions..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
-if ($btnToggleHiddenFiles) {
-    $btnToggleHiddenFiles.Add_Click({
-            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            $currentlyHidden = ([int](Get-WmtRegValue $ap "Hidden" 2) -eq 2)
-            if ($currentlyHidden) {
-                Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 1; Write-GuiLog "Hidden files shown." } "Showing hidden files..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 2; Write-GuiLog "Hidden files hidden." } "Hiding hidden files..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
-if ($btnToggleExplorerLaunch) {
-    $btnToggleExplorerLaunch.Add_Click({
-            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-            $currentlyThisPc = ([int](Get-WmtRegValue $ap "LaunchTo" 2) -eq 1)
-            if ($currentlyThisPc) {
-                Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 2; Write-GuiLog "Explorer opens to Quick Access." } "Setting Quick Access..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 1; Write-GuiLog "Explorer opens to This PC." } "Setting This PC..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
-if ($btnToggleFullPath) {
-    $btnToggleFullPath.Add_Click({
-            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
-            $currentlyOn = ([int](Get-WmtRegValue $p "FullPath" 0) -eq 1)
-            if ($currentlyOn) {
-                Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 0; Write-GuiLog "Full path in title bar disabled." } "Disabling full path..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 1; Write-GuiLog "Full path in title bar enabled." } "Enabling full path..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleRecents = Get-Ctrl "btnToggleRecents"
-if ($btnToggleRecents) {
-    $btnToggleRecents.Add_Click({
-            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-            $currentlyHidden = ([int](Get-WmtRegValue $p "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $p "ShowFrequent" 1) -eq 0)
-            if ($currentlyHidden) {
-                Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 1; Set-WmtRegDword $p "ShowFrequent" 1; Write-GuiLog "Recent files shown." } "Showing recents..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 0; Set-WmtRegDword $p "ShowFrequent" 0; Write-GuiLog "Recent files hidden." } "Hiding recents..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
-if ($btnToggleMouseAccel) {
-    $btnToggleMouseAccel.Add_Click({
-            $p = "HKCU:\Control Panel\Mouse"
-            $currentlyOn = ([string](Get-WmtRegValue $p "MouseSpeed" "1") -ne "0")
-            if ($currentlyOn) {
-                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "0" -Type String -Force; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..."
-            } else {
-                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "1" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "6" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "10" -Type String -Force; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
-if ($btnToggleClickMode) {
-    $btnToggleClickMode.Add_Click({
-            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-            $shellState = Get-WmtRegValue $p "ShellState"
-            $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
-            if ($singleClick) {
-                Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click..."
-            } else {
-                Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
-if ($btnToggleCtxMenu) {
-    $btnToggleCtxMenu.Add_Click({
-            $classicInstalled = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
-            if ($classicInstalled) {
-                Invoke-UiCommand { Remove-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Modern context menu restored." } "Restoring modern menu..."
-            } else {
-                Invoke-UiCommand { New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Force | Out-Null; New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Force | Out-Null; Set-ItemProperty -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Name "(Default)" -Value "C:\Windows\System32\Windows.UI.FileExplorer.dll" -Force; Write-GuiLog "Classic context menu enabled." } "Enabling classic menu..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
-if ($btnToggleTakeOwnership) {
-    $btnToggleTakeOwnership.Add_Click({
-            $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
-            if ($installed) {
-                Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership..."
-            } else {
-                Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; Write-GuiLog "Take Ownership context menu added." } "Adding Take Ownership..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
-if ($btnTogglePsHere) {
-    $btnTogglePsHere.Add_Click({
-            $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
-            if ($installed) {
-                Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "PowerShell Here context menu removed." } "Removing PowerShell Here..."
-            } else {
-                Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "(Default)" -Value "Open PowerShell Here" -Force; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "Icon" -Value "powershell.exe" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Name "(Default)" -Value "powershell.exe -NoExit -Command Set-Location -LiteralPath "%V"" -Force; Write-GuiLog "PowerShell Here context menu added." } "Adding PowerShell Here..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleAds = Get-Ctrl "btnToggleAds"
-if ($btnToggleAds) {
-    $btnToggleAds.Add_Click({
-            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
-            $currentlyOn = ([int](Get-WmtRegValue $p "Enabled" 1) -ne 0)
-            if ($currentlyOn) {
-                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..."
-            } else {
-                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..."
-            }
-            Update-TweakButtonStates
-        })
-}
-
-$btnToggleWidgets = Get-Ctrl "btnToggleWidgets"; Update-WmtTweakToggle $btnToggleWidgets $widgetsHidden "Show Widgets" "Hide Widgets"
-        $taskViewHidden = (([int](Get-WmtRegValue $ap "ShowTaskViewButton" 1) -eq 0)); $btnToggleTaskView = Get-Ctrl "btnToggleTaskView"; Update-WmtTweakToggle $btnToggleTaskView $taskViewHidden "Show Task View" "Hide Task View"
-        $chatHidden = (([int](Get-WmtRegValue $ap "TaskbarMn" 1) -eq 0)); $btnToggleChat = Get-Ctrl "btnToggleChat"; Update-WmtTweakToggle $btnToggleChat $chatHidden "Show Chat" "Hide Chat"
-
-        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
-        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-        $hideExt = [int](& $getRegValue $ap "HideFileExt" 1)
-        $btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
-        Update-WmtTweakToggle $btnToggleExtensions ($hideExt -eq 0) "Show Extensions" "Hide Extensions"
-        $hidden = [int](& $getRegValue $ap "Hidden" 2)
-        $btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
-        Update-WmtTweakToggle $btnToggleHiddenFiles ($hidden -eq 1) "Show Hidden Files" "Hide Hidden Files"
-        $fullPath = [int](& $getRegValue $cabinetPath "FullPath" 0)
-        $btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
-        Update-WmtTweakToggle $btnToggleFullPath ($fullPath -eq 1) "Full Path On" "Full Path Off"
-        $launchTo = [int](& $getRegValue $ap "LaunchTo" 2)
-        $btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
-        Update-WmtTweakToggle $btnToggleExplorerLaunch ($launchTo -eq 1) "Open to This PC" "Open to Quick Access"
-        $recentsHidden = ([int](& $getRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](& $getRegValue $explorerPath "ShowFrequent" 1) -eq 0)
-        $btnToggleRecents = Get-Ctrl "btnToggleRecents"
-        Update-WmtTweakToggle $btnToggleRecents $recentsHidden "Hide Recents" "Show Recents"
-
-        $mousePath = "HKCU:\Control Panel\Mouse"
-        $mouseSpeed = [int](& $getRegValue $mousePath "MouseSensitivity" 10)
-        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
-        $mouseAccelOn = ([string](& $getRegValue $mousePath "MouseSpeed" "1") -ne "0")
-        $btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
-        Update-WmtTweakToggle $btnToggleMouseAccel $mouseAccelOn "Acceleration On" "Acceleration Off"
-        $shellState = & $getRegValue $explorerPath "ShellState"
-        $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
-        $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
-        Update-WmtTweakToggle $btnToggleClickMode $singleClick "Single-Click Folders" "Double-Click Folders"
-
-        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
-        $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
-        Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
-        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
-        $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
-        Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
-        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
-        $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
-        Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
-
-        $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
-        $btnToggleAds = Get-Ctrl "btnToggleAds"
-        Update-WmtTweakToggle $btnToggleAds ($adEnabled -eq 0) "Ad ID Off" "Ad ID On"
-        $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
-        $suggestionsOff = $true
-        foreach ($name in $suggestionNames) {
-            if ([int](& $getRegValue $contentDeliveryPath $name 1) -ne 0) { $suggestionsOff = $false; break }
-        }
-        $btnToggleSuggested = Get-Ctrl "btnToggleSuggested"
-        Update-WmtTweakToggle $btnToggleSuggested $suggestionsOff "Suggestions Off" "Suggestions On"
-        $tailoredOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
-        $btnToggleTailored = Get-Ctrl "btnToggleTailored"
-        Update-WmtTweakToggle $btnToggleTailored $tailoredOff "Tailored Off" "Tailored On"
-        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-        $activityOff = ([int](& $getRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
-        $btnToggleActivity = Get-Ctrl "btnToggleActivity"
-        Update-WmtTweakToggle $btnToggleActivity $activityOff "Activity History Off" "Activity History On"
-        $launchTrackingOff = ([int](& $getRegValue $ap "Start_TrackProgs" 1) -eq 0)
-        $btnToggleAppLaunch = Get-Ctrl "btnToggleAppLaunch"
-        Update-WmtTweakToggle $btnToggleAppLaunch $launchTrackingOff "Launch Tracking Off" "Launch Tracking On"
-
-        $webSearchOff = ([int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
-        $btnToggleWebSearch = Get-Ctrl "btnToggleWebSearch"
-        Update-WmtTweakToggle $btnToggleWebSearch $webSearchOff "Web Search Off" "Web Search On"
-        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
-        if ($searchSvc) {
-            $indexReduced = ($searchSvc.StartType -ne "Automatic")
-            $btnToggleSearchIndex = Get-Ctrl "btnToggleSearchIndex"
-            Update-WmtTweakToggle $btnToggleSearchIndex $indexReduced "Reduce Indexing" "Default Indexing"
-        }
-
-        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
-        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
-        $gameCfgPath = "HKCU:\System\GameConfigStore"
-        $gameModeOn = ([int](& $getRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](& $getRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
-        $btnToggleGameMode = Get-Ctrl "btnToggleGameMode"
-        Update-WmtTweakToggle $btnToggleGameMode $gameModeOn "Game Mode On" "Game Mode Off"
-        $gameBarOn = ([int](& $getRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](& $getRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
-        $btnToggleGameBar = Get-Ctrl "btnToggleGameBar"
-        Update-WmtTweakToggle $btnToggleGameBar $gameBarOn "Game Bar On" "Game Bar Off"
-        $captureOn = ([int](& $getRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
-        $btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
-        Update-WmtTweakToggle $btnToggleGameCapture (-not $captureOn) "Capture Off" "Capture On"
-        $fsoOff = ([int](& $getRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](& $getRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
-        $btnToggleFso = Get-Ctrl "btnToggleFso"
-        Update-WmtTweakToggle $btnToggleFso $fsoOff "Disable FS Optimizations" "Default FS Optimizations"
-
-        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-        $visualMode = [int](& $getRegValue $visualPath "VisualFXSetting" 0)
-        $snappyOn = ($visualMode -eq 3 -and [string](& $getRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](& $getRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
-        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
-
-        $tipsOff = ([int](& $getRegValue $contentDeliveryPath "SoftLandingEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338389Enabled" 1) -eq 0)
-        $btnToggleTips = Get-Ctrl "btnToggleTips"
-        Update-WmtTweakToggle $btnToggleTips $tipsOff "Tips Off" "Tips On"
-        $setupOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
-        $btnToggleSetupPrompts = Get-Ctrl "btnToggleSetupPrompts"; Update-WmtTweakToggle $btnToggleSetupPrompts $setupOff "Setup Prompts On" "Setup Prompts Off"
-        $lockFactsOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338387Enabled" 1) -eq 0)
-        $spotlightOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](& $getRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
-        $btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
-        Update-WmtTweakToggle $btnToggleLockFacts $lockFactsOff "Lock Facts Off" "Lock Facts On"
-        $btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
-        Update-WmtTweakToggle $btnToggleLockSpotlight $spotlightOff "Spotlight Off" "Spotlight On"
-        $btnToggleLockScreen = Get-Ctrl "btnToggleLockScreen"
-        Update-WmtTweakToggle $btnToggleLockScreen ($lockFactsOff -and $spotlightOff) "Plain Lock Screen" "Default Lock Screen"
-
-        $fastStartupOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
-        $btnToggleFastStartup = Get-Ctrl "btnToggleFastStartup"
-        Update-WmtTweakToggle $btnToggleFastStartup (-not $fastStartupOn) "Fast Startup Off" "Fast Startup On"
-        $restoreFoldersOn = ([int](& $getRegValue $ap "PersistBrowsers" 0) -ne 0)
-        $btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
-        Update-WmtTweakToggle $btnToggleRestoreFolders $restoreFoldersOn "Restore Folders On" "Restore Folders Off"
-
-        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
-        if ($null -ne $batteryThreshold) {
-            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
-        }
-        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
-        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
-        if ($null -ne $usbAc -and $null -ne $usbDc) {
-            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
-            $btnToggleUsbSuspend = Get-Ctrl "btnToggleUsbSuspend"
-            Update-WmtTweakToggle $btnToggleUsbSuspend $usbOn "USB Suspend On" "USB Suspend Off"
-        }
-        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
-        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
-        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
-            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
-            $btnTogglePcie = Get-Ctrl "btnTogglePcie"
-            Update-WmtTweakToggle $btnTogglePcie $pcieModerate "PCIe Savings" "PCIe Savings Off"
-        }
-
-        $longPathsOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
-        $btnToggleLongPaths = Get-Ctrl "btnToggleLongPaths"
-        Update-WmtTweakToggle $btnToggleLongPaths $longPathsOn "Long Paths On" "Long Paths Off"
-        $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
-        $btnToggleDevMode = Get-Ctrl "btnToggleDevMode"
-        Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
-    }
-    catch {}
 }
 
 # Centralized data path for exports (in repo folder)
@@ -22103,6 +21668,408 @@ $btnToggleMemCompress = Get-Ctrl "btnToggleMemCompress"
 $btnMyDeviceMemCompressToggle = Get-Ctrl "btnMyDeviceMemCompressToggle"
 $btnToggleHags = Get-Ctrl "btnToggleHags"
 $btnMyDeviceHagsToggle = Get-Ctrl "btnMyDeviceHagsToggle"
+function Update-WmtTweakToggle {
+    param($Button, [bool]$IsOn, [string]$OnLabel, [string]$OffLabel, [string]$BaseToolTip = "")
+    if (-not $Button) { return }
+    $stateDesc = if ($IsOn) { "Current state: $OnLabel (Blue = active/applied)" } else { "Current state: $OffLabel (Gray = inactive/default)" }
+    $actionDesc = if ($IsOn) { "Click to switch to: $OffLabel" } else { "Click to switch to: $OnLabel" }
+    $fullToolTip = if ([string]::IsNullOrWhiteSpace($BaseToolTip)) { "$stateDesc`n$actionDesc" } else { "$BaseToolTip`n`n$stateDesc`n$actionDesc" }
+    if ($IsOn) {
+        $Button.Content = $OnLabel
+        $Button.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
+    }
+    else {
+        $Button.Content = $OffLabel
+        $Button.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
+    }
+    $Button.ToolTip = $fullToolTip
+}
+
+function Update-TweakButtonStates {
+    try {
+        $regCache = @{}
+        $getRegValue = {
+            param(
+                [string]$Path,
+                [string]$Name,
+                $Default = $null
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+            if (-not $regCache.ContainsKey($Path)) {
+                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
+                catch { $regCache[$Path] = $null }
+            }
+
+            $item = $regCache[$Path]
+            if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+            return $Default
+        }.GetNewClosure()
+
+        $setButtonEnabled = {
+            param(
+                [string]$Name,
+                [bool]$Enabled
+            )
+
+            $button = Get-Ctrl $Name
+            if ($button) { $button.IsEnabled = [bool]$Enabled }
+        }
+
+        $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
+        $hagsOn = ($h -ne 2); Update-WmtTweakToggle $btnToggleHags $hagsOn "Disable HAGS" "Enable HAGS"
+        Update-WmtTweakToggle $btnMyDeviceHagsToggle $hagsOn "Disable HAGS" "Enable HAGS"
+
+        $sm = Get-Service "SysMain" -EA Ignore
+        if ($sm) {
+            $d = ($sm.StartType -eq 'Disabled')
+            $superfetchDisabled = $d; Update-WmtTweakToggle $btnToggleSuperfetch $superfetchDisabled "Enable Superfetch" "Disable Superfetch"
+        }
+
+        $hibernate = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
+        if ($null -ne $hibernate) {
+            $hibernateEnabled = ([int]$hibernate -ne 0)
+            $hibernateOff = (-not $hibernateEnabled); Update-WmtTweakToggle $btnToggleHibernate $hibernateOff "Enable Hibernation" "Disable Hibernation"
+            Update-WmtTweakToggle $btnMyDeviceHibernateToggle $hibernateOff "Enable Hibernation" "Disable Hibernation"
+        }
+
+        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
+            $mma = Get-MMAgent -ErrorAction Ignore
+            if ($mma -and $null -ne $mma.MemoryCompression) {
+                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
+                Update-WmtTweakToggle $btnToggleMemCompress $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
+                Update-WmtTweakToggle $btnMyDeviceMemCompressToggle $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
+            }
+        }
+
+        $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        $ta = & $getRegValue $ap "TaskbarAl";
+
+$btnToggleTaskbarAlign = Get-Ctrl "btnToggleTaskbarAlign"; $taskbarLeft = ($ta -ne 0 -and $null -ne $ta); Update-WmtTweakToggle $btnToggleTaskbarAlign $taskbarLeft "Align Taskbar Center" "Align Taskbar Left"
+        $tc = & $getRegValue $ap "TaskbarGlomLevel"; $neverCombine = ($tc -eq 2); Update-WmtTweakToggle $btnToggleCombine $neverCombine "Always Combine" "Never Combine"
+        $is24 = ([string](& $getRegValue "HKCU:\Control Panel\International" "sShortTime") -cmatch "H")
+        $btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"; Update-WmtTweakToggle $btnToggleClockFormat $is24 "12-Hour Clock" "24-Hour Clock"
+        $cs = & $getRegValue $ap "ShowSecondsInSystemClock"; $clockSecsOn = ($cs -eq 1); Update-WmtTweakToggle $btnToggleClockSecs $clockSecsOn "Hide Clock Seconds" "Show Clock Seconds"
+        $smode = & $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode"
+        $btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"; $searchHidden = ($smode -eq 0); $searchIcon = ($smode -eq 1); $searchState = if ($searchHidden) { 2 } elseif ($searchIcon) { 1 } else { 0 }; if ($searchState -eq 2) { $btnToggleSearchDisplay.Content = "Show Search Box"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } elseif ($searchState -eq 1) { $btnToggleSearchDisplay.Content = "Hide Search"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } else { $btnToggleSearchDisplay.Content = "Search as Icon"; $btnToggleSearchDisplay.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style]) }
+        $widgetsHidden = (([int](Get-WmtRegValue $ap "TaskbarDa" 1) -eq 0)); if ($btnMouseSpeedSlow) {
+    $btnMouseSpeedSlow.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6 (slow)." } "Setting mouse speed slow..." ; Update-TweakButtonStates })
+}
+$btnMouseSpeedDefault = Get-Ctrl "btnMouseSpeedDefault"
+if ($btnMouseSpeedDefault) {
+    $btnMouseSpeedDefault.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10 (default)." } "Setting mouse speed default..." ; Update-TweakButtonStates })
+}
+if ($btnMouseSpeedFast) {
+    $btnMouseSpeedFast.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15 (fast)." } "Setting mouse speed fast..." ; Update-TweakButtonStates })
+}
+$btnMouseSettings = Get-Ctrl "btnMouseSettings"
+if ($btnMouseSettings) { $btnMouseSettings.Add_Click({ Start-Process "main.cpl" }) }
+if ($btnSearchIndexRebuild) {
+    $btnSearchIndexRebuild.Add_Click({
+            Invoke-UiCommand { Start-Process "powershell.exe" -ArgumentList "-NoProfile -Command `"Get-Service WSearch | Stop-Service -Force; (Get-Service WSearch).WaitForStatus('Stopped'); Start-Service WSearch`"" -Verb RunAs; Write-GuiLog "Search index rebuild started." } "Rebuilding search index..."
+        })
+}
+
+# --- Missing toggle click handlers (found by audit) ---
+$btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
+if ($btnToggleExtensions) {
+    $btnToggleExtensions.Add_Click({
+            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = ([int](Get-WmtRegValue $ap "HideFileExt" 1) -ne 0)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 0; Write-GuiLog "File extensions shown." } "Showing file extensions..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 1; Write-GuiLog "File extensions hidden." } "Hiding file extensions..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
+if ($btnToggleHiddenFiles) {
+    $btnToggleHiddenFiles.Add_Click({
+            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = ([int](Get-WmtRegValue $ap "Hidden" 2) -eq 2)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 1; Write-GuiLog "Hidden files shown." } "Showing hidden files..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 2; Write-GuiLog "Hidden files hidden." } "Hiding hidden files..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
+if ($btnToggleExplorerLaunch) {
+    $btnToggleExplorerLaunch.Add_Click({
+            $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyThisPc = ([int](Get-WmtRegValue $ap "LaunchTo" 2) -eq 1)
+            if ($currentlyThisPc) {
+                Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 2; Write-GuiLog "Explorer opens to Quick Access." } "Setting Quick Access..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 1; Write-GuiLog "Explorer opens to This PC." } "Setting This PC..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
+if ($btnToggleFullPath) {
+    $btnToggleFullPath.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+            $currentlyOn = ([int](Get-WmtRegValue $p "FullPath" 0) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 0; Write-GuiLog "Full path in title bar disabled." } "Disabling full path..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 1; Write-GuiLog "Full path in title bar enabled." } "Enabling full path..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleRecents = Get-Ctrl "btnToggleRecents"
+if ($btnToggleRecents) {
+    $btnToggleRecents.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+            $currentlyHidden = ([int](Get-WmtRegValue $p "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $p "ShowFrequent" 1) -eq 0)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 1; Set-WmtRegDword $p "ShowFrequent" 1; Write-GuiLog "Recent files shown." } "Showing recents..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 0; Set-WmtRegDword $p "ShowFrequent" 0; Write-GuiLog "Recent files hidden." } "Hiding recents..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
+if ($btnToggleMouseAccel) {
+    $btnToggleMouseAccel.Add_Click({
+            $p = "HKCU:\Control Panel\Mouse"
+            $currentlyOn = ([string](Get-WmtRegValue $p "MouseSpeed" "1") -ne "0")
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "0" -Type String -Force; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..."
+            } else {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "1" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "6" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "10" -Type String -Force; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
+if ($btnToggleClickMode) {
+    $btnToggleClickMode.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+            $shellState = Get-WmtRegValue $p "ShellState"
+            $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+            if ($singleClick) {
+                Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click..."
+            } else {
+                Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
+if ($btnToggleCtxMenu) {
+    $btnToggleCtxMenu.Add_Click({
+            $classicInstalled = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+            if ($classicInstalled) {
+                Invoke-UiCommand { Remove-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Modern context menu restored." } "Restoring modern menu..."
+            } else {
+                Invoke-UiCommand { New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Force | Out-Null; New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Force | Out-Null; Set-ItemProperty -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Name "(Default)" -Value "C:\Windows\System32\Windows.UI.FileExplorer.dll" -Force; Write-GuiLog "Classic context menu enabled." } "Enabling classic menu..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
+if ($btnToggleTakeOwnership) {
+    $btnToggleTakeOwnership.Add_Click({
+            $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+            if ($installed) {
+                Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership..."
+            } else {
+                Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; Write-GuiLog "Take Ownership context menu added." } "Adding Take Ownership..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
+if ($btnTogglePsHere) {
+    $btnTogglePsHere.Add_Click({
+            $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+            if ($installed) {
+                Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "PowerShell Here context menu removed." } "Removing PowerShell Here..."
+            } else {
+                Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "(Default)" -Value "Open PowerShell Here" -Force; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "Icon" -Value "powershell.exe" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Name "(Default)" -Value "powershell.exe -NoExit -Command Set-Location -LiteralPath "%V"" -Force; Write-GuiLog "PowerShell Here context menu added." } "Adding PowerShell Here..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleAds = Get-Ctrl "btnToggleAds"
+if ($btnToggleAds) {
+    $btnToggleAds.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+            $currentlyOn = ([int](Get-WmtRegValue $p "Enabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..."
+            } else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleWidgets = Get-Ctrl "btnToggleWidgets"; Update-WmtTweakToggle $btnToggleWidgets $widgetsHidden "Show Widgets" "Hide Widgets"
+        $taskViewHidden = (([int](Get-WmtRegValue $ap "ShowTaskViewButton" 1) -eq 0)); $btnToggleTaskView = Get-Ctrl "btnToggleTaskView"; Update-WmtTweakToggle $btnToggleTaskView $taskViewHidden "Show Task View" "Hide Task View"
+        $chatHidden = (([int](Get-WmtRegValue $ap "TaskbarMn" 1) -eq 0)); $btnToggleChat = Get-Ctrl "btnToggleChat"; Update-WmtTweakToggle $btnToggleChat $chatHidden "Show Chat" "Hide Chat"
+
+        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        $hideExt = [int](& $getRegValue $ap "HideFileExt" 1)
+        $btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
+        Update-WmtTweakToggle $btnToggleExtensions ($hideExt -eq 0) "Show Extensions" "Hide Extensions"
+        $hidden = [int](& $getRegValue $ap "Hidden" 2)
+        $btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
+        Update-WmtTweakToggle $btnToggleHiddenFiles ($hidden -eq 1) "Show Hidden Files" "Hide Hidden Files"
+        $fullPath = [int](& $getRegValue $cabinetPath "FullPath" 0)
+        $btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
+        Update-WmtTweakToggle $btnToggleFullPath ($fullPath -eq 1) "Full Path On" "Full Path Off"
+        $launchTo = [int](& $getRegValue $ap "LaunchTo" 2)
+        $btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
+        Update-WmtTweakToggle $btnToggleExplorerLaunch ($launchTo -eq 1) "Open to This PC" "Open to Quick Access"
+        $recentsHidden = ([int](& $getRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](& $getRegValue $explorerPath "ShowFrequent" 1) -eq 0)
+        $btnToggleRecents = Get-Ctrl "btnToggleRecents"
+        Update-WmtTweakToggle $btnToggleRecents $recentsHidden "Hide Recents" "Show Recents"
+
+        $mousePath = "HKCU:\Control Panel\Mouse"
+        $mouseSpeed = [int](& $getRegValue $mousePath "MouseSensitivity" 10)
+        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
+        $mouseAccelOn = ([string](& $getRegValue $mousePath "MouseSpeed" "1") -ne "0")
+        $btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
+        Update-WmtTweakToggle $btnToggleMouseAccel $mouseAccelOn "Acceleration On" "Acceleration Off"
+        $shellState = & $getRegValue $explorerPath "ShellState"
+        $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+        $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
+        Update-WmtTweakToggle $btnToggleClickMode $singleClick "Single-Click Folders" "Double-Click Folders"
+
+        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
+        Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
+        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
+        Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
+        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
+        Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
+
+        $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
+        $btnToggleAds = Get-Ctrl "btnToggleAds"
+        Update-WmtTweakToggle $btnToggleAds ($adEnabled -eq 0) "Ad ID Off" "Ad ID On"
+        $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+        $suggestionsOff = $true
+        foreach ($name in $suggestionNames) {
+            if ([int](& $getRegValue $contentDeliveryPath $name 1) -ne 0) { $suggestionsOff = $false; break }
+        }
+        $btnToggleSuggested = Get-Ctrl "btnToggleSuggested"
+        Update-WmtTweakToggle $btnToggleSuggested $suggestionsOff "Suggestions Off" "Suggestions On"
+        $tailoredOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
+        $btnToggleTailored = Get-Ctrl "btnToggleTailored"
+        Update-WmtTweakToggle $btnToggleTailored $tailoredOff "Tailored Off" "Tailored On"
+        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        $activityOff = ([int](& $getRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
+        $btnToggleActivity = Get-Ctrl "btnToggleActivity"
+        Update-WmtTweakToggle $btnToggleActivity $activityOff "Activity History Off" "Activity History On"
+        $launchTrackingOff = ([int](& $getRegValue $ap "Start_TrackProgs" 1) -eq 0)
+        $btnToggleAppLaunch = Get-Ctrl "btnToggleAppLaunch"
+        Update-WmtTweakToggle $btnToggleAppLaunch $launchTrackingOff "Launch Tracking Off" "Launch Tracking On"
+
+        $webSearchOff = ([int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
+        $btnToggleWebSearch = Get-Ctrl "btnToggleWebSearch"
+        Update-WmtTweakToggle $btnToggleWebSearch $webSearchOff "Web Search Off" "Web Search On"
+        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
+        if ($searchSvc) {
+            $indexReduced = ($searchSvc.StartType -ne "Automatic")
+            $btnToggleSearchIndex = Get-Ctrl "btnToggleSearchIndex"
+            Update-WmtTweakToggle $btnToggleSearchIndex $indexReduced "Reduce Indexing" "Default Indexing"
+        }
+
+        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
+        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        $gameCfgPath = "HKCU:\System\GameConfigStore"
+        $gameModeOn = ([int](& $getRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](& $getRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
+        $btnToggleGameMode = Get-Ctrl "btnToggleGameMode"
+        Update-WmtTweakToggle $btnToggleGameMode $gameModeOn "Game Mode On" "Game Mode Off"
+        $gameBarOn = ([int](& $getRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](& $getRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
+        $btnToggleGameBar = Get-Ctrl "btnToggleGameBar"
+        Update-WmtTweakToggle $btnToggleGameBar $gameBarOn "Game Bar On" "Game Bar Off"
+        $captureOn = ([int](& $getRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
+        $btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
+        Update-WmtTweakToggle $btnToggleGameCapture (-not $captureOn) "Capture Off" "Capture On"
+        $fsoOff = ([int](& $getRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](& $getRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+        $btnToggleFso = Get-Ctrl "btnToggleFso"
+        Update-WmtTweakToggle $btnToggleFso $fsoOff "Disable FS Optimizations" "Default FS Optimizations"
+
+        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+        $visualMode = [int](& $getRegValue $visualPath "VisualFXSetting" 0)
+        $snappyOn = ($visualMode -eq 3 -and [string](& $getRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](& $getRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
+        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
+
+        $tipsOff = ([int](& $getRegValue $contentDeliveryPath "SoftLandingEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338389Enabled" 1) -eq 0)
+        $btnToggleTips = Get-Ctrl "btnToggleTips"
+        Update-WmtTweakToggle $btnToggleTips $tipsOff "Tips Off" "Tips On"
+        $setupOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+        $btnToggleSetupPrompts = Get-Ctrl "btnToggleSetupPrompts"; Update-WmtTweakToggle $btnToggleSetupPrompts $setupOff "Setup Prompts On" "Setup Prompts Off"
+        $lockFactsOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338387Enabled" 1) -eq 0)
+        $spotlightOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](& $getRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
+        $btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
+        Update-WmtTweakToggle $btnToggleLockFacts $lockFactsOff "Lock Facts Off" "Lock Facts On"
+        $btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
+        Update-WmtTweakToggle $btnToggleLockSpotlight $spotlightOff "Spotlight Off" "Spotlight On"
+        $btnToggleLockScreen = Get-Ctrl "btnToggleLockScreen"
+        Update-WmtTweakToggle $btnToggleLockScreen ($lockFactsOff -and $spotlightOff) "Plain Lock Screen" "Default Lock Screen"
+
+        $fastStartupOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
+        $btnToggleFastStartup = Get-Ctrl "btnToggleFastStartup"
+        Update-WmtTweakToggle $btnToggleFastStartup (-not $fastStartupOn) "Fast Startup Off" "Fast Startup On"
+        $restoreFoldersOn = ([int](& $getRegValue $ap "PersistBrowsers" 0) -ne 0)
+        $btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
+        Update-WmtTweakToggle $btnToggleRestoreFolders $restoreFoldersOn "Restore Folders On" "Restore Folders Off"
+
+        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
+        if ($null -ne $batteryThreshold) {
+            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
+        }
+        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
+        if ($null -ne $usbAc -and $null -ne $usbDc) {
+            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
+            $btnToggleUsbSuspend = Get-Ctrl "btnToggleUsbSuspend"
+            Update-WmtTweakToggle $btnToggleUsbSuspend $usbOn "USB Suspend On" "USB Suspend Off"
+        }
+        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
+        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
+            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
+            $btnTogglePcie = Get-Ctrl "btnTogglePcie"
+            Update-WmtTweakToggle $btnTogglePcie $pcieModerate "PCIe Savings" "PCIe Savings Off"
+        }
+
+        $longPathsOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
+        $btnToggleLongPaths = Get-Ctrl "btnToggleLongPaths"
+        Update-WmtTweakToggle $btnToggleLongPaths $longPathsOn "Long Paths On" "Long Paths Off"
+        $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
+        $btnToggleDevMode = Get-Ctrl "btnToggleDevMode"
+        Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
+    }
+    catch {}
+}
+
+
 $btnPerfUltimatePower = Get-Ctrl "btnPerfUltimatePower"
 
 $btnAppxLoad = Get-Ctrl "btnAppxLoad"
@@ -33607,20 +33574,8 @@ $btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"
 $btnToggleWidgets = Get-Ctrl "btnToggleWidgets"
 $btnToggleTaskView = Get-Ctrl "btnToggleTaskView"
 $btnToggleChat = Get-Ctrl "btnToggleChat"
-$btnDevSettings = Get-Ctrl "btnDevSettings"
 $btnMouseSettings = Get-Ctrl "btnMouseSettings"
-$btnNotifyFocusSettings = Get-Ctrl "btnNotifyFocusSettings"
-$btnSearchIndexOptions = Get-Ctrl "btnSearchIndexOptions"
 $btnSearchIndexRebuild = Get-Ctrl "btnSearchIndexRebuild"
-$btnSecurityCfaOpen = Get-Ctrl "btnSecurityCfaOpen"
-$btnSecuritySmartScreenOpen = Get-Ctrl "btnSecuritySmartScreenOpen"
-$btnSecurityUacOpen = Get-Ctrl "btnSecurityUacOpen"
-$btnVisualBestAppearance = Get-Ctrl "btnVisualBestAppearance"
-$btnVisualBestPerformance = Get-Ctrl "btnVisualBestPerformance"
-$btnVisualSnappy = Get-Ctrl "btnVisualSnappy"
-$btnPowerBatterySaverOff = Get-Ctrl "btnPowerBatterySaverOff"
-$btnPowerBatterySaver20 = Get-Ctrl "btnPowerBatterySaver20"
-$btnPowerBatterySaver50 = Get-Ctrl "btnPowerBatterySaver50"
 $btnMouseSpeedSlow = Get-Ctrl "btnMouseSpeedSlow"
 $btnMouseSpeedDefault = Get-Ctrl "btnMouseSpeedDefault"
 $btnMouseSpeedFast = Get-Ctrl "btnMouseSpeedFast"
@@ -33708,92 +33663,6 @@ if ($btnToggleSearchIndex) {
             Invoke-UiCommand { Set-Service -Name WSearch -StartupType Automatic; Start-Service -Name WSearch -ErrorAction SilentlyContinue; Write-GuiLog "Search index set to Automatic." } "Enabling search index..."
         } else {
             Invoke-UiCommand { Set-Service -Name WSearch -StartupType Manual; Write-GuiLog "Search index set to Manual." } "Reducing search index..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
-if ($btnToggleGameCapture) {
-    $btnToggleGameCapture.Add_Click({
-        $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
-        $currentlyOn = ([int](Get-WmtRegValue $p "HistoricalCaptureEnabled" 1) -ne 0)
-        if ($currentlyOn) {
-            Invoke-UiCommand { Set-WmtRegDword $p "HistoricalCaptureEnabled" 0; Write-GuiLog "Game capture disabled." } "Disabling game capture..."
-        } else {
-            Invoke-UiCommand { Set-WmtRegDword $p "HistoricalCaptureEnabled" 1; Write-GuiLog "Game capture enabled." } "Enabling game capture..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnToggleFso = Get-Ctrl "btnToggleFso"
-if ($btnToggleFso) {
-    $btnToggleFso.Add_Click({
-        $p = "HKCU:\System\GameConfigStore"
-        $currentlyOff = ([int](Get-WmtRegValue $p "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](Get-WmtRegValue $p "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
-        if ($currentlyOff) {
-            Invoke-UiCommand { Set-WmtRegDword $p "GameDVR_FSEBehaviorMode" 0; Set-WmtRegDword $p "GameDVR_HonorUserFSEBehaviorMode" 0; Write-GuiLog "Fullscreen optimizations enabled." } "Enabling FSO..."
-        } else {
-            Invoke-UiCommand { Set-WmtRegDword $p "GameDVR_FSEBehaviorMode" 2; Set-WmtRegDword $p "GameDVR_HonorUserFSEBehaviorMode" 1; Write-GuiLog "Fullscreen optimizations disabled." } "Disabling FSO..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
-if ($btnToggleLockFacts) {
-    $btnToggleLockFacts.Add_Click({
-        $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-        $currentlyOn = ([int](Get-WmtRegValue $p "RotatingLockScreenOverlayEnabled" 1) -ne 0 -or [int](Get-WmtRegValue $p "SubscribedContent-338387Enabled" 1) -ne 0)
-        if ($currentlyOn) {
-            Invoke-UiCommand { Set-WmtRegDword $p "RotatingLockScreenOverlayEnabled" 0; Set-WmtRegDword $p "SubscribedContent-338387Enabled" 0; Write-GuiLog "Lock screen facts/tips disabled." } "Disabling lock screen facts..."
-        } else {
-            Invoke-UiCommand { Set-WmtRegDword $p "RotatingLockScreenOverlayEnabled" 1; Set-WmtRegDword $p "SubscribedContent-338387Enabled" 1; Write-GuiLog "Lock screen facts/tips enabled." } "Enabling lock screen facts..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
-if ($btnToggleLockSpotlight) {
-    $btnToggleLockSpotlight.Add_Click({
-        $p1 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-        $p2 = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
-        $currentlyOn = ([int](Get-WmtRegValue $p1 "RotatingLockScreenEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $p2 "DisableWindowsSpotlightFeatures" 0) -ne 1)
-        if ($currentlyOn) {
-            Invoke-UiCommand { Set-WmtRegDword $p1 "RotatingLockScreenEnabled" 0; Set-WmtRegDword $p2 "DisableWindowsSpotlightFeatures" 1; Write-GuiLog "Lock screen Spotlight disabled." } "Disabling Spotlight..."
-        } else {
-            Invoke-UiCommand { Set-WmtRegDword $p1 "RotatingLockScreenEnabled" 1; Set-WmtRegDword $p2 "DisableWindowsSpotlightFeatures" 0; Write-GuiLog "Lock screen Spotlight enabled." } "Enabling Spotlight..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
-if ($btnToggleRestoreFolders) {
-    $btnToggleRestoreFolders.Add_Click({
-        $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-        $currentlyOn = ([int](Get-WmtRegValue $p "PersistBrowsers" 0) -ne 0)
-        if ($currentlyOn) {
-            Invoke-UiCommand { Set-WmtRegDword $p "PersistBrowsers" 0; Write-GuiLog "Folder restore on startup disabled." } "Disabling folder restore..."
-        } else {
-            Invoke-UiCommand { Set-WmtRegDword $p "PersistBrowsers" 1; Write-GuiLog "Folder restore on startup enabled." } "Enabling folder restore..."
-        }
-        Update-TweakButtonStates
-    })
-}
-
-$btnTogglePcie = Get-Ctrl "btnTogglePcie"
-if ($btnTogglePcie) {
-    $btnTogglePcie.Add_Click({
-        $sub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $setting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
-        $ac = Get-WmtPowerSettingIndex $sub $setting "AC"; $dc = Get-WmtPowerSettingIndex $sub $setting "DC"
-        $currentlyOn = ($ac -eq 1 -and $dc -eq 1)
-        if ($currentlyOn) {
-            Invoke-UiCommand { Set-WmtPowerSettingIndex $sub $setting 0; Write-GuiLog "PCIe link state power management disabled." } "Disabling PCIe power management..."
-        } else {
-            Invoke-UiCommand { Set-WmtPowerSettingIndex $sub $setting 1; Write-GuiLog "PCIe link state power management enabled." } "Enabling PCIe power management..."
         }
         Update-TweakButtonStates
     })
@@ -35078,10 +34947,31 @@ $btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"
 if ($btnToggleClockFormat) {
     $btnToggleClockFormat.Add_Click({
             $is24 = ([int](Get-WmtRegValue "HKCU:\Control Panel\International" "iTime" 0) -eq 1)
+            $intlPath = "HKCU:\Control Panel\International"
             if ($is24) {
-                Invoke-UiCommand { Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "iTime" -Value 0 -Type String -Force; Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "h:mm tt" -Type String -Force; Write-GuiLog "Clock set to 12-hour format." } "Setting 12-hour clock..."
+                Invoke-UiCommand {
+                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 0 -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "h:mm tt" -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "h:mm tt" -Type String -Force
+                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
+                    $HWND_BROADCAST = [IntPtr]0xffff
+                    $WM_SETTINGCHANGE = 0x1A
+                    $result = [IntPtr]::Zero
+                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
+                    Write-GuiLog "Clock set to 12-hour format."
+                } "Setting 12-hour clock..."
             } else {
-                Invoke-UiCommand { Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "iTime" -Value 1 -Type String -Force; Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "H:mm" -Type String -Force; Write-GuiLog "Clock set to 24-hour format." } "Setting 24-hour clock..."
+                Invoke-UiCommand {
+                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 1 -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "H:mm" -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "H:mm" -Type String -Force
+                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
+                    $HWND_BROADCAST = [IntPtr]0xffff
+                    $WM_SETTINGCHANGE = 0x1A
+                    $result = [IntPtr]::Zero
+                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
+                    Write-GuiLog "Clock set to 24-hour format."
+                } "Setting 24-hour clock..."
             }
             Update-TweakButtonStates
         })
@@ -35946,6 +35836,8 @@ $onMainWindowClosed = {
     } catch {}
     try { if ($script:WmtLibraryScanTimer) { $script:WmtLibraryScanTimer.Stop(); $script:WmtLibraryScanTimer = $null } } catch {}
     try { if ($script:WmtLibrarySearchTimer) { $script:WmtLibrarySearchTimer.Stop(); $script:WmtLibrarySearchTimer = $null } } catch {}
+    try { if ($script:StatsTimer) { $script:StatsTimer.Stop(); $script:StatsTimer = $null } } catch {}
+    try { if ($script:UpdateTimer) { $script:UpdateTimer.Stop(); $script:UpdateTimer = $null } } catch {}
     try { if ($script:WmtProviderMgrLibrarySearchTimer) { $script:WmtProviderMgrLibrarySearchTimer.Stop(); $script:WmtProviderMgrLibrarySearchTimer = $null } } catch {}
     try {
         if ($script:bootCacheTimer) {
