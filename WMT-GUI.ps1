@@ -8203,6 +8203,14 @@ function Show-WmtCleanupPreviewWpf {
             [string]$ActionTitle
         )
 
+        $formatDeleteBytes = {
+            param([int64]$Bytes)
+            if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+            if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+            if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+            return "$Bytes B"
+        }.GetNewClosure()
+
         $deleteTargets = [System.Collections.Generic.List[object]]::new()
         $seenIds = @{}
         foreach ($target in @($Targets)) {
@@ -8378,7 +8386,7 @@ function Show-WmtCleanupPreviewWpf {
                     $failed = [Math]::Max(0, [int]$deleteState["Failed"])
                     $bytes = [int64]$deleteState["Bytes"]
                     $currentPath = [string]$deleteState["Current"]
-                    $freed = & $formatPreviewBytes $bytes
+                    $freed = & $formatDeleteBytes $bytes
 
                     $deleteProgress.Value = [Math]::Min($deleteProgress.Maximum, $processed)
                     $deleteLabel.Text = "$processed/$total processed | Deleted: $deleted | Failed: $failed | Recovered: $freed"
@@ -8454,7 +8462,7 @@ function Show-WmtCleanupPreviewWpf {
         if ($completedRowIds.Count -gt 0) { & $removePreviewRowsByIds -RowIds ([int[]]$completedRowIds) }
         else { & $refreshPreviewFilter }
 
-        $finalFreed = & $formatPreviewBytes ([int64]$deleteState["Bytes"])
+        $finalFreed = & $formatDeleteBytes ([int64]$deleteState["Bytes"])
         $finalDeleted = [int]$deleteState["Deleted"]
         $finalMissing = [int]$deleteState["Missing"]
         $finalFailed = [int]$deleteState["Failed"]
@@ -13009,24 +13017,25 @@ function Invoke-RegistryTask {
                     return "Unknown"
                 }
 
-                try {
-                    $categoryWeight = 100.0 / ($SelectedScans.Count)
-                    $currentBaseProgress = 0.0
+                # Define tick helpers BEFORE try block so they're always available
+                $categoryWeight = 100.0 / ($SelectedScans.Count)
+                $currentBaseProgress = 0.0
 
-                    # Tick Helper
-                    $Tick = {
-                        param($DetailText, $CurrentIndex, $TotalEstimated)
-                        if ($CurrentIndex % 50 -eq 0) {
-                            $SyncHash.Status = $DetailText
-                            $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
-                            $realVal = $currentBaseProgress + ($fraction * $categoryWeight)
-                            $SyncHash.Progress = [int]$realVal
-                        }
+                $Tick = {
+                    param($DetailText, $CurrentIndex, $TotalEstimated)
+                    if ($CurrentIndex % 50 -eq 0) {
+                        $SyncHash.Status = $DetailText
+                        $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
+                        $realVal = $currentBaseProgress + ($fraction * $categoryWeight)
+                        $SyncHash.Progress = [int]$realVal
                     }
-                    $EndCategory = {
-                        $currentBaseProgress += $categoryWeight
-                        $SyncHash.Progress = [int]$currentBaseProgress
-                    }
+                }
+                $EndCategory = {
+                    $currentBaseProgress += $categoryWeight
+                    $SyncHash.Progress = [int]$currentBaseProgress
+                }
+
+                try {
 
                     # 1. ACTIVEX & COM
                     if ($SelectedScans -contains "ActiveX") {
