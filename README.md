@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v6-green)
+![Version](https://img.shields.io/badge/version-v6.1-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -17,6 +17,8 @@ It is built for technicians, power users, and end users who want practical Windo
 - One-by-one package update flow with visible progress windows, plus experimental headless/background automation.
 - Optional EXE build support through PS2EXE for release builds.
 - Optional system tray mode with background update scans, notifications, and reduced RAM mode while hidden.
+- Unified Game Library for installed Steam, Epic/Legendary, and GOG titles.
+- Individual provider controls for update scans, package search, library search, and metadata.
 - My Device dashboard with system specs, storage health, improved drive benchmark, network, battery/power, driver tools, RAM cleanup, TRIM, export, and quick shortcuts to related tools.
 - Startup Manager for startup apps, scheduled tasks, context menu entries, and services.
 - Restore Manager with create, delete, restore, enable, and disable actions.
@@ -24,47 +26,46 @@ It is built for technicians, power users, and end users who want practical Windo
 - Safety prompts, backups, revert actions, and clearer error messages for risky operations.
 
 ## Screenshot
+<img width="1920" height="1033" alt="image" src="https://github.com/user-attachments/assets/e3e7ca22-4e27-4382-a812-7a66d2cc3789" />
 
-<img width="1920" height="1034" alt="image" src="https://github.com/user-attachments/assets/dc09f75e-d459-4f51-a1af-e187425274c4" />
 
 
-## What's New in v6
+## What's New in v6.1
 
-### EXE, Tray, and Background Updates
+### Game Library
 
-- Added PS2EXE build support for creating a release-ready `WindowsMaintenanceTool.exe`.
-- Added single-instance protection so launching WMT again restores the existing window instead of opening a second copy.
-- Added optional system tray mode with restore/exit actions, background update scans, native Windows notifications, and tray-balloon fallback.
-- Added optional RAM reduction while WMT is hidden in the tray.
-- Added experimental headless update/install mode and experimental auto-install from background scans.
+- Added a unified Game Library for locally installed Steam, Epic/Legendary, and GOG games.
+- Added library search, provider filtering, sorting, cache refresh, and supported launch/install/uninstall actions.
+- Added Steam library discovery through configured library folders, app manifests, and cached app metadata.
+- Added Epic library discovery through Legendary and GOG library discovery through GOGDL/local metadata.
+- Added Game Library entries to global search.
+- Integrated owned Legendary and GOG games into the main package search when library searching is enabled.
 
-### Package Providers
+### Providers and Search
 
-- Added Windows Update as a package/update provider using the Windows Update COM API, including optional update detection and install monitoring.
-- Added .NET global tools, PowerShell modules, and Composer global packages as update/search/install providers.
-- Added Steam manifest scanning for pending game updates, with update handling delegated to Steam.
-- Added Legendary/Epic Games update support with local `legendary.exe` management and EGL sync.
-- Added GOGDL/GOG update support with local GOGDL management, Heroic auth reuse, and GOG auth flow.
-- Added provider install/repair/open buttons in Provider Manager for supported external tools and launchers.
-- Added Microsoft Store GUI automation when Store CLI is not enough to complete Store app updates.
+- Added individual controls for each provider's update scans, package search, library search, and metadata use.
+- Added provider capability detection so only supported options are displayed.
+- Added package searching for Steam, Scoop, RubyGems, and Cargo.
+- Added a 24-hour cached PyPI index for much faster Python package searches with less network traffic.
+- Added automatic update-scan intervals for 8 hours, 12 hours, and 1 day.
+- Added individual Windows Update category controls.
 
-### Interface and Managers
+### Interface and Startup
 
-- Rebuilt Startup Manager in WPF with startup apps, scheduled tasks, context menu entries, services, filtering, color/status styling, and entry editing.
-- Rebuilt Restore Manager with out-of-process restore work and loading/progress feedback.
-- Moved Advanced Cleanup selection and cleanup preview windows to WPF with grouped/searchable rule rendering.
-- Improved update-list checkboxes, smart column sizing, row clipboard export, sorting, and refresh behavior.
-- Improved Firewall Manager with background rule loading, lazy selected-rule details, caching, search, and sortable headers.
-- Improved My Device and Firewall startup behavior with background preloading for expensive data.
+- Added **Start with Windows** in Support & Credits, with automatic startup-entry validation and repair if WMT is moved.
+- Consolidated 31 paired on/off or enable/disable controls into single state-aware Tweaks buttons.
+- Applied matching unified toggle behavior to relevant My Device and Drivers actions.
+- Added clearer state-aware tooltips and hover descriptions.
+- Added Enter/Space checkbox control and improved click-drag selection in the Updates list.
 
-### Registry Cleaner and Reliability
+### Fixes and Performance
 
-- Reworked Registry Cleaner safelist behavior so protected or risky findings are shown as review-only instead of being hidden.
-- Added "Open in Regedit" and improved copy-selected/copy-all output for registry results.
-- Added repair handling for malformed COM server paths and broken executable/argument registry values.
-- Added deeper registry delete handling with native registry APIs, `reg.exe` fallback, ACL unlock attempts, 32-bit/64-bit target expansion, and verification.
-- Added crash diagnostics to `data\last-crash.txt` for unhandled WPF/update-monitor failures.
-- Fixed package manager progress, refresh, error detection, provider output deadlocks, Store GUI failures, GOG auth writes, Restore Manager crashes, Winapp2 Analyze crashes, stale tray icons, and duplicate-instance issues.
+- Fixed Advanced Cleanup deletion after the WPF conversion.
+- Fixed Windows Update category handling and provider-toggle persistence.
+- Fixed several consolidated controls showing or applying the wrong action.
+- Fixed Steam library detection across additional configured library folders.
+- Improved Steam metadata caching, provider search performance, and startup registration for script and EXE launches.
+- Reduced repeated C# compilation work and corrected transparency in the EXE/tray icon.
 
 ## Core Features
 
@@ -74,6 +75,7 @@ It is built for technicians, power users, and end users who want practical Windo
 - Update packages one at a time with a visible update window.
 - Run optional background scans and experimental headless/auto-install flows from tray mode.
 - Search package results before updating.
+- Control update scanning, package search, library search, and metadata separately for supported providers.
 - Ignore selected Winget packages.
 - Browse and install curated software.
 - Handles slow providers with timeout protection.
@@ -83,6 +85,14 @@ It is built for technicians, power users, and end users who want practical Windo
 - Updates Epic games through the standalone Legendary executable when authenticated; updates installed GOG games through Heroic's GOGDL when GOG auth is available.
 - Right-click supported Winget package rows to view manifest details.
 - Use **Update All** for batch update flows where available.
+
+### Game Library
+
+- View installed Steam, Epic/Legendary, and GOG games in one combined library.
+- Search and filter the library by title and provider.
+- Sort library columns and refresh locally cached game metadata.
+- Launch installed games and use supported install/uninstall actions.
+- Include owned Legendary/GOG games in package searches when library searching is enabled.
 
 ### System Health
 
@@ -108,6 +118,7 @@ It is built for technicians, power users, and end users who want practical Windo
 
 ### Tweaks
 
+- Use state-aware toggle buttons instead of separate on/off buttons for supported settings.
 - Performance service optimization and revert actions.
 - Hibernation, SysMain, memory compression, and power plan controls.
 - Windows Update policy presets.
@@ -173,6 +184,7 @@ It is built for technicians, power users, and end users who want practical Windo
 - Release download stats.
 - .NET roll-forward configuration.
 - PS2EXE build script for creating release EXE builds.
+- Start or stop WMT launching automatically with Windows.
 - Group Policy Editor installer for supported Windows Home systems.
 - Optional MAS activation helper with explicit user confirmation.
 
@@ -231,6 +243,7 @@ WMT stores generated files in a local `data` folder next to the script.
 | `hosts_backups` | Hosts file backups |
 | `winapp2.ini` / cache files | Advanced cleanup community rules |
 | `legendary` / `gogdl` | Local game-provider helper tools and auth files |
+| Provider/library cache files | Cached PyPI and game-library metadata |
 | `last-crash.txt` | Last captured WMT crash/monitor diagnostic |
 
 ## Safety Notes
@@ -239,6 +252,7 @@ WMT stores generated files in a local `data` folder next to the script.
 - Registry and hosts changes create backups where applicable.
 - Many tweak groups include revert actions.
 - Startup and service changes are visible in Startup Manager.
+- Start with Windows repairs its saved launch path when WMT has been moved.
 - Registry cleaner review-only rows are shown for inspection and are not fixed automatically.
 - Tray/headless package automation is experimental and may still require manual provider interaction.
 - WMT itself does not send telemetry.
@@ -254,6 +268,8 @@ WMT stores generated files in a local `data` folder next to the script.
 | Winget scan fails | Make sure App Installer / Winget is installed and internet is available. |
 | Package update hangs | Retry the individual provider or update the package manually. |
 | Background/headless update does not finish | Disable headless mode and run the provider visibly from the Updates tab. |
+| A game is missing from Game Library | Refresh the library and verify its launcher, local manifest, authentication, and provider toggles. |
+| Start with Windows no longer works after moving WMT | Open Support & Credits; WMT can validate and repair its startup entry. |
 | A tweak causes issues | Use the matching revert button where available. |
 | Registry cleanup finds protected entries | Review-only entries are intentionally not fixed automatically. Inspect them before taking action. |
 
