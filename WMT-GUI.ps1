@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6"
+$AppVersion = "6.1"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -62,16 +62,49 @@ if ([string]::IsNullOrWhiteSpace($script:WmtRootPath)) {
     $script:WmtRootPath = (Get-Location).Path
 }
 
-# HIDE CONSOLE (Safe Check)
+# HIDE CONSOLE + DPI + TOKEN MANIPULATOR (consolidated into one Add-Type call)
 # This prevents crashes if you run the script twice in the same session
-if (-not ([System.Management.Automation.PSTypeName]'Win32Functions.Win32ShowWindow').Type) {
-    $t = '[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int state);'
-    Add-Type -MemberDefinition $t -Name "Win32ShowWindow" -Namespace Win32Functions
+if (-not ([System.Management.Automation.PSTypeName]'WmtNativeStartup.Native').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace WmtNativeStartup {
+    public class Native {
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr handle, int state);
+        [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    }
+    public class TokenManipulator {
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
+        [DllImport("kernel32.dll", ExactSpelling = true)]
+        internal static extern IntPtr GetCurrentProcess();
+        [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
+        internal static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
+        [DllImport("advapi32.dll", SetLastError = true)]
+        internal static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        internal struct TokPriv1Luid { public int Count; public long Luid; public int Attr; }
+        internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
+        internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
+        internal const int TOKEN_QUERY = 0x00000008;
+        public static bool EnablePrivilege(string privilege) {
+            try {
+                IntPtr htok = IntPtr.Zero;
+                if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htok)) return false;
+                TokPriv1Luid tp; tp.Count = 1; tp.Attr = SE_PRIVILEGE_ENABLED; tp.Luid = 0;
+                if (!LookupPrivilegeValue(null, privilege, ref tp.Luid)) return false;
+                if (!AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) return false;
+                return true;
+            } catch { return false; }
+        }
+    }
+}
+'@
 }
 try {
     $hwnd = [System.Diagnostics.Process]::GetCurrentProcess().MainWindowHandle
     if ($hwnd -ne [IntPtr]::Zero) {
-        [Win32Functions.Win32ShowWindow]::ShowWindow($hwnd, 0) | Out-Null
+        [WmtNativeStartup.Native]::ShowWindow($hwnd, 0) | Out-Null
     }
 }
 catch {}
@@ -139,55 +172,14 @@ catch {
     $script:WmtSingleInstanceMutexOwned = $false
 }
 
-# ENABLE HIGH-DPI AWARENESS (Safe Check)
+# ENABLE HIGH-DPI AWARENESS (using consolidated type)
 if ([Environment]::OSVersion.Version.Major -ge 6) {
-    if (-not ([System.Management.Automation.PSTypeName]'Win32Dpi').Type) {
-        $code = @'
-        [DllImport("user32.dll")]
-        public static extern bool SetProcessDPIAware();
-'@
-        Add-Type -MemberDefinition $code -Name "Win32Dpi"
-    }
-    try { [Win32Dpi]::SetProcessDPIAware() | Out-Null } catch {}
+    try { [WmtNativeStartup.Native]::SetProcessDPIAware() | Out-Null } catch {}
 }
 
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Data
 
-# OPTIMIZATION: Define Token Manipulator globally once (Prevents "Type already exists" errors)
-if (-not ([System.Management.Automation.PSTypeName]'Win32.TokenManipulator').Type) {
-    $tokenCode = @'
-    using System;
-    using System.Runtime.InteropServices;
-    namespace Win32 {
-        public class TokenManipulator {
-            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-            internal static extern bool AdjustTokenPrivileges(IntPtr htok, bool disall, ref TokPriv1Luid newst, int len, IntPtr prev, IntPtr relen);
-            [DllImport("kernel32.dll", ExactSpelling = true)]
-            internal static extern IntPtr GetCurrentProcess();
-            [DllImport("advapi32.dll", ExactSpelling = true, SetLastError = true)]
-            internal static extern bool OpenProcessToken(IntPtr h, int acc, ref IntPtr phtok);
-            [DllImport("advapi32.dll", SetLastError = true)]
-            internal static extern bool LookupPrivilegeValue(string host, string name, ref long pluid);
-            [StructLayout(LayoutKind.Sequential, Pack = 1)]
-            internal struct TokPriv1Luid { public int Count; public long Luid; public int Attr; }
-            internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
-            internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
-            internal const int TOKEN_QUERY = 0x00000008;
-            public static bool EnablePrivilege(string privilege) {
-                try {
-                    IntPtr htok = IntPtr.Zero;
-                    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htok)) return false;
-                    TokPriv1Luid tp; tp.Count = 1; tp.Attr = SE_PRIVILEGE_ENABLED; tp.Luid = 0;
-                    if (!LookupPrivilegeValue(null, privilege, ref tp.Luid)) return false;
-                    if (!AdjustTokenPrivileges(htok, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero)) return false;
-                    return true;
-                } catch { return false; }
-            }
-        }
-    }
-'@
-    Add-Type -TypeDefinition $tokenCode
-}
+# Token Manipulator (consolidated into WmtNativeStartup above)
 
 # ==========================================
 # 2. HELPER FUNCTIONS
@@ -373,183 +365,6 @@ function New-WmtVirtualRows {
     $rows = [System.Collections.ArrayList]::new()
     foreach ($item in @($Items)) { [void]$rows.Add($item) }
     return , $rows
-}
-
-function Update-TweakButtonStates {
-    try {
-        $regCache = @{}
-        $getRegValue = {
-            param(
-                [string]$Path,
-                [string]$Name,
-                $Default = $null
-            )
-
-            if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
-            if (-not $regCache.ContainsKey($Path)) {
-                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
-                catch { $regCache[$Path] = $null }
-            }
-
-            $item = $regCache[$Path]
-            if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
-            return $Default
-        }.GetNewClosure()
-
-        $setButtonEnabled = {
-            param(
-                [string]$Name,
-                [bool]$Enabled
-            )
-
-            $button = Get-Ctrl $Name
-            if ($button) { $button.IsEnabled = [bool]$Enabled }
-        }
-
-        $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
-        & $setButtonEnabled "btnPerfEnableHags" ($h -ne 2); & $setButtonEnabled "btnPerfDisableHags" ($h -eq 2)
-
-        $sm = Get-Service "SysMain" -EA Ignore
-        if ($sm) {
-            $d = ($sm.StartType -eq 'Disabled')
-            & $setButtonEnabled "btnPerfDisableSuperfetch" (-not $d); & $setButtonEnabled "btnPerfEnableSuperfetch" $d
-        }
-
-        $hibernate = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
-        if ($null -ne $hibernate) {
-            $hibernateEnabled = ([int]$hibernate -ne 0)
-            & $setButtonEnabled "btnPerfDisableHibernate" $hibernateEnabled; & $setButtonEnabled "btnPerfEnableHibernate" (-not $hibernateEnabled)
-        }
-
-        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
-            $mma = Get-MMAgent -ErrorAction Ignore
-            if ($mma -and $null -ne $mma.MemoryCompression) {
-                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
-                & $setButtonEnabled "btnPerfDisableMemCompress" $memoryCompressionEnabled; & $setButtonEnabled "btnPerfEnableMemCompress" (-not $memoryCompressionEnabled)
-            }
-        }
-
-        $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-        $ta = & $getRegValue $ap "TaskbarAl"; & $setButtonEnabled "btnTaskbarLeft" ($ta -ne 0); & $setButtonEnabled "btnTaskbarCenter" ($ta -eq 0 -or $null -eq $ta)
-        $tc = & $getRegValue $ap "TaskbarGlomLevel"; & $setButtonEnabled "btnNeverCombine" ($tc -ne 2); & $setButtonEnabled "btnAlwaysCombine" ($tc -eq 2 -or $null -eq $tc)
-        $is24 = ([string](& $getRegValue "HKCU:\Control Panel\International" "sShortTime") -cmatch "H")
-        & $setButtonEnabled "btnClock24" (-not $is24); & $setButtonEnabled "btnClock12" $is24
-        $cs = & $getRegValue $ap "ShowSecondsInSystemClock"; & $setButtonEnabled "btnClockSecsOn" ($cs -ne 1); & $setButtonEnabled "btnClockSecsOff" ($cs -eq 1 -or $null -eq $cs)
-        $smode = & $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode"
-        & $setButtonEnabled "btnHideSearch" ($smode -ne 0); & $setButtonEnabled "btnSearchIcon" ($smode -ne 1)
-        & $setButtonEnabled "btnHideWidgets" ((& $getRegValue $ap "TaskbarDa") -ne 0)
-        & $setButtonEnabled "btnHideTaskView" ((& $getRegValue $ap "ShowTaskViewButton") -ne 0)
-        & $setButtonEnabled "btnHideChat" ((& $getRegValue $ap "TaskbarMn") -ne 0)
-
-        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
-        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
-        $hideExt = [int](& $getRegValue $ap "HideFileExt" 1)
-        & $setButtonEnabled "btnExpShowExt" ($hideExt -ne 0); & $setButtonEnabled "btnExpHideExt" ($hideExt -eq 0)
-        $hidden = [int](& $getRegValue $ap "Hidden" 2)
-        & $setButtonEnabled "btnExpShowHidden" ($hidden -ne 1); & $setButtonEnabled "btnExpHideHidden" ($hidden -eq 1)
-        $fullPath = [int](& $getRegValue $cabinetPath "FullPath" 0)
-        & $setButtonEnabled "btnExpFullPathOn" ($fullPath -ne 1); & $setButtonEnabled "btnExpFullPathOff" ($fullPath -eq 1)
-        $launchTo = [int](& $getRegValue $ap "LaunchTo" 2)
-        & $setButtonEnabled "btnExpLaunchThisPc" ($launchTo -ne 1); & $setButtonEnabled "btnExpLaunchQuickAccess" ($launchTo -eq 1)
-        $recentsHidden = ([int](& $getRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](& $getRegValue $explorerPath "ShowFrequent" 1) -eq 0)
-        & $setButtonEnabled "btnExpHideRecents" (-not $recentsHidden); & $setButtonEnabled "btnExpShowRecents" $recentsHidden
-
-        $mousePath = "HKCU:\Control Panel\Mouse"
-        $mouseSpeed = [int](& $getRegValue $mousePath "MouseSensitivity" 10)
-        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
-        $mouseAccelOn = ([string](& $getRegValue $mousePath "MouseSpeed" "1") -ne "0")
-        & $setButtonEnabled "btnMouseAccelOn" (-not $mouseAccelOn); & $setButtonEnabled "btnMouseAccelOff" $mouseAccelOn
-        $shellState = & $getRegValue $explorerPath "ShellState"
-        $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
-        & $setButtonEnabled "btnMouseSingleClick" (-not $singleClick); & $setButtonEnabled "btnMouseDoubleClick" $singleClick
-
-        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
-        & $setButtonEnabled "btnCtxClassic" (-not $classicContext); & $setButtonEnabled "btnCtxModern" $classicContext
-        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
-        & $setButtonEnabled "btnCtxTakeOwnAdd" (-not $takeOwnInstalled); & $setButtonEnabled "btnCtxTakeOwnRemove" $takeOwnInstalled
-        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
-        & $setButtonEnabled "btnCtxPsHereAdd" (-not $psHereInstalled); & $setButtonEnabled "btnCtxPsHereRemove" $psHereInstalled
-
-        $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
-        & $setButtonEnabled "btnPrivacyAdsOff" ($adEnabled -ne 0); & $setButtonEnabled "btnPrivacyAdsOn" ($adEnabled -eq 0)
-        $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
-        $suggestionsOff = $true
-        foreach ($name in $suggestionNames) {
-            if ([int](& $getRegValue $contentDeliveryPath $name 1) -ne 0) { $suggestionsOff = $false; break }
-        }
-        & $setButtonEnabled "btnPrivacySuggestedOff" (-not $suggestionsOff); & $setButtonEnabled "btnPrivacySuggestedOn" $suggestionsOff
-        $tailoredOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
-        & $setButtonEnabled "btnPrivacyTailoredOff" (-not $tailoredOff); & $setButtonEnabled "btnPrivacyTailoredOn" $tailoredOff
-        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-        $activityOff = ([int](& $getRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
-        & $setButtonEnabled "btnPrivacyActivityOff" (-not $activityOff); & $setButtonEnabled "btnPrivacyActivityOn" $activityOff
-        $launchTrackingOff = ([int](& $getRegValue $ap "Start_TrackProgs" 1) -eq 0)
-        & $setButtonEnabled "btnPrivacyAppLaunchOff" (-not $launchTrackingOff); & $setButtonEnabled "btnPrivacyAppLaunchOn" $launchTrackingOff
-
-        $webSearchOff = ([int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
-        & $setButtonEnabled "btnSearchWebOff" (-not $webSearchOff); & $setButtonEnabled "btnSearchWebOn" $webSearchOff
-        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
-        if ($searchSvc) {
-            $indexReduced = ($searchSvc.StartType -ne "Automatic")
-            & $setButtonEnabled "btnSearchIndexReduced" (-not $indexReduced); & $setButtonEnabled "btnSearchIndexDefault" $indexReduced
-        }
-
-        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
-        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
-        $gameCfgPath = "HKCU:\System\GameConfigStore"
-        $gameModeOn = ([int](& $getRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](& $getRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
-        & $setButtonEnabled "btnGameModeOn" (-not $gameModeOn); & $setButtonEnabled "btnGameModeOff" $gameModeOn
-        $gameBarOn = ([int](& $getRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](& $getRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
-        & $setButtonEnabled "btnGameBarOff" $gameBarOn; & $setButtonEnabled "btnGameBarOn" (-not $gameBarOn)
-        $captureOn = ([int](& $getRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
-        & $setButtonEnabled "btnGameCaptureOff" $captureOn; & $setButtonEnabled "btnGameCaptureOn" (-not $captureOn)
-        $fsoOff = ([int](& $getRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](& $getRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
-        & $setButtonEnabled "btnGameFsoOff" (-not $fsoOff); & $setButtonEnabled "btnGameFsoDefault" $fsoOff
-
-        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-        $visualMode = [int](& $getRegValue $visualPath "VisualFXSetting" 0)
-        $snappyOn = ($visualMode -eq 3 -and [string](& $getRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](& $getRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
-        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
-
-        $tipsOff = ([int](& $getRegValue $contentDeliveryPath "SoftLandingEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338389Enabled" 1) -eq 0)
-        & $setButtonEnabled "btnNotifyTipsOff" (-not $tipsOff); & $setButtonEnabled "btnNotifyTipsOn" $tipsOff
-        $setupOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
-        & $setButtonEnabled "btnNotifySetupOff" (-not $setupOff); & $setButtonEnabled "btnNotifySetupOn" $setupOff
-        $lockFactsOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338387Enabled" 1) -eq 0)
-        $spotlightOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](& $getRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
-        & $setButtonEnabled "btnLockFactsOff" (-not $lockFactsOff); & $setButtonEnabled "btnLockFactsOn" $lockFactsOff
-        & $setButtonEnabled "btnLockSpotlightOff" (-not $spotlightOff); & $setButtonEnabled "btnLockSpotlightOn" $spotlightOff
-        & $setButtonEnabled "btnLockPlain" (-not ($lockFactsOff -and $spotlightOff)); & $setButtonEnabled "btnLockDefault" ($lockFactsOff -or $spotlightOff)
-
-        $fastStartupOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
-        & $setButtonEnabled "btnStartupFastOff" $fastStartupOn; & $setButtonEnabled "btnStartupFastOn" (-not $fastStartupOn)
-        $restoreFoldersOn = ([int](& $getRegValue $ap "PersistBrowsers" 0) -ne 0)
-        & $setButtonEnabled "btnStartupRestoreFoldersOn" (-not $restoreFoldersOn); & $setButtonEnabled "btnStartupRestoreFoldersOff" $restoreFoldersOn
-
-        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
-        if ($null -ne $batteryThreshold) {
-            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
-        }
-        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
-        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
-        if ($null -ne $usbAc -and $null -ne $usbDc) {
-            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
-            & $setButtonEnabled "btnPowerUsbSuspendOn" (-not $usbOn); & $setButtonEnabled "btnPowerUsbSuspendOff" ($usbAc -ne 0 -or $usbDc -ne 0)
-        }
-        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
-        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
-        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
-            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
-            & $setButtonEnabled "btnPowerPcieModerate" (-not $pcieModerate); & $setButtonEnabled "btnPowerPcieOff" ($pcieAc -ne 0 -or $pcieDc -ne 0)
-        }
-
-        $longPathsOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
-        & $setButtonEnabled "btnDevLongPathsOn" (-not $longPathsOn); & $setButtonEnabled "btnDevLongPathsOff" $longPathsOn
-        $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
-        & $setButtonEnabled "btnDevModeOn" (-not $devModeOn); & $setButtonEnabled "btnDevModeOff" $devModeOn
-    }
-    catch {}
 }
 
 # Centralized data path for exports (in repo folder)
@@ -4130,6 +3945,8 @@ function Save-WmtSettings {
             LoadWinapp2                = [bool]$Settings.LoadWinapp2
             LoadCleanerML              = [bool]$Settings.LoadCleanerML
             EnabledProviders           = $Settings.EnabledProviders
+            ProviderToggles            = if ($Settings.ProviderToggles) { $Settings.ProviderToggles } else { @{} }
+            WuCategoryToggles          = if ($Settings.WuCategoryToggles) { $Settings.WuCategoryToggles } else { @{} }
             CustomDnsServers           = if ($Settings.CustomDnsServers) { @($Settings.CustomDnsServers) } else { @() }
             CustomDohTemplate          = if ($Settings.CustomDohTemplate) { [string]$Settings.CustomDohTemplate } else { "" }
             CustomDohEnabled           = [bool]$Settings.CustomDohEnabled
@@ -4145,8 +3962,15 @@ function Save-WmtSettings {
 }
 
 function Get-WmtSettings {
-    # OPTIMIZATION: Return cached settings if available to avoid disk I/O
-    if ($script:WmtSettingsCache) { return $script:WmtSettingsCache }
+    # OPTIMIZATION: Return cached settings if available to avoid disk I/O.
+    # Return a shallow clone so callers can't mutate the cache by reference.
+    if ($script:WmtSettingsCache) {
+        $clone = @{}
+        foreach ($k in @($script:WmtSettingsCache.Keys)) {
+            $clone[$k] = $script:WmtSettingsCache[$k]
+        }
+        return $clone
+    }
 
     $path = Join-Path (Get-DataPath) "settings.json"
     
@@ -4165,6 +3989,8 @@ function Get-WmtSettings {
         LoadWinapp2                = $false 
         LoadCleanerML              = $false
         EnabledProviders           = @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
+        WuCategoryToggles          = @{}
+        ProviderToggles            = @{}
         CustomDnsServers           = @()
         CustomDohTemplate          = ""
         CustomDohEnabled           = $false
@@ -4207,6 +4033,8 @@ function Get-WmtSettings {
             if ($json.PSObject.Properties["LoadWinapp2"]) { $defaults.LoadWinapp2 = [bool]$json.LoadWinapp2 }
             if ($json.PSObject.Properties["LoadCleanerML"]) { $defaults.LoadCleanerML = [bool]$json.LoadCleanerML }
             if ($json.PSObject.Properties["EnabledProviders"]) { $defaults.EnabledProviders = $json.EnabledProviders }
+            if ($json.PSObject.Properties["ProviderToggles"]) { $defaults.ProviderToggles = $json.ProviderToggles }
+            if ($json.PSObject.Properties["WuCategoryToggles"]) { $defaults.WuCategoryToggles = $json.WuCategoryToggles }
             if ($json.PSObject.Properties["CustomDnsServers"]) {
                 $customDnsServers = @()
                 foreach ($server in @($json.CustomDnsServers)) {
@@ -8375,6 +8203,14 @@ function Show-WmtCleanupPreviewWpf {
             [string]$ActionTitle
         )
 
+        $formatDeleteBytes = {
+            param([int64]$Bytes)
+            if ($Bytes -ge 1GB) { return "{0:N2} GB" -f ($Bytes / 1GB) }
+            if ($Bytes -ge 1MB) { return "{0:N2} MB" -f ($Bytes / 1MB) }
+            if ($Bytes -ge 1KB) { return "{0:N2} KB" -f ($Bytes / 1KB) }
+            return "$Bytes B"
+        }.GetNewClosure()
+
         $deleteTargets = [System.Collections.Generic.List[object]]::new()
         $seenIds = @{}
         foreach ($target in @($Targets)) {
@@ -8550,7 +8386,7 @@ function Show-WmtCleanupPreviewWpf {
                     $failed = [Math]::Max(0, [int]$deleteState["Failed"])
                     $bytes = [int64]$deleteState["Bytes"]
                     $currentPath = [string]$deleteState["Current"]
-                    $freed = & $formatPreviewBytes $bytes
+                    $freed = & $formatDeleteBytes $bytes
 
                     $deleteProgress.Value = [Math]::Min($deleteProgress.Maximum, $processed)
                     $deleteLabel.Text = "$processed/$total processed | Deleted: $deleted | Failed: $failed | Recovered: $freed"
@@ -8626,7 +8462,7 @@ function Show-WmtCleanupPreviewWpf {
         if ($completedRowIds.Count -gt 0) { & $removePreviewRowsByIds -RowIds ([int[]]$completedRowIds) }
         else { & $refreshPreviewFilter }
 
-        $finalFreed = & $formatPreviewBytes ([int64]$deleteState["Bytes"])
+        $finalFreed = & $formatDeleteBytes ([int64]$deleteState["Bytes"])
         $finalDeleted = [int]$deleteState["Deleted"]
         $finalMissing = [int]$deleteState["Missing"]
         $finalFailed = [int]$deleteState["Failed"]
@@ -12146,8 +11982,8 @@ function Invoke-RegistryTask {
 "@
     }
     try {
-        [Win32.TokenManipulator]::EnablePrivilege("SeTakeOwnershipPrivilege") | Out-Null
-        [Win32.TokenManipulator]::EnablePrivilege("SeRestorePrivilege") | Out-Null
+        [WmtNativeStartup.TokenManipulator]::EnablePrivilege("SeTakeOwnershipPrivilege") | Out-Null
+        [WmtNativeStartup.TokenManipulator]::EnablePrivilege("SeRestorePrivilege") | Out-Null
     }
     catch {}
 
@@ -13181,24 +13017,25 @@ function Invoke-RegistryTask {
                     return "Unknown"
                 }
 
-                try {
-                    $categoryWeight = 100.0 / ($SelectedScans.Count)
-                    $currentBaseProgress = 0.0
+                # Define tick helpers BEFORE try block so they're always available
+                $categoryWeight = 100.0 / ($SelectedScans.Count)
+                $currentBaseProgress = 0.0
 
-                    # Tick Helper
-                    $Tick = {
-                        param($DetailText, $CurrentIndex, $TotalEstimated)
-                        if ($CurrentIndex % 50 -eq 0) {
-                            $SyncHash.Status = $DetailText
-                            $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
-                            $realVal = $currentBaseProgress + ($fraction * $categoryWeight)
-                            $SyncHash.Progress = [int]$realVal
-                        }
+                $Tick = {
+                    param($DetailText, $CurrentIndex, $TotalEstimated)
+                    if ($CurrentIndex % 50 -eq 0) {
+                        $SyncHash.Status = $DetailText
+                        $fraction = [math]::Min(($CurrentIndex / $TotalEstimated), 1.0)
+                        $realVal = $currentBaseProgress + ($fraction * $categoryWeight)
+                        $SyncHash.Progress = [int]$realVal
                     }
-                    $EndCategory = {
-                        $currentBaseProgress += $categoryWeight
-                        $SyncHash.Progress = [int]$currentBaseProgress
-                    }
+                }
+                $EndCategory = {
+                    $currentBaseProgress += $categoryWeight
+                    $SyncHash.Progress = [int]$currentBaseProgress
+                }
+
+                try {
 
                     # 1. ACTIVEX & COM
                     if ($SelectedScans -contains "ActiveX") {
@@ -20262,7 +20099,8 @@ function Set-WmtPowerSettingIndex {
                     <!-- List Card -->
                     <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0">
                         <ListView Name="lstWinget" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
-                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}"
+                                  VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="Select" Width="64">
@@ -20311,41 +20149,35 @@ function Set-WmtPowerSettingIndex {
                     
                     <!-- Header -->
                     <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="300"/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
-                                <TextBlock Text="Curated selection of popular applications" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
-                            </StackPanel>
-                            <Grid Grid.Column="1">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*"/>
-                                    <ColumnDefinition Width="Auto"/>
-                                </Grid.ColumnDefinitions>
-                                <TextBox Name="txtCatalogSearch" Grid.Column="0" Height="40" VerticalContentAlignment="Center" Text="Search catalog..." ToolTip="Type to filter applications by name or description"/>
-                                <Button Name="btnCatalogSearch" Grid.Column="1" Content="Search" Width="100" Height="40" Margin="8,0,0,0" Style="{StaticResource AccentBtn}" ToolTip="Search the catalog"/>
-                            </Grid>
-                        </Grid>
+                        <StackPanel>
+                            <TextBlock Text="Software Catalog" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            <TextBlock Text="Curated selection of popular applications" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
+                        </StackPanel>
                     </Border>
 
-                    <!-- Category Filter -->
-                    <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="6,0,6,12">
-                        <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
-                        <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
-                        <Button Name="btnCatDev" Content="Development" Width="Auto" MinWidth="120" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
-                        <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
-                        <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
-                        <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
-                        <Button Name="btnCatSecurity" Content="Security" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Antivirus, password managers, security tools"/>
-                    </StackPanel>
+                    <!-- Category Filter + Your Library button -->
+                    <Grid Grid.Row="1" Margin="6,0,6,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Name="pnlCategoryFilter" Grid.Column="0" Orientation="Horizontal">
+                            <Button Name="btnCatAll" Content="All" Width="80" Style="{StaticResource AccentBtn}" ToolTip="Show all applications"/>
+                            <Button Name="btnCatBrowsers" Content="Browsers" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Web browsers"/>
+                            <Button Name="btnCatDev" Content="Development" Width="Auto" MinWidth="120" Style="{StaticResource ActionBtn}" ToolTip="Filter: Developer tools, IDEs, runtimes"/>
+                            <Button Name="btnCatUtils" Content="Utilities" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: System utilities and tools"/>
+                            <Button Name="btnCatMedia" Content="Multimedia" Width="100" Style="{StaticResource ActionBtn}" ToolTip="Filter: Media players, editors, streaming"/>
+                            <Button Name="btnCatGames" Content="Gaming" Width="80" Style="{StaticResource ActionBtn}" ToolTip="Filter: Game platforms and gaming tools"/>
+                            <Button Name="btnCatSecurity" Content="Security" Width="90" Style="{StaticResource ActionBtn}" ToolTip="Filter: Antivirus, password managers, security tools"/>
+                        </StackPanel>
+                        <Button Name="btnShowLibrary" Content="Your Library" Grid.Column="1" Style="{StaticResource ActionBtn}" ToolTip="Show games you own from Steam, Epic (Legendary), and GOG (GOGDL)"/>
+                    </Grid>
 
                     <!-- Catalog List -->
-                    <Border Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
+                    <Border Name="brdCatalogList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0">
                         <ListView Name="lstCatalog" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" 
-                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}">
+                                  SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}"
+                                  VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="Category" Width="100" DisplayMemberBinding="{Binding Category}"/>
@@ -20357,14 +20189,67 @@ function Set-WmtPowerSettingIndex {
                         </ListView>
                     </Border>
 
+                    <!-- Library List (initially hidden) -->
+                    <Border Name="brdLibraryList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0" Visibility="Collapsed">
+                        <DockPanel>
+                            <Border DockPanel.Dock="Top" Padding="8,6" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="0,0,0,1">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <TextBox Name="txtLibrarySearch" Grid.Column="0" Height="28" VerticalContentAlignment="Center" Text="Search library..." Foreground="{DynamicResource TextSecondary}" BorderBrush="{DynamicResource BorderBrush}" Background="{DynamicResource BgDark}" ToolTip="Type to filter your library by name or ID"/>
+                                    <Button Name="btnLibraryClearSearch" Grid.Column="1" Content="Clear" Width="60" Height="28" Margin="6,0,0,0" Style="{StaticResource ActionBtn}" ToolTip="Clear the search filter"/>
+                                </Grid>
+                            </Border>
+                            <ListView Name="lstLibrary" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0"
+                                      SelectionMode="Single" AlternationCount="2" ItemContainerStyle="{StaticResource FwItem}"
+                                      VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                                <ListView.ContextMenu>
+                                    <ContextMenu Name="ctxLibrary" StaysOpen="True">
+                                        <MenuItem Name="miLibLaunch" Header="Launch / Play" ToolTip="Launch the game if it is installed"/>
+                                        <MenuItem Name="miLibInstall" Header="Install" ToolTip="Download and install this game"/>
+                                        <MenuItem Name="miLibUninstall" Header="Uninstall / Delete" ToolTip="Remove the game from your system"/>
+                                        <Separator/>
+                                        <MenuItem Name="miLibGoToDir" Header="Go to install directory" ToolTip="Open the folder where the game is installed"/>
+                                        <MenuItem Name="miLibStorePage" Header="Open store page" ToolTip="Open the game's store page in your browser"/>
+                                        <MenuItem Name="miLibCopyId" Header="Copy ID" ToolTip="Copy the game ID to clipboard"/>
+                                    </ContextMenu>
+                                </ListView.ContextMenu>
+                                <ListView.View>
+                                    <GridView>
+                                        <GridViewColumn Header="Source" Width="90" DisplayMemberBinding="{Binding Source}"/>
+                                        <GridViewColumn Header="Name" Width="280" DisplayMemberBinding="{Binding Name}"/>
+                                        <GridViewColumn Header="ID" Width="180" DisplayMemberBinding="{Binding Id}"/>
+                                        <GridViewColumn Header="Installed" Width="120" DisplayMemberBinding="{Binding Version}"/>
+                                        <GridViewColumn Header="Latest" Width="120" DisplayMemberBinding="{Binding Available}"/>
+                                    </GridView>
+                                </ListView.View>
+                            </ListView>
+                        </DockPanel>
+                    </Border>
+
                     <!-- Actions -->
                     <Border Grid.Row="3" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
-                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                            <Button Name="btnBackToUpdates" Content="Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
-                            <Button Name="btnCatalogInstall" Content="Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
-                            <Button Name="btnCatalogSelectAll" Content="Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
-                            <Button Name="btnCatalogClear" Content="Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
-                        </StackPanel>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <!-- Library status (left side, shows when in library view) -->
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left">
+                                <Button Name="btnBackToCatalog" Content="Back to Catalog" Style="{StaticResource ActionBtn}" ToolTip="Return to the software catalog" Visibility="Collapsed"/>
+                                <Button Name="btnLibraryRefresh" Content="Refresh Library" Style="{StaticResource ActionBtn}" ToolTip="Re-scan Steam manifests and refresh Legendary/GOGDL caches" Visibility="Collapsed"/>
+                                <TextBlock Name="lblLibraryStatus" Text="" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Margin="12,0,0,0"/>
+                            </StackPanel>
+                            <!-- Catalog actions (always visible) -->
+                            <StackPanel Name="pnlCatalogActions" Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Name="btnBackToUpdates" Content="Back to Updates" Style="{StaticResource ActionBtn}" ToolTip="Return to the package updates view"/>
+                                <Button Name="btnCatalogInstall" Content="Install Selected" Style="{StaticResource PositiveBtn}" ToolTip="Install all selected applications using winget. May take several minutes depending on app size."/>
+                                <Button Name="btnCatalogSelectAll" Content="Select All" Style="{StaticResource ActionBtn}" ToolTip="Select all visible applications in the list"/>
+                                <Button Name="btnCatalogClear" Content="Clear Selection" Style="{StaticResource ActionBtn}" ToolTip="Unselect all applications"/>
+                            </StackPanel>
+                        </Grid>
                     </Border>
                 </Grid>
 
@@ -20380,15 +20265,11 @@ function Set-WmtPowerSettingIndex {
                         <WrapPanel>
                             <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
                             <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
-                            <Button Name="btnPerfDisableHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Disable hibernation and delete hiberfil.sys. Frees up several GB of disk space equal to your RAM size."/>
-                            <Button Name="btnPerfEnableHibernate" Content="Enable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Re-enable hibernation mode. Allows your PC to save state and power off completely, resuming faster than a full boot."/>
-                            <Button Name="btnPerfDisableSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Disable SysMain (Superfetch) service. Prevents Windows from pre-loading apps into RAM. Can help on systems with low RAM or SSDs."/>
-                            <Button Name="btnPerfEnableSuperfetch" Content="Enable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Enable SysMain (Superfetch) service. Pre-loads frequently used apps into RAM for faster launch times on HDDs."/>
-                            <Button Name="btnPerfDisableMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Disable memory compression. RAM stores data uncompressed. May improve performance on high-RAM systems."/>
-                            <Button Name="btnPerfEnableMemCompress" Content="Enable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Enable memory compression. Windows compresses inactive RAM pages to free up physical memory for active apps."/>
+                            <Button Name="btnToggleHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Toggle hibernation. When enabled (blue), hibernation is off and hiberfil.sys is deleted."/>
+                            <Button Name="btnToggleSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Toggle SysMain (Superfetch) service. When enabled (blue), Superfetch is disabled."/>
+                            <Button Name="btnToggleMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows memory compression. Compresses inactive RAM pages to free physical memory."/>
                             <Button Name="btnPerfUltimatePower" Content="Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
-                            <Button Name="btnPerfEnableHags" Content="Enable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Turn on Hardware-Accelerated GPU Scheduling for better VRAM management and lower latency." />
-                            <Button Name="btnPerfDisableHags" Content="Disable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Turn off Hardware-Accelerated GPU Scheduling." />
+                            <Button Name="btnToggleHags" Content="Enable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Toggle Hardware-Accelerated GPU Scheduling for better VRAM management and lower latency."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20397,7 +20278,8 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
                         <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
-                        <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple">
+                        <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple"
+                                  VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
                             <ListView.View>
                                 <GridView>
                                     <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
@@ -20467,19 +20349,14 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="TASKBAR &amp; SYSTEM CLOCK" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnTaskbarLeft" Content="Align Taskbar Left" Style="{StaticResource ActionBtn}" ToolTip="Aligns the Windows 11 Taskbar to the left side."/>
-                            <Button Name="btnTaskbarCenter" Content="Align Taskbar Center" Style="{StaticResource ActionBtn}" ToolTip="Aligns the Windows 11 Taskbar to the center (Default)."/>
-                            <Button Name="btnClock24" Content="24-Hour Clock" Style="{StaticResource ActionBtn}" ToolTip="Changes the system tray clock to 24-hour format."/>
-                            <Button Name="btnClock12" Content="12-Hour Clock" Style="{StaticResource ActionBtn}" ToolTip="Changes the system tray clock to 12-hour format (Default)."/>
-                            <Button Name="btnClockSecsOn" Content="Show Clock Seconds" Style="{StaticResource ActionBtn}" ToolTip="Displays seconds on the system tray clock."/>
-                            <Button Name="btnClockSecsOff" Content="Hide Clock Seconds" Style="{StaticResource ActionBtn}" ToolTip="Hides seconds on the system tray clock (Default)."/>
-                            <Button Name="btnHideSearch" Content="Hide Search" Style="{StaticResource ActionBtn}" ToolTip="Completely removes the Search box/icon from the taskbar."/>
-                            <Button Name="btnSearchIcon" Content="Search as Icon" Style="{StaticResource ActionBtn}" ToolTip="Changes the large Search box into a small icon."/>
-                            <Button Name="btnHideWidgets" Content="Hide Widgets" Style="{StaticResource ActionBtn}" ToolTip="Removes the Widgets/Weather panel from the taskbar."/>
-                            <Button Name="btnHideTaskView" Content="Hide Task View" Style="{StaticResource ActionBtn}" ToolTip="Removes the Task View (multiple desktops) button."/>
-                            <Button Name="btnHideChat" Content="Hide Chat" Style="{StaticResource ActionBtn}" ToolTip="Removes the built-in Microsoft Teams Chat icon."/>
-                            <Button Name="btnNeverCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Shows app labels and stops identical app windows from grouping into one button."/>
-                            <Button Name="btnAlwaysCombine" Content="Always Combine" Style="{StaticResource ActionBtn}" ToolTip="Hides app labels and groups windows (Windows 11 Default)."/>
+                            <Button Name="btnToggleTaskbarAlign" Content="Align Taskbar Left" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar alignment: Left or Center. Blue = aligned left. Gray = centered (default)."/>
+                            <Button Name="btnToggleClockFormat" Content="24-Hour Clock" Style="{StaticResource ActionBtn}" ToolTip="Toggle clock format: 24-hour or 12-hour. Blue = 24-hour. Gray = 12-hour (default)."/>
+                            <Button Name="btnToggleClockSecs" Content="Show Clock Seconds" Style="{StaticResource ActionBtn}" ToolTip="Toggle seconds display on the system tray clock."/>
+                            <Button Name="btnToggleSearchDisplay" Content="Hide Search" Style="{StaticResource ActionBtn}" ToolTip="Cycle search display: Hidden, Icon only, or Search box. Blue = hidden, Gray = icon, default = box."/>
+                            <Button Name="btnToggleWidgets" Content="Hide Widgets" Style="{StaticResource ActionBtn}" ToolTip="Toggle Widgets/Weather panel on the taskbar. Blue = widgets hidden. Gray = widgets visible (default)."/>
+                            <Button Name="btnToggleTaskView" Content="Hide Task View" Style="{StaticResource ActionBtn}" ToolTip="Toggle Task View button on the taskbar. Blue = task view hidden. Gray = task view visible (default)."/>
+                            <Button Name="btnToggleChat" Content="Hide Chat" Style="{StaticResource ActionBtn}" ToolTip="Toggle Chat (Teams) icon on the taskbar. Blue = chat hidden. Gray = chat visible (default)."/>
+                            <Button Name="btnToggleCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar button combining: Never Combine (show labels) or Always Combine (Windows 11 default)."/>
                             </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20488,16 +20365,11 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="EXPLORER &amp; FILES" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnExpShowExt" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show known file extensions in File Explorer."/>
-                            <Button Name="btnExpHideExt" Content="Hide Extensions" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows default behavior for known file extensions."/>
-                            <Button Name="btnExpShowHidden" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show hidden files and folders in File Explorer."/>
-                            <Button Name="btnExpHideHidden" Content="Hide Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Hide hidden files and folders."/>
-                            <Button Name="btnExpFullPathOn" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show the full folder path in File Explorer title bars."/>
-                            <Button Name="btnExpFullPathOff" Content="Full Path Off" Style="{StaticResource ActionBtn}" ToolTip="Hide the full folder path in File Explorer title bars."/>
-                            <Button Name="btnExpLaunchThisPc" Content="Open This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC."/>
-                            <Button Name="btnExpLaunchQuickAccess" Content="Open Quick Access" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to Quick Access/Home."/>
-                            <Button Name="btnExpHideRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide recent and frequent items from Quick Access/Home."/>
-                            <Button Name="btnExpShowRecents" Content="Show Recents" Style="{StaticResource ActionBtn}" ToolTip="Restore recent and frequent items in Quick Access/Home."/>
+                            <Button Name="btnToggleExtensions" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show or hide known file extensions in File Explorer."/>
+                            <Button Name="btnToggleHiddenFiles" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show or hide hidden files and folders in File Explorer."/>
+                            <Button Name="btnToggleFullPath" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show or hide the full folder path in File Explorer title bars."/>
+                            <Button Name="btnToggleExplorerLaunch" Content="Open to This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC or Quick Access/Home."/>
+                            <Button Name="btnToggleRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide or restore recent and frequent items in Quick Access/Home."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20509,10 +20381,8 @@ function Set-WmtPowerSettingIndex {
                             <Button Name="btnMouseSpeedSlow" Content="Cursor Slow" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 6."/>
                             <Button Name="btnMouseSpeedDefault" Content="Cursor Default" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to the Windows default of 10."/>
                             <Button Name="btnMouseSpeedFast" Content="Cursor Fast" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 15."/>
-                            <Button Name="btnMouseAccelOn" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable enhanced pointer precision / mouse acceleration."/>
-                            <Button Name="btnMouseAccelOff" Content="Acceleration Off" Style="{StaticResource ActionBtn}" ToolTip="Disable enhanced pointer precision / mouse acceleration."/>
-                            <Button Name="btnMouseSingleClick" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click in File Explorer."/>
-                            <Button Name="btnMouseDoubleClick" Content="Double-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Restore double-click to open files and folders."/>
+                            <Button Name="btnToggleMouseAccel" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable enhanced pointer precision / mouse acceleration."/>
+                            <Button Name="btnToggleClickMode" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click or restore double-click."/>
                             <Button Name="btnMouseSettings" Content="Mouse Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows mouse settings."/>
                         </WrapPanel>
                     </StackPanel>
@@ -20522,12 +20392,9 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="CONTEXT MENU" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnCtxClassic" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu on Windows 11."/>
-                            <Button Name="btnCtxModern" Content="Modern Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Restore the default Windows 11 context menu."/>
-                            <Button Name="btnCtxTakeOwnAdd" Content="Add Take Ownership" Style="{StaticResource WarningBtn}" ToolTip="Add an elevated Take Ownership action to file, folder, and drive context menus."/>
-                            <Button Name="btnCtxTakeOwnRemove" Content="Remove Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Remove the Take Ownership context menu action."/>
-                            <Button Name="btnCtxPsHereAdd" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add Open PowerShell Here to folder and background context menus."/>
-                            <Button Name="btnCtxPsHereRemove" Content="Remove PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Remove the Open PowerShell Here context menu action."/>
+                            <Button Name="btnToggleCtxMenu" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu or restore the default Windows 11 context menu."/>
+                            <Button Name="btnToggleTakeOwnership" Content="Add Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Add or remove an elevated Take Ownership action on file, folder, and drive context menus."/>
+                            <Button Name="btnTogglePsHere" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add or remove the Open PowerShell Here context menu action."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20536,16 +20403,11 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="PRIVACY" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnPrivacyAdsOff" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable the per-user Windows advertising ID."/>
-                            <Button Name="btnPrivacyAdsOn" Content="Ad ID On" Style="{StaticResource ActionBtn}" ToolTip="Re-enable the per-user Windows advertising ID."/>
-                            <Button Name="btnPrivacySuggestedOff" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable suggested apps, settings suggestions, and consumer content prompts."/>
-                            <Button Name="btnPrivacySuggestedOn" Content="Suggestions On" Style="{StaticResource ActionBtn}" ToolTip="Restore suggested content defaults."/>
-                            <Button Name="btnPrivacyTailoredOff" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable tailored experiences based on diagnostic data."/>
-                            <Button Name="btnPrivacyTailoredOn" Content="Tailored On" Style="{StaticResource ActionBtn}" ToolTip="Restore tailored experiences."/>
-                            <Button Name="btnPrivacyActivityOff" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows activity history publishing and upload policies."/>
-                            <Button Name="btnPrivacyActivityOn" Content="Activity History On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows activity history policy defaults."/>
-                            <Button Name="btnPrivacyAppLaunchOff" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Stop Windows from tracking app launches to personalize Start and Search."/>
-                            <Button Name="btnPrivacyAppLaunchOn" Content="Launch Tracking On" Style="{StaticResource ActionBtn}" ToolTip="Restore app launch tracking."/>
+                            <Button Name="btnToggleAds" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or re-enable the per-user Windows advertising ID."/>
+                            <Button Name="btnToggleSuggested" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore suggested apps, settings suggestions, and consumer content prompts."/>
+                            <Button Name="btnToggleTailored" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore tailored experiences based on diagnostic data."/>
+                            <Button Name="btnToggleActivity" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows activity history publishing and upload policies."/>
+                            <Button Name="btnToggleAppLaunch" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows app launch tracking."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20554,10 +20416,8 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="SEARCH &amp; INDEXING" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnSearchWebOff" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Bing/web results in Windows Start search."/>
-                            <Button Name="btnSearchWebOn" Content="Web Search On" Style="{StaticResource ActionBtn}" ToolTip="Restore web results in Windows Start search."/>
-                            <Button Name="btnSearchIndexReduced" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Set Windows Search indexing service to Manual and stop it."/>
-                            <Button Name="btnSearchIndexDefault" Content="Default Indexing" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Search indexing service to Automatic."/>
+                            <Button Name="btnToggleWebSearch" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Bing/web results in Windows Start search."/>
+                            <Button Name="btnToggleSearchIndex" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Reduce Windows Search indexing to Manual or restore it to Automatic."/>
                             <Button Name="btnSearchIndexRebuild" Content="Rebuild Index" Style="{StaticResource WarningBtn}" ToolTip="Delete the Windows search index database so Windows rebuilds it."/>
                             <Button Name="btnSearchIndexOptions" Content="Index Options" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Indexing Options."/>
                         </WrapPanel>
@@ -20568,14 +20428,10 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="GAMING" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnGameModeOn" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Game Mode."/>
-                            <Button Name="btnGameModeOff" Content="Game Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Game Mode."/>
-                            <Button Name="btnGameBarOff" Content="Game Bar Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Xbox Game Bar and Game DVR toggles."/>
-                            <Button Name="btnGameBarOn" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Restore Xbox Game Bar and Game DVR toggles."/>
-                            <Button Name="btnGameCaptureOff" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable background gameplay capture."/>
-                            <Button Name="btnGameCaptureOn" Content="Capture On" Style="{StaticResource ActionBtn}" ToolTip="Restore background gameplay capture."/>
-                            <Button Name="btnGameFsoOff" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Apply common registry values to disable fullscreen optimizations globally."/>
-                            <Button Name="btnGameFsoDefault" Content="Default FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Restore default fullscreen optimization registry values."/>
+                            <Button Name="btnToggleGameMode" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Game Mode."/>
+                            <Button Name="btnToggleGameBar" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Xbox Game Bar and Game DVR toggles."/>
+                            <Button Name="btnToggleGameCapture" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore background gameplay capture."/>
+                            <Button Name="btnToggleFso" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Disable fullscreen optimizations globally or restore default registry values."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20596,16 +20452,11 @@ function Set-WmtPowerSettingIndex {
                         <TextBlock Text="NOTIFICATIONS &amp; LOCK SCREEN" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
                             <Button Name="btnNotifyFocusSettings" Content="Focus Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Focus Assist / Do Not Disturb settings."/>
-                            <Button Name="btnNotifyTipsOff" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows tips, welcome experience, and suggestion notifications."/>
-                            <Button Name="btnNotifyTipsOn" Content="Tips On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows tips and suggestion notifications."/>
-                            <Button Name="btnNotifySetupOff" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable finish setting up this device prompts."/>
-                            <Button Name="btnNotifySetupOn" Content="Setup Prompts On" Style="{StaticResource ActionBtn}" ToolTip="Restore finish setting up this device prompts."/>
-                            <Button Name="btnLockFactsOff" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable fun facts, tips, and overlays on the lock screen."/>
-                            <Button Name="btnLockFactsOn" Content="Lock Facts On" Style="{StaticResource ActionBtn}" ToolTip="Restore lock screen fun facts and overlays."/>
-                            <Button Name="btnLockSpotlightOff" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Spotlight on the lock screen."/>
-                            <Button Name="btnLockSpotlightOn" Content="Spotlight On" Style="{StaticResource ActionBtn}" ToolTip="Restore Windows Spotlight on the lock screen."/>
-                            <Button Name="btnLockPlain" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Disable lock screen Spotlight and overlay content together."/>
-                            <Button Name="btnLockDefault" Content="Default Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Restore default lock screen content settings."/>
+                            <Button Name="btnToggleTips" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows tips, welcome experience, and suggestion notifications."/>
+                            <Button Name="btnToggleSetupPrompts" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle finish setting up this device prompts. When enabled (blue), setup prompts are disabled."/>
+                            <Button Name="btnToggleLockFacts" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore lock screen fun facts, tips, and overlays."/>
+                            <Button Name="btnToggleLockSpotlight" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows Spotlight on the lock screen."/>
+                            <Button Name="btnToggleLockScreen" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Apply a plain lock screen (no Spotlight or overlay) or restore default lock screen content."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20614,10 +20465,8 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="STARTUP BEHAVIOR" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnStartupFastOff" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Fast Startup."/>
-                            <Button Name="btnStartupFastOn" Content="Fast Startup On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Fast Startup."/>
-                            <Button Name="btnStartupRestoreFoldersOn" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore previous folder windows at logon."/>
-                            <Button Name="btnStartupRestoreFoldersOff" Content="Restore Folders Off" Style="{StaticResource ActionBtn}" ToolTip="Do not restore previous folder windows at logon."/>
+                            <Button Name="btnToggleFastStartup" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or enable Windows Fast Startup."/>
+                            <Button Name="btnToggleRestoreFolders" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore or skip previous folder windows at logon."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20642,10 +20491,8 @@ function Set-WmtPowerSettingIndex {
                             <Button Name="btnPowerBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 0 percent."/>
                             <Button Name="btnPowerBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 20 percent."/>
                             <Button Name="btnPowerBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 50 percent."/>
-                            <Button Name="btnPowerUsbSuspendOn" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable USB selective suspend for the active power plan."/>
-                            <Button Name="btnPowerUsbSuspendOff" Content="USB Suspend Off" Style="{StaticResource ActionBtn}" ToolTip="Disable USB selective suspend for the active power plan."/>
-                            <Button Name="btnPowerPcieModerate" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings."/>
-                            <Button Name="btnPowerPcieOff" Content="PCIe Savings Off" Style="{StaticResource ActionBtn}" ToolTip="Turn off PCI Express link state power management."/>
+                            <Button Name="btnToggleUsbSuspend" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable USB selective suspend for the active power plan."/>
+                            <Button Name="btnTogglePcie" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings or turn it off."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -20654,10 +20501,8 @@ function Set-WmtPowerSettingIndex {
                     <StackPanel>
                         <TextBlock Text="DEVELOPER" Style="{StaticResource SubHeader}"/>
                         <WrapPanel>
-                            <Button Name="btnDevLongPathsOn" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable Win32 long path support."/>
-                            <Button Name="btnDevLongPathsOff" Content="Long Paths Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Win32 long path support."/>
-                            <Button Name="btnDevModeOn" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable Windows Developer Mode policies."/>
-                            <Button Name="btnDevModeOff" Content="Developer Mode Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Developer Mode policies."/>
+                            <Button Name="btnToggleLongPaths" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Win32 long path support."/>
+                            <Button Name="btnToggleDevMode" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Developer Mode policies."/>
                             <Button Name="btnDevSettings" Content="Developer Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Developer Settings."/>
                         </WrapPanel>
                     </StackPanel>
@@ -20908,14 +20753,7 @@ function Set-WmtPowerSettingIndex {
                                                         <TextBlock x:Name="txtPowerTotal" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Total Power: Loading..."/>
                                                         <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                             <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
-                                                            <Grid Margin="0,4,0,0">
-                                                                <Grid.ColumnDefinitions>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                </Grid.ColumnDefinitions>
-                                                                <Button Name="btnMyDeviceHibernateOn" Grid.Column="0" Content="Hibernate On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Re-enable hibernation"/>
-                                                                <Button Name="btnMyDeviceHibernateOff" Grid.Column="1" Content="Hibernate Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable hibernation and free hiberfil.sys disk space"/>
-                                                            </Grid>
+                                                            <Button Name="btnMyDeviceHibernateToggle" Content="Hibernate Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle hibernation on/off. Blue = hibernation disabled. Gray = hibernation enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -20931,14 +20769,7 @@ function Set-WmtPowerSettingIndex {
                                                         <TextBlock Text="Memory (RAM)" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
                                                         <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                             <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
-                                                            <Grid Margin="0,4,0,0">
-                                                                <Grid.ColumnDefinitions>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                </Grid.ColumnDefinitions>
-                                                                <Button Name="btnMyDeviceMemCompressOn" Grid.Column="0" Content="MC On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Windows memory compression"/>
-                                                                <Button Name="btnMyDeviceMemCompressOff" Grid.Column="1" Content="MC Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Windows memory compression"/>
-                                                            </Grid>
+                                                            <Button Name="btnMyDeviceMemCompressToggle" Content="MC Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Windows memory compression. Blue = compression disabled. Gray = compression enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -20983,14 +20814,7 @@ function Set-WmtPowerSettingIndex {
                                                             <StackPanel x:Name="pnlDeviceGPUList" Margin="0,4,0,0"/>
                                                         <TextBlock Text="Click an individual GPU entry to open that vendor's control panel." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap" Margin="0,8,0,0"/>
                                                             <Button Name="btnMyDeviceGPUDriver" Content="Drivers" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Open GPU vendor driver download pages"/>
-                                                            <Grid Margin="0,4,0,0">
-                                                                <Grid.ColumnDefinitions>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                    <ColumnDefinition Width="*"/>
-                                                                </Grid.ColumnDefinitions>
-                                                                <Button Name="btnMyDeviceHagsOn" Grid.Column="0" Content="HAGS On" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Enable Hardware-Accelerated GPU Scheduling"/>
-                                                                <Button Name="btnMyDeviceHagsOff" Grid.Column="1" Content="HAGS Off" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Disable Hardware-Accelerated GPU Scheduling"/>
-                                                            </Grid>
+                                                            <Button Name="btnMyDeviceHagsToggle" Content="HAGS Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Hardware-Accelerated GPU Scheduling. Blue = HAGS disabled. Gray = HAGS enabled."/>
                                                         </StackPanel>
                                                     </Grid>
                                                 </Border>
@@ -21209,10 +21033,8 @@ function Set-WmtPowerSettingIndex {
                             </WrapPanel>
                             <TextBlock Text="WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnDrvDisableWU" Content="Disable Auto-Drivers" Style="{StaticResource DestructiveBtn}" ToolTip="Stop Windows Update from installing drivers"/>
-                                <Button Name="btnDrvEnableWU" Content="Enable Auto-Drivers" Style="{StaticResource PositiveBtn}" ToolTip="Allow Windows Update to install drivers"/>
-                                <Button Name="btnDrvDisableMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}"/>
-                                <Button Name="btnDrvEnableMeta" Content="Enable Metadata" Style="{StaticResource ActionBtn}"/>
+                                <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
+                                <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
                             </WrapPanel>
                         </StackPanel>
                     </Border>
@@ -21304,7 +21126,10 @@ function Set-WmtPowerSettingIndex {
                                 <TextBlock Text="Support &amp; Credits" Style="{StaticResource SectionHeader}" Margin="0"/>
                                 <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold"/>
                             </StackPanel>
-                            <Button Name="btnToggleTheme" Grid.Column="1" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" HorizontalAlignment="Right" VerticalAlignment="Top" ToolTip="Switch between dark and light theme"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
+                                <Button Name="btnStartWithWindows" Content="Start with Windows" Style="{StaticResource ActionBtn}" Height="32" MinWidth="140" Margin="0,0,8,0" ToolTip="Launch WMT automatically when Windows starts"/>
+                                <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" ToolTip="Switch between dark and light theme"/>
+                            </StackPanel>
                         </Grid>
                     </Border>
 
@@ -21660,127 +21485,142 @@ function Set-ButtonIcon {
 }
 
 # --- ICONS & TOOLTIPS ---
-Set-ButtonIcon "btnTabUpdates" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Updates" "Manage software updates across enabled providers" 18 "#00FF00"
-# Set-ButtonIcon "btnTabHealth" - CUSTOM LOGIC BELOW
-Set-ButtonIcon "btnTabNetwork" "M5,3A2,2 0 0,0 3,5V15A2,2 0 0,0 5,17H8V15H5V5H19V15H16V17H19A2,2 0 0,0 21,15V5A2,2 0 0,0 19,3H5M11,15H13V17H11V15M11,11H13V13H11V11M11,7H13V9H11V7Z" "Network & DNS" "DNS, IP Config, Network Repair tools" 18
-Set-ButtonIcon "btnTabFirewall" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M12,11.95L7,12.2V11.2L12,10.95L17,11.2V12.2L12,11.95Z" "Firewall Manager" "View and manage Windows Firewall rules" 18 "#FF5555"
-Set-ButtonIcon "btnTabDrivers" "M7,17L10.5,12.5L5,9.6V17H7M12,21L14.6,16.3L9.5,13.6L12,21M17,17V9.6L11.5,12.5L15,17H17M20.2,4.8L12,1L3.8,4.8C2.7,5.4 2,6.5 2,7.7V17C2,19.8 4.2,22 7,22H17C19.8,22 22,19.8 22,17V7.7C22,6.5 21.3,5.4 20.2,4.8Z" "Drivers" "Backup, Restore, and Clean drivers" 18
-Set-ButtonIcon "btnTabCleanup" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Cleanup" "Disk cleanup, Temp files, Shortcuts, Registry" 18
-Set-ButtonIcon "btnTabUtils" "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.7,20.3C23.1,19.9 23.1,19.3 22.7,19Z" "Utilities" "System Info, SSD Trim, Activation, Task Scheduler" 18
-Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
-# Tweaks tab icon (lightning bolt / flash icon)
-Set-ButtonIcon "btnTabTweaks" "M7,2V13H10V22L17,10H13L17,2H7M10,4H14L11,10H15L10.5,17V12H7V4H10Z" "Tweaks" "System optimization and performance tweaks" 18 "#FFD700"
+# Button icons (deferred to after window render for faster startup)
 $btnWingetIgnore = Get-Ctrl "btnWingetIgnore"
 $btnWingetUnignore = Get-Ctrl "btnWingetUnignore"
-# (Ban Icon for Ignore)
-Set-ButtonIcon "btnWingetIgnore" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12C4,13.85 4.63,15.55 5.68,16.91L16.91,5.68C15.55,4.63 13.85,4 12,4M12,20A8,8 0 0,0 20,12C20,10.15 19.37,8.45 18.32,7.09L7.09,18.32C8.45,19.37 10.15,20 12,20Z" "Ignore Selected" "Hide selected updates from future scans" 16 "#FFD700"
-# (List/Restore Icon for Unignore)
-Set-ButtonIcon "btnWingetUnignore" "M2,5H22V7H2V5M2,9H22V11H2V9M2,13H22V15H2V13M2,17H22V19H2V17" "Manage Ignored" "View and restore ignored updates"
 
-# --- CUSTOM HEALTH ICON (Red Squircle with White Cross) ---
-$btnHealth = Get-Ctrl "btnTabHealth"
-if ($btnHealth) {
-    $grid = New-Object System.Windows.Controls.Grid
-    $grid.Width = 18; $grid.Height = 18; $grid.Margin = "0,0,10,0"
-    
-    # Red Squircle
-    $rect = New-Object System.Windows.Shapes.Rectangle
-    $rect.RadiusX = 4; $rect.RadiusY = 4
-    $rect.Fill = New-WmtBrush "#FF3333"
-    [void]$grid.Children.Add($rect)
-    
-    # White Cross (Plus shape)
-    $path = New-Object System.Windows.Shapes.Path
-    $path.Data = [System.Windows.Media.Geometry]::Parse("M8,4H10V8H14V10H10V14H8V10H4V8H8V4Z")
-    $path.Fill = [System.Windows.Media.Brushes]::White
-    $path.Stretch = "Uniform"; $path.Margin = "3"
-    [void]$grid.Children.Add($path)
-    
-    $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = "Horizontal"
-    [void]$sp.Children.Add($grid)
-    $txt = New-Object System.Windows.Controls.TextBlock; $txt.Text = "System Health"; $txt.VerticalAlignment = "Center"
-    [void]$sp.Children.Add($txt)
-    
-    $btnHealth.Content = $sp
-    $btnHealth.ToolTip = "System integrity checks (SFC, DISM, CHKDSK)"
-}
+$iconDeferTimer = New-Object System.Windows.Threading.DispatcherTimer
+$iconDeferTimer.Interval = [TimeSpan]::FromMilliseconds(300)
+$iconDeferTimer.Add_Tick({
+        try { $iconDeferTimer.Stop() } catch {}
+        Set-ButtonIcon "btnTabUpdates" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Updates" "Manage software updates across enabled providers" 18 "#00FF00"
+        # Set-ButtonIcon "btnTabHealth" - CUSTOM LOGIC BELOW
+        Set-ButtonIcon "btnTabNetwork" "M5,3A2,2 0 0,0 3,5V15A2,2 0 0,0 5,17H8V15H5V5H19V15H16V17H19A2,2 0 0,0 21,15V5A2,2 0 0,0 19,3H5M11,15H13V17H11V15M11,11H13V13H11V11M11,7H13V9H11V7Z" "Network & DNS" "DNS, IP Config, Network Repair tools" 18
+        Set-ButtonIcon "btnTabFirewall" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M12,11.95L7,12.2V11.2L12,10.95L17,11.2V12.2L12,11.95Z" "Firewall Manager" "View and manage Windows Firewall rules" 18 "#FF5555"
+        Set-ButtonIcon "btnTabDrivers" "M7,17L10.5,12.5L5,9.6V17H7M12,21L14.6,16.3L9.5,13.6L12,21M17,17V9.6L11.5,12.5L15,17H17M20.2,4.8L12,1L3.8,4.8C2.7,5.4 2,6.5 2,7.7V17C2,19.8 4.2,22 7,22H17C19.8,22 22,19.8 22,17V7.7C22,6.5 21.3,5.4 20.2,4.8Z" "Drivers" "Backup, Restore, and Clean drivers" 18
+        Set-ButtonIcon "btnTabCleanup" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Cleanup" "Disk cleanup, Temp files, Shortcuts, Registry" 18
+        Set-ButtonIcon "btnTabUtils" "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.7,20.3C23.1,19.9 23.1,19.3 22.7,19Z" "Utilities" "System Info, SSD Trim, Activation, Task Scheduler" 18
+        Set-ButtonIcon "btnTabSupport" "M10,19H13V22H10V19M12,2C17.35,2.22 19.68,7.62 16.5,11.67C15.67,12.67 14.33,13.33 13.67,14.17C13,15 13,16 13,17H10C10,15.33 10,13.92 10.67,12.92C11.33,11.92 12.67,11.33 13.5,10.67C15.92,8.43 15.32,5.26 12,5A3,3 0 0,0 9,8H6A6,6 0 0,1 12,2Z" "Support & Credits" "Links to Discord and GitHub" 18
+        # Tweaks tab icon (lightning bolt / flash icon)
+        Set-ButtonIcon "btnTabTweaks" "M7,2V13H10V22L17,10H13L17,2H7M10,4H14L11,10H15L10.5,17V12H7V4H10Z" "Tweaks" "System optimization and performance tweaks" 18 "#FFD700"
+        # (Ban Icon for Ignore)
+        Set-ButtonIcon "btnWingetIgnore" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12C4,13.85 4.63,15.55 5.68,16.91L16.91,5.68C15.55,4.63 13.85,4 12,4M12,20A8,8 0 0,0 20,12C20,10.15 19.37,8.45 18.32,7.09L7.09,18.32C8.45,19.37 10.15,20 12,20Z" "Ignore Selected" "Hide selected updates from future scans" 16 "#FFD700"
+        # (List/Restore Icon for Unignore)
+        Set-ButtonIcon "btnWingetUnignore" "M2,5H22V7H2V5M2,9H22V11H2V9M2,13H22V15H2V13M2,17H22V19H2V17" "Manage Ignored" "View and restore ignored updates"
 
-Set-ButtonIcon "btnNetRepair" "M20,12H19.5C19.5,14.5 17.5,16.5 15,16.5H9V18.5H15C18.6,18.5 21.5,15.6 21.5,12H21C21,15 19,17.5 16,18V16L13,19L16,22V20C19.9,19.4 23,16 23,12M3,12H3.5C3.5,9.5 5.5,7.5 8,7.5H14V5.5H8C4.4,5.5 1.5,8.4 1.5,12H2C2,9 4,6.5 7,6V8L10,5L7,2V4C3.1,4.6 0,8 0,12H3Z" "Full Net Repair" "Full network stack reset (Winsock, IP, Flush DNS)"
-Set-ButtonIcon "btnRouteTable" "M19,15L13,21L11.58,19.58L15.17,16H4V4H6V14H15.17L11.58,10.42L13,9L19,15Z" "Save Route Table" "Exports the current IP routing table to the data folder"
-Set-ButtonIcon "btnRouteView" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,17C14.76,17 17,14.76 17,12C17,9.24 14.76,7 12,7C9.24,7 7,9.24 7,12C7,14.76 9.24,17 12,17M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" "View Route Table" "Displays the routing table in the log"
-Set-ButtonIcon "btnCleanReg" "M5,3H19A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3M7,7V9H9V7H7M11,7V9H13V7H11M15,7V9H17V7H15M7,11V13H9V11H7M11,11V13H13V11H11M15,11V13H17V11H15M7,15V17H9V15H7M11,15V17H13V15H11M15,15V17H17V15H15Z" "Clean Reg Keys" "Backs up & deletes obsolete Uninstall registry keys"
-Set-ButtonIcon "btnCleanXbox" "M6.4,4.8L12,10.4L17.6,4.8L19.2,6.4L13.6,12L19.2,17.6L17.6,19.2L12,13.6L6.4,19.2L4.8,17.6L10.4,12L4.8,6.4L6.4,4.8Z" "Clean Xbox Data" "Removes Xbox Live credentials to fix login loops" 18 "#107C10"
-Set-ButtonIcon "btnUpdateRepair" "M21,10.12H14.22L16.96,7.3C14.55,4.61 10.54,4.42 7.85,6.87C5.16,9.32 5.35,13.33 7.8,16.03C10.25,18.72 14.26,18.91 16.95,16.46C17.65,15.82 18.2,15.05 18.56,14.21L20.62,15.05C19.79,16.89 18.3,18.42 16.39,19.34C13.4,20.78 9.77,20.21 7.37,17.96C4.96,15.71 4.54,12.06 6.37,9.32C8.2,6.59 11.83,5.65 14.65,7.09L17.38,4.35H10.63V2.35H21V10.12Z" "Reset Update Svc" "Stops services, clears cache, and resets Windows Update components"
-Set-ButtonIcon "btnUpdateServices" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12H20A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4C14.23,4 16.24,4.82 17.76,6.24L14,10H22V2L19.36,4.64C17.5,2.89 14.89,2 12,2Z" "Restart Update Svcs" "Restarts update-related services"
-Set-ButtonIcon "btnDotNetEnable" "M14.6,16.6L19.2,12L14.6,7.4L16,6L22,12L16,18L14.6,16.6M9.4,16.6L4.8,12L9.4,7.4L8,6L2,12L8,18L9.4,16.6Z" "Set .NET RollFwd" "Sets DOTNET_ROLL_FORWARD=LatestMajor (Force apps to use newest .NET)"
-Set-ButtonIcon "btnDotNetDisable" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Reset .NET RollFwd" "Removes the DOTNET_ROLL_FORWARD environment variable"
-Set-ButtonIcon "btnTaskManager" "M14,10H2V12H14V10M14,6H2V8H14V6M2,16H10V14H2V16M21.5,11.5L23,13L16,20L11.5,15.5L13,14L16,17L21.5,11.5Z" "Task Scheduler" "View, Enable, Disable, or Delete Windows Scheduled Tasks"
-Set-ButtonIcon "btnInstallGpedit" "M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2H6M6,4H13V9H18V20H6V4M8,12V14H16V12H8M8,16V18H13V16H8Z" "Install Gpedit" "Installs the Group Policy Editor on Windows Home editions"
-Set-ButtonIcon "btnQuickFix" "M12,2A10,10 0 0,0 2,12H5L8.5,16L12,7L15.5,12H22A10,10 0 0,0 12,2M12,20A8,8 0 0,1 4,12H6L8.5,14.5L12,5.5L15.5,10H20A8,8 0 0,1 12,20Z" "Quick Fix" "Runs SFC + DISM + Temp cleanup"
-Set-ButtonIcon "btnSFC" "M15.5,14L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5M9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14Z" "SFC Scan" "Scans system files for corruption and repairs them"
-Set-ButtonIcon "btnDISMCheck" "M22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10H22M19.5,12.5C19.5,11.1 20.6,10 22,10H8V15H19.5V12.5Z" "DISM Check" "Checks the health of the Windows Image (dism /checkhealth)"
-Set-ButtonIcon "btnDISMRestore" "M19.5,12.5C19.5,11.1 20.6,10 22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10C9.4,10 10.5,11.1 10.5,12.5C10.5,13.9 9.4,15 8,15V19H12V22H8C6.3,22 5,20.7 5,19V15C3.6,15 2.5,13.9 2.5,12.5C2.5,11.1 3.6,10 5,10V9C5,3.5 9.5,-1 15,-1C20.5,-1 25,3.5 25,9V10C26.4,10 27.5,11.1 27.5,12.5C27.5,13.9 26.4,15 25,15V19C25,20.7 23.7,22 22,22H17V19H22V15C20.6,15 19.5,13.9 19.5,12.5Z" "DISM Restore" "Attempts to repair the Windows Image (dism /restorehealth)"
-Set-ButtonIcon "btnCHKDSK" "M6,2H18C19.1,2 20,2.9 20,4V20C20,21.1 19.1,22 18,22H6C4.9,22 4,21.1 4,20V4C4,2.9 4.9,2 6,2M6,4V20H18V4H6M11,17C11,17.55 11.45,18 12,18C12.55,18 13,17.55 13,17C13,16.45 12.55,16 12,16C11.45,16 11,16.45 11,17M7,17C7,17.55 7.45,18 8,18C8.55,18 9,17.55 9,17C9,16.45 8.55,16 8,16C7.45,16 7,16.45 7,17M15,17C15,17.55 15.45,18 16,18C16.55,18 17,17.55 17,17C17,16.45 16.55,16 16,16C15.45,16 15,16.45 15,17Z" "Check Disk" "Scans all drives for filesystem errors (requires reboot)"
-Set-ButtonIcon "btnFlushDNS" "M2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2A10,10 0 0,0 2,12M4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12M10,17L15,12L10,7V17Z" "Flush DNS" "Clears the client DNS resolver cache"
-Set-ButtonIcon "btnNetInfo" "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" "Show IP Config" "Displays full IP configuration for all adapters"
-Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Restart Wi-Fi" "Disables and Re-Enables Wi-Fi adapters"
-Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
-Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
-Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
-(Get-Ctrl "btnWingetFind").Width = 100
-Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
-Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks enabled providers for available application updates"
-Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Checked" "Updates the checked applications; falls back to selected rows if nothing is checked"
-Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
-Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
-Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
-Set-ButtonIcon "btnSupportDiscord" "M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09c-.01-.02-.04-.03-.07-.03c-1.5.26-2.93.71-4.27 1.33c-.01 0-.02.01-.03.02c-2.72 4.07-3.47 8.03-3.1 11.95c0 .02.01.04.03.05c1.8 1.32 3.53 2.12 5.2 2.65c.03.01.06 0 .07-.02c.4-.55.76-1.13 1.07-1.74c.02-.04 0-.08-.04-.09c-.57-.22-1.11-.48-1.64-.78c-.04-.02-.04-.08.01-.11c.11-.08.22-.17.33-.25c.02-.02.05-.02.07-.01c3.44 1.57 7.15 1.57 10.55 0c.02-.01.05-.01.07.01c.11.09.22.17.33.26c.04.03.04.09-.01.11c-.52.31-1.07.56-1.64.78c-.04.01-.05.06-.04.09c.32.61.68 1.19 1.07 1.74c.03.01.06.02.09.01c1.67-.53 3.4-1.33 5.2-2.65c.02-.01.03-.03.03-.05c.44-4.53-.73-8.46-3.1-11.95c-.01-.01-.02-.02-.04-.02z" "Join Discord" "Opens the community support Discord server"
-Set-ButtonIcon "btnSupportIssue" "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" "Report Issue" "Opens the GitHub Issues page to report bugs"
-Set-ButtonIcon "btnNavDownloads" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,6H13V12H11V6M11,14H13V16H11V14Z" "Release Downloads" "Show latest release download counts"
-Set-ButtonIcon "btnDonateIos12" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Lil_Batti" "Support Lil_Batti via GitHub Sponsors" "#00FF00"
-Set-ButtonIcon "btnDonate" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Chaython" "Support Chaython via GitHub Sponsors" "#00FF00"
-Set-ButtonIcon "btnDnsGoogle" "M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" "Google" "Sets DNS to 8.8.8.8 & 8.8.4.4"
-Set-ButtonIcon "btnDnsCloudflare" "M19.35,10.04C18.67,6.59 15.64,4 12,4C9.11,4 6.6,5.64 5.35,8.04C2.34,8.36 0,10.91 0,14A6,6 0 0,0 6,20H19A5,5 0 0,0 24,15C24,12.36 21.95,10.22 19.35,10.04Z" "Cloudflare" "Sets DNS to 1.1.1.1 & 1.0.0.1"
-Set-ButtonIcon "btnDnsQuad9" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Quad9" "Sets DNS to 9.9.9.9 (Malware Blocking)"
-Set-ButtonIcon "btnDnsAdGuard" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "AdGuard" "Sets DNS to 94.140.14.14 & 94.140.15.15 (Ad/tracker blocking)" 16 "#00FF99"
-Set-ButtonIcon "btnDnsAuto" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Auto (DHCP)" "Resets DNS settings to DHCP (Automatic)"
-Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses and optional DoH template"
-Set-ButtonIcon "btnHostsUpdate" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Download AdBlock" "Updates Hosts file with AdBlocking list"
-Set-ButtonIcon "btnHostsEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Edit Hosts" "Opens the Hosts File Editor"
-Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to the data folder"
-Set-ButtonIcon "btnHostsRestore" "M13,3A9,9 0 0,0 4,12H1L4.89,15.89L4.96,16.03L9,12H6A7,7 0 0,1 13,5A7,7 0 0,1 20,12A7,7 0 0,1 13,19C11.07,19 9.32,18.21 8.06,16.94L6.64,18.36C8.27,20 10.5,21 13,21A9,9 0 0,0 22,12A9,9 0 0,0 13,3Z" "Restore Hosts" "Restores a previous hosts file backup"
-Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Register DoH" "Registers Windows DoH templates for bundled DNS providers; choose a DNS preset separately" "#00FFFF"
-Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Remove DoH" "Removes bundled Windows DoH templates" "#FF5555"
-Set-ButtonIcon "btnFwRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Refreshes the firewall rule list"
-Set-ButtonIcon "btnFwAdd" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Add Rule" "Create a new firewall rule"
-Set-ButtonIcon "btnFwEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Modify" "Edit the selected firewall rule"
-Set-ButtonIcon "btnFwEnable" "M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable" "Enable selected rule"
-Set-ButtonIcon "btnFwDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable" "Disable selected rule"
-Set-ButtonIcon "btnFwDelete" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete" "Delete selected rule"
-Set-ButtonIcon "btnFwExport" "M15,14H14V10H10V14H9L12,17L15,14M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3Z" "Export" "Export firewall policy to the data folder"
-Set-ButtonIcon "btnFwImport" "M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3M12,6.15L17.5,10.2V14C17.5,16.96 15.56,19.5 12,20.82C8.44,19.5 6.5,16.96 6.5,14V10.2L12,6.15M12,9L8,13H11V17H13V13H16L12,9Z" "Import" "Import firewall policy (.wfw)"
-Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2M7,9H9V13H11V9H13V13H15V9H17V15H7V9Z" "Restore Defaults" "Reset firewall to default rules"
-Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
-Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
-Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
-Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
-Set-ButtonIcon "btnDrvClean" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Clean Old Drivers" "Removes obsolete drivers from the Windows Driver Store"
-Set-ButtonIcon "btnDrvRestore" "M12,2L3,7V17L12,22L21,17V7L12,2M12,4.3L18.5,8L12,11.7L5.5,8L12,4.3M5,9.85L12,14L19,9.85V16.15L12,20.3L5,16.15V9.85M7,11H9V14H7V11M15,11H17V14H15V11Z" "Restore Drivers" "Imports drivers from a DriverBackup folder"
-Set-ButtonIcon "btnDrvDisableWU" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H15V15H9V13Z" "Disable Driver Updates" "Turn off automatic driver updates"
-Set-ButtonIcon "btnDrvEnableWU" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H13V15H9V13Z" "Enable Driver Updates" "Turn on automatic driver updates"
-Set-ButtonIcon "btnDrvDisableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M16.59,11.17L15.17,12.59L12,9.41L8.83,12.59L7.41,11.17L12,6.58L16.59,11.17Z" "Disable Device Metadata" "Block device metadata downloads"
-Set-ButtonIcon "btnDrvEnableMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M11,14V9H9L12,6L15,9H13V14H11Z" "Enable Device Metadata" "Allow device metadata downloads"
-Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
-Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
-Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
-Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
-Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
-Set-ButtonIcon "btnMyDeviceExport" "M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M13,9V3.5L18.5,9H13M12,17L8,13H10.5V10H13.5V13H16L12,17Z" "Export" "Saves the current My Device details to the data folder"
-Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
-Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
-Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
-Set-ButtonIcon "btnUtilMas" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "MAS Activation" "Downloads and runs Microsoft Activation Scripts"
-Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Context Menu Builder" "Create a custom right-click action for Windows 11"
+        # --- CUSTOM HEALTH ICON (Red Squircle with White Cross) ---
+        $btnHealth = Get-Ctrl "btnTabHealth"
+        if ($btnHealth) {
+            $grid = New-Object System.Windows.Controls.Grid
+            $grid.Width = 18; $grid.Height = 18; $grid.Margin = "0,0,10,0"
+    
+            # Red Squircle
+            $rect = New-Object System.Windows.Shapes.Rectangle
+            $rect.RadiusX = 4; $rect.RadiusY = 4
+            $rect.Fill = New-WmtBrush "#FF3333"
+            [void]$grid.Children.Add($rect)
+    
+            # White Cross (Plus shape)
+            $path = New-Object System.Windows.Shapes.Path
+            $path.Data = [System.Windows.Media.Geometry]::Parse("M8,4H10V8H14V10H10V14H8V10H4V8H8V4Z")
+            $path.Fill = [System.Windows.Media.Brushes]::White
+            $path.Stretch = "Uniform"; $path.Margin = "3"
+            [void]$grid.Children.Add($path)
+    
+            $sp = New-Object System.Windows.Controls.StackPanel; $sp.Orientation = "Horizontal"
+            [void]$sp.Children.Add($grid)
+            $txt = New-Object System.Windows.Controls.TextBlock; $txt.Text = "System Health"; $txt.VerticalAlignment = "Center"
+            [void]$sp.Children.Add($txt)
+    
+            $btnHealth.Content = $sp
+            $btnHealth.ToolTip = "System integrity checks (SFC, DISM, CHKDSK)"
+        }
+
+        Set-ButtonIcon "btnNetRepair" "M20,12H19.5C19.5,14.5 17.5,16.5 15,16.5H9V18.5H15C18.6,18.5 21.5,15.6 21.5,12H21C21,15 19,17.5 16,18V16L13,19L16,22V20C19.9,19.4 23,16 23,12M3,12H3.5C3.5,9.5 5.5,7.5 8,7.5H14V5.5H8C4.4,5.5 1.5,8.4 1.5,12H2C2,9 4,6.5 7,6V8L10,5L7,2V4C3.1,4.6 0,8 0,12H3Z" "Full Net Repair" "Full network stack reset (Winsock, IP, Flush DNS)"
+        Set-ButtonIcon "btnRouteTable" "M19,15L13,21L11.58,19.58L15.17,16H4V4H6V14H15.17L11.58,10.42L13,9L19,15Z" "Save Route Table" "Exports the current IP routing table to the data folder"
+        Set-ButtonIcon "btnRouteView" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,17C14.76,17 17,14.76 17,12C17,9.24 14.76,7 12,7C9.24,7 7,9.24 7,12C7,14.76 9.24,17 12,17M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z" "View Route Table" "Displays the routing table in the log"
+        Set-ButtonIcon "btnCleanReg" "M5,3H19A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3M7,7V9H9V7H7M11,7V9H13V7H11M15,7V9H17V7H15M7,11V13H9V11H7M11,11V13H13V11H11M15,11V13H17V11H15M7,15V17H9V15H7M11,15V17H13V15H11M15,15V17H17V15H15Z" "Clean Reg Keys" "Backs up & deletes obsolete Uninstall registry keys"
+        Set-ButtonIcon "btnCleanXbox" "M6.4,4.8L12,10.4L17.6,4.8L19.2,6.4L13.6,12L19.2,17.6L17.6,19.2L12,13.6L6.4,19.2L4.8,17.6L10.4,12L4.8,6.4L6.4,4.8Z" "Clean Xbox Data" "Removes Xbox Live credentials to fix login loops" 18 "#107C10"
+        Set-ButtonIcon "btnUpdateRepair" "M21,10.12H14.22L16.96,7.3C14.55,4.61 10.54,4.42 7.85,6.87C5.16,9.32 5.35,13.33 7.8,16.03C10.25,18.72 14.26,18.91 16.95,16.46C17.65,15.82 18.2,15.05 18.56,14.21L20.62,15.05C19.79,16.89 18.3,18.42 16.39,19.34C13.4,20.78 9.77,20.21 7.37,17.96C4.96,15.71 4.54,12.06 6.37,9.32C8.2,6.59 11.83,5.65 14.65,7.09L17.38,4.35H10.63V2.35H21V10.12Z" "Reset Update Svc" "Stops services, clears cache, and resets Windows Update components"
+        Set-ButtonIcon "btnUpdateServices" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12H20A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4C14.23,4 16.24,4.82 17.76,6.24L14,10H22V2L19.36,4.64C17.5,2.89 14.89,2 12,2Z" "Restart Update Svcs" "Restarts update-related services"
+        Set-ButtonIcon "btnDotNetEnable" "M14.6,16.6L19.2,12L14.6,7.4L16,6L22,12L16,18L14.6,16.6M9.4,16.6L4.8,12L9.4,7.4L8,6L2,12L8,18L9.4,16.6Z" "Set .NET RollFwd" "Sets DOTNET_ROLL_FORWARD=LatestMajor (Force apps to use newest .NET)"
+        Set-ButtonIcon "btnDotNetDisable" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Reset .NET RollFwd" "Removes the DOTNET_ROLL_FORWARD environment variable"
+        Set-ButtonIcon "btnTaskManager" "M14,10H2V12H14V10M14,6H2V8H14V6M2,16H10V14H2V16M21.5,11.5L23,13L16,20L11.5,15.5L13,14L16,17L21.5,11.5Z" "Task Scheduler" "View, Enable, Disable, or Delete Windows Scheduled Tasks"
+        Set-ButtonIcon "btnInstallGpedit" "M6,2C4.89,2 4,2.89 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2H6M6,4H13V9H18V20H6V4M8,12V14H16V12H8M8,16V18H13V16H8Z" "Install Gpedit" "Installs the Group Policy Editor on Windows Home editions"
+        Set-ButtonIcon "btnQuickFix" "M12,2A10,10 0 0,0 2,12H5L8.5,16L12,7L15.5,12H22A10,10 0 0,0 12,2M12,20A8,8 0 0,1 4,12H6L8.5,14.5L12,5.5L15.5,10H20A8,8 0 0,1 12,20Z" "Quick Fix" "Runs SFC + DISM + Temp cleanup"
+        Set-ButtonIcon "btnSFC" "M15.5,14L20.5,19L19,20.5L14,15.5V14.71L13.73,14.43C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.43,13.73L14.71,14H15.5M9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14Z" "SFC Scan" "Scans system files for corruption and repairs them"
+        Set-ButtonIcon "btnDISMCheck" "M22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10H22M19.5,12.5C19.5,11.1 20.6,10 22,10H8V15H19.5V12.5Z" "DISM Check" "Checks the health of the Windows Image (dism /checkhealth)"
+        Set-ButtonIcon "btnDISMRestore" "M19.5,12.5C19.5,11.1 20.6,10 22,10V9C22,5.1 18.9,2 15,2C11.1,2 8,5.1 8,9V10C9.4,10 10.5,11.1 10.5,12.5C10.5,13.9 9.4,15 8,15V19H12V22H8C6.3,22 5,20.7 5,19V15C3.6,15 2.5,13.9 2.5,12.5C2.5,11.1 3.6,10 5,10V9C5,3.5 9.5,-1 15,-1C20.5,-1 25,3.5 25,9V10C26.4,10 27.5,11.1 27.5,12.5C27.5,13.9 26.4,15 25,15V19C25,20.7 23.7,22 22,22H17V19H22V15C20.6,15 19.5,13.9 19.5,12.5Z" "DISM Restore" "Attempts to repair the Windows Image (dism /restorehealth)"
+        Set-ButtonIcon "btnCHKDSK" "M6,2H18C19.1,2 20,2.9 20,4V20C20,21.1 19.1,22 18,22H6C4.9,22 4,21.1 4,20V4C4,2.9 4.9,2 6,2M6,4V20H18V4H6M11,17C11,17.55 11.45,18 12,18C12.55,18 13,17.55 13,17C13,16.45 12.55,16 12,16C11.45,16 11,16.45 11,17M7,17C7,17.55 7.45,18 8,18C8.55,18 9,17.55 9,17C9,16.45 8.55,16 8,16C7.45,16 7,16.45 7,17M15,17C15,17.55 15.45,18 16,18C16.55,18 17,17.55 17,17C17,16.45 16.55,16 16,16C15.45,16 15,16.45 15,17Z" "Check Disk" "Scans all drives for filesystem errors (requires reboot)"
+        Set-ButtonIcon "btnFlushDNS" "M2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2A10,10 0 0,0 2,12M4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12M10,17L15,12L10,7V17Z" "Flush DNS" "Clears the client DNS resolver cache"
+        Set-ButtonIcon "btnNetInfo" "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z" "Show IP Config" "Displays full IP configuration for all adapters"
+        Set-ButtonIcon "btnResetWifi" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Restart Wi-Fi" "Disables and Re-Enables Wi-Fi adapters"
+        Set-ButtonIcon "btnCleanDisk" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Disk Cleanup" "Opens the built-in Windows Disk Cleanup utility"
+        Set-ButtonIcon "btnCleanTemp" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete Temp Files" "Deletes temporary files from User and System Temp folders"
+        Set-ButtonIcon "btnCleanShortcuts" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Fix Shortcuts" "Scans for and fixes broken .lnk shortcuts"
+        (Get-Ctrl "btnWingetFind").Width = 100
+        Set-ButtonIcon "btnWingetFind" "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" "Search" "Search Winget"
+        Set-ButtonIcon "btnWingetScan" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Refresh Updates" "Checks enabled providers for available application updates"
+        Set-ButtonIcon "btnWingetUpdateSel" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update Checked" "Updates the checked applications; falls back to selected rows if nothing is checked"
+        Set-ButtonIcon "btnWingetUpdateAll" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Update All" "Updates all listed applications"
+        Set-ButtonIcon "btnWingetInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Installs the selected applications"
+        Set-ButtonIcon "btnWingetUninstall" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Uninstall Selected" "Uninstalls the selected applications"
+        Set-ButtonIcon "btnSupportDiscord" "M19.27 5.33C17.94 4.71 16.5 4.26 15 4a.09.09 0 0 0-.07.03c-.18.33-.39.76-.53 1.09a16.09 16.09 0 0 0-4.8 0c-.14-.34-.35-.76-.54-1.09c-.01-.02-.04-.03-.07-.03c-1.5.26-2.93.71-4.27 1.33c-.01 0-.02.01-.03.02c-2.72 4.07-3.47 8.03-3.1 11.95c0 .02.01.04.03.05c1.8 1.32 3.53 2.12 5.2 2.65c.03.01.06 0 .07-.02c.4-.55.76-1.13 1.07-1.74c.02-.04 0-.08-.04-.09c-.57-.22-1.11-.48-1.64-.78c-.04-.02-.04-.08.01-.11c.11-.08.22-.17.33-.25c.02-.02.05-.02.07-.01c3.44 1.57 7.15 1.57 10.55 0c.02-.01.05-.01.07.01c.11.09.22.17.33.26c.04.03.04.09-.01.11c-.52.31-1.07.56-1.64.78c-.04.01-.05.06-.04.09c.32.61.68 1.19 1.07 1.74c.03.01.06.02.09.01c1.67-.53 3.4-1.33 5.2-2.65c.02-.01.03-.03.03-.05c.44-4.53-.73-8.46-3.1-11.95c-.01-.01-.02-.02-.04-.02z" "Join Discord" "Opens the community support Discord server"
+        Set-ButtonIcon "btnSupportIssue" "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" "Report Issue" "Opens the GitHub Issues page to report bugs"
+        Set-ButtonIcon "btnNavDownloads" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,6H13V12H11V6M11,14H13V16H11V14Z" "Release Downloads" "Show latest release download counts"
+        Set-ButtonIcon "btnDonateIos12" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Lil_Batti" "Support Lil_Batti via GitHub Sponsors" "#00FF00"
+        Set-ButtonIcon "btnDonate" "M7,15H9C9,16.08 10.37,17 12,17C13.63,17 15,16.08 15,15C15,13.9 13.9,13.5 12,13.5C8.36,13.5 6,12.28 6,10C6,7.24 8.7,5 12,5V3H14V5C15.68,5.37 16.86,6.31 17.38,7.5H15.32C14.93,6.85 13.95,6.2 12,6.2C10.37,6.2 9,7.11 9,8.2C9,9.3 10.1,9.7 12,9.7C15.64,9.7 18,10.92 18,13.2C18,15.96 15.3,18.2 12,18.2V20H10V18.2C8.32,17.83 7.14,16.89 6.62,15.7L8.68,15Z" "Sponsor Chaython" "Support Chaython via GitHub Sponsors" "#00FF00"
+        Set-ButtonIcon "btnDnsGoogle" "M21.35,11.1H12.18V13.83H18.69C18.36,17.64 15.19,19.27 12.19,19.27C8.36,19.27 5,16.25 5,12C5,7.9 8.2,4.73 12.2,4.73C15.29,4.73 17.1,6.7 17.1,6.7L19,4.72C19,4.72 16.56,2 12.1,2C6.42,2 2.03,6.8 2.03,12C2.03,17.05 6.16,22 12.25,22C17.6,22 21.5,18.33 21.5,12.91C21.5,11.76 21.35,11.1 21.35,11.1V11.1Z" "Google" "Sets DNS to 8.8.8.8 & 8.8.4.4"
+        Set-ButtonIcon "btnDnsCloudflare" "M19.35,10.04C18.67,6.59 15.64,4 12,4C9.11,4 6.6,5.64 5.35,8.04C2.34,8.36 0,10.91 0,14A6,6 0 0,0 6,20H19A5,5 0 0,0 24,15C24,12.36 21.95,10.22 19.35,10.04Z" "Cloudflare" "Sets DNS to 1.1.1.1 & 1.0.0.1"
+        Set-ButtonIcon "btnDnsQuad9" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Quad9" "Sets DNS to 9.9.9.9 (Malware Blocking)"
+        Set-ButtonIcon "btnDnsAdGuard" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "AdGuard" "Sets DNS to 94.140.14.14 & 94.140.15.15 (Ad/tracker blocking)" 16 "#00FF99"
+        Set-ButtonIcon "btnDnsAuto" "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" "Auto (DHCP)" "Resets DNS settings to DHCP (Automatic)"
+        Set-ButtonIcon "btnDnsCustom" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M17,7L12,12L7,7H17Z" "Custom DNS" "Set custom DNS addresses and optional DoH template"
+        Set-ButtonIcon "btnHostsUpdate" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "Download AdBlock" "Updates Hosts file with AdBlocking list"
+        Set-ButtonIcon "btnHostsEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Edit Hosts" "Opens the Hosts File Editor"
+        Set-ButtonIcon "btnHostsBackup" "M19,9H15V3H9V9H5L12,16L19,9Z" "Backup Hosts" "Backs up the current hosts file to the data folder"
+        Set-ButtonIcon "btnHostsRestore" "M13,3A9,9 0 0,0 4,12H1L4.89,15.89L4.96,16.03L9,12H6A7,7 0 0,1 13,5A7,7 0 0,1 20,12A7,7 0 0,1 13,19C11.07,19 9.32,18.21 8.06,16.94L6.64,18.36C8.27,20 10.5,21 13,21A9,9 0 0,0 22,12A9,9 0 0,0 13,3Z" "Restore Hosts" "Restores a previous hosts file backup"
+        Set-ButtonIcon "btnDohAuto" "M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Register DoH" "Registers Windows DoH templates for bundled DNS providers; choose a DNS preset separately" "#00FFFF"
+        Set-ButtonIcon "btnDohDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Remove DoH" "Removes bundled Windows DoH templates" "#FF5555"
+        Set-ButtonIcon "btnFwRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Refreshes the firewall rule list"
+        Set-ButtonIcon "btnFwAdd" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Add Rule" "Create a new firewall rule"
+        Set-ButtonIcon "btnFwEdit" "M14.06,9L15,9.94L5.92,19H5V18.08L14.06,9M17.66,3C17.41,3 17.15,3.1 16.96,3.29L15.13,5.12L18.88,8.87L20.71,7.04C21.1,6.65 21.1,6 20.71,5.63L18.37,3.29C18.17,3.09 17.92,3 17.66,3M14.06,6.19L3,17.25V21H6.75L17.81,9.94L14.06,6.19Z" "Modify" "Edit the selected firewall rule"
+        Set-ButtonIcon "btnFwEnable" "M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9L10,17Z" "Enable" "Enable selected rule"
+        Set-ButtonIcon "btnFwDisable" "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z" "Disable" "Disable selected rule"
+        Set-ButtonIcon "btnFwDelete" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Delete" "Delete selected rule"
+        Set-ButtonIcon "btnFwExport" "M15,14H14V10H10V14H9L12,17L15,14M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3Z" "Export" "Export firewall policy to the data folder"
+        Set-ButtonIcon "btnFwImport" "M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3M12,6.15L17.5,10.2V14C17.5,16.96 15.56,19.5 12,20.82C8.44,19.5 6.5,16.96 6.5,14V10.2L12,6.15M12,9L8,13H11V17H13V13H16L12,9Z" "Import" "Import firewall policy (.wfw)"
+        Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2M7,9H9V13H11V9H13V13H15V9H17V15H7V9Z" "Restore Defaults" "Reset firewall to default rules"
+        Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
+        Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
+        Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
+        Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
+        Set-ButtonIcon "btnDrvClean" "M19,4H15.5L14.5,3H9.5L8.5,4H5V6H19M6,19A2,2 0 0,0 8,21H16A2,2 0 0,0 18,19V7H6V19Z" "Clean Old Drivers" "Removes obsolete drivers from the Windows Driver Store"
+        Set-ButtonIcon "btnDrvRestore" "M12,2L3,7V17L12,22L21,17V7L12,2M12,4.3L18.5,8L12,11.7L5.5,8L12,4.3M5,9.85L12,14L19,9.85V16.15L12,20.3L5,16.15V9.85M7,11H9V14H7V11M15,11H17V14H15V11Z" "Restore Drivers" "Imports drivers from a DriverBackup folder"
+        Set-ButtonIcon "btnToggleDrvUpdates" "M19,4H5V6H19M5,20H19V18H5M9,9H15V11H9V9M9,13H15V15H9V13Z" "Driver Updates" "Toggle automatic driver updates via Windows Update"
+        Set-ButtonIcon "btnToggleDrvMeta" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M15,17H9V15H15V17M16.59,11.17L15.17,12.59L12,9.41L8.83,12.59L7.41,11.17L12,6.58L16.59,11.17Z" "Device Metadata" "Toggle device metadata downloads from the internet"
+        Set-ButtonIcon "btnUtilSysInfo" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "System Info Report" "Generates a full system information report"
+        Set-ButtonIcon "btnUtilTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim SSD" "Optimizes SSD performance via Trim command"
+        Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
+        Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
+        Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
+        Set-ButtonIcon "btnMyDeviceExport" "M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M13,9V3.5L18.5,9H13M12,17L8,13H10.5V10H13.5V13H16L12,17Z" "Export" "Saves the current My Device details to the data folder"
+        Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
+        Set-ButtonIcon "btnUtilRestoreMgr" "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M11,7V12.59L15.3,16.9L16.7,15.5L13,11.8V7H11Z" "Restore Manager" "Manage System Restore points"
+        Set-ButtonIcon "btnUtilStartupMgr" "M4,18H10V6H4V18M11,18H17V2H11V18M18,18H24V10H18V18Z" "Startup Manager" "Manage startup entries, tasks, context menus, and services"
+        Set-ButtonIcon "btnUtilMas" "M5,20H19V18H5M19,9H15V3H9V9H5L12,16L19,9Z" "MAS Activation" "Downloads and runs Microsoft Activation Scripts"
+        Set-ButtonIcon "btnCtxBuilder" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Context Menu Builder" "Create a custom right-click action for Windows 11"
+        Set-ButtonIcon "btnShowCatalog" "M3,5H9V7H3V5M5,19V21H3V19H5M3,13H7V15H3V13M3,9H9V11H3V9M11,5H21V7H11V5M11,13H21V15H11V13M11,9H21V11H11V9M5,19H21V21H5V19M11,17H21V19H11V17Z" "Software Catalog" "Browse our curated catalog of popular free applications. Install multiple apps at once with one click." 16 "#00FF99"
+        Set-ButtonIcon "btnShowLibrary" "M7,6A6,6 0 0,1 13,12A6,6 0 0,1 7,18A6,6 0 0,1 1,12A6,6 0 0,1 7,6M21,6A6,6 0 0,1 27,12A6,6 0 0,1 21,18A6,6 0 0,1 15,12A6,6 0 0,1 21,6M7,9A3,3 0 0,0 4,12A3,3 0 0,0 7,15A3,3 0 0,0 10,12A3,3 0 0,0 7,9M21,9A3,3 0 0,0 18,12A3,3 0 0,0 21,15A3,3 0 0,0 24,12A3,3 0 0,0 21,9M10.5,12C10.5,12 11.5,11 12,11C12.5,11 13.5,12 13.5,12C13.5,12 12.5,13 12,13C11.5,13 10.5,12 10.5,12Z" "Your Library" "Show games you own from Steam, Epic (Legendary), and GOG (GOGDL)" 16 "#00FF99"
+        Set-ButtonIcon "btnCatalogInstall" "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z" "Install Selected" "Install all selected applications using winget. May take several minutes depending on app size." 16 "#00FF00"
+        Set-ButtonIcon "btnCatalogSelectAll" "M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3M19,19H5V5H19V19M10,17L5,12L6.41,10.59L10,14.17L17.59,6.58L19,8L10,17Z" "Select All" "Select all visible applications in the list" 16
+        Set-ButtonIcon "btnCatalogClear" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Clear Selection" "Unselect all applications" 16
+        Set-ButtonIcon "btnBackToUpdates" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Updates" "Return to the package updates view" 16
+        Set-ButtonIcon "btnBackToCatalog" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Catalog" "Return to the software catalog" 16
+        Set-ButtonIcon "btnLibraryRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Refresh Library" "Re-scan Steam manifests and refresh Legendary/GOGDL caches" 16
+        $iconDeferTimer = $null
+    })
+$iconDeferTimer.Start()
 # ==========================================
 # 5. LOGIC & EVENTS
 # ==========================================
@@ -21827,12 +21667,436 @@ $btnQuickFix = Get-Ctrl "btnQuickFix"
 
 $btnPerfServicesManual = Get-Ctrl "btnPerfServicesManual"
 $btnPerfServicesRevert = Get-Ctrl "btnPerfServicesRevert"
-$btnPerfDisableHibernate = Get-Ctrl "btnPerfDisableHibernate"
-$btnPerfEnableHibernate = Get-Ctrl "btnPerfEnableHibernate"
-$btnPerfDisableSuperfetch = Get-Ctrl "btnPerfDisableSuperfetch"
-$btnPerfEnableSuperfetch = Get-Ctrl "btnPerfEnableSuperfetch"
-$btnPerfDisableMemCompress = Get-Ctrl "btnPerfDisableMemCompress"
-$btnPerfEnableMemCompress = Get-Ctrl "btnPerfEnableMemCompress"
+$btnToggleHibernate = Get-Ctrl "btnToggleHibernate"
+$btnMyDeviceHibernateToggle = Get-Ctrl "btnMyDeviceHibernateToggle"
+$btnToggleSuperfetch = Get-Ctrl "btnToggleSuperfetch"
+$btnToggleMemCompress = Get-Ctrl "btnToggleMemCompress"
+$btnMyDeviceMemCompressToggle = Get-Ctrl "btnMyDeviceMemCompressToggle"
+$btnToggleHags = Get-Ctrl "btnToggleHags"
+$btnMyDeviceHagsToggle = Get-Ctrl "btnMyDeviceHagsToggle"
+function Update-WmtTweakToggle {
+    param($Button, [bool]$IsOn, [string]$OnLabel, [string]$OffLabel, [string]$BaseToolTip = "")
+    if (-not $Button) { return }
+    $stateDesc = if ($IsOn) { "Current state: $OnLabel (Blue = active/applied)" } else { "Current state: $OffLabel (Gray = inactive/default)" }
+    $actionDesc = if ($IsOn) { "Click to switch to: $OffLabel" } else { "Click to switch to: $OnLabel" }
+    $fullToolTip = if ([string]::IsNullOrWhiteSpace($BaseToolTip)) { "$stateDesc`n$actionDesc" } else { "$BaseToolTip`n`n$stateDesc`n$actionDesc" }
+    if ($IsOn) {
+        $Button.Content = $OnLabel
+        $Button.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
+    }
+    else {
+        $Button.Content = $OffLabel
+        $Button.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
+    }
+    $Button.ToolTip = $fullToolTip
+}
+
+function Update-TweakButtonStates {
+    try {
+        $regCache = @{}
+        $getRegValue = {
+            param(
+                [string]$Path,
+                [string]$Name,
+                $Default = $null
+            )
+
+            if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+            if (-not $regCache.ContainsKey($Path)) {
+                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
+                catch { $regCache[$Path] = $null }
+            }
+
+            $item = $regCache[$Path]
+            if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+            return $Default
+        }.GetNewClosure()
+
+        $setButtonEnabled = {
+            param(
+                [string]$Name,
+                [bool]$Enabled
+            )
+
+            $button = Get-Ctrl $Name
+            if ($button) { $button.IsEnabled = [bool]$Enabled }
+        }
+
+        $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
+        $hagsOn = ($h -ne 2); Update-WmtTweakToggle $btnToggleHags $hagsOn "Disable HAGS" "Enable HAGS"
+        Update-WmtTweakToggle $btnMyDeviceHagsToggle $hagsOn "Disable HAGS" "Enable HAGS"
+
+        $sm = Get-Service "SysMain" -EA Ignore
+        if ($sm) {
+            $d = ($sm.StartType -eq 'Disabled')
+            $superfetchDisabled = $d; Update-WmtTweakToggle $btnToggleSuperfetch $superfetchDisabled "Enable Superfetch" "Disable Superfetch"
+        }
+
+        $hibernate = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled"
+        if ($null -ne $hibernate) {
+            $hibernateEnabled = ([int]$hibernate -ne 0)
+            $hibernateOff = (-not $hibernateEnabled); Update-WmtTweakToggle $btnToggleHibernate $hibernateOff "Enable Hibernation" "Disable Hibernation"
+            Update-WmtTweakToggle $btnMyDeviceHibernateToggle $hibernateOff "Enable Hibernation" "Disable Hibernation"
+        }
+
+        if (Get-Command Get-MMAgent -ErrorAction Ignore) {
+            $mma = Get-MMAgent -ErrorAction Ignore
+            if ($mma -and $null -ne $mma.MemoryCompression) {
+                $memoryCompressionEnabled = [bool]$mma.MemoryCompression
+                Update-WmtTweakToggle $btnToggleMemCompress $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
+                Update-WmtTweakToggle $btnMyDeviceMemCompressToggle $memoryCompressionEnabled "Enable Mem Compression" "Disable Mem Compression"
+            }
+        }
+
+        $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+        $ta = & $getRegValue $ap "TaskbarAl";
+
+        $btnToggleTaskbarAlign = Get-Ctrl "btnToggleTaskbarAlign"; $taskbarLeft = ($ta -ne 0 -and $null -ne $ta); Update-WmtTweakToggle $btnToggleTaskbarAlign $taskbarLeft "Align Taskbar Center" "Align Taskbar Left"
+        $tc = & $getRegValue $ap "TaskbarGlomLevel"; $neverCombine = ($tc -eq 2); Update-WmtTweakToggle $btnToggleCombine $neverCombine "Always Combine" "Never Combine"
+        $is24 = ([string](& $getRegValue "HKCU:\Control Panel\International" "sShortTime") -cmatch "H")
+        $btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"; Update-WmtTweakToggle $btnToggleClockFormat $is24 "12-Hour Clock" "24-Hour Clock"
+        $cs = & $getRegValue $ap "ShowSecondsInSystemClock"; $clockSecsOn = ($cs -eq 1); Update-WmtTweakToggle $btnToggleClockSecs $clockSecsOn "Hide Clock Seconds" "Show Clock Seconds"
+        $smode = & $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode"
+        $btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"; $searchHidden = ($smode -eq 0); $searchIcon = ($smode -eq 1); $searchState = if ($searchHidden) { 2 } elseif ($searchIcon) { 1 } else { 0 }; if ($searchState -eq 2) { $btnToggleSearchDisplay.Content = "Show Search Box"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } elseif ($searchState -eq 1) { $btnToggleSearchDisplay.Content = "Hide Search"; $btnToggleSearchDisplay.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) } else { $btnToggleSearchDisplay.Content = "Search as Icon"; $btnToggleSearchDisplay.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style]) }
+        $widgetsHidden = (([int](Get-WmtRegValue $ap "TaskbarDa" 1) -eq 0)); if ($btnMouseSpeedSlow) {
+            $btnMouseSpeedSlow.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6 (slow)." } "Setting mouse speed slow..." ; Update-TweakButtonStates })
+        }
+        $btnMouseSpeedDefault = Get-Ctrl "btnMouseSpeedDefault"
+        if ($btnMouseSpeedDefault) {
+            $btnMouseSpeedDefault.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10 (default)." } "Setting mouse speed default..." ; Update-TweakButtonStates })
+        }
+        if ($btnMouseSpeedFast) {
+            $btnMouseSpeedFast.Add_Click({ Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15 (fast)." } "Setting mouse speed fast..." ; Update-TweakButtonStates })
+        }
+        $btnMouseSettings = Get-Ctrl "btnMouseSettings"
+        if ($btnMouseSettings) { $btnMouseSettings.Add_Click({ Start-Process "main.cpl" }) }
+        if ($btnSearchIndexRebuild) {
+            $btnSearchIndexRebuild.Add_Click({
+                    Invoke-UiCommand { Start-Process "powershell.exe" -ArgumentList "-NoProfile -Command `"Get-Service WSearch | Stop-Service -Force; (Get-Service WSearch).WaitForStatus('Stopped'); Start-Service WSearch`"" -Verb RunAs; Write-GuiLog "Search index rebuild started." } "Rebuilding search index..."
+                })
+        }
+
+        # --- Missing toggle click handlers (found by audit) ---
+        $btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
+        if ($btnToggleExtensions) {
+            $btnToggleExtensions.Add_Click({
+                    $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                    $currentlyHidden = ([int](Get-WmtRegValue $ap "HideFileExt" 1) -ne 0)
+                    if ($currentlyHidden) {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 0; Write-GuiLog "File extensions shown." } "Showing file extensions..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "HideFileExt" 1; Write-GuiLog "File extensions hidden." } "Hiding file extensions..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
+        if ($btnToggleHiddenFiles) {
+            $btnToggleHiddenFiles.Add_Click({
+                    $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                    $currentlyHidden = ([int](Get-WmtRegValue $ap "Hidden" 2) -eq 2)
+                    if ($currentlyHidden) {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 1; Write-GuiLog "Hidden files shown." } "Showing hidden files..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "Hidden" 2; Write-GuiLog "Hidden files hidden." } "Hiding hidden files..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
+        if ($btnToggleExplorerLaunch) {
+            $btnToggleExplorerLaunch.Add_Click({
+                    $ap = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+                    $currentlyThisPc = ([int](Get-WmtRegValue $ap "LaunchTo" 2) -eq 1)
+                    if ($currentlyThisPc) {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 2; Write-GuiLog "Explorer opens to Quick Access." } "Setting Quick Access..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $ap "LaunchTo" 1; Write-GuiLog "Explorer opens to This PC." } "Setting This PC..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
+        if ($btnToggleFullPath) {
+            $btnToggleFullPath.Add_Click({
+                    $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+                    $currentlyOn = ([int](Get-WmtRegValue $p "FullPath" 0) -eq 1)
+                    if ($currentlyOn) {
+                        Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 0; Write-GuiLog "Full path in title bar disabled." } "Disabling full path..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $p "FullPath" 1; Write-GuiLog "Full path in title bar enabled." } "Enabling full path..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleRecents = Get-Ctrl "btnToggleRecents"
+        if ($btnToggleRecents) {
+            $btnToggleRecents.Add_Click({
+                    $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+                    $currentlyHidden = ([int](Get-WmtRegValue $p "ShowRecent" 1) -eq 0 -and [int](Get-WmtRegValue $p "ShowFrequent" 1) -eq 0)
+                    if ($currentlyHidden) {
+                        Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 1; Set-WmtRegDword $p "ShowFrequent" 1; Write-GuiLog "Recent files shown." } "Showing recents..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $p "ShowRecent" 0; Set-WmtRegDword $p "ShowFrequent" 0; Write-GuiLog "Recent files hidden." } "Hiding recents..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
+        if ($btnToggleMouseAccel) {
+            $btnToggleMouseAccel.Add_Click({
+                    $p = "HKCU:\Control Panel\Mouse"
+                    $currentlyOn = ([string](Get-WmtRegValue $p "MouseSpeed" "1") -ne "0")
+                    if ($currentlyOn) {
+                        Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "0" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "0" -Type String -Force; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-ItemProperty -Path $p -Name "MouseSpeed" -Value "1" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold1" -Value "6" -Type String -Force; Set-ItemProperty -Path $p -Name "MouseThreshold2" -Value "10" -Type String -Force; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
+        if ($btnToggleClickMode) {
+            $btnToggleClickMode.Add_Click({
+                    $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+                    $shellState = Get-WmtRegValue $p "ShellState"
+                    $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+                    if ($singleClick) {
+                        Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
+        if ($btnToggleCtxMenu) {
+            $btnToggleCtxMenu.Add_Click({
+                    $classicInstalled = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+                    if ($classicInstalled) {
+                        Invoke-UiCommand { Remove-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Modern context menu restored." } "Restoring modern menu..."
+                    }
+                    else {
+                        Invoke-UiCommand { New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}" -Force | Out-Null; New-Item -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Force | Out-Null; Set-ItemProperty -Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" -Name "(Default)" -Value "C:\Windows\System32\Windows.UI.FileExplorer.dll" -Force; Write-GuiLog "Classic context menu enabled." } "Enabling classic menu..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
+        if ($btnToggleTakeOwnership) {
+            $btnToggleTakeOwnership.Add_Click({
+                    $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+                    if ($installed) {
+                        Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership..."
+                    }
+                    else {
+                        Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\*\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership" -Name "(Default)" -Value "Take Ownership" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership\command" -Name "(Default)" -Value 'powershell -windowstyle hidden -command "Start-Process cmd -ArgumentList ''/c takeown /f "%1" /r /d y && icacls "%1" /grant administrators:F /t'' -Verb runAs"' -Force; Write-GuiLog "Take Ownership context menu added." } "Adding Take Ownership..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
+        if ($btnTogglePsHere) {
+            $btnTogglePsHere.Add_Click({
+                    $installed = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+                    if ($installed) {
+                        Invoke-UiCommand { Remove-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Recurse -Force -ErrorAction SilentlyContinue; Write-GuiLog "PowerShell Here context menu removed." } "Removing PowerShell Here..."
+                    }
+                    else {
+                        Invoke-UiCommand { New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "(Default)" -Value "Open PowerShell Here" -Force; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell" -Name "Icon" -Value "powershell.exe" -Force; New-Item -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Force | Out-Null; Set-ItemProperty -Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell\command" -Name "(Default)" -Value "powershell.exe -NoExit -Command Set-Location -LiteralPath "%V"" -Force; Write-GuiLog "PowerShell Here context menu added." } "Adding PowerShell Here..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleAds = Get-Ctrl "btnToggleAds"
+        if ($btnToggleAds) {
+            $btnToggleAds.Add_Click({
+                    $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+                    $currentlyOn = ([int](Get-WmtRegValue $p "Enabled" 1) -ne 0)
+                    if ($currentlyOn) {
+                        Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..."
+                    }
+                    else {
+                        Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..."
+                    }
+                    Update-TweakButtonStates
+                })
+        }
+
+        $btnToggleWidgets = Get-Ctrl "btnToggleWidgets"; Update-WmtTweakToggle $btnToggleWidgets $widgetsHidden "Show Widgets" "Hide Widgets"
+        $taskViewHidden = (([int](Get-WmtRegValue $ap "ShowTaskViewButton" 1) -eq 0)); $btnToggleTaskView = Get-Ctrl "btnToggleTaskView"; Update-WmtTweakToggle $btnToggleTaskView $taskViewHidden "Show Task View" "Hide Task View"
+        $chatHidden = (([int](Get-WmtRegValue $ap "TaskbarMn" 1) -eq 0)); $btnToggleChat = Get-Ctrl "btnToggleChat"; Update-WmtTweakToggle $btnToggleChat $chatHidden "Show Chat" "Hide Chat"
+
+        $cabinetPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState"
+        $explorerPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer"
+        $hideExt = [int](& $getRegValue $ap "HideFileExt" 1)
+        $btnToggleExtensions = Get-Ctrl "btnToggleExtensions"
+        Update-WmtTweakToggle $btnToggleExtensions ($hideExt -eq 0) "Show Extensions" "Hide Extensions"
+        $hidden = [int](& $getRegValue $ap "Hidden" 2)
+        $btnToggleHiddenFiles = Get-Ctrl "btnToggleHiddenFiles"
+        Update-WmtTweakToggle $btnToggleHiddenFiles ($hidden -eq 1) "Show Hidden Files" "Hide Hidden Files"
+        $fullPath = [int](& $getRegValue $cabinetPath "FullPath" 0)
+        $btnToggleFullPath = Get-Ctrl "btnToggleFullPath"
+        Update-WmtTweakToggle $btnToggleFullPath ($fullPath -eq 1) "Full Path On" "Full Path Off"
+        $launchTo = [int](& $getRegValue $ap "LaunchTo" 2)
+        $btnToggleExplorerLaunch = Get-Ctrl "btnToggleExplorerLaunch"
+        Update-WmtTweakToggle $btnToggleExplorerLaunch ($launchTo -eq 1) "Open to This PC" "Open to Quick Access"
+        $recentsHidden = ([int](& $getRegValue $explorerPath "ShowRecent" 1) -eq 0 -and [int](& $getRegValue $explorerPath "ShowFrequent" 1) -eq 0)
+        $btnToggleRecents = Get-Ctrl "btnToggleRecents"
+        Update-WmtTweakToggle $btnToggleRecents $recentsHidden "Hide Recents" "Show Recents"
+
+        $mousePath = "HKCU:\Control Panel\Mouse"
+        $mouseSpeed = [int](& $getRegValue $mousePath "MouseSensitivity" 10)
+        & $setButtonEnabled "btnMouseSpeedSlow" ($mouseSpeed -ne 6); & $setButtonEnabled "btnMouseSpeedDefault" ($mouseSpeed -ne 10); & $setButtonEnabled "btnMouseSpeedFast" ($mouseSpeed -ne 15)
+        $mouseAccelOn = ([string](& $getRegValue $mousePath "MouseSpeed" "1") -ne "0")
+        $btnToggleMouseAccel = Get-Ctrl "btnToggleMouseAccel"
+        Update-WmtTweakToggle $btnToggleMouseAccel $mouseAccelOn "Acceleration On" "Acceleration Off"
+        $shellState = & $getRegValue $explorerPath "ShellState"
+        $singleClick = ($shellState -and $shellState.Length -gt 4 -and [int]$shellState[4] -eq 0x1E)
+        $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
+        Update-WmtTweakToggle $btnToggleClickMode $singleClick "Single-Click Folders" "Double-Click Folders"
+
+        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
+        Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
+        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
+        Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
+        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
+        Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
+
+        $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
+        $btnToggleAds = Get-Ctrl "btnToggleAds"
+        Update-WmtTweakToggle $btnToggleAds ($adEnabled -eq 0) "Ad ID Off" "Ad ID On"
+        $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        $suggestionNames = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+        $suggestionsOff = $true
+        foreach ($name in $suggestionNames) {
+            if ([int](& $getRegValue $contentDeliveryPath $name 1) -ne 0) { $suggestionsOff = $false; break }
+        }
+        $btnToggleSuggested = Get-Ctrl "btnToggleSuggested"
+        Update-WmtTweakToggle $btnToggleSuggested $suggestionsOff "Suggestions Off" "Suggestions On"
+        $tailoredOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1) -eq 0 -or [int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 0) -eq 1)
+        $btnToggleTailored = Get-Ctrl "btnToggleTailored"
+        Update-WmtTweakToggle $btnToggleTailored $tailoredOff "Tailored Off" "Tailored On"
+        $activityPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+        $activityOff = ([int](& $getRegValue $activityPolicy "EnableActivityFeed" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "PublishUserActivities" 1) -eq 0 -and [int](& $getRegValue $activityPolicy "UploadUserActivities" 1) -eq 0)
+        $btnToggleActivity = Get-Ctrl "btnToggleActivity"
+        Update-WmtTweakToggle $btnToggleActivity $activityOff "Activity History Off" "Activity History On"
+        $launchTrackingOff = ([int](& $getRegValue $ap "Start_TrackProgs" 1) -eq 0)
+        $btnToggleAppLaunch = Get-Ctrl "btnToggleAppLaunch"
+        Update-WmtTweakToggle $btnToggleAppLaunch $launchTrackingOff "Launch Tracking Off" "Launch Tracking On"
+
+        $webSearchOff = ([int](& $getRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 0) -eq 1 -or [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1) -eq 0)
+        $btnToggleWebSearch = Get-Ctrl "btnToggleWebSearch"
+        Update-WmtTweakToggle $btnToggleWebSearch $webSearchOff "Web Search Off" "Web Search On"
+        $searchSvc = Get-Service "WSearch" -ErrorAction Ignore
+        if ($searchSvc) {
+            $indexReduced = ($searchSvc.StartType -ne "Automatic")
+            $btnToggleSearchIndex = Get-Ctrl "btnToggleSearchIndex"
+            Update-WmtTweakToggle $btnToggleSearchIndex $indexReduced "Reduce Indexing" "Default Indexing"
+        }
+
+        $gameBarPath = "HKCU:\Software\Microsoft\GameBar"
+        $gameDvrPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
+        $gameCfgPath = "HKCU:\System\GameConfigStore"
+        $gameModeOn = ([int](& $getRegValue $gameBarPath "AutoGameModeEnabled" 0) -eq 1 -or [int](& $getRegValue $gameBarPath "AllowAutoGameMode" 0) -eq 1)
+        $btnToggleGameMode = Get-Ctrl "btnToggleGameMode"
+        Update-WmtTweakToggle $btnToggleGameMode $gameModeOn "Game Mode On" "Game Mode Off"
+        $gameBarOn = ([int](& $getRegValue $gameDvrPath "AppCaptureEnabled" 1) -ne 0 -and [int](& $getRegValue $gameCfgPath "GameDVR_Enabled" 1) -ne 0)
+        $btnToggleGameBar = Get-Ctrl "btnToggleGameBar"
+        Update-WmtTweakToggle $btnToggleGameBar $gameBarOn "Game Bar On" "Game Bar Off"
+        $captureOn = ([int](& $getRegValue $gameDvrPath "HistoricalCaptureEnabled" 1) -ne 0)
+        $btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
+        Update-WmtTweakToggle $btnToggleGameCapture (-not $captureOn) "Capture Off" "Capture On"
+        $fsoOff = ([int](& $getRegValue $gameCfgPath "GameDVR_FSEBehaviorMode" 0) -eq 2 -and [int](& $getRegValue $gameCfgPath "GameDVR_HonorUserFSEBehaviorMode" 0) -eq 1)
+        $btnToggleFso = Get-Ctrl "btnToggleFso"
+        Update-WmtTweakToggle $btnToggleFso $fsoOff "Disable FS Optimizations" "Default FS Optimizations"
+
+        $visualPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
+        $visualMode = [int](& $getRegValue $visualPath "VisualFXSetting" 0)
+        $snappyOn = ($visualMode -eq 3 -and [string](& $getRegValue "HKCU:\Control Panel\Desktop" "MinAnimate" "1") -eq "0" -and [int](& $getRegValue $ap "TaskbarAnimations" 1) -eq 0 -and [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0)
+        & $setButtonEnabled "btnVisualBestAppearance" ($visualMode -ne 1); & $setButtonEnabled "btnVisualBestPerformance" ($visualMode -ne 2); & $setButtonEnabled "btnVisualSnappy" (-not $snappyOn)
+
+        $tipsOff = ([int](& $getRegValue $contentDeliveryPath "SoftLandingEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338389Enabled" 1) -eq 0)
+        $btnToggleTips = Get-Ctrl "btnToggleTips"
+        Update-WmtTweakToggle $btnToggleTips $tipsOff "Tips Off" "Tips On"
+        $setupOff = ([int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+        $btnToggleSetupPrompts = Get-Ctrl "btnToggleSetupPrompts"; Update-WmtTweakToggle $btnToggleSetupPrompts $setupOff "Setup Prompts On" "Setup Prompts Off"
+        $lockFactsOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenOverlayEnabled" 1) -eq 0 -and [int](& $getRegValue $contentDeliveryPath "SubscribedContent-338387Enabled" 1) -eq 0)
+        $spotlightOff = ([int](& $getRegValue $contentDeliveryPath "RotatingLockScreenEnabled" 1) -eq 0 -or [int](& $getRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0) -eq 1)
+        $btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
+        Update-WmtTweakToggle $btnToggleLockFacts $lockFactsOff "Lock Facts Off" "Lock Facts On"
+        $btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
+        Update-WmtTweakToggle $btnToggleLockSpotlight $spotlightOff "Spotlight Off" "Spotlight On"
+        $btnToggleLockScreen = Get-Ctrl "btnToggleLockScreen"
+        Update-WmtTweakToggle $btnToggleLockScreen ($lockFactsOff -and $spotlightOff) "Plain Lock Screen" "Default Lock Screen"
+
+        $fastStartupOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1) -ne 0)
+        $btnToggleFastStartup = Get-Ctrl "btnToggleFastStartup"
+        Update-WmtTweakToggle $btnToggleFastStartup (-not $fastStartupOn) "Fast Startup Off" "Fast Startup On"
+        $restoreFoldersOn = ([int](& $getRegValue $ap "PersistBrowsers" 0) -ne 0)
+        $btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
+        Update-WmtTweakToggle $btnToggleRestoreFolders $restoreFoldersOn "Restore Folders On" "Restore Folders Off"
+
+        $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC"
+        if ($null -ne $batteryThreshold) {
+            & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
+        }
+        $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+        $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
+        if ($null -ne $usbAc -and $null -ne $usbDc) {
+            $usbOn = ($usbAc -eq 1 -and $usbDc -eq 1)
+            $btnToggleUsbSuspend = Get-Ctrl "btnToggleUsbSuspend"
+            Update-WmtTweakToggle $btnToggleUsbSuspend $usbOn "USB Suspend On" "USB Suspend Off"
+        }
+        $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+        $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
+        if ($null -ne $pcieAc -and $null -ne $pcieDc) {
+            $pcieModerate = ($pcieAc -eq 1 -and $pcieDc -eq 1)
+            $btnTogglePcie = Get-Ctrl "btnTogglePcie"
+            Update-WmtTweakToggle $btnTogglePcie $pcieModerate "PCIe Savings" "PCIe Savings Off"
+        }
+
+        $longPathsOn = ([int](& $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0) -eq 1)
+        $btnToggleLongPaths = Get-Ctrl "btnToggleLongPaths"
+        Update-WmtTweakToggle $btnToggleLongPaths $longPathsOn "Long Paths On" "Long Paths Off"
+        $devModeOn = ([int](& $getRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0) -eq 1)
+        $btnToggleDevMode = Get-Ctrl "btnToggleDevMode"
+        Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
+        $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+        $drvMetaDisabled = $false
+        try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $drvMetaDisabled = $true } } catch {}
+        $btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
+        Update-WmtTweakToggle $btnToggleDrvMeta $drvMetaDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
+        $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
+        $drvWUDisabled = $false
+        try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $drvWUDisabled = $true } } catch {}
+        $btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+        Update-WmtTweakToggle $btnToggleDrvUpdates $drvWUDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
+    }
+    catch {}
+}
+
+
 $btnPerfUltimatePower = Get-Ctrl "btnPerfUltimatePower"
 
 $btnAppxLoad = Get-Ctrl "btnAppxLoad"
@@ -21920,10 +22184,8 @@ if ($btnDrvClean) { $btnDrvClean.Add_Click({ Show-DriverCleanupDialog }) }
 
 $btnDrvRestore = Get-Ctrl "btnDrvRestore"
 if ($btnDrvRestore) { $btnDrvRestore.Add_Click({ Invoke-RestoreDrivers }) }
-$btnDrvDisableWU = Get-Ctrl "btnDrvDisableWU"
-$btnDrvEnableWU = Get-Ctrl "btnDrvEnableWU"
-$btnDrvDisableMeta = Get-Ctrl "btnDrvDisableMeta"
-$btnDrvEnableMeta = Get-Ctrl "btnDrvEnableMeta"
+$btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+$btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
 
 $btnCleanDisk = Get-Ctrl "btnCleanDisk"
 $btnCleanTemp = Get-Ctrl "btnCleanTemp"
@@ -22129,10 +22391,27 @@ if ($btnMyDeviceWinUpdate) {
         })
 }
 $lstCatalog = Get-Ctrl "lstCatalog"
-$txtCatalogSearch = Get-Ctrl "txtCatalogSearch"
+$lstLibrary = Get-Ctrl "lstLibrary"
+$txtLibrarySearch = Get-Ctrl "txtLibrarySearch"
+$btnLibraryClearSearch = Get-Ctrl "btnLibraryClearSearch"
+$brdCatalogList = Get-Ctrl "brdCatalogList"
+$brdLibraryList = Get-Ctrl "brdLibraryList"
+$pnlCatalogActions = Get-Ctrl "pnlCatalogActions"
+$btnShowLibrary = Get-Ctrl "btnShowLibrary"
+$ctxLibrary = Get-Ctrl "ctxLibrary"
+$miLibLaunch = Get-Ctrl "miLibLaunch"
+$miLibInstall = Get-Ctrl "miLibInstall"
+$miLibUninstall = Get-Ctrl "miLibUninstall"
+$miLibGoToDir = Get-Ctrl "miLibGoToDir"
+$miLibStorePage = Get-Ctrl "miLibStorePage"
+$miLibCopyId = Get-Ctrl "miLibCopyId"
+$btnBackToCatalog = Get-Ctrl "btnBackToCatalog"
+$btnLibraryRefresh = Get-Ctrl "btnLibraryRefresh"
+$lblLibraryStatus = Get-Ctrl "lblLibraryStatus"
+
 $btnShowCatalog = Get-Ctrl "btnShowCatalog"
 $btnBackToUpdates = Get-Ctrl "btnBackToUpdates"
-$btnCatalogSearch = Get-Ctrl "btnCatalogSearch"
+
 $btnCatalogInstall = Get-Ctrl "btnCatalogInstall"
 $btnCatalogSelectAll = Get-Ctrl "btnCatalogSelectAll"
 $btnCatalogClear = Get-Ctrl "btnCatalogClear"
@@ -22147,6 +22426,7 @@ $btnCatSecurity = Get-Ctrl "btnCatSecurity"
 $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
 $btnToggleTheme = Get-Ctrl "btnToggleTheme"
+$btnStartWithWindows = Get-Ctrl "btnStartWithWindows"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
 $btnDonateIos12 = Get-Ctrl "btnDonateIos12"
 $btnDonate = Get-Ctrl "btnDonate"
@@ -22248,134 +22528,170 @@ function Update-WmtSearchIndexEntries {
 # --- GLOBAL SEARCH INDEX ---
 
 # 1. Updates
-Add-SearchIndexEntry "btnWingetScan"        "Check Package Updates"           "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Checked Apps"             "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
-Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
+# Search index entries (deferred to after window render)
+$searchIndexDeferTimer = New-Object System.Windows.Threading.DispatcherTimer
+$searchIndexDeferTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+$searchIndexDeferTimer.Add_Tick({
+        try { $searchIndexDeferTimer.Stop() } catch {}
+        Add-SearchIndexEntry "btnWingetScan"        "Check Package Updates"           "btnTabUpdates"
+        Add-SearchIndexEntry "btnWingetUpdateSel"   "Update Checked Apps"             "btnTabUpdates"
+        Add-SearchIndexEntry "btnWingetUpdateAll"   "Update All Apps"                 "btnTabUpdates"
+        Add-SearchIndexEntry "btnWingetInstall"     "Install Selected Apps"           "btnTabUpdates"
+        Add-SearchIndexEntry "btnWingetUninstall"   "Uninstall Selected Apps"         "btnTabUpdates"
+        Add-SearchIndexEntry "btnWingetFind"        "Search Winget Packages"          "btnTabUpdates"
 
-# 2. System Health
-Add-SearchIndexEntry "btnQuickFix"           "Quick Fix (SFC + DISM + Cleanup)" "btnTabHealth"
-Add-SearchIndexEntry "btnSFC"               "SFC Scan (System File Checker)"  "btnTabHealth"
-Add-SearchIndexEntry "btnDISMCheck"         "DISM Check Health"               "btnTabHealth"
-Add-SearchIndexEntry "btnDISMRestore"       "DISM Restore Health"             "btnTabHealth"
-Add-SearchIndexEntry "btnCHKDSK"            "CHKDSK (Check Disk)"             "btnTabHealth"
+        # 2. System Health
+        Add-SearchIndexEntry "btnQuickFix"           "Quick Fix (SFC + DISM + Cleanup)" "btnTabHealth"
+        Add-SearchIndexEntry "btnSFC"               "SFC Scan (System File Checker)"  "btnTabHealth"
+        Add-SearchIndexEntry "btnDISMCheck"         "DISM Check Health"               "btnTabHealth"
+        Add-SearchIndexEntry "btnDISMRestore"       "DISM Restore Health"             "btnTabHealth"
+        Add-SearchIndexEntry "btnCHKDSK"            "CHKDSK (Check Disk)"             "btnTabHealth"
 
-# 3. Network & DNS
-Add-SearchIndexEntry "btnNetInfo"           "Show IP Config / Network Info"   "btnTabNetwork"
-Add-SearchIndexEntry "btnFlushDNS"          "Flush DNS Cache"                 "btnTabNetwork"
-Add-SearchIndexEntry "btnResetWifi"         "Restart Wi-Fi Adapter"           "btnTabNetwork"
-Add-SearchIndexEntry "btnNetRepair"         "Full Network Repair (Reset IP)"  "btnTabNetwork"
-Add-SearchIndexEntry "btnRouteTable"        "Save Routing Table"              "btnTabNetwork"
-Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "btnTabNetwork"
+        # 3. Network & DNS
+        Add-SearchIndexEntry "btnNetInfo"           "Show IP Config / Network Info"   "btnTabNetwork"
+        Add-SearchIndexEntry "btnFlushDNS"          "Flush DNS Cache"                 "btnTabNetwork"
+        Add-SearchIndexEntry "btnResetWifi"         "Restart Wi-Fi Adapter"           "btnTabNetwork"
+        Add-SearchIndexEntry "btnNetRepair"         "Full Network Repair (Reset IP)"  "btnTabNetwork"
+        Add-SearchIndexEntry "btnRouteTable"        "Save Routing Table"              "btnTabNetwork"
+        Add-SearchIndexEntry "btnRouteView"         "View Routing Table"              "btnTabNetwork"
 
-# DNS Presets
-Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
-Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
-Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
-Add-SearchIndexEntry "btnDnsAdGuard"        "Set DNS: AdGuard (Ad Blocking)"  "btnTabNetwork"
-Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
-Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
+        # DNS Presets
+        Add-SearchIndexEntry "btnDnsGoogle"         "Set DNS: Google (8.8.8.8)"       "btnTabNetwork"
+        Add-SearchIndexEntry "btnDnsCloudflare"     "Set DNS: Cloudflare (1.1.1.1)"   "btnTabNetwork"
+        Add-SearchIndexEntry "btnDnsQuad9"          "Set DNS: Quad9 (Malware Block)"  "btnTabNetwork"
+        Add-SearchIndexEntry "btnDnsAdGuard"        "Set DNS: AdGuard (Ad Blocking)"  "btnTabNetwork"
+        Add-SearchIndexEntry "btnDnsAuto"           "Reset DNS to Auto (DHCP)"        "btnTabNetwork"
+        Add-SearchIndexEntry "btnDnsCustom"         "Set Custom DNS Address"          "btnTabNetwork"
 
-# DNS Encryption & Hosts
-Add-SearchIndexEntry "btnDohAuto"           "Register DoH Templates"          "btnTabNetwork"
-Add-SearchIndexEntry "btnDohDisable"        "Remove DoH Templates"            "btnTabNetwork"
-Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
-Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
-Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
-Add-SearchIndexEntry "btnHostsRestore"      "Restore Hosts File"              "btnTabNetwork"
+        # DNS Encryption & Hosts
+        Add-SearchIndexEntry "btnDohAuto"           "Register DoH Templates"          "btnTabNetwork"
+        Add-SearchIndexEntry "btnDohDisable"        "Remove DoH Templates"            "btnTabNetwork"
+        Add-SearchIndexEntry "btnHostsUpdate"       "Update Hosts (AdBlock)"          "btnTabNetwork"
+        Add-SearchIndexEntry "btnHostsEdit"         "Edit Hosts File"                 "btnTabNetwork"
+        Add-SearchIndexEntry "btnHostsBackup"       "Backup Hosts File"               "btnTabNetwork"
+        Add-SearchIndexEntry "btnHostsRestore"      "Restore Hosts File"              "btnTabNetwork"
 
-# 4. Firewall
-Add-SearchIndexEntry "btnFwRefresh"         "Refresh Firewall Rules"          "btnTabFirewall"
-Add-SearchIndexEntry "btnFwAdd"             "Add New Firewall Rule"           "btnTabFirewall"
-Add-SearchIndexEntry "btnFwEdit"            "Edit/Modify Firewall Rule"       "btnTabFirewall"
-Add-SearchIndexEntry "btnFwExport"          "Export Firewall Policy"          "btnTabFirewall"
-Add-SearchIndexEntry "btnFwImport"          "Import Firewall Policy"          "btnTabFirewall"
-Add-SearchIndexEntry "btnFwDefaults"        "Restore Default Firewall Rules"  "btnTabFirewall"
-Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
+        # 4. Firewall
+        Add-SearchIndexEntry "btnFwRefresh"         "Refresh Firewall Rules"          "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwAdd"             "Add New Firewall Rule"           "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwEdit"            "Edit/Modify Firewall Rule"       "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwExport"          "Export Firewall Policy"          "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwImport"          "Import Firewall Policy"          "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwDefaults"        "Restore Default Firewall Rules"  "btnTabFirewall"
+        Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
 
-# 5. Drivers
-Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvBackup"         "Export Drivers"                  "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvDisableWU"      "Disable Driver Updates"          "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvEnableWU"       "Enable Driver Updates"           "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvDisableMeta"    "Disable Device Metadata"         "btnTabDrivers"
-Add-SearchIndexEntry "btnDrvEnableMeta"     "Enable Device Metadata"          "btnTabDrivers"
+        # 5. Drivers
+        Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
+        Add-SearchIndexEntry "btnDrvBackup"         "Export Drivers"                  "btnTabDrivers"
+        Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
+        Add-SearchIndexEntry "btnDrvClean"          "Clean Old Drivers (DriverStore)" "btnTabDrivers"
+        Add-SearchIndexEntry "btnDrvRestore"        "Restore Drivers from Backup"     "btnTabDrivers"
+        Add-SearchIndexEntry "btnToggleDrvUpdates"  "Toggle Driver Updates"           "btnTabDrivers"
+        Add-SearchIndexEntry "btnToggleDrvMeta"     "Toggle Device Metadata"          "btnTabDrivers"
 
-# 6. Cleanup
-Add-SearchIndexEntry "btnCleanDisk"         "Disk Cleanup Tool"               "btnTabCleanup"
-Add-SearchIndexEntry "btnCleanTemp"         "Clean Temporary Files"           "btnTabCleanup"
-Add-SearchIndexEntry "btnCleanShortcuts"    "Fix Broken Shortcuts"            "btnTabCleanup"
-Add-SearchIndexEntry "btnCleanReg"          "Registry Cleanup & Backup"       "btnTabCleanup"
-Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "btnTabCleanup"
-Add-SearchIndexEntry "btnCleanupOneDrive" "Free up OneDrive space (Online Only)" "btnTabCleanup"
+        # 6. Cleanup
+        Add-SearchIndexEntry "btnCleanDisk"         "Disk Cleanup Tool"               "btnTabCleanup"
+        Add-SearchIndexEntry "btnCleanTemp"         "Clean Temporary Files"           "btnTabCleanup"
+        Add-SearchIndexEntry "btnCleanShortcuts"    "Fix Broken Shortcuts"            "btnTabCleanup"
+        Add-SearchIndexEntry "btnCleanReg"          "Registry Cleanup & Backup"       "btnTabCleanup"
+        Add-SearchIndexEntry "btnCleanXbox"         "Clean Xbox Credentials"          "btnTabCleanup"
+        Add-SearchIndexEntry "btnCleanupOneDrive" "Free up OneDrive space (Online Only)" "btnTabCleanup"
 
-# 7. Utilities
-Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
-Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
-Add-SearchIndexEntry "btnUtilWinRE"         "Check WinRE Status"              "btnTabUtils"
-Add-SearchIndexEntry "btnUtilRestoreMgr"    "System Restore Manager"          "btnTabUtils"
-Add-SearchIndexEntry "btnUtilStartupMgr"    "Startup Manager (4 Tabs)"        "btnTabUtils"
-Add-SearchIndexEntry "btnUtilMas"           "MAS Activation"                  "btnTabUtils"
-Add-SearchIndexEntry "btnUpdateRepair"      "Reset Windows Update Components" "btnTabUtils"
-Add-SearchIndexEntry "btnUpdateServices"    "Restart Update Services"         "btnTabUtils"
-Add-SearchIndexEntry "btnDotNetEnable"      "Set .NET RollForward"            "btnTabUtils"
-Add-SearchIndexEntry "btnDotNetDisable"     "Reset .NET RollForward"          "btnTabUtils"
-Add-SearchIndexEntry "btnTaskManager"       "Task Scheduler Manager"          "btnTabUtils"
-Add-SearchIndexEntry "btnInstallGpedit"     "Install Group Policy (Home)"     "btnTabUtils"
-Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
+        # 7. Utilities
+        Add-SearchIndexEntry "btnUtilSysInfo"       "System Info Report"              "btnTabUtils"
+        Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
+        Add-SearchIndexEntry "btnUtilWinRE"         "Check WinRE Status"              "btnTabUtils"
+        Add-SearchIndexEntry "btnUtilRestoreMgr"    "System Restore Manager"          "btnTabUtils"
+        Add-SearchIndexEntry "btnUtilStartupMgr"    "Startup Manager (4 Tabs)"        "btnTabUtils"
+        Add-SearchIndexEntry "btnUtilMas"           "MAS Activation"                  "btnTabUtils"
+        Add-SearchIndexEntry "btnUpdateRepair"      "Reset Windows Update Components" "btnTabUtils"
+        Add-SearchIndexEntry "btnUpdateServices"    "Restart Update Services"         "btnTabUtils"
+        Add-SearchIndexEntry "btnDotNetEnable"      "Set .NET RollForward"            "btnTabUtils"
+        Add-SearchIndexEntry "btnDotNetDisable"     "Reset .NET RollForward"          "btnTabUtils"
+        Add-SearchIndexEntry "btnTaskManager"       "Task Scheduler Manager"          "btnTabUtils"
+        Add-SearchIndexEntry "btnInstallGpedit"     "Install Group Policy (Home)"     "btnTabUtils"
+        Add-SearchIndexEntry "btnCtxBuilder" "Custom Context Menu Builder" "btnTabUtils"
 
-# 8. Support
-Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
-Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
-Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
-Add-SearchIndexAction "Light Mode" { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
-Add-SearchIndexAction "Dark Mode" { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
+        # 8. Support
+        Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
+        Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
+        Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
+        Add-SearchIndexEntry "btnStartWithWindows" "Start with Windows"              "btnTabSupport"
+        Add-SearchIndexAction "Light Mode" { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
+        Add-SearchIndexAction "Dark Mode" { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
 
-# 9. My Device
-Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
-Add-SearchIndexEntry "btnMyDeviceExport" "Export My Device Details" "btnTabMyDevice"
+        # 9. My Device
+        Add-SearchIndexEntry "btnMyDeviceCleanRAM" "Clean RAM" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
+        Add-SearchIndexEntry "btnMyDeviceExport" "Export My Device Details" "btnTabMyDevice"
 
-# 10. Catalog & Providers
-Add-SearchIndexEntry "btnShowCatalog" "Software Catalog" "btnTabUpdates"
-Add-SearchIndexEntry "btnManageProviders" "Manage Package Providers" "btnTabUpdates"
+        # 10. Catalog & Providers
+        Add-SearchIndexEntry "btnShowCatalog" "Software Catalog" "btnTabUpdates"
+        Add-SearchIndexAction "Your Game Library" {
+            # Open the Software Catalog page first, then switch to library view.
+            if ($btnShowCatalog) {
+                $pnlUpdates.Visibility = "Collapsed"
+                $pnlCatalog.Visibility = "Visible"
+                Add-WmtCatalogListItems -ListView $lstCatalog -Items $script:SoftwareCatalog
+            }
+            # Pre-load library scan if not already done.
+            if (-not $script:WmtLibraryScanResults -and -not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan -Silent
+            }
+            # Switch to library view.
+            if ($brdCatalogList) { $brdCatalogList.Visibility = "Collapsed" }
+            if ($brdLibraryList) { $brdLibraryList.Visibility = "Visible" }
+            if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Visible" }
+            if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Visible" }
+            if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) }
+            # Display pre-loaded results if available.
+            if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0 -and $lstLibrary) {
+                $lstLibrary.Items.Clear()
+                foreach ($item in $script:WmtLibraryScanResults) {
+                    [void]$lstLibrary.Items.Add($item)
+                }
+                if ($lblLibraryStatus) { $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library." }
+            }
+            elseif (-not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan
+            }
+        } "btnTabUpdates"
+        Add-SearchIndexEntry "btnManageProviders" "Manage Package Providers" "btnTabUpdates"
 
-# 11. Common Tweaks
-Add-SearchIndexEntry "btnSvcOptimize" "Optimize System Services" "btnTabTweaks"
-Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
-Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
-Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
-Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
-Add-SearchIndexEntry "btnExpShowExt" "Show File Extensions" "btnTabTweaks"
-Add-SearchIndexEntry "btnExpShowHidden" "Show Hidden Files" "btnTabTweaks"
-Add-SearchIndexEntry "btnExpLaunchThisPc" "Open File Explorer to This PC" "btnTabTweaks"
-Add-SearchIndexEntry "btnMouseSpeedDefault" "Set Mouse Cursor Speed" "btnTabTweaks"
-Add-SearchIndexEntry "btnMouseAccelOff" "Disable Mouse Acceleration" "btnTabTweaks"
-Add-SearchIndexEntry "btnMouseSingleClick" "Single Click to Open Folders" "btnTabTweaks"
-Add-SearchIndexEntry "btnCtxClassic" "Classic Windows 11 Context Menu" "btnTabTweaks"
-Add-SearchIndexEntry "btnCtxTakeOwnAdd" "Add Take Ownership Context Menu" "btnTabTweaks"
-Add-SearchIndexEntry "btnPrivacySuggestedOff" "Disable Suggested Content" "btnTabTweaks"
-Add-SearchIndexEntry "btnSearchWebOff" "Disable Start Menu Web Search" "btnTabTweaks"
-Add-SearchIndexEntry "btnSearchIndexRebuild" "Rebuild Windows Search Index" "btnTabTweaks"
-Add-SearchIndexEntry "btnGameModeOn" "Enable Game Mode" "btnTabTweaks"
-Add-SearchIndexEntry "btnGameBarOff" "Disable Xbox Game Bar" "btnTabTweaks"
-Add-SearchIndexEntry "btnVisualSnappy" "Snappy Desktop Visual Effects" "btnTabTweaks"
-Add-SearchIndexEntry "btnNotifyTipsOff" "Disable Windows Tips" "btnTabTweaks"
-Add-SearchIndexEntry "btnLockPlain" "Plain Lock Screen" "btnTabTweaks"
-Add-SearchIndexEntry "btnStartupFastOff" "Disable Fast Startup" "btnTabTweaks"
-Add-SearchIndexEntry "btnSecuritySmartScreenOpen" "Open SmartScreen Settings" "btnTabTweaks"
-Add-SearchIndexEntry "btnPowerUsbSuspendOff" "Disable USB Selective Suspend" "btnTabTweaks"
-Add-SearchIndexEntry "btnDevLongPathsOn" "Enable Long Paths" "btnTabTweaks"
-Add-SearchIndexEntry "btnDevModeOn" "Enable Developer Mode" "btnTabTweaks"
+        # 11. Common Tweaks
+        Add-SearchIndexEntry "btnSvcOptimize" "Optimize System Services" "btnTabTweaks"
+        Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
+        Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
+        Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
+        Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleExtensions" "File Extensions" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleHiddenFiles" "Hidden Files" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleExplorerLaunch" "File Explorer Launch Folder" "btnTabTweaks"
+        Add-SearchIndexEntry "btnMouseSpeedDefault" "Set Mouse Cursor Speed" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleMouseAccel" "Mouse Acceleration" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleClickMode" "Folder Click Mode" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleCtxMenu" "Context Menu Style" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleTakeOwnership" "Take Ownership Context Menu" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleSuggested" "Suggested Content" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleWebSearch" "Start Menu Web Search" "btnTabTweaks"
+        Add-SearchIndexEntry "btnSearchIndexRebuild" "Rebuild Windows Search Index" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleGameMode" "Game Mode" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleGameBar" "Xbox Game Bar" "btnTabTweaks"
+        Add-SearchIndexEntry "btnVisualSnappy" "Snappy Desktop Visual Effects" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleTips" "Windows Tips" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleLockScreen" "Lock Screen Style" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleFastStartup" "Fast Startup" "btnTabTweaks"
+        Add-SearchIndexEntry "btnSecuritySmartScreenOpen" "Open SmartScreen Settings" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleUsbSuspend" "USB Selective Suspend" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleLongPaths" "Win32 Long Paths" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDevMode" "Developer Mode" "btnTabTweaks"
+        $searchIndexDeferTimer = $null
+    })
+$searchIndexDeferTimer.Start()
 Update-WmtSearchIndexEntries
 
 $txtGlobalSearch.Add_TextChanged({
@@ -22439,10 +22755,86 @@ if ($lstWinget) {
                         $e.Handled = $true
                     }
                 }
+                # Enter or Space toggles checkbox on selected rows
+                if ($e.Key -eq [System.Windows.Input.Key]::Enter -or $e.Key -eq [System.Windows.Input.Key]::Space) {
+                    $selected = @($s.SelectedItems)
+                    if ($selected.Count -gt 0) {
+                        $anyUnchecked = $false
+                        foreach ($item in $selected) {
+                            $currentVal = $false
+                            try { if ($item.PSObject.Properties["IsChecked"]) { $currentVal = [bool]$item.IsChecked } } catch {}
+                            if (-not $currentVal) { $anyUnchecked = $true; break }
+                        }
+                        foreach ($item in $selected) {
+                            try {
+                                if ($item.PSObject.Properties["IsChecked"]) {
+                                    $item.IsChecked = $anyUnchecked
+                                }
+                            }
+                            catch {}
+                        }
+                        try { $s.Items.Refresh() } catch {}
+                        $e.Handled = $true
+                    }
+                }
             }
             catch {
-                Write-GuiLog "ERROR: Ctrl+C copy row data failed: $($_.Exception.Message)"
+                Write-GuiLog "ERROR: Key handler failed: $($_.Exception.Message)"
             }
+        })
+
+    # Mouse drag multi-select: hold left button and drag to select a range
+    $script:WmtDragSelectStartIndex = -1
+    $lstWinget.Add_PreviewMouseLeftButtonDown({
+            param($s, $e)
+            try {
+                $hitTest = $s.InputHitTest($e.GetPosition($s))
+                if ($hitTest) {
+                    $container = $hitTest
+                    while ($container -and -not ($container -is [System.Windows.Controls.ListViewItem])) {
+                        $container = [System.Windows.Media.VisualTreeHelper]::GetParent($container)
+                    }
+                    if ($container) {
+                        $item = $s.ItemContainerGenerator.ItemFromContainer($container)
+                        if ($item) {
+                            $script:WmtDragSelectStartIndex = $s.Items.IndexOf($item)
+                        }
+                    }
+                }
+            }
+            catch {}
+        })
+    $lstWinget.Add_PreviewMouseMove({
+            param($s, $e)
+            try {
+                if ($script:WmtDragSelectStartIndex -lt 0) { return }
+                if ($e.LeftButton -ne [System.Windows.Input.MouseButtonState]::Pressed) {
+                    $script:WmtDragSelectStartIndex = -1
+                    return
+                }
+                $hitTest = $s.InputHitTest($e.GetPosition($s))
+                if (-not $hitTest) { return }
+                $container = $hitTest
+                while ($container -and -not ($container -is [System.Windows.Controls.ListViewItem])) {
+                    $container = [System.Windows.Media.VisualTreeHelper]::GetParent($container)
+                }
+                if (-not $container) { return }
+                $item = $s.ItemContainerGenerator.ItemFromContainer($container)
+                if (-not $item) { return }
+                $currentIndex = $s.Items.IndexOf($item)
+                if ($currentIndex -lt 0) { return }
+                $start = [Math]::Min($script:WmtDragSelectStartIndex, $currentIndex)
+                $end = [Math]::Max($script:WmtDragSelectStartIndex, $currentIndex)
+                $s.SelectedItems.Clear()
+                for ($i = $start; $i -le $end; $i++) {
+                    $s.SelectedItems.Add($s.Items[$i])
+                }
+                $e.Handled = $true
+            }
+            catch {}
+        })
+    $lstWinget.Add_PreviewMouseLeftButtonUp({
+            $script:WmtDragSelectStartIndex = -1
         })
 }
 
@@ -22507,17 +22899,19 @@ $miCopyRow.Add_Click({
 # 6. Ignore Selected
 $miIgnore = New-Object System.Windows.Controls.MenuItem
 $miIgnore.Header = "Ignore Selected"
-$miIgnore.Add_Click({ 
-        $btnWingetIgnore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-    })
+$miIgnore.Add_Click({
+        $btn = Get-Ctrl "btnWingetIgnore"
+        if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+    }.GetNewClosure())
 [void]$ctxMenu.Items.Add($miIgnore)
 
 # 7. Manage Ignored
 $miManage = New-Object System.Windows.Controls.MenuItem
 $miManage.Header = "Manage Ignored List..."
-$miManage.Add_Click({ 
-        $btnWingetUnignore.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) 
-    })
+$miManage.Add_Click({
+        $btn = Get-Ctrl "btnWingetUnignore"
+        if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+    }.GetNewClosure())
 [void]$ctxMenu.Items.Add($miManage)
 
 # --- Checkbox helpers ---
@@ -25764,22 +26158,1001 @@ exit /b %WMT_EXIT%
 }
 
 # 3. EVENT HANDLERS
+# ==========================================
+# Provider capability + per-provider toggle helpers
+# ==========================================
+
+# Static capability matrix. Search = provider exposes a search/library-search
+# capability in the Providers panel. Library = the provider's owned/licensed
+# games can be enumerated for the live library search box.
+function Get-WmtProviderCapabilities {
+    return [ordered]@{
+        winget        = @{ Search = $true; Library = $false }
+        msstore       = @{ Search = $true; Library = $false }
+        windowsupdate = @{ Search = $false; Library = $false }
+        pip           = @{ Search = $true; Library = $false }
+        npm           = @{ Search = $true; Library = $false }
+        pnpm          = @{ Search = $true; Library = $false }
+        chocolatey    = @{ Search = $true; Library = $false }
+        scoop         = @{ Search = $true; Library = $false }
+        gem           = @{ Search = $true; Library = $false }
+        cargo         = @{ Search = $true; Library = $false }
+        dotnet        = @{ Search = $true; Library = $false }
+        psmodule      = @{ Search = $true; Library = $false }
+        composer      = @{ Search = $true; Library = $false }
+        steam         = @{ Search = $true; Library = $false }
+        legendary     = @{ Search = $true; Library = $true }
+        gogdl         = @{ Search = $true; Library = $true }
+    }
+}
+
+function Get-WmtProviderToggleDefaults {
+    param([string]$ProviderKey)
+
+    $caps = Get-WmtProviderCapabilities
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $cap = if ($caps.Contains($key)) { $caps[$key] } else { @{ Search = $false; Library = $false } }
+    return [ordered]@{
+        Search     = [bool]$cap.Search
+        Scan       = $true
+        Headless   = $false
+        AutoUpdate = $false
+    }
+}
+
+function Get-WmtProviderToggles {
+    param($Settings)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+
+    $toggles = [ordered]@{}
+
+    # Helper: get a value from either an IDictionary or a PSObject.
+    function Get-WmtToggleValue($Obj, [string]$Name) {
+        if (-not $Obj) { return $null }
+        if ($Obj -is [System.Collections.IDictionary]) {
+            if ($Obj.Contains($Name)) { return $Obj[$Name] }
+            return $null
+        }
+        try {
+            if ($Obj.PSObject.Properties[$Name]) { return $Obj.$Name }
+        }
+        catch {}
+        return $null
+    }
+
+    # Helper: enumerate key-value pairs from either an IDictionary or a PSObject.
+    function Get-WmtToggleEntries($Obj) {
+        $result = @()
+        if (-not $Obj) { return $result }
+        if ($Obj -is [System.Collections.IDictionary]) {
+            foreach ($k in @($Obj.Keys)) {
+                $result += [PSCustomObject]@{ Name = [string]$k; Value = $Obj[$k] }
+            }
+        }
+        else {
+            try {
+                foreach ($prop in @($Obj.PSObject.Properties)) {
+                    $result += [PSCustomObject]@{ Name = [string]$prop.Name; Value = $prop.Value }
+                }
+            }
+            catch {}
+        }
+        return $result
+    }
+
+    try {
+        $raw = $null
+        if ($Settings -is [System.Collections.IDictionary]) {
+            if ($Settings.Contains("ProviderToggles")) { $raw = $Settings["ProviderToggles"] }
+        }
+        else {
+            try {
+                if ($Settings.PSObject.Properties["ProviderToggles"]) { $raw = $Settings.ProviderToggles }
+            }
+            catch {}
+        }
+
+        if ($raw) {
+            foreach ($entry_item in (Get-WmtToggleEntries $raw)) {
+                $k = ([string]$entry_item.Name).Trim().ToLowerInvariant()
+                if ([string]::IsNullOrWhiteSpace($k)) { continue }
+                $defaults = Get-WmtProviderToggleDefaults -ProviderKey $k
+                $t = [ordered]@{
+                    Search     = [bool]$defaults.Search
+                    Scan       = [bool]$defaults.Scan
+                    Headless   = [bool]$defaults.Headless
+                    AutoUpdate = [bool]$defaults.AutoUpdate
+                }
+                $val = $entry_item.Value
+                $s = Get-WmtToggleValue $val "Search"
+                if ($null -ne $s) { $t["Search"] = [bool]$s }
+                $sc = Get-WmtToggleValue $val "Scan"
+                if ($null -ne $sc) { $t["Scan"] = [bool]$sc }
+                $h = Get-WmtToggleValue $val "Headless"
+                if ($null -ne $h) { $t["Headless"] = [bool]$h }
+                $a = Get-WmtToggleValue $val "AutoUpdate"
+                if ($null -ne $a) { $t["AutoUpdate"] = [bool]$a }
+                $toggles[$k] = $t
+            }
+        }
+    }
+    catch {
+        Write-GuiLog "Failed to read ProviderToggles: $($_.Exception.Message)"
+    }
+
+    # Ensure every known provider has an entry.
+    foreach ($key in @((Get-WmtProviderCapabilities).Keys)) {
+        if (-not $toggles.Contains($key)) {
+            $toggles[$key] = (Get-WmtProviderToggleDefaults -ProviderKey $key)
+        }
+        else {
+            $defaults = Get-WmtProviderToggleDefaults -ProviderKey $key
+            if (-not $defaults.Search) { $toggles[$key]["Search"] = $false }
+        }
+    }
+
+    return $toggles
+}
+
+function Set-WmtProviderToggles {
+    param($Toggles)
+
+    $settings = Get-WmtSettings
+    $clean = [ordered]@{}
+    if ($Toggles) {
+        foreach ($key in @($Toggles.PSObject.Properties.Name)) {
+            $k = ([string]$key).Trim().ToLowerInvariant()
+            if ([string]::IsNullOrWhiteSpace($k)) { continue }
+            $val = $Toggles.$key
+            $defaults = Get-WmtProviderToggleDefaults -ProviderKey $k
+            $entry = [ordered]@{
+                Search     = if ($defaults.Search) { [bool]$val.Search } else { $false }
+                Scan       = [bool]$val.Scan
+                Headless   = [bool]$val.Headless
+                AutoUpdate = [bool]$val.AutoUpdate
+            }
+            $clean[$k] = $entry
+        }
+    }
+
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["ProviderToggles"] = $clean
+    }
+    elseif ($settings.PSObject.Properties["ProviderToggles"]) {
+        $settings.ProviderToggles = $clean
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "ProviderToggles" -Value $clean -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
+function Get-WmtProviderToggle {
+    param($Settings, [string]$ProviderKey, [string]$ToggleName)
+
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+    $toggles = Get-WmtProviderToggles -Settings $Settings
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $name = ([string]$ToggleName).Trim()
+    if (-not $toggles.Contains($key)) { return $false }
+    if (-not $toggles[$key].PSObject.Properties[$name]) { return $false }
+    return [bool]$toggles[$key].$name
+}
+
+# ==========================================
+# Library enumeration for Legendary / GOGDL
+# ==========================================
+
+function Get-WmtLegendaryLibrary {
+    param([switch]$Force)
+
+    if (-not $Force -and $script:WmtLegendaryLibraryCache) { return $script:WmtLegendaryLibraryCache }
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    $exe = Get-WmtLegendaryExePath
+    if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        try {
+            $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+            if ($cmd -and $cmd.Source) { $exe = [string]$cmd.Source }
+        }
+        catch {}
+    }
+    if ([string]::IsNullOrWhiteSpace($exe) -or -not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+        $script:WmtLegendaryLibraryCache = $result.ToArray()
+        return $script:WmtLegendaryLibraryCache
+    }
+
+    try {
+        # Try JSON output first (much more reliable than text parsing).
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $exe
+        $psi.Arguments = "list --json"
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        try { $proc.WaitForExit(30000) } catch {}
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+
+        $parsed = $false
+
+        # Attempt 1: JSON parsing (legendary >= 0.20.x supports --json)
+        if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+            try {
+                $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($json) {
+                    $items = @($json)
+                    foreach ($game in $items) {
+                        $title = [string]$game.app_title
+                        if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                        # Legendary JSON: is_installed boolean, version = installed version, app_version = latest
+                        $isInstalled = $false
+                        try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                        $installedVer = ""
+                        $latestVer = [string]$game.app_version
+                        if ($isInstalled) {
+                            try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                            if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                        }
+                        $result.Add([PSCustomObject]@{
+                                Provider         = "legendary"
+                                Title            = $title
+                                Id               = [string]$game.app_name
+                                Version          = $latestVer
+                                InstalledVersion = $installedVer
+                                IsInstalled      = $isInstalled
+                                Source           = "legendary"
+                                Kind             = "Library"
+                            })
+                    }
+                    if ($result.Count -gt 0) { $parsed = $true }
+                }
+            }
+            catch {
+                # JSON parse failed — fall through to text parsing
+            }
+        }
+
+        # Attempt 2: Text parsing fallback.
+        # Format:  * Game Title (App name: app_name, Version: version)
+        #          * Game Title (App name: app_name, Version: version, Installed: ...)
+        if (-not $parsed) {
+            $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+            foreach ($match in $regex.Matches($stdout)) {
+                $title = $match.Groups["title"].Value.Trim()
+                $app = $match.Groups["app"].Value.Trim()
+                $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                $result.Add([PSCustomObject]@{
+                        Provider = "legendary"
+                        Title    = $title
+                        Id       = $app
+                        Version  = $ver
+                        Source   = "legendary"
+                        Kind     = "Library"
+                    })
+            }
+        }
+
+        if ($result.Count -eq 0 -and -not [string]::IsNullOrWhiteSpace($stderr)) {
+            Write-GuiLog "Legendary library enumeration produced no results. stderr: $(([string]$stderr).Trim())"
+        }
+    }
+    catch {
+        Write-GuiLog "Legendary library enumeration failed: $($_.Exception.Message)"
+    }
+
+    $script:WmtLegendaryLibraryCache = $result.ToArray()
+
+    # Write to cache file for use by the search runspace.
+    try {
+        $cacheFile = Join-Path (Get-DataPath) "legendary_library.json"
+        $script:WmtLegendaryLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
+    catch {
+        Write-GuiLog "Failed to write Legendary library cache: $($_.Exception.Message)"
+    }
+
+    return $script:WmtLegendaryLibraryCache
+}
+
+function Get-WmtGogLibrary {
+    param([switch]$Force)
+
+    if (-not $Force -and $script:WmtGogLibraryCache) { return $script:WmtGogLibraryCache }
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    $authPath = Get-WmtGogdlAuthConfigPath
+    if ([string]::IsNullOrWhiteSpace($authPath) -or -not (Test-Path -LiteralPath $authPath -PathType Leaf)) {
+        $heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+        if ($heroicAuthPath -and (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf)) { $authPath = $heroicAuthPath }
+    }
+    if ([string]::IsNullOrWhiteSpace($authPath) -or -not (Test-Path -LiteralPath $authPath -PathType Leaf)) {
+        $script:WmtGogLibraryCache = $result.ToArray()
+        return $script:WmtGogLibraryCache
+    }
+
+    try {
+        $text = [System.IO.File]::ReadAllText($authPath).TrimStart([char]0xFEFF)
+        $json = $text | ConvertFrom-Json -ErrorAction Stop
+        $gogClientId = "46899977096215655"
+        $creds = $null
+        $clientProp = $json.PSObject.Properties[$gogClientId]
+        if ($clientProp) { $creds = $clientProp.Value }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+        if (-not $creds -or [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+            $script:WmtGogLibraryCache = $result.ToArray()
+            return $script:WmtGogLibraryCache
+        }
+
+        $token = [string]$creds.access_token
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+
+        $page = 1
+        $totalPages = 1
+        while ($page -le $totalPages -and $page -le 50) {
+            $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+            $headers = @{
+                "Authorization" = "Bearer $token"
+                "User-Agent"    = "Windows-Maintenance-Tool"
+            }
+            $resp = $null
+            try {
+                $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -ErrorAction Stop -TimeoutSec 20
+            }
+            catch {
+                Write-GuiLog "GOG library page $page fetch failed: $($_.Exception.Message)"
+                break
+            }
+            if (-not $resp) { break }
+            if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+            if ($resp.products) {
+                foreach ($prod in @($resp.products)) {
+                    $title = [string]$prod.title
+                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                    $result.Add([PSCustomObject]@{
+                            Provider = "gogdl"
+                            Title    = $title
+                            Id       = [string]$prod.id
+                            Version  = [string]$prod.version
+                            Source   = "gogdl"
+                            Kind     = "Library"
+                        })
+                }
+            }
+            $page++
+        }
+    }
+    catch {
+        Write-GuiLog "GOG library enumeration failed: $($_.Exception.Message)"
+    }
+
+    $script:WmtGogLibraryCache = $result.ToArray()
+
+    # Write to cache file for use by the search runspace.
+    try {
+        $cacheFile = Join-Path (Get-DataPath) "gog_library.json"
+        $script:WmtGogLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
+    catch {
+        Write-GuiLog "Failed to write GOG library cache: $($_.Exception.Message)"
+    }
+
+    return $script:WmtGogLibraryCache
+}
+
+function Get-WmtSteamLibrary {
+    param([switch]$Force)
+
+    if (-not $Force -and $script:WmtSteamLibraryCache) { return $script:WmtSteamLibraryCache }
+
+    $result = [System.Collections.Generic.List[object]]::new()
+
+    # Find Steam install path.
+    $steamInstall = $null
+    foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+        try {
+            $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+            if ($props) {
+                foreach ($p in @("SteamPath", "InstallPath")) {
+                    if ($props.PSObject.Properties[$p]) {
+                        $v = [string]$props.$p
+                        if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $steamInstall = $v; break }
+                    }
+                }
+            }
+        }
+        catch {}
+        if ($steamInstall) { break }
+    }
+    if (-not $steamInstall) {
+        foreach ($c in @("${env:ProgramFiles(x86)}\Steam", "${env:ProgramFiles}\Steam")) {
+            if (-not [string]::IsNullOrWhiteSpace($c) -and (Test-Path -LiteralPath $c)) { $steamInstall = $c; break }
+        }
+    }
+    if (-not $steamInstall) {
+        $script:WmtSteamLibraryCache = $result.ToArray()
+        return $script:WmtSteamLibraryCache
+    }
+
+    try {
+        # Step 1: Get installed game names from appmanifest files.
+        $installedApps = @{}
+        $libraryRoots = [System.Collections.Generic.List[string]]::new()
+        if (Test-Path -LiteralPath (Join-Path $steamInstall "steamapps")) { [void]$libraryRoots.Add($steamInstall) }
+        $libFile = Join-Path $steamInstall "steamapps\libraryfolders.vdf"
+        if (Test-Path -LiteralPath $libFile -PathType Leaf) {
+            $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+            if (-not [string]::IsNullOrWhiteSpace($libText)) {
+                foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+                    $p = $m.Groups[1].Value -replace '\\\\', '\'
+                    if ((Test-Path -LiteralPath $p) -and -not $libraryRoots.Contains($p)) { [void]$libraryRoots.Add($p) }
+                }
+            }
+        }
+        foreach ($libRoot in $libraryRoots) {
+            $steamApps = Join-Path $libRoot "steamapps"
+            if (-not (Test-Path -LiteralPath $steamApps)) { continue }
+            foreach ($manifest in @(Get-ChildItem -LiteralPath $steamApps -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+                $mtext = Get-Content -LiteralPath $manifest.FullName -Raw -ErrorAction SilentlyContinue
+                if ([string]::IsNullOrWhiteSpace($mtext)) { continue }
+                $aid = ""
+                $am = [regex]::Match($mtext, '"appid"\s+"([^"]*)"')
+                if ($am.Success) { $aid = $am.Groups[1].Value }
+                if ([string]::IsNullOrWhiteSpace($aid)) { $aid = [regex]::Match($manifest.BaseName, '\d+').Value }
+                if ([string]::IsNullOrWhiteSpace($aid)) { continue }
+                $mname = ""
+                $nm = [regex]::Match($mtext, '"name"\s+"([^"]*)"')
+                if ($nm.Success) { $mname = $nm.Groups[1].Value }
+                if ([string]::IsNullOrWhiteSpace($mname)) { $mname = "Steam App $aid" }
+                $buildId = ""
+                $bm = [regex]::Match($mtext, '"buildid"\s+"([^"]*)"')
+                if ($bm.Success) { $buildId = $bm.Groups[1].Value }
+                $installedApps[$aid] = @{ Name = $mname; BuildId = $buildId }
+            }
+        }
+
+        # Step 2: Get owned app IDs from localconfig.vdf (case-insensitive "apps" search).
+        $ownedAppIds = [System.Collections.Generic.List[string]]::new()
+        $userdataPath = Join-Path $steamInstall "userdata"
+        if (Test-Path -LiteralPath $userdataPath) {
+            foreach ($userDir in @(Get-ChildItem -LiteralPath $userdataPath -Directory -ErrorAction SilentlyContinue)) {
+                $vdfPath = Join-Path $userDir.FullName "config\localconfig.vdf"
+                if (-not (Test-Path -LiteralPath $vdfPath -PathType Leaf)) { continue }
+                $vdfText = Get-Content -LiteralPath $vdfPath -Raw -ErrorAction SilentlyContinue
+                if ([string]::IsNullOrWhiteSpace($vdfText)) { continue }
+
+                # Case-insensitive search for "apps"
+                $appsIdx = $vdfText.IndexOf('"apps"', [System.StringComparison]::OrdinalIgnoreCase)
+                if ($appsIdx -lt 0) { continue }
+
+                $braceIdx = $vdfText.IndexOf('{', $appsIdx)
+                if ($braceIdx -lt 0) { continue }
+
+                # Brace-matching parser: at depth 1, quoted strings followed by
+                # '{' are app IDs.
+                $depth = 0
+                $i = $braceIdx
+                while ($i -lt $vdfText.Length) {
+                    $ch = $vdfText[$i]
+                    if ($ch -eq '{') { $depth++; $i++ }
+                    elseif ($ch -eq '}') { $depth--; if ($depth -le 0) { break }; $i++ }
+                    elseif ($ch -eq '"') {
+                        $endQ = $vdfText.IndexOf('"', $i + 1)
+                        if ($endQ -lt 0) { break }
+                        $str = $vdfText.Substring($i + 1, $endQ - $i - 1)
+                        $i = $endQ + 1
+                        if ($depth -eq 1) {
+                            $j = $i
+                            while ($j -lt $vdfText.Length -and [char]::IsWhiteSpace($vdfText[$j])) { $j++ }
+                            if ($j -lt $vdfText.Length -and $vdfText[$j] -eq '{') {
+                                if (-not $ownedAppIds.Contains($str)) { [void]$ownedAppIds.Add($str) }
+                            }
+                        }
+                    }
+                    else { $i++ }
+                }
+            }
+        }
+
+        # Step 3: Resolve names for owned apps not in appmanifests.
+        # Use the Steam GetAppList API cache (steam_applist.json) if available.
+        $appNames = @{}
+        $appListFile = Join-Path (Get-DataPath) "steam_applist.json"
+        if (Test-Path -LiteralPath $appListFile -PathType Leaf) {
+            try {
+                $appListText = [System.IO.File]::ReadAllText($appListFile)
+                $appList = $appListText | ConvertFrom-Json -ErrorAction Stop
+                if ($appList) {
+                    foreach ($entry in @($appList)) {
+                        $aid = [string]$entry.appid
+                        $aname = [string]$entry.name
+                        if (-not [string]::IsNullOrWhiteSpace($aid) -and -not [string]::IsNullOrWhiteSpace($aname)) {
+                            $appNames[$aid] = $aname
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+
+        # Step 4: Combine owned + installed into result.
+        $seenIds = @{}
+        if ($ownedAppIds.Count -gt 0) {
+            foreach ($aid in $ownedAppIds) {
+                if ($seenIds.ContainsKey($aid)) { continue }
+                $seenIds[$aid] = $true
+                if ($installedApps.ContainsKey($aid)) {
+                    $info = $installedApps[$aid]
+                    $result.Add([PSCustomObject]@{
+                            Provider         = "steam"
+                            Title            = [string]$info.Name
+                            Id               = $aid
+                            Version          = [string]$info.BuildId
+                            Source           = "steam"
+                            Kind             = "Library"
+                            IsInstalled      = $true
+                            InstalledVersion = if (-not [string]::IsNullOrWhiteSpace([string]$info.BuildId) -and [string]$info.BuildId -ne "0") { "Build " + [string]$info.BuildId } else { "Installed" }
+                        })
+                }
+                else {
+                    $name = if ($appNames.ContainsKey($aid)) { $appNames[$aid] } else { "Steam App $aid" }
+                    $result.Add([PSCustomObject]@{
+                            Provider         = "steam"
+                            Title            = $name
+                            Id               = $aid
+                            Version          = ""
+                            Source           = "steam"
+                            Kind             = "Library"
+                            IsInstalled      = $false
+                            InstalledVersion = "Not installed"
+                        })
+                }
+            }
+        }
+        else {
+            # No localconfig.vdf found — fall back to installed games only.
+            foreach ($aid in @($installedApps.Keys)) {
+                if ($seenIds.ContainsKey($aid)) { continue }
+                $seenIds[$aid] = $true
+                $info = $installedApps[$aid]
+                $result.Add([PSCustomObject]@{
+                        Provider         = "steam"
+                        Title            = [string]$info.Name
+                        Id               = $aid
+                        Version          = [string]$info.BuildId
+                        Source           = "steam"
+                        Kind             = "Library"
+                        IsInstalled      = $true
+                        InstalledVersion = if (-not [string]::IsNullOrWhiteSpace([string]$info.BuildId) -and [string]$info.BuildId -ne "0") { "Build " + [string]$info.BuildId } else { "Installed" }
+                    })
+            }
+        }
+    }
+    catch {
+        Write-GuiLog "Steam library enumeration failed: $($_.Exception.Message)"
+    }
+
+    $script:WmtSteamLibraryCache = $result.ToArray()
+
+    # Write to cache file.
+    try {
+        $cacheFile = Join-Path (Get-DataPath) "steam_library.json"
+        $script:WmtSteamLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
+    catch {
+        Write-GuiLog "Failed to write Steam library cache: $($_.Exception.Message)"
+    }
+
+    return $script:WmtSteamLibraryCache
+}
+
+function Get-WmtSteamAppList {
+    # Downloads the Steam app ID list (games + DLC) from a GitHub-hosted
+    # mirror and caches it to steam_applist.json with a 7-day expiry.
+    # This is a single download (~25MB total) that contains every Steam
+    # app ID + name, much faster than per-app API calls.
+    param([switch]$Force)
+
+    $cacheFile = Join-Path (Get-DataPath) "steam_applist.json"
+    $appNames = @{}
+
+    # Load existing cache if not forcing refresh.
+    if (-not $Force -and (Test-Path -LiteralPath $cacheFile -PathType Leaf)) {
+        try {
+            $age = (Get-Date) - (Get-Item -LiteralPath $cacheFile).LastWriteTime
+            if ($age.TotalDays -lt 7) {
+                $cacheText = [System.IO.File]::ReadAllText($cacheFile)
+                $cache = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                if ($cache) {
+                    foreach ($entry in @($cache)) {
+                        $aid = [string]$entry.appid
+                        $aname = [string]$entry.name
+                        if (-not [string]::IsNullOrWhiteSpace($aid) -and -not [string]::IsNullOrWhiteSpace($aname)) {
+                            $appNames[$aid] = $aname
+                        }
+                    }
+                }
+                return $appNames
+            }
+        }
+        catch {}
+    }
+
+    # Download from GitHub.
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        Write-GuiLog "Downloading Steam app ID list..."
+
+        $gamesUrl = "https://raw.githubusercontent.com/jsnli/steamappidlist/master/data/games_appid.json"
+        $dlcUrl = "https://raw.githubusercontent.com/jsnli/steamappidlist/master/data/dlc_appid.json"
+
+        $gamesResp = Invoke-RestMethod -Uri $gamesUrl -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+        $dlcResp = Invoke-RestMethod -Uri $dlcUrl -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+
+        $allApps = [System.Collections.Generic.List[object]]::new()
+        if ($gamesResp) {
+            foreach ($e in @($gamesResp)) {
+                $ea = [string]$e.appid
+                $en = [string]$e.name
+                if (-not [string]::IsNullOrWhiteSpace($ea) -and -not [string]::IsNullOrWhiteSpace($en)) {
+                    $appNames[$ea] = $en
+                    [void]$allApps.Add([PSCustomObject]@{ appid = $ea; name = $en })
+                }
+            }
+        }
+        if ($dlcResp) {
+            foreach ($e in @($dlcResp)) {
+                $ea = [string]$e.appid
+                $en = [string]$e.name
+                if (-not [string]::IsNullOrWhiteSpace($ea) -and -not [string]::IsNullOrWhiteSpace($en) -and -not $appNames.ContainsKey($ea)) {
+                    $appNames[$ea] = $en
+                    [void]$allApps.Add([PSCustomObject]@{ appid = $ea; name = $en })
+                }
+            }
+        }
+
+        # Save to cache.
+        $allApps.ToArray() | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+        Write-GuiLog "Steam app list cached: $($appNames.Count) apps."
+    }
+    catch {
+        Write-GuiLog "Steam app list download failed: $($_.Exception.Message)"
+    }
+
+    return $appNames
+}
+
+function Clear-WmtLibraryCaches {
+    $script:WmtLegendaryLibraryCache = $null
+    $script:WmtGogLibraryCache = $null
+    $script:WmtSteamLibraryCache = $null
+    try {
+        $dataPath = Get-DataPath
+        $legFile = Join-Path $dataPath "legendary_library.json"
+        $gogFile = Join-Path $dataPath "gog_library.json"
+        $steamFile = Join-Path $dataPath "steam_library.json"
+        $steamAppFile = Join-Path $dataPath "steam_applist.json"
+        if (Test-Path -LiteralPath $legFile) { Remove-Item -LiteralPath $legFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $gogFile) { Remove-Item -LiteralPath $gogFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $steamFile) { Remove-Item -LiteralPath $steamFile -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $steamAppFile) { Remove-Item -LiteralPath $steamAppFile -Force -ErrorAction SilentlyContinue }
+    }
+    catch {}
+}
+
+# ==========================================
+# Catalog search helpers (per-provider)
+# ==========================================
+
+function Invoke-WmtSearchProcess {
+    param(
+        [string]$FilePath,
+        [string]$Arguments,
+        [int]$TimeoutMs = 15000
+    )
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $FilePath
+        $psi.Arguments = $Arguments
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        try { $psi.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch {}
+        $proc = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        try { $proc.WaitForExit($TimeoutMs) } catch {}
+        try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+        return [string]$stdout
+    }
+    catch { return "" }
+}
+
+
+
+function Get-WmtScoopSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command scoop -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath "powershell.exe" -Arguments "-NoProfile -Command scoop search `"$Query`"" -TimeoutMs ($TimeoutSeconds * 1000)
+    $inResults = $false
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match "^Name\s") { $inResults = $true; continue }
+        if (-not $inResults) { continue }
+        if ($line -match "^-+") { continue }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $cols = $line -split '\s{2,}|\t'
+        if ($cols.Count -ge 2) {
+            $result.Add([PSCustomObject]@{ Provider = "scoop"; Title = $cols[0]; Id = $cols[0]; Version = if ($cols.Count -ge 2) { $cols[1] } else { "" }; Source = "Scoop"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+
+
+
+
+function Get-WmtCargoSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath $exe.Source -Arguments "search `"$Query`"" -TimeoutMs ($TimeoutSeconds * 1000)
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match '^(?<name>\S+)\s*=\s*"(?<version>[^"]*)"') {
+            $result.Add([PSCustomObject]@{ Provider = "cargo"; Title = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Source = "crates.io"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+function Get-WmtGemSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 20)
+    $result = New-Object System.Collections.Generic.List[object]
+    $exe = Get-Command gem -ErrorAction SilentlyContinue
+    if (-not $exe) { return $result.ToArray() }
+    $stdout = Invoke-WmtSearchProcess -FilePath $exe.Source -Arguments "search `"$Query`" --remote" -TimeoutMs ($TimeoutSeconds * 1000)
+    foreach ($line in $stdout -split "`r?`n") {
+        $line = $line.Trim()
+        if ($line -match '^(?<name>\S+)\s+\((?<version>[^)]+)\)') {
+            $result.Add([PSCustomObject]@{ Provider = "gem"; Title = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Source = "RubyGems"; Kind = "Catalog" })
+        }
+    }
+    return $result.ToArray()
+}
+
+
+
+
+
+
+
+function Get-WmtSteamSearch {
+    param([string]$Query, [int]$TimeoutSeconds = 15)
+    $result = New-Object System.Collections.Generic.List[object]
+    if ([string]::IsNullOrWhiteSpace($Query)) { return $result.ToArray() }
+    try {
+        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+        $encoded = [Uri]::EscapeDataString($Query)
+        $url = "https://store.steampowered.com/api/storesearch/?term=$encoded&l=english&cc=US"
+        $resp = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec $TimeoutSeconds -ErrorAction Stop
+        if ($resp -and $resp.total -gt 0) {
+            foreach ($item in @($resp.items)) {
+                $result.Add([PSCustomObject]@{ Provider = "steam"; Title = [string]$item.name; Id = [string]$item.id; Version = ""; Source = "Steam Store"; Kind = "Catalog" })
+            }
+        }
+    }
+    catch {}
+    return $result.ToArray()
+}
+
+
+
+function Get-WmtProviderCatalogSearch {
+    param([string]$ProviderKey, [string]$Query, [int]$TimeoutSeconds = 15)
+
+    $key = ([string]$ProviderKey).Trim().ToLowerInvariant()
+    $query = ([string]$Query).Trim()
+    if ([string]::IsNullOrWhiteSpace($query)) { return @() }
+
+    switch ($key) {
+        "scoop" { return @(Get-WmtScoopSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "cargo" { return @(Get-WmtCargoSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "gem" { return @(Get-WmtGemSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        "steam" { return @(Get-WmtSteamSearch -Query $query -TimeoutSeconds $TimeoutSeconds) }
+        default { return @() }
+    }
+}
+
+
+# ==========================================
+# Windows Update category toggle helpers
+# ==========================================
+
+function Get-WmtWuCategoryToggles {
+    param($Settings)
+    if (-not $Settings) { $Settings = Get-WmtSettings }
+    $defaults = [ordered]@{
+        Updates  = $true
+        Optional = $true
+        Driver   = $true
+        Security = $true
+        Insider  = $false
+    }
+    try {
+        $raw = $null
+        if ($Settings -is [System.Collections.IDictionary]) {
+            if ($Settings.Contains("WuCategoryToggles")) { $raw = $Settings["WuCategoryToggles"] }
+        }
+        else {
+            try { if ($Settings.PSObject.Properties["WuCategoryToggles"]) { $raw = $Settings.WuCategoryToggles } } catch {}
+        }
+        if ($raw) {
+            foreach ($prop in @($raw.PSObject.Properties)) {
+                $k = ([string]$prop.Name).Trim()
+                if ($defaults.Contains($k)) { $defaults[$k] = [bool]$prop.Value }
+            }
+        }
+    }
+    catch {}
+    return $defaults
+}
+
+function Set-WmtWuCategoryToggles {
+    param($Toggles)
+    $settings = Get-WmtSettings
+    if ($settings -is [System.Collections.IDictionary]) {
+        $settings["WuCategoryToggles"] = $Toggles
+    }
+    elseif ($settings.PSObject.Properties["WuCategoryToggles"]) {
+        $settings.WuCategoryToggles = $Toggles
+    }
+    else {
+        $settings | Add-Member -MemberType NoteProperty -Name "WuCategoryToggles" -Value $Toggles -Force
+    }
+    Save-WmtSettings -Settings $settings
+}
+
 function Show-ProviderManager {
     # 1. Load Current Settings
     $settings = Get-WmtSettings
-    if (-not $settings.EnabledProviders) { 
+    if (-not $settings.EnabledProviders) {
         $settings | Add-Member -MemberType NoteProperty -Name "EnabledProviders" -Value @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl") -Force
     }
     $enabled = $settings.EnabledProviders
+    $providerToggles = Get-WmtProviderToggles -Settings $settings
+    $providerCapabilities = Get-WmtProviderCapabilities
 
-    # 2. Define UI
+    # 2. Provider definitions are needed BEFORE building the XAML so we can
+    # generate per-provider rows that include the Search/Scan/Headless/AutoUpdate toggles.
+    $providerDefinitions = @(
+        [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction"; LockedOn = $true; ToolTip = "Windows Package Manager" },
+        [PSCustomObject]@{ Key = "msstore"; DisplayName = "Store CLI"; Commands = [string[]]@("store"); Label = "lblProviderMsStoreStatus"; Button = "btnProviderMsStoreAction"; LockedOn = $false; ToolTip = "Microsoft Store Apps via store.exe" },
+        [PSCustomObject]@{ Key = "windowsupdate"; DisplayName = "Windows Update"; Commands = [string[]]@("powershell"); Label = "lblWindowsUpdateStatus"; Button = "btnProviderWindowsUpdateAction"; LockedOn = $false; ToolTip = "Windows Update Agent. Scans both regular and optional Windows updates, including drivers when offered." },
+        [PSCustomObject]@{ Key = "pip"; DisplayName = "Python (Pip)"; Commands = [string[]]@("pip", "pip3"); Label = "lblPipStatus"; Button = "btnProviderPipAction"; LockedOn = $false; ToolTip = "Python package manager" },
+        [PSCustomObject]@{ Key = "npm"; DisplayName = "Node (Npm)"; Commands = [string[]]@("npm"); Label = "lblNpmStatus"; Button = "btnProviderNpmAction"; LockedOn = $false; ToolTip = "Node.js package manager" },
+        [PSCustomObject]@{ Key = "pnpm"; DisplayName = "pnpm"; Commands = [string[]]@("pnpm"); Label = "lblPnpmStatus"; Button = "btnProviderPnpmAction"; LockedOn = $false; ToolTip = "Fast Node.js package manager" },
+        [PSCustomObject]@{ Key = "chocolatey"; DisplayName = "Chocolatey"; Commands = [string[]]@("choco"); Label = "lblChocoStatus"; Button = "btnProviderChocoAction"; LockedOn = $false; ToolTip = "Chocolatey package manager" },
+        [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction"; LockedOn = $false; ToolTip = "Scoop command-line installer" },
+        [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction"; LockedOn = $false; ToolTip = "RubyGems package manager" },
+        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction"; LockedOn = $false; ToolTip = "Rust package manager" },
+        [PSCustomObject]@{ Key = "dotnet"; DisplayName = ".NET Tools"; Commands = [string[]]@("dotnet"); Label = "lblDotnetStatus"; Button = "btnProviderDotnetAction"; LockedOn = $false; ToolTip = ".NET global tools installed with dotnet tool install -g" },
+        [PSCustomObject]@{ Key = "psmodule"; DisplayName = "PS Modules"; Commands = [string[]]@("powershell", "pwsh"); Label = "lblPsModuleStatus"; Button = "btnProviderPsModuleAction"; LockedOn = $false; ToolTip = "PowerShell modules installed from PSGallery with PowerShellGet" },
+        [PSCustomObject]@{ Key = "composer"; DisplayName = "Composer"; Commands = [string[]]@("composer"); Label = "lblComposerStatus"; Button = "btnProviderComposerAction"; LockedOn = $false; ToolTip = "PHP Composer global packages" },
+        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction"; LockedOn = $false; ToolTip = "Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads." },
+        [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction"; LockedOn = $false; ToolTip = "Legendary CLI for Epic Games Store game updates." },
+        [PSCustomObject]@{ Key = "gogdl"; DisplayName = "GOGDL"; Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction"; LockedOn = $false; ToolTip = "GOGDL updates installed GOG games through Heroic's gogdl downloader." }
+    )
+
+    function Format-WmtProviderRowXaml {
+        param($Provider)
+
+        $key = [string]$Provider.Key
+        $name = [string]$Provider.DisplayName
+        $tip = [string]$Provider.ToolTip
+        $locked = [bool]$Provider.LockedOn
+        $caps = $providerCapabilities[$key]
+        $searchSupported = [bool]$caps.Search
+
+        $chkAttr = if ($locked) { 'IsChecked="True" IsEnabled="False"' } else { '' }
+        $searchEnabled = if ($searchSupported) { 'True' } else { 'False' }
+        $t = $providerToggles[$key]
+        $searchVal = if ($t -is [System.Collections.IDictionary]) { $t["Search"] } else { $t.Search }
+        $scanVal = if ($t -is [System.Collections.IDictionary]) { $t["Scan"] } else { $t.Scan }
+        $headVal = if ($t -is [System.Collections.IDictionary]) { $t["Headless"] } else { $t.Headless }
+        $autoVal = if ($t -is [System.Collections.IDictionary]) { $t["AutoUpdate"] } else { $t.AutoUpdate }
+        $searchIsChecked = if ($searchSupported -and [bool]$searchVal) { 'True' } else { 'False' }
+        $scanIsChecked = if ([bool]$scanVal) { 'True' } else { 'False' }
+        $headlessIsChecked = if ([bool]$headVal) { 'True' } else { 'False' }
+        $autoIsChecked = if ([bool]$autoVal) { 'True' } else { 'False' }
+
+        $searchToolTip = if ($searchSupported) {
+            "Allow searching this provider's catalog or owned library from the WMT search box."
+        }
+        else {
+            "This provider does not expose a search capability."
+        }
+
+        # Winget gets a 5th toggle: "Include unknown" (--include-unknown flag).
+        $includeUnknownToggle = ""
+        if ($key -eq "winget") {
+            $includeUnknownToggle = '<ToggleButton Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,8,0" Padding="10,3" MinWidth="80" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/>'
+        }
+
+        # Windows Update gets an extra row of category toggle buttons.
+        $wuCategorySection = ""
+        if ($key -eq "windowsupdate") {
+            $wuCategorySection = @"
+                    <StackPanel Orientation="Horizontal" Margin="30,6,0,0">
+                        <TextBlock Text="Categories:" FontWeight="SemiBold" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                        <ToggleButton Name="btnWuCatUpdates" Content="Updates" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Regular Windows updates (important and recommended)"/>
+                        <ToggleButton Name="btnWuCatOptional" Content="Optional" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Optional updates that are not automatically installed"/>
+                        <ToggleButton Name="btnWuCatDriver" Content="Driver" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Driver updates from Windows Update"/>
+                        <ToggleButton Name="btnWuCatSecurity" Content="Security" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Security updates (Critical, Important, Moderate severity)"/>
+                        <ToggleButton Name="btnWuCatInsider" Content="Insider" Margin="0,0,8,0" Padding="10,3" MinWidth="60" ToolTip="Insider Preview, beta, dev channel, and canary builds"/>
+                    </StackPanel>
+"@
+        }
+
+        $row = @"
+            <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="8" Padding="10" Margin="0,0,0,10" ToolTip="$tip">
+                <StackPanel>
+                    <Grid>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <CheckBox Name="chk$key" $chkAttr Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBlock Name="lbl${key}Name" Text="$name" FontWeight="Bold" Grid.Column="1" VerticalAlignment="Center"/>
+                        <TextBlock Name="$($Provider.Label)" Text="Checking..." Grid.Column="2" VerticalAlignment="Center"/>
+                        <Button Name="$($Provider.Button)" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
+                    </Grid>
+                    <StackPanel Orientation="Horizontal" Margin="30,6,0,0">
+                        <ToggleButton Name="chk${key}Search"     Content="Search"     Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$searchIsChecked"    IsEnabled="$searchEnabled" ToolTip="$searchToolTip"/>
+                        <ToggleButton Name="chk${key}Scan"       Content="Scan"       Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$scanIsChecked"       ToolTip="Include this provider in update scans. Disabling also disables Headless and Auto-update for this provider."/>
+                        <ToggleButton Name="chk${key}Headless"   Content="Headless"   Margin="0,0,8,0" Padding="10,3" MinWidth="60" IsChecked="$headlessIsChecked"   ToolTip="Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."/>
+                        <ToggleButton Name="chk${key}AutoUpdate" Content="Auto-update" Margin="0,0,8,0" Padding="10,3" MinWidth="70" IsChecked="$autoIsChecked"       ToolTip="After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."/>
+                        $includeUnknownToggle
+                    </StackPanel>
+                    $wuCategorySection
+                </StackPanel>
+            </Border>
+"@
+        return $row
+    }
+
+    $providerRowsXaml = ""
+    foreach ($p in $providerDefinitions) {
+        $providerRowsXaml += (Format-WmtProviderRowXaml -Provider $p) + "`r`n"
+    }
+
+    # 3. Define UI
     [xml]$pXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        Title="Package Manager Settings" Height="790" Width="680" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
+        Title="Package Manager Settings" Height="860" Width="760" WindowStartupLocation="CenterScreen" ResizeMode="NoResize"
         Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}">
     <Window.Resources>
         <Style TargetType="TextBlock"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/></Style>
-        <Style TargetType="CheckBox"><Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/><Setter Property="VerticalAlignment" Value="Center"/><Setter Property="Margin" Value="0,0,10,0"/></Style>
+        <Style TargetType="CheckBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Margin" Value="0,0,10,0"/>
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Opacity" Value="0.35"/>
+                    <Setter Property="TextBlock.TextDecorations" Value="Strikethrough"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
         <Style TargetType="Button">
             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
             <Setter Property="Background" Value="{DynamicResource BgElevated}"/>
@@ -25796,14 +27169,32 @@ function Show-ProviderManager {
             <Setter Property="Foreground" Value="#111827"/>
             <Setter Property="Background" Value="#FFFFFF"/>
         </Style>
+        <Style TargetType="TextBox">
+            <Setter Property="Foreground" Value="#111827"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
+        <Style TargetType="ListBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+        </Style>
+        <Style TargetType="ListBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+            <Setter Property="Background" Value="{DynamicResource BgDark}"/>
+            <Setter Property="Padding" Value="6,4"/>
+        </Style>
     </Window.Resources>
     <Grid Margin="20">
         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
         
-        <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,15"/>
-        <TextBlock Text="Select which package managers to scan." Foreground="{DynamicResource TextSecondary}" Margin="0,25,0,0" Grid.Row="0"/>
+        <StackPanel Grid.Row="0">
+            <TextBlock Text="Manage Package Providers" FontSize="18" FontWeight="Bold" Margin="0,0,0,4"/>
+            <TextBlock Text="Select which package managers to scan, and configure per-provider Search / Scan / Headless / Auto-update options. Search uses the main Updates search box." Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,0" TextWrapping="Wrap"/>
+        </StackPanel>
 
-        <ScrollViewer Grid.Row="1" Margin="0,15,0,0" VerticalScrollBarVisibility="Auto">
+        <ScrollViewer Grid.Row="1" Margin="0,12,0,0" VerticalScrollBarVisibility="Auto">
             <StackPanel>
             <Border Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,14"
                     ToolTip="Configure automatic update scans, installation behavior, and background operation.">
@@ -25819,6 +27210,9 @@ function Show-ProviderManager {
                         <ComboBoxItem Content="Every 1 hour" Tag="60" Foreground="#111827" Background="#FFFFFF"/>
                         <ComboBoxItem Content="Every 2 hours" Tag="120" Foreground="#111827" Background="#FFFFFF"/>
                         <ComboBoxItem Content="Every 4 hours" Tag="240" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 8 hours" Tag="480" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every 12 hours" Tag="720" Foreground="#111827" Background="#FFFFFF"/>
+                        <ComboBoxItem Content="Every day" Tag="1440" Foreground="#111827" Background="#FFFFFF"/>
                     </ComboBox>
                     <CheckBox Name="chkUpdateNotifications" Grid.Row="0" Grid.Column="2" Content="Native notifications" Margin="12,0,0,0"
                               ToolTip="Show a Windows notification when an automatic background scan finds updates or fails."/>
@@ -25831,145 +27225,12 @@ function Show-ProviderManager {
                     <CheckBox Name="chkUpdateAutoInstall" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="Automatically install available updates after scans" Margin="0,8,0,0"
                               ToolTip="After each completed scan, automatically update listed packages without confirmation. Packages known to risk an automatic restart are skipped."/>
                     <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
-                               Text="Auto scan runs while WMT is open or hidden in the tray. Auto install runs after completed manual, startup, and scheduled scans; restart-risk packages are skipped."
+                               Text="Auto scan runs while WMT is open or hidden in the tray. Auto install runs after completed manual, startup, and scheduled scans; restart-risk packages are skipped. Per-provider Headless / Auto-update options above override these global settings."
                                Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
                 </Grid>
             </Border>
 
-            <Grid Margin="0,0,0,10" ToolTip="Windows Package Manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkWinget" IsChecked="True" IsEnabled="False" Grid.Column="0"/>
-                <TextBlock Text="Winget" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblProviderWingetStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderWingetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="30,0,0,12"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkIncludeUnknown" Grid.Column="0"/>
-                <TextBlock Text="Include unknown" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Text="Adds --include-unknown to winget scans" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Grid.Column="2"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Microsoft Store Apps via store.exe">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkMsStore" Grid.Column="0"/>
-                <TextBlock Text="Store CLI" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblProviderMsStoreStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderMsStoreAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Windows Update Agent. Scans both regular and optional Windows updates, including drivers when offered.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkWindowsUpdate" Grid.Column="0"/>
-                <TextBlock Text="Windows Update" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblWindowsUpdateStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderWindowsUpdateAction" Content="Open" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Python package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPip" Grid.Column="0"/>
-                <TextBlock Text="Python (Pip)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPipStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPipAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Node.js package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkNpm" Grid.Column="0"/>
-                <TextBlock Text="Node (Npm)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblNpmStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderNpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <!-- PNPM -->
-            <Grid Margin="0,0,0,10" ToolTip="Fast Node.js package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPnpm" Grid.Column="0"/>
-                <TextBlock Text="pnpm" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPnpmStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPnpmAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Chocolatey package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkChoco" Grid.Column="0"/>
-                <TextBlock Text="Chocolatey" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblChocoStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderChocoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Scoop command-line installer">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkScoop" Grid.Column="0"/>
-                <TextBlock Text="Scoop" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblScoopStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderScoopAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="RubyGems package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkGem" Grid.Column="0"/>
-                <TextBlock Text="Ruby (Gem)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblGemStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderGemAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Rust package manager">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkCargo" Grid.Column="0"/>
-                <TextBlock Text="Rust (Cargo)" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblCargoStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderCargoAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip=".NET global tools installed with dotnet tool install -g">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkDotnet" Grid.Column="0"/>
-                <TextBlock Text=".NET Tools" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblDotnetStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderDotnetAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="PowerShell modules installed from PSGallery with PowerShellGet">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkPsModule" Grid.Column="0"/>
-                <TextBlock Text="PS Modules" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblPsModuleStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderPsModuleAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="PHP Composer global packages">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkComposer" Grid.Column="0"/>
-                <TextBlock Text="Composer" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblComposerStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderComposerAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Steam game updates detected from local Steam manifests. Updates are delegated to Steam Downloads.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkSteam" Grid.Column="0"/>
-                <TextBlock Text="Steam Games" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblSteamStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderSteamAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="Legendary CLI for Epic Games Store game updates.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkLegendary" Grid.Column="0"/>
-                <TextBlock Text="Legendary" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblLegendaryStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderLegendaryAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
-
-            <Grid Margin="0,0,0,10" ToolTip="GOGDL updates installed GOG games through Heroic's gogdl downloader.">
-                <Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                <CheckBox Name="chkGogdl" Grid.Column="0"/>
-                <TextBlock Text="GOGDL" FontWeight="Bold" Grid.Column="1"/>
-                <TextBlock Name="lblGogdlStatus" Text="Checking..." Grid.Column="2"/>
-                <Button Name="btnProviderGogdlAction" Content="Install" Width="78" Height="26" Grid.Column="3" Margin="8,0,0,0"/>
-            </Grid>
+            $providerRowsXaml
             </StackPanel>
         </ScrollViewer>
 
@@ -25982,7 +27243,7 @@ function Show-ProviderManager {
     $win = New-WmtWindowFromFullXaml -Xaml $pXaml
 
     function Get-WinCtrl($name) { $win.FindName($name) }
-    
+
     $cmbAutoScanInterval = Get-WinCtrl "cmbAutoScanInterval"
     $chkUpdateNotifications = Get-WinCtrl "chkUpdateNotifications"
     $chkRunInTrayOnClose = Get-WinCtrl "chkRunInTrayOnClose"
@@ -25990,40 +27251,15 @@ function Show-ProviderManager {
     $chkUpdateSilentInstall = Get-WinCtrl "chkUpdateSilentInstall"
     $chkUpdateAutoInstall = Get-WinCtrl "chkUpdateAutoInstall"
     $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
-    $chkMsStore = Get-WinCtrl "chkMsStore"
-    $chkWindowsUpdate = Get-WinCtrl "chkWindowsUpdate"
-    $chkPip = Get-WinCtrl "chkPip"
-    $chkNpm = Get-WinCtrl "chkNpm"
-    $chkPnpm = Get-WinCtrl "chkPnpm"  
-    $chkChoco = Get-WinCtrl "chkChoco"
-    $chkScoop = Get-WinCtrl "chkScoop"
-    $chkGem = Get-WinCtrl "chkGem"
-    $chkCargo = Get-WinCtrl "chkCargo"
-    $chkDotnet = Get-WinCtrl "chkDotnet"
-    $chkPsModule = Get-WinCtrl "chkPsModule"
-    $chkComposer = Get-WinCtrl "chkComposer"
-    $chkSteam = Get-WinCtrl "chkSteam"
-    $chkLegendary = Get-WinCtrl "chkLegendary"
-    $chkGogdl = Get-WinCtrl "chkGogdl"
+    $btnWuCatUpdates = Get-WinCtrl "btnWuCatUpdates"
+    $btnWuCatOptional = Get-WinCtrl "btnWuCatOptional"
+    $btnWuCatDriver = Get-WinCtrl "btnWuCatDriver"
+    $btnWuCatSecurity = Get-WinCtrl "btnWuCatSecurity"
+    $btnWuCatInsider = Get-WinCtrl "btnWuCatInsider"
 
-    $providerDefinitions = @(
-        [PSCustomObject]@{ Key = "winget"; DisplayName = "Winget"; Commands = [string[]]@("winget"); Label = "lblProviderWingetStatus"; Button = "btnProviderWingetAction" },
-        [PSCustomObject]@{ Key = "msstore"; DisplayName = "Store CLI"; Commands = [string[]]@("store"); Label = "lblProviderMsStoreStatus"; Button = "btnProviderMsStoreAction" },
-        [PSCustomObject]@{ Key = "windowsupdate"; DisplayName = "Windows Update"; Commands = [string[]]@("powershell"); Label = "lblWindowsUpdateStatus"; Button = "btnProviderWindowsUpdateAction" },
-        [PSCustomObject]@{ Key = "pip"; DisplayName = "Python (Pip)"; Commands = [string[]]@("pip", "pip3"); Label = "lblPipStatus"; Button = "btnProviderPipAction" },
-        [PSCustomObject]@{ Key = "npm"; DisplayName = "Node (Npm)"; Commands = [string[]]@("npm"); Label = "lblNpmStatus"; Button = "btnProviderNpmAction" },
-        [PSCustomObject]@{ Key = "pnpm"; DisplayName = "pnpm"; Commands = [string[]]@("pnpm"); Label = "lblPnpmStatus"; Button = "btnProviderPnpmAction" },
-        [PSCustomObject]@{ Key = "chocolatey"; DisplayName = "Chocolatey"; Commands = [string[]]@("choco"); Label = "lblChocoStatus"; Button = "btnProviderChocoAction" },
-        [PSCustomObject]@{ Key = "scoop"; DisplayName = "Scoop"; Commands = [string[]]@("scoop"); Label = "lblScoopStatus"; Button = "btnProviderScoopAction" },
-        [PSCustomObject]@{ Key = "gem"; DisplayName = "Ruby (Gem)"; Commands = [string[]]@("gem"); Label = "lblGemStatus"; Button = "btnProviderGemAction" },
-        [PSCustomObject]@{ Key = "cargo"; DisplayName = "Rust (Cargo)"; Commands = [string[]]@("cargo"); Label = "lblCargoStatus"; Button = "btnProviderCargoAction" },
-        [PSCustomObject]@{ Key = "dotnet"; DisplayName = ".NET Tools"; Commands = [string[]]@("dotnet"); Label = "lblDotnetStatus"; Button = "btnProviderDotnetAction" },
-        [PSCustomObject]@{ Key = "psmodule"; DisplayName = "PowerShell Modules"; Commands = [string[]]@("powershell", "pwsh"); Label = "lblPsModuleStatus"; Button = "btnProviderPsModuleAction" },
-        [PSCustomObject]@{ Key = "composer"; DisplayName = "Composer"; Commands = [string[]]@("composer"); Label = "lblComposerStatus"; Button = "btnProviderComposerAction" },
-        [PSCustomObject]@{ Key = "steam"; DisplayName = "Steam Games"; Commands = [string[]]@("steam", "steam.exe"); RegistryPaths = [string[]]@("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam"); Label = "lblSteamStatus"; Button = "btnProviderSteamAction" },
-        [PSCustomObject]@{ Key = "legendary"; DisplayName = "Legendary (Epic Games)"; Commands = [string[]]@("legendary", "legendary.exe"); LocalPaths = [string[]]@(Get-WmtLegendaryExePath); Label = "lblLegendaryStatus"; Button = "btnProviderLegendaryAction" },
-        [PSCustomObject]@{ Key = "gogdl"; DisplayName = "GOGDL (GOG Games)"; Commands = [string[]]@("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe"); LocalPaths = [string[]]@(Get-WmtGogdlExePath); Label = "lblGogdlStatus"; Button = "btnProviderGogdlAction" }
-    )
+    # Map provider key -> checkbox control objects (filled in below per provider).
+    $providerControls = @{}
+
     $providerInstallState = @{}
     $providerActionMonitors = @{}
 
@@ -26714,6 +27950,7 @@ catch {
 }
 
 Write-Host ""
+
 [void](Read-Host "Press Enter to close")
 "@
 
@@ -27003,6 +28240,9 @@ exit `$exitCode
             Write-GuiLog "[$($provider.DisplayName)] $action failed to start: $($_.Exception.Message)"
             try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
             & $updateProviderStatuses
+            foreach ($prov in $providerDefinitions) {
+                & $updateProviderToggleState -ProviderKey ([string]$prov.Key)
+            }
             return
         }
 
@@ -27095,23 +28335,222 @@ exit `$exitCode
     if ($chkUpdateSilentInstall) { $chkUpdateSilentInstall.IsChecked = (Get-WmtUpdateSilentInstallEnabled -Settings $settings) }
     if ($chkUpdateAutoInstall) { $chkUpdateAutoInstall.IsChecked = (Get-WmtUpdateAutoInstallEnabled -Settings $settings) }
     $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
-    if ("msstore" -in $enabled) { $chkMsStore.IsChecked = $true }
-    if ("windowsupdate" -in $enabled) { $chkWindowsUpdate.IsChecked = $true }
-    if ("pip" -in $enabled) { $chkPip.IsChecked = $true }
-    if ("npm" -in $enabled) { $chkNpm.IsChecked = $true }
-    if ("pnpm" -in $enabled) { $chkPnpm.IsChecked = $true }
-    if ("chocolatey" -in $enabled) { $chkChoco.IsChecked = $true }
-    if ("scoop" -in $enabled) { $chkScoop.IsChecked = $true }
-    if ("gem" -in $enabled) { $chkGem.IsChecked = $true }
-    if ("cargo" -in $enabled) { $chkCargo.IsChecked = $true }
-    if ("dotnet" -in $enabled) { $chkDotnet.IsChecked = $true }
-    if ("psmodule" -in $enabled) { $chkPsModule.IsChecked = $true }
-    if ("composer" -in $enabled) { $chkComposer.IsChecked = $true }
-    if ("steam" -in $enabled) { $chkSteam.IsChecked = $true }
-    if ("legendary" -in $enabled) { $chkLegendary.IsChecked = $true }
-    if ("gogdl" -in $enabled) { $chkGogdl.IsChecked = $true }
+
+    # Load Windows Update category toggle states.
+    $wuToggles = Get-WmtWuCategoryToggles -Settings $settings
+    if ($btnWuCatUpdates) { $btnWuCatUpdates.IsChecked = [bool]$wuToggles.Updates }
+    if ($btnWuCatOptional) { $btnWuCatOptional.IsChecked = [bool]$wuToggles.Optional }
+    if ($btnWuCatDriver) { $btnWuCatDriver.IsChecked = [bool]$wuToggles.Driver }
+    if ($btnWuCatSecurity) { $btnWuCatSecurity.IsChecked = [bool]$wuToggles.Security }
+    if ($btnWuCatInsider) { $btnWuCatInsider.IsChecked = [bool]$wuToggles.Insider }
+
+    # Reflect each provider's main checkbox state from $enabled.
+    foreach ($provider in $providerDefinitions) {
+        $key = [string]$provider.Key
+        $chkMain = & $getWinCtrl "chk$key"
+        if (-not $chkMain) { continue }
+        if ($provider.PSObject.Properties["LockedOn"] -and [bool]$provider.LockedOn) {
+            $chkMain.IsChecked = $true
+        }
+        else {
+            $chkMain.IsChecked = ($key -in $enabled)
+        }
+        # Also reflect per-provider toggle state.
+        $toggles = $providerToggles[$key]
+        $searchVal = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Search"] } else { $toggles.Search }
+        $scanVal = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Scan"] } else { $toggles.Scan }
+        $headVal = if ($toggles -is [System.Collections.IDictionary]) { $toggles["Headless"] } else { $toggles.Headless }
+        $autoVal = if ($toggles -is [System.Collections.IDictionary]) { $toggles["AutoUpdate"] } else { $toggles.AutoUpdate }
+        $chkSearch = & $getWinCtrl "chk${key}Search"
+        $chkScan = & $getWinCtrl "chk${key}Scan"
+        $chkHeadless = & $getWinCtrl "chk${key}Headless"
+        $chkAuto = & $getWinCtrl "chk${key}AutoUpdate"
+        if ($chkSearch) { $chkSearch.IsChecked = [bool]$searchVal }
+        if ($chkScan) { $chkScan.IsChecked = [bool]$scanVal }
+        if ($chkHeadless) { $chkHeadless.IsChecked = [bool]$headVal }
+        if ($chkAuto) { $chkAuto.IsChecked = [bool]$autoVal }
+        # Store controls for later event wiring.
+        $providerControls[$key] = @{
+            Main       = $chkMain
+            Search     = $chkSearch
+            Scan       = $chkScan
+            Headless   = $chkHeadless
+            AutoUpdate = $chkAuto
+        }
+    }
+
+    # Helper: enable/disable the per-provider sub-toggles based on the
+    # main checkbox and the Scan toggle. The Search toggle is additionally
+    # gated by the capability matrix (it is created disabled in XAML when
+    # the provider does not support search).
+    $updateProviderToggleState = {
+        param([string]$ProviderKey)
+
+        $controls = $providerControls[$ProviderKey]
+        if (-not $controls) { return }
+        $caps = $providerCapabilities[$ProviderKey]
+        $searchSupported = [bool]$caps.Search
+        $mainChecked = [bool]$controls.Main.IsChecked
+        $scanChecked = [bool]$controls.Scan.IsChecked
+
+        # Get provider display name for tooltip messages.
+        $provider = @($providerDefinitions | Where-Object { $_.Key -eq $ProviderKey } | Select-Object -First 1)
+        $dispName = if ($provider) { [string]$provider.DisplayName } else { $ProviderKey }
+
+        # Check if the provider is installed.
+        $isInstalled = $true
+        if ($providerInstallState.ContainsKey($ProviderKey)) {
+            $isInstalled = [bool]$providerInstallState[$ProviderKey]
+        }
+        if ($ProviderKey -eq "winget") { $isInstalled = $true }
+
+        # Base tooltips (shown when enabled).
+        $mainTip = "Enable or disable $dispName for scanning and updates."
+        $searchTip = "Allow searching this provider's catalog or owned library from the WMT search box."
+        $scanTip = "Include this provider in update scans. Disabling also disables Headless and Auto-update."
+        $headlessTip = "Run this provider's update/install commands without showing their console windows. Requires Scan to be enabled."
+        $autoTip = "After a completed scan, automatically install this provider's available updates without confirmation. Requires Scan to be enabled."
+
+        if (-not $isInstalled) {
+            # Provider not installed: disable main + all toggles.
+            $notInstalledMsg = "$dispName is not installed. Click the Install button to set it up."
+            if ($controls.Main) {
+                $controls.Main.IsEnabled = $false
+                $controls.Main.ToolTip = $notInstalledMsg
+            }
+            if ($controls.Search) { $controls.Search.IsEnabled = $false; $controls.Search.ToolTip = $notInstalledMsg }
+            if ($controls.Scan) { $controls.Scan.IsEnabled = $false; $controls.Scan.ToolTip = $notInstalledMsg }
+            if ($controls.Headless) { $controls.Headless.IsEnabled = $false; $controls.Headless.ToolTip = $notInstalledMsg }
+            if ($controls.AutoUpdate) { $controls.AutoUpdate.IsEnabled = $false; $controls.AutoUpdate.ToolTip = $notInstalledMsg }
+
+            # Slash out the name.
+            $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
+            if ($nameCtrl) {
+                $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
+                $nameCtrl.Opacity = 0.35
+                $nameCtrl.ToolTip = $notInstalledMsg
+            }
+            return
+        }
+
+        # Provider IS installed: apply normal gray-out rules.
+        if ($controls.Main) {
+            if ($ProviderKey -eq "winget") {
+                $controls.Main.IsEnabled = $false
+                $controls.Main.ToolTip = "Winget is the core package manager and is always enabled."
+            }
+            else {
+                $controls.Main.IsEnabled = $true
+                $controls.Main.ToolTip = $mainTip
+            }
+        }
+
+        # Search toggle
+        if ($controls.Search) {
+            if (-not $searchSupported) {
+                $controls.Search.IsEnabled = $false
+                $controls.Search.IsChecked = $false
+                $controls.Search.ToolTip = "$dispName does not support catalog or library search."
+            }
+            elseif (-not $mainChecked) {
+                $controls.Search.IsEnabled = $false
+                $controls.Search.ToolTip = "Enable $dispName (check the box on the left) to use search."
+            }
+            else {
+                $controls.Search.IsEnabled = $true
+                $controls.Search.ToolTip = $searchTip
+            }
+        }
+
+        # Scan toggle
+        if ($controls.Scan) {
+            if (-not $mainChecked) {
+                $controls.Scan.IsEnabled = $false
+                $controls.Scan.ToolTip = "Enable $dispName (check the box on the left) to use scanning."
+            }
+            else {
+                $controls.Scan.IsEnabled = $true
+                $controls.Scan.ToolTip = $scanTip
+            }
+        }
+
+        # Headless toggle
+        if ($controls.Headless) {
+            if (-not $mainChecked) {
+                $controls.Headless.IsEnabled = $false
+                $controls.Headless.ToolTip = "Enable $dispName and Scan to use headless mode."
+            }
+            elseif (-not $scanChecked) {
+                $controls.Headless.IsEnabled = $false
+                $controls.Headless.ToolTip = "Enable Scan for $dispName to use headless mode."
+            }
+            else {
+                $controls.Headless.IsEnabled = $true
+                $controls.Headless.ToolTip = $headlessTip
+            }
+        }
+
+        # AutoUpdate toggle
+        if ($controls.AutoUpdate) {
+            if (-not $mainChecked) {
+                $controls.AutoUpdate.IsEnabled = $false
+                $controls.AutoUpdate.ToolTip = "Enable $dispName and Scan to use auto-update."
+            }
+            elseif (-not $scanChecked) {
+                $controls.AutoUpdate.IsEnabled = $false
+                $controls.AutoUpdate.ToolTip = "Enable Scan for $dispName to use auto-update."
+            }
+            else {
+                $controls.AutoUpdate.IsEnabled = $true
+                $controls.AutoUpdate.ToolTip = $autoTip
+            }
+        }
+
+        # Visually "slash out" the provider name when the provider is disabled.
+        $nameCtrl = & $getWinCtrl "lbl${ProviderKey}Name"
+        if ($nameCtrl) {
+            if ($mainChecked) {
+                $nameCtrl.TextDecorations = $null
+                $nameCtrl.Opacity = 1.0
+                $nameCtrl.ToolTip = $dispName
+            }
+            else {
+                $nameCtrl.TextDecorations = [System.Windows.TextDecorations]::Strikethrough
+                $nameCtrl.Opacity = 0.45
+                $nameCtrl.ToolTip = "$dispName is disabled. Check the box on the left to enable it."
+            }
+        }
+    }.GetNewClosure()
+
+    # Apply initial toggle state    }.GetNewClosure()
+
+    # Apply initial toggle state for every provider.
+    foreach ($provider in $providerDefinitions) {
+        & $updateProviderToggleState -ProviderKey ([string]$provider.Key)
+    }
+
+    # Wire up checkbox change handlers so the sub-toggles react live.
+    foreach ($provider in $providerDefinitions) {
+        $key = [string]$provider.Key
+        $controls = $providerControls[$key]
+        if (-not $controls) { continue }
+        if ($controls.Main) {
+            $controls.Main.Add_Checked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+            $controls.Main.Add_Unchecked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+        }
+        if ($controls.Scan) {
+            $controls.Scan.Add_Checked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+            $controls.Scan.Add_Unchecked({ & $updateProviderToggleState -ProviderKey $key }.GetNewClosure())
+        }
+    }
 
     & $updateProviderStatuses
+    # Re-apply toggle state for all providers now that install state is known.
+    # (Done here, not inside $updateProviderStatuses, because $updateProviderToggleState
+    # is defined below and .GetNewClosure() on $updateProviderStatuses would capture $null.)
+    foreach ($provider in $providerDefinitions) {
+        & $updateProviderToggleState -ProviderKey ([string]$provider.Key)
+    }
     foreach ($provider in $providerDefinitions) {
         $buttonCtrl = & $getWinCtrl $provider.Button
         if (-not $buttonCtrl) { continue }
@@ -27119,25 +28558,21 @@ exit `$exitCode
         $buttonCtrl.Add_Click({ & $startProviderAction -ProviderKey $providerKey }.GetNewClosure())
     }
 
+    # Library cache files for Legendary/GOGDL are populated lazily by the
+    # main Updates search box (background runspace), not here — calling
+    # Get-WmtLegendaryLibrary/Get-WmtGogLibrary synchronously on the UI
+    # thread would hang the window for up to 30+ seconds.
+
     # Save Event
     (Get-WinCtrl "btnSave").Add_Click({
-            $newEnabled = @("winget") 
-            if ($chkMsStore.IsChecked) { $newEnabled += "msstore" }
-            if ($chkWindowsUpdate.IsChecked) { $newEnabled += "windowsupdate" }
-            if ($chkPip.IsChecked) { $newEnabled += "pip" }
-            if ($chkNpm.IsChecked) { $newEnabled += "npm" }
-            if ($chkPnpm.IsChecked) { $newEnabled += "pnpm" } 
-            if ($chkChoco.IsChecked) { $newEnabled += "chocolatey" }
-            if ($chkScoop.IsChecked) { $newEnabled += "scoop" }
-            if ($chkGem.IsChecked) { $newEnabled += "gem" }
-            if ($chkCargo.IsChecked) { $newEnabled += "cargo" }
-            if ($chkDotnet.IsChecked) { $newEnabled += "dotnet" }
-            if ($chkPsModule.IsChecked) { $newEnabled += "psmodule" }
-            if ($chkComposer.IsChecked) { $newEnabled += "composer" }
-            if ($chkSteam.IsChecked) { $newEnabled += "steam" }
-            if ($chkLegendary.IsChecked) { $newEnabled += "legendary" }
-            if ($chkGogdl.IsChecked) { $newEnabled += "gogdl" }
-        
+            $newEnabled = @("winget")
+            foreach ($provider in $providerDefinitions) {
+                $key = [string]$provider.Key
+                if ($provider.PSObject.Properties["LockedOn"] -and [bool]$provider.LockedOn) { continue }
+                $chkMain = & $getWinCtrl "chk$key"
+                if ($chkMain -and [bool]$chkMain.IsChecked) { $newEnabled += $key }
+            }
+
             $current = Get-WmtSettings
             $current.EnabledProviders = $newEnabled
             if ($current -is [System.Collections.IDictionary]) {
@@ -27145,6 +28580,50 @@ exit `$exitCode
             }
             else {
                 $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
+            }
+
+            # Save Windows Update category toggles.
+            $wuTogglesToSave = [ordered]@{
+                Updates  = if ($btnWuCatUpdates) { [bool]$btnWuCatUpdates.IsChecked }  else { $true }
+                Optional = if ($btnWuCatOptional) { [bool]$btnWuCatOptional.IsChecked } else { $true }
+                Driver   = if ($btnWuCatDriver) { [bool]$btnWuCatDriver.IsChecked }   else { $true }
+                Security = if ($btnWuCatSecurity) { [bool]$btnWuCatSecurity.IsChecked } else { $true }
+                Insider  = if ($btnWuCatInsider) { [bool]$btnWuCatInsider.IsChecked }  else { $false }
+            }
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["WuCategoryToggles"] = $wuTogglesToSave
+            }
+            elseif ($current.PSObject.Properties["WuCategoryToggles"]) {
+                $current.WuCategoryToggles = $wuTogglesToSave
+            }
+            else {
+                $current | Add-Member -MemberType NoteProperty -Name "WuCategoryToggles" -Value $wuTogglesToSave -Force
+            }
+
+            # Build the per-provider toggles object to save.
+            $togglesToSave = [ordered]@{}
+            foreach ($provider in $providerDefinitions) {
+                $key = [string]$provider.Key
+                $chkSearch = & $getWinCtrl "chk${key}Search"
+                $chkScan = & $getWinCtrl "chk${key}Scan"
+                $chkHeadless = & $getWinCtrl "chk${key}Headless"
+                $chkAuto = & $getWinCtrl "chk${key}AutoUpdate"
+                $defaults = Get-WmtProviderToggleDefaults -ProviderKey $key
+                $togglesToSave[$key] = [ordered]@{
+                    Search     = if ($defaults.Search -and $chkSearch) { [bool]$chkSearch.IsChecked }   else { $false }
+                    Scan       = if ($chkScan) { [bool]$chkScan.IsChecked }     else { $true }
+                    Headless   = if ($chkHeadless) { [bool]$chkHeadless.IsChecked } else { $false }
+                    AutoUpdate = if ($chkAuto) { [bool]$chkAuto.IsChecked }     else { $false }
+                }
+            }
+            if ($current -is [System.Collections.IDictionary]) {
+                $current["ProviderToggles"] = $togglesToSave
+            }
+            elseif ($current.PSObject.Properties["ProviderToggles"]) {
+                $current.ProviderToggles = $togglesToSave
+            }
+            else {
+                $current | Add-Member -MemberType NoteProperty -Name "ProviderToggles" -Value $togglesToSave -Force
             }
 
             $selectedAutoScanMinutes = 0
@@ -27208,6 +28687,7 @@ exit `$exitCode
         })
 
     $win.ShowDialog() | Out-Null
+
 }
 
 
@@ -27670,6 +29150,14 @@ $script:ScanTimer.Add_Tick({
             # All tasks finished
             if ($script:ScanTimer.IsEnabled) {
                 $script:ScanTimer.Stop()
+
+                # Stop the 120s global timeout timer too — the scan finished
+                # before it fired, so leaving it running would falsely report
+                # the engine as busy (Test-WmtUpdateScanEngineBusy checks
+                # $script:GlobalScanTimer.IsEnabled).
+                if ($script:GlobalScanTimer) {
+                    try { $script:GlobalScanTimer.Stop() } catch {}
+                }
             
                 $rebootPendingCount = [Math]::Max(0, [int]$script:WmtWindowsUpdateRebootPendingCount)
                 if ($rebootPendingCount -gt 0) {
@@ -27716,6 +29204,9 @@ $script:ScanTimer.Add_Tick({
 # 2. BUTTON CLICK (Launch Parallel Threads)
 $btnWingetScan.Add_Click({
         # UI Prep
+        # Clear any stale "package search active" flag so auto-scans are no
+        # longer blocked once the user explicitly starts a new scan.
+        $script:WmtPackageSearchActive = $false
         $lblWingetTitle.Text = "Package Updates"
         $lblWingetStatus.Text = "Scanning all providers..."
         $lblWingetStatus.Visibility = "Visible"
@@ -27752,6 +29243,30 @@ $btnWingetScan.Add_Click({
         $completedWindowsUpdateIds = if ($script:WmtCompletedWindowsUpdateIds) { @($script:WmtCompletedWindowsUpdateIds.Keys) } else { @() }
     
         Write-GuiLog "Enabled providers: $($enabled -join ', ')"
+
+        # Respect per-provider Scan toggle: providers with Scan=false are
+        # skipped during update scans (but still available for search/install).
+        $allToggles = Get-WmtProviderToggles -Settings $settings
+        $scanEnabled = @()
+        foreach ($prov in @($enabled)) {
+            $t = $null
+            if ($allToggles -is [System.Collections.IDictionary] -and $allToggles.Contains($prov)) {
+                $t = $allToggles[$prov]
+            }
+            $scanOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Scan")) { $scanOn = [bool]$t["Scan"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Scan"]) { $scanOn = [bool]$t.Scan } } catch {}
+                }
+            }
+            if ($scanOn) { $scanEnabled += $prov }
+        }
+        $enabled = $scanEnabled
+
+        Write-GuiLog "Scan-enabled providers: $($enabled -join ', ')"
         Write-GuiLog "Winget include unknown: $includeUnknown"
 
         # Gate the actual winget scan behind a completed source refresh.
@@ -28126,11 +29641,14 @@ $btnWingetScan.Add_Click({
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
 
+        # Resolve WU category toggles in main scope (can't call functions inside runspace).
+        $wuCategoryTogglesForScan = Get-WmtWuCategoryToggles -Settings $settings
+
         # WINDOWS UPDATE WORKER - includes optional updates.
         if ("windowsupdate" -in $enabled) {
             $ps = [PowerShell]::Create()
             [void]$ps.AddScript({
-                    param($IgnoreList, $CompletedUpdateIds)
+                    param($IgnoreList, $CompletedUpdateIds, $WuCategoryToggles)
                     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
                     function Test-Ignored($n, $i) {
@@ -28276,6 +29794,23 @@ $btnWingetScan.Add_Click({
                                 $displayName = "$displayName ($kbText)"
                             }
 
+                            # Apply WU category filter: skip updates whose
+                            # categories are disabled in provider settings.
+                            # $WuCategoryToggles was passed from the main scope
+                            # (runspaces can't call main-scope functions).
+                            $isInsider = ($title -match '(?i)insider|preview|beta|dev channel|canary')
+                            $isDriver = ($categoryText -match '(?i)driver')
+                            $isSecurity = (-not [string]::IsNullOrWhiteSpace($severity))
+                            $showThisUpdate = $false
+                            if (-not $isOptional -and -not $isDriver -and -not $isSecurity -and -not $isInsider) {
+                                if ($WuCategoryToggles.Updates) { $showThisUpdate = $true }
+                            }
+                            if ($isOptional -and $WuCategoryToggles.Optional) { $showThisUpdate = $true }
+                            if ($isDriver -and $WuCategoryToggles.Driver) { $showThisUpdate = $true }
+                            if ($isSecurity -and $WuCategoryToggles.Security) { $showThisUpdate = $true }
+                            if ($isInsider -and $WuCategoryToggles.Insider) { $showThisUpdate = $true }
+                            if (-not $showThisUpdate) { continue }
+
                             $visibleCount++
                             [PSCustomObject]@{
                                 Source       = "windowsupdate"
@@ -28304,7 +29839,7 @@ $btnWingetScan.Add_Click({
                     catch {
                         Write-Output "LOG:Windows Update scan failed: $($_.Exception.Message)"
                     }
-                }).AddArgument($ignoreList).AddArgument($completedWindowsUpdateIds)
+                }).AddArgument($ignoreList).AddArgument($completedWindowsUpdateIds).AddArgument($wuCategoryTogglesForScan)
 
             [void]$script:ActiveScans.Add([PSCustomObject]@{ PowerShell = $ps; AsyncResult = $ps.BeginInvoke() })
         }
@@ -29451,6 +30986,7 @@ $btnWingetScan.Add_Click({
     })
 
 # --- IGNORE SELECTED ---
+if (-not $btnWingetIgnore) { $btnWingetIgnore = Get-Ctrl "btnWingetIgnore" }
 $btnWingetIgnore.Add_Click({
         $selected = @($lstWinget.SelectedItems)
         if ($selected.Count -eq 0) { return }
@@ -29493,6 +31029,7 @@ $btnWingetIgnore.Add_Click({
     })
 
 # --- MANAGE IGNORED (UNIGNORE) ---
+if (-not $btnWingetUnignore) { $btnWingetUnignore = Get-Ctrl "btnWingetUnignore" }
 $btnWingetUnignore.Add_Click({
         $jsonPath = Join-Path (Get-DataPath) "settings.json"
         $listItems = @()
@@ -29986,6 +31523,39 @@ if ($lstWinget) {
     Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
 }
 
+# --- Library list column sorting ---
+$script:LibrarySortChain = New-Object System.Collections.ArrayList
+
+function Resolve-LibrarySortProperty {
+    param([string]$Header)
+    switch ($Header) {
+        "Source" { return "Source" }
+        "Name" { return "Name" }
+        "ID" { return "Id" }
+        "Installed" { return "Version" }
+        "Latest" { return "Available" }
+        default { return $Header }
+    }
+}
+
+if ($lstLibrary) {
+    $librarySortHandler = [System.Windows.RoutedEventHandler] {
+        param($src, $e)
+        $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+        if (-not $columnHeader -or -not $columnHeader.Column) { return }
+        $header = Get-CleanHeader $columnHeader.Column.Header
+        if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+        $propName = Resolve-LibrarySortProperty $header
+        if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+        $isAscending = Set-SortChainPrimary -Chain $script:LibrarySortChain -PropertyName $propName
+        Update-GridViewHeaders -ListView $lstLibrary -ActiveHeader $header -Ascending:$isAscending
+        Set-ListViewSort -ListView $lstLibrary -Chain $script:LibrarySortChain
+    }
+    $lstLibrary.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $librarySortHandler, $true)
+}
+
 # ---------------------------------------------------------
 # HIGH-PERFORMANCE THREADED SEARCH
 # ---------------------------------------------------------
@@ -30012,10 +31582,11 @@ $script:SearchTimer.Add_Tick({
             $lblWingetStatus.Visibility = "Visible"
             $btnWingetFind.IsEnabled = $true
             $txtWingetSearch.IsEnabled = $true
-            if ($lstWinget.Items.Count -eq 0) {
-                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "Search timed out"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false))
+            # Don't add a placeholder row — the status label already shows
+            # "Search timed out" above the list.
+            if ($lstWinget.Items.Count -gt 0) {
+                Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
             }
-            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
 
             $script:AsyncSearch = $null
             $script:AsyncPowerShell = $null
@@ -30053,11 +31624,15 @@ $script:SearchTimer.Add_Tick({
             $txtWingetSearch.IsEnabled = $true
             $lblWingetStatus.Text = "Ready"
         
-            if ($lstWinget.Items.Count -eq 0) { 
-                [void]$lstWinget.Items.Add((Set-WmtUpdateListItemCheckState -Item ([PSCustomObject]@{ Source = ""; Name = "No results found"; Id = ""; Version = ""; Available = "" }) -DefaultChecked:$false)) 
+            if ($lstWinget.Items.Count -eq 0) {
+                $lblWingetStatus.Text = "No results found"
+                $lblWingetStatus.Visibility = "Visible"
+                Write-GuiLog "Search Complete. No results found."
             }
-            Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
-            Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+            else {
+                Request-WmtUpdateListSmartColumnResize -ListView $lstWinget
+                Write-GuiLog "Search Complete. Found $($lstWinget.Items.Count) results."
+            }
             $script:WmtPackageSearchActive = $true
         
             $script:AsyncSearch = $null
@@ -30098,14 +31673,213 @@ $btnWingetFind.Add_Click({
             @("winget", "msstore", "windowsupdate", "pip", "npm", "pnpm", "dotnet", "psmodule", "composer", "chocolatey", "scoop", "gem", "cargo", "steam", "legendary", "gogdl")
         }
 
-        Write-GuiLog "Enabled providers: $($enabled -join ', ')"
-        
+        # Respect per-provider Search toggle: providers with Search=false are
+        # skipped during package search (but still scanned for updates).
+        # This is computed here (main scope) because Get-WmtProviderToggles
+        # is not available inside the runspace.
+        $allToggles = Get-WmtProviderToggles -Settings $settings
+        $searchEnabled = @()
+        foreach ($prov in @($enabled)) {
+            $t = $null
+            if ($allToggles -is [System.Collections.IDictionary] -and $allToggles.Contains($prov)) {
+                $t = $allToggles[$prov]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) { $searchEnabled += $prov }
+        }
+        $enabled = $searchEnabled
+
+        Write-GuiLog "Search-enabled providers: $($enabled -join ', ')"
+
+        # Resolve library cache file paths for the runspace (Get-DataPath is
+        # not available inside the runspace).
+        $dataPath = Get-DataPath
+        $legendaryCacheFile = Join-Path $dataPath "legendary_library.json"
+        $gogCacheFile = Join-Path $dataPath "gog_library.json"
+
+        # Kick off PyPI index cache refresh if pip is search-enabled and the
+        # cache is missing or stale. The search runspace reads from the cache.
+        # PyPI Simple API: https://pypi.org/simple/ with Accept header
+        # application/vnd.pypi.simple.v1+json returns a JSON index of all
+        # package names. We cache this locally and fuzzy-search it.
+        $pypiIndexFile = Join-Path $dataPath "pypi_index.json"
+        if ("pip" -in $enabled) {
+            $needPypiIndex = $false
+            $fileExists = (Test-Path -LiteralPath $pypiIndexFile -PathType Leaf)
+            $isStale = $false
+            if ($fileExists) {
+                try {
+                    $age = (Get-Date) - (Get-Item -LiteralPath $pypiIndexFile).LastWriteTime
+                    if ($age.TotalHours -ge 24) { $isStale = $true }
+                }
+                catch {}
+            }
+            $needPypiIndex = (-not $fileExists) -or $isStale
+            if ($needPypiIndex) {
+                Write-GuiLog "Fetching PyPI package index in background..."
+                $pypiPs = [PowerShell]::Create()
+                [void]$pypiPs.AddScript({
+                        param($CacheFile)
+                        try {
+                            try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                            $headers = @{
+                                "Accept"     = "application/vnd.pypi.simple.v1+json"
+                                "User-Agent" = "Windows-Maintenance-Tool"
+                            }
+                            $resp = Invoke-RestMethod -Uri "https://pypi.org/simple/" -Headers $headers -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                            if ($resp -and $resp.projects) {
+                                # Extract just the package names to keep the cache small.
+                                $names = @($resp.projects | ForEach-Object { [string]$_.name })
+                                $names | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $CacheFile -Force -Encoding UTF8
+                                Write-Output "LOG:PyPI index cached: $($names.Count) packages."
+                            }
+                        }
+                        catch {
+                            Write-Output "LOG:PyPI index fetch failed: $($_.Exception.Message)"
+                        }
+                    }).AddArgument($pypiIndexFile)
+                try { [void]$pypiPs.BeginInvoke() } catch { try { $pypiPs.Dispose() } catch {} }
+            }
+        }
+
+        # Kick off background library cache refresh for Legendary/GOGDL if
+        # the cache files are missing. This runs in a separate runspace so
+        # the UI does not hang. The search runspace below will read from
+        # the cache files; if they are not ready yet on the first search,
+        # it logs a message and the user can search again shortly after.
+        # The runspace scriptBlock is self-contained (inline logic) because
+        # main-scope functions are NOT available in [PowerShell]::Create().
+        $needLegCache = ("legendary" -in $enabled -and -not (Test-Path -LiteralPath $legendaryCacheFile -PathType Leaf))
+        $needGogCache = ("gogdl" -in $enabled -and -not (Test-Path -LiteralPath $gogCacheFile -PathType Leaf))
+        if ($needLegCache -or $needGogCache) {
+            Write-GuiLog "Fetching game libraries in background (Legendary/GOGDL)..."
+            # Resolve paths in main scope.
+            $legExe = Get-WmtLegendaryExePath
+            if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                try {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                catch {}
+            }
+            $gogAuth = Get-WmtGogdlAuthConfigPath
+            if ([string]::IsNullOrWhiteSpace($gogAuth) -or -not (Test-Path -LiteralPath $gogAuth -PathType Leaf)) {
+                $heroicAuth = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+                if (Test-Path -LiteralPath $heroicAuth -PathType Leaf) { $gogAuth = $heroicAuth }
+            }
+            $cachePs = [PowerShell]::Create()
+            [void]$cachePs.AddScript({
+                    param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile)
+
+                    if ($DoLeg) {
+                        try {
+                            $result = New-Object System.Collections.Generic.List[object]
+                            if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
+                                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                                $psi.FileName = $LegendaryExe
+                                $psi.Arguments = "list --json"
+                                $psi.RedirectStandardOutput = $true
+                                $psi.RedirectStandardError = $true
+                                $psi.UseShellExecute = $false
+                                $psi.CreateNoWindow = $true
+                                $proc = [System.Diagnostics.Process]::Start($psi)
+                                $stdout = $proc.StandardOutput.ReadToEnd()
+                                try { $proc.WaitForExit(30000) } catch {}
+                                try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+                                $parsed = $false
+                                if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+                                    try {
+                                        $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                                        if ($json) {
+                                            foreach ($game in @($json)) {
+                                                $title = [string]$game.app_title
+                                                if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                                $isInstalled = $false
+                                                try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                                                $installedVer = ""
+                                                $latestVer = [string]$game.app_version
+                                                if ($isInstalled) {
+                                                    try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                                                    if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                                                }
+                                                $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = [string]$game.app_name; Version = $latestVer; InstalledVersion = $installedVer; IsInstalled = $isInstalled; Source = "legendary"; Kind = "Library" })
+                                            }
+                                            if ($result.Count -gt 0) { $parsed = $true }
+                                        }
+                                    }
+                                    catch {}
+                                }
+                                if (-not $parsed) {
+                                    $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                                    foreach ($match in $regex.Matches($stdout)) {
+                                        $title = $match.Groups["title"].Value.Trim()
+                                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                        $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                                        $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = $match.Groups["app"].Value.Trim(); Version = $ver; Source = "legendary"; Kind = "Library" })
+                                    }
+                                }
+                            }
+                            $result.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                        }
+                        catch {}
+                    }
+
+                    if ($DoGog) {
+                        try {
+                            $result = New-Object System.Collections.Generic.List[object]
+                            if ($GogAuthPath -and (Test-Path -LiteralPath $GogAuthPath -PathType Leaf)) {
+                                $text = [System.IO.File]::ReadAllText($GogAuthPath).TrimStart([char]0xFEFF)
+                                $json = $text | ConvertFrom-Json -ErrorAction Stop
+                                $gogClientId = "46899977096215655"
+                                $creds = $null
+                                $clientProp = $json.PSObject.Properties[$gogClientId]
+                                if ($clientProp) { $creds = $clientProp.Value }
+                                elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+                                if ($creds -and -not [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+                                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                                    $token = [string]$creds.access_token
+                                    $headers = @{ "Authorization" = "Bearer $token"; "User-Agent" = "Windows-Maintenance-Tool" }
+                                    $page = 1
+                                    $totalPages = 1
+                                    while ($page -le $totalPages -and $page -le 50) {
+                                        $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+                                        $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                                        if (-not $resp) { break }
+                                        if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+                                        if ($resp.products) {
+                                            foreach ($prod in @($resp.products)) {
+                                                $title = [string]$prod.title
+                                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                                $result.Add([PSCustomObject]@{ Provider = "gogdl"; Title = $title; Id = [string]$prod.id; Version = [string]$prod.version; Source = "gogdl"; Kind = "Library" })
+                                            }
+                                        }
+                                        $page++
+                                    }
+                                }
+                            }
+                            $result.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $GogCacheFile -Force -Encoding UTF8
+                        }
+                        catch {}
+                    }
+                }).AddArgument($needLegCache).AddArgument($needGogCache).AddArgument($legExe).AddArgument($legendaryCacheFile).AddArgument($gogAuth).AddArgument($gogCacheFile)
+            try { [void]$cachePs.BeginInvoke() } catch { try { $cachePs.Dispose() } catch {} }
+        }
+
         # Reset Task List
         $script:ActiveScans.Clear()
         # 3. DEFINE THE WORKER THREAD SCRIPT
         # This contains the EXACT logic that worked for you before.
         $scriptBlock = {
-            param($Query, $Enabled)
+            param($Query, $Enabled, $LegendaryCacheFile, $GogCacheFile, $PypiIndexFile)
         
             [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
             function Log($msg) { Write-Output "LOG:$msg" }
@@ -30335,10 +32109,167 @@ $btnWingetFind.Add_Click({
                 }
                 catch { Log "Composer skipped." }
             }
+
+            # --- M. PIP (PyPI via cached simple index) ---
+            if ("pip" -in $Enabled) {
+                Log "Searching PyPI (cached index)..."
+                try {
+                    if ($PypiIndexFile -and (Test-Path -LiteralPath $PypiIndexFile -PathType Leaf)) {
+                        $indexText = [System.IO.File]::ReadAllText($PypiIndexFile)
+                        $index = $indexText | ConvertFrom-Json -ErrorAction Stop
+                        if ($index) {
+                            $needle = $Query.ToLowerInvariant()
+                            $count = 0
+                            foreach ($pkgName in @($index)) {
+                                $name = [string]$pkgName
+                                if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                                if ($name.ToLowerInvariant().Contains($needle)) {
+                                    [PSCustomObject]@{ Source = "pip"; Name = $name; Id = $name; Version = "-"; Available = "-" }
+                                    $count++
+                                    if ($count -ge 100) { break }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "PyPI index cache not found. It is fetched in the background on first search."
+                    }
+                }
+                catch { Log "Pip search skipped: $($_.Exception.Message)" }
+            }
+
+            # --- G. SCOOP ---
+            if ("scoop" -in $Enabled) {
+                Log "Searching Scoop..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "powershell.exe" -Arguments "-NoProfile -Command scoop search `"$Query`"" -TimeoutSeconds 30
+                    $out = $result.Output
+                    $inResults = $false
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match "^Name\s") { $inResults = $true; continue }
+                        if (-not $inResults) { continue }
+                        if ($trimmed -match "^-+") { continue }
+                        if ([string]::IsNullOrWhiteSpace($trimmed)) { continue }
+                        $parts = @($trimmed -split '\s{2,}|     ' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                        if ($parts.Count -ge 2) {
+                            [PSCustomObject]@{ Source = "scoop"; Name = [string]$parts[0]; Id = [string]$parts[0]; Version = [string]$parts[1]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Scoop skipped." }
+            }
+
+            # --- H. CARGO ---
+            if ("cargo" -in $Enabled) {
+                Log "Searching Cargo crates..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "cargo" -Arguments "search `"$Query`"" -TimeoutSeconds 30
+                    $out = $result.Output
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match '^(?<name>\S+)\s*=\s*"(?<version>[^"]*)"') {
+                            [PSCustomObject]@{ Source = "cargo"; Name = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Cargo skipped." }
+            }
+
+            # --- I. RUBYGEMS ---
+            if ("gem" -in $Enabled) {
+                Log "Searching RubyGems..."
+                try {
+                    $result = Invoke-WmtPackageSearchProcess -FileName "gem" -Arguments "search `"$Query`" --remote" -TimeoutSeconds 30
+                    $out = $result.Output
+                    foreach ($line in ($out -split "`r?`n")) {
+                        $trimmed = ([string]$line).Trim()
+                        if ($trimmed -match '^(?<name>\S+)\s+\((?<version>[^)]+)\)') {
+                            [PSCustomObject]@{ Source = "gem"; Name = $matches["name"]; Id = $matches["name"]; Version = $matches["version"]; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "RubyGems skipped." }
+            }
+
+            # --- J. STEAM STORE ---
+            if ("steam" -in $Enabled) {
+                Log "Searching Steam Store..."
+                try {
+                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                    $encoded = [Uri]::EscapeDataString($Query)
+                    $url = "https://store.steampowered.com/api/storesearch/?term=$encoded&l=english&cc=US"
+                    $resp = Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                    if ($resp -and $resp.total -gt 0) {
+                        foreach ($item in @($resp.items)) {
+                            [PSCustomObject]@{ Source = "steam"; Name = [string]$item.name; Id = [string]$item.id; Version = "-"; Available = "-" }
+                        }
+                    }
+                }
+                catch { Log "Steam Store skipped." }
+            }
+
+            # --- K. LEGENDARY (Epic Games library) ---
+            if ("legendary" -in $Enabled) {
+                Log "Searching Legendary library..."
+                try {
+                    if ($LegendaryCacheFile -and (Test-Path -LiteralPath $LegendaryCacheFile -PathType Leaf)) {
+                        $cacheText = [System.IO.File]::ReadAllText($LegendaryCacheFile)
+                        $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                        if ($library) {
+                            $needle = $Query.ToLowerInvariant()
+                            foreach ($game in @($library)) {
+                                $title = [string]$game.Title
+                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                if ([string]::IsNullOrWhiteSpace($needle) -or $title.ToLowerInvariant().Contains($needle)) {
+                                    # Show installed version in Version column, latest in Available.
+                                    $isInst = $false
+                                    try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
+                                    $instVer = ""
+                                    try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
+                                    $latestVer = [string]$game.Version
+                                    $verCol = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "-" }
+                                    $availCol = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                                    [PSCustomObject]@{ Source = "legendary"; Name = $title; Id = [string]$game.Id; Version = $verCol; Available = $availCol }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "Legendary library cache not found. Open Providers panel to populate."
+                    }
+                }
+                catch { Log "Legendary library skipped: $($_.Exception.Message)" }
+            }
+
+            # --- L. GOGDL (GOG library) ---
+            if ("gogdl" -in $Enabled) {
+                Log "Searching GOG library..."
+                try {
+                    if ($GogCacheFile -and (Test-Path -LiteralPath $GogCacheFile -PathType Leaf)) {
+                        $cacheText = [System.IO.File]::ReadAllText($GogCacheFile)
+                        $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                        if ($library) {
+                            $needle = $Query.ToLowerInvariant()
+                            foreach ($game in @($library)) {
+                                $title = [string]$game.Title
+                                if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                if ([string]::IsNullOrWhiteSpace($needle) -or $title.ToLowerInvariant().Contains($needle)) {
+                                    [PSCustomObject]@{ Source = "gogdl"; Name = $title; Id = [string]$game.Id; Version = [string]$game.Version; Available = "-" }
+                                }
+                            }
+                        }
+                    }
+                    else {
+                        Log "GOG library cache not found. Open Providers panel to populate."
+                    }
+                }
+                catch { Log "GOG library skipped: $($_.Exception.Message)" }
+            }
         }
 
         # 4. EXECUTE THREAD (The Magic Part)
-        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled)
+        $script:AsyncPowerShell = [PowerShell]::Create().AddScript($scriptBlock).AddArgument($query).AddArgument($enabled).AddArgument($legendaryCacheFile).AddArgument($gogCacheFile).AddArgument($pypiIndexFile)
         $script:AsyncSearch = $script:AsyncPowerShell.BeginInvoke()
         $script:WmtPackageSearchStartedAt = Get-Date
         $script:SearchTimer.Start()
@@ -31207,26 +33138,40 @@ $btnFwDefaults.Add_Click({ Invoke-FirewallDefaults; $btnFwRefresh.RaiseEvent((Ne
 $btnFwPurge.Add_Click({ Invoke-FirewallPurge; $btnFwRefresh.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) })
 
 # --- Drivers ---
-$btnDrvDisableWU.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Disable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($res -ne "Yes") { return }
-        Invoke-DriverUpdates -Enable:$false
-    })
-$btnDrvEnableWU.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Enable automatic driver updates via Windows Update?", "Driver Updates", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Invoke-DriverUpdates -Enable:$true
-    })
-$btnDrvDisableMeta.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Disable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
-        if ($res -ne "Yes") { return }
-        Invoke-DeviceMetadata -Enable:$false
-    })
-$btnDrvEnableMeta.Add_Click({
-        $res = [System.Windows.MessageBox]::Show("Enable device metadata downloads (icons/info) from the internet?", "Device Metadata", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
-        if ($res -ne "Yes") { return }
-        Invoke-DeviceMetadata -Enable:$true
-    })
+$btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
+if ($btnToggleDrvUpdates) {
+    $btnToggleDrvUpdates.Add_Click({
+            $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $currentlyDisabled = $true } } catch {}
+            if ($currentlyDisabled) {
+                Invoke-DriverUpdates -Enable:$true
+            }
+            else {
+                Invoke-DriverUpdates -Enable:$false
+            }
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $currentlyDisabled = $true } } catch {}
+            Update-WmtTweakToggle $btnToggleDrvUpdates $currentlyDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
+        })
+}
+$btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
+if ($btnToggleDrvMeta) {
+    $btnToggleDrvMeta.Add_Click({
+            $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $currentlyDisabled = $true } } catch {}
+            if ($currentlyDisabled) {
+                Invoke-DeviceMetadata -Enable:$true
+            }
+            else {
+                Invoke-DeviceMetadata -Enable:$false
+            }
+            $currentlyDisabled = $false
+            try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $currentlyDisabled = $true } } catch {}
+            Update-WmtTweakToggle $btnToggleDrvMeta $currentlyDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
+        })
+}
 
 # --- Cleanup ---
 $btnCleanDisk.Add_Click({ Start-Process cleanmgr })
@@ -31347,6 +33292,148 @@ if ($btnToggleTheme) {
             Set-WmtThemePreference -Theme $nextTheme
         })
 }
+
+# --- Start with Windows ---
+# Uses Task Scheduler to launch WMT at logon with highest privileges,
+# which skips the UAC prompt. This works in both .exe and .ps1 mode.
+
+$script:WmtStartupTaskName = "WindowsMaintenanceTool"
+
+function Get-WmtStartupCommand {
+    # Build the command parts for Task Scheduler.
+    # Returns a hashtable: @{ FilePath; Arguments }
+    if ($script:WmtIsCompiledExe) {
+        $exePath = $script:WmtProcessPath
+        if ([string]::IsNullOrWhiteSpace($exePath) -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) { return $null }
+        return @{ FilePath = $exePath; Arguments = "" }
+    }
+    else {
+        $scriptPath = $script:WmtScriptPath
+        if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return $null }
+        $psExe = "powershell.exe"
+        try {
+            $cmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
+            if ($cmd -and $cmd.Source) { $psExe = $cmd.Source }
+        }
+        catch {}
+        return @{ FilePath = $psExe; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" }
+    }
+}
+
+function Test-WmtStartWithWindows {
+    try {
+        $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
+        if ($task -and $task.State -ne "Disabled") { return $true }
+    }
+    catch {}
+    return $false
+}
+
+function Test-WmtStartupEntryValid {
+    # Check if the existing scheduled task points to a file that still exists.
+    try {
+        $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
+        if (-not $task) { return $false }
+        foreach ($action in @($task.Actions)) {
+            $filePath = [string]$action.Execute
+            if (-not [string]::IsNullOrWhiteSpace($filePath) -and (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                return $true
+            }
+        }
+        return $false
+    }
+    catch {}
+    return $false
+}
+
+function Repair-WmtStartupEntry {
+    # If the scheduled task exists but points to a moved/deleted file,
+    # update it to the current WMT path. If the current path is also
+    # invalid, remove the task entirely.
+    try {
+        if (-not (Test-WmtStartWithWindows)) { return }
+        $isValid = Test-WmtStartupEntryValid
+        if ($isValid) { return }
+
+        # Entry is stale — try to repair with the current path.
+        $cmdParts = Get-WmtStartupCommand
+        if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
+            # Can't build a valid command — remove the stale task.
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-GuiLog "Start with Windows: removed stale task (file was moved or deleted)."
+            return
+        }
+
+        # Recreate the task with the current path.
+        Set-WmtStartWithWindows -Enabled $true
+        Write-GuiLog "Start with Windows: updated task to current path."
+    }
+    catch {
+        Write-GuiLog "Failed to repair startup task: $($_.Exception.Message)"
+    }
+}
+
+function Set-WmtStartWithWindows {
+    param([bool]$Enabled)
+    try {
+        if ($Enabled) {
+            $cmdParts = Get-WmtStartupCommand
+            if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
+                Write-GuiLog "Start with Windows: could not determine WMT launch path."
+                return
+            }
+
+            # Remove existing task if it exists.
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+
+            # Build the scheduled task:
+            # - Trigger: At logon
+            # - Action: Run WMT (exe or powershell.exe -File script.ps1)
+            # - Settings: Run with highest privileges (skips UAC)
+            $action = New-ScheduledTaskAction -FilePath $cmdParts.FilePath -Argument $cmdParts.Arguments
+            $trigger = New-ScheduledTaskTrigger -AtLogOn
+            $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+
+            Register-ScheduledTask -TaskName $script:WmtStartupTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
+            Write-GuiLog "Start with Windows: enabled (Task Scheduler, no UAC prompt)."
+        }
+        else {
+            Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+            Write-GuiLog "Start with Windows: disabled."
+        }
+    }
+    catch {
+        Write-GuiLog "Failed to set Start with Windows: $($_.Exception.Message)"
+    }
+}
+
+function Update-WmtStartWithWindowsButton {
+    if (-not $btnStartWithWindows) { return }
+    $isEnabled = Test-WmtStartWithWindows
+    if ($isEnabled) {
+        $btnStartWithWindows.Content = "Stop Starting with Windows"
+        $btnStartWithWindows.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
+    }
+    else {
+        $btnStartWithWindows.Content = "Start with Windows"
+        $btnStartWithWindows.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
+    }
+}
+
+if ($btnStartWithWindows) {
+    # On startup, repair the startup entry if the file was moved.
+    Repair-WmtStartupEntry
+
+    # Set initial button state.
+    Update-WmtStartWithWindowsButton
+
+    $btnStartWithWindows.Add_Click({
+            $isEnabled = Test-WmtStartWithWindows
+            Set-WmtStartWithWindows -Enabled (-not $isEnabled)
+            Update-WmtStartWithWindowsButton
+        })
+}
 if ($btnDonate) { $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" }) }
 
 if ($btnNavDownloads) { $btnNavDownloads.Add_Click({ Show-DownloadStats }) }
@@ -31372,7 +33459,7 @@ $btnPerfServicesManual.Add_Click({
             }
             Write-GuiLog "Services optimization complete!"
         } "Optimizing services..."
-        Update-TweakButtonStates
+        # Deferred to ContentRendered: Update-TweakButtonStates
     })
 
 $btnPerfServicesRevert.Add_Click({
@@ -31391,55 +33478,42 @@ $btnPerfServicesRevert.Add_Click({
         Update-TweakButtonStates
     })
 
-$btnPerfDisableHibernate.Add_Click({
-        Invoke-UiCommand {
-            powercfg /hibernate off
-            Write-GuiLog "Hibernation disabled. Disk space freed."
-        } "Disabling hibernation..."
+$btnToggleHibernate = Get-Ctrl "btnToggleHibernate"
+if ($btnToggleHibernate) {
+    $btnToggleHibernate.Add_Click({
+            $h = [int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "HibernateEnabled" 0)
+            if ($h -eq 1) {
+                Invoke-UiCommand { powercfg /hibernate off; Write-GuiLog "Hibernation disabled. Disk space freed." } "Disabling hibernation..."
+            }
+            else {
+                Invoke-UiCommand { powercfg /hibernate on; Write-GuiLog "Hibernation enabled." } "Enabling hibernation..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSuperfetch.Add_Click({
+        $svc = Get-Service "SysMain" -ErrorAction SilentlyContinue
+        if ($svc -and $svc.StartType -eq "Disabled") {
+            Invoke-UiCommand {
+                Set-Service -Name SysMain -StartupType Automatic
+                Start-Service -Name SysMain -ErrorAction SilentlyContinue
+                Write-GuiLog "Superfetch/SysMain enabled."
+            } "Enabling Superfetch..."
+        }
+        else {
+            Invoke-UiCommand {
+                Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
+                Set-Service -Name SysMain -StartupType Disabled
+                Write-GuiLog "Superfetch/SysMain disabled."
+            } "Disabling Superfetch..."
+        }
         Update-TweakButtonStates
     })
 
-$btnPerfEnableHibernate.Add_Click({
-        Invoke-UiCommand {
-            powercfg /hibernate on
-            Write-GuiLog "Hibernation enabled."
-        } "Enabling hibernation..."
-        Update-TweakButtonStates
-    })
 
-$btnPerfDisableSuperfetch.Add_Click({
-        Invoke-UiCommand {
-            Stop-Service -Name SysMain -Force -ErrorAction SilentlyContinue
-            Set-Service -Name SysMain -StartupType Disabled
-            Write-GuiLog "Superfetch/SysMain disabled."
-        } "Disabling Superfetch..."
-        Update-TweakButtonStates
-    })
 
-$btnPerfEnableSuperfetch.Add_Click({
-        Invoke-UiCommand {
-            Set-Service -Name SysMain -StartupType Automatic
-            Start-Service -Name SysMain -ErrorAction SilentlyContinue
-            Write-GuiLog "Superfetch/SysMain enabled."
-        } "Enabling Superfetch..."
-        Update-TweakButtonStates
-    })
 
-$btnPerfDisableMemCompress.Add_Click({
-        Invoke-UiCommand {
-            Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
-            Write-GuiLog "Memory compression disabled."
-        } "Disabling memory compression..."
-        Update-TweakButtonStates
-    })
-
-$btnPerfEnableMemCompress.Add_Click({
-        Invoke-UiCommand {
-            Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue
-            Write-GuiLog "Memory compression enabled."
-        } "Enabling memory compression..."
-        Update-TweakButtonStates
-    })
 
 $btnPerfUltimatePower.Add_Click({
         Invoke-UiCommand {
@@ -31449,56 +33523,19 @@ $btnPerfUltimatePower.Add_Click({
         } "Enabling Ultimate Performance..."
         Update-TweakButtonStates
     })
-$btnPerfEnableHags = Get-Ctrl "btnPerfEnableHags"
-$btnPerfDisableHags = Get-Ctrl "btnPerfDisableHags"
-if ($btnPerfEnableHags) {
-    $btnPerfEnableHags.Add_Click({ Set-Hags -Enable $true; Update-TweakButtonStates })
-}
-if ($btnPerfDisableHags) {
-    $btnPerfDisableHags.Add_Click({ Set-Hags -Enable $false; Update-TweakButtonStates })
-}
-    
-
-# --- APPX BLOATWARE REMOVAL ---
-$script:AppxList = @(
-    [PSCustomObject]@{Name = "Xbox App"; Package = "Microsoft.XboxApp" },
-    [PSCustomObject]@{Name = "Xbox Gaming Overlay"; Package = "Microsoft.XboxGamingOverlay" },
-    [PSCustomObject]@{Name = "Xbox Game Bar"; Package = "Microsoft.XboxGameOverlay" },
-    [PSCustomObject]@{Name = "Xbox Live"; Package = "Microsoft.XboxSpeechToTextOverlay" },
-    [PSCustomObject]@{Name = "Xbox Identity Provider"; Package = "Microsoft.XboxIdentityProvider" },
-    [PSCustomObject]@{Name = "Microsoft Solitaire"; Package = "Microsoft.MicrosoftSolitaireCollection" },
-    [PSCustomObject]@{Name = "Microsoft Office Hub"; Package = "Microsoft.MicrosoftOfficeHub" },
-    [PSCustomObject]@{Name = "OneNote"; Package = "Microsoft.Office.OneNote" },
-    [PSCustomObject]@{Name = "Mail & Calendar"; Package = "microsoft.windowscommunicationsapps" },
-    [PSCustomObject]@{Name = "People"; Package = "Microsoft.People" },
-    [PSCustomObject]@{Name = "Skype"; Package = "Microsoft.SkypeApp" },
-    [PSCustomObject]@{Name = "Maps"; Package = "Microsoft.WindowsMaps" },
-    [PSCustomObject]@{Name = "Weather"; Package = "Microsoft.BingWeather" },
-    [PSCustomObject]@{Name = "News"; Package = "Microsoft.BingNews" },
-    [PSCustomObject]@{Name = "Sports"; Package = "Microsoft.BingSports" },
-    [PSCustomObject]@{Name = "Finance"; Package = "Microsoft.BingFinance" },
-    [PSCustomObject]@{Name = "Movies & TV"; Package = "Microsoft.ZuneVideo" },
-    [PSCustomObject]@{Name = "Groove Music"; Package = "Microsoft.ZuneMusic" },
-    [PSCustomObject]@{Name = "Get Help"; Package = "Microsoft.GetHelp" },
-    [PSCustomObject]@{Name = "Get Started"; Package = "Microsoft.Getstarted" },
-    [PSCustomObject]@{Name = "Feedback Hub"; Package = "Microsoft.WindowsFeedbackHub" },
-    [PSCustomObject]@{Name = "Mixed Reality Portal"; Package = "Microsoft.MixedReality.Portal" },
-    [PSCustomObject]@{Name = "3D Viewer"; Package = "Microsoft.Microsoft3DViewer" },
-    [PSCustomObject]@{Name = "Paint 3D"; Package = "Microsoft.MSPaint" },
-    [PSCustomObject]@{Name = "Phone Link"; Package = "Microsoft.YourPhone" },
-    [PSCustomObject]@{Name = "Quick Assist"; Package = "MicrosoftCorporationII.QuickAssist" },
-    [PSCustomObject]@{Name = "Family Safety"; Package = "MicrosoftCorporationII.MicrosoftFamily" }
-)
 
 $btnAppxLoad.Add_Click({
-        $lstAppxPackages.Items.Clear()
-        foreach ($app in $script:AppxList) {
-            $installed = Get-AppxPackage -Name $app.Package -ErrorAction SilentlyContinue
-            if ($installed) {
-                [void]$lstAppxPackages.Items.Add($app)
+        Invoke-UiCommand {
+            $lstAppxPackages.Items.Clear()
+            $apps = @(Get-AppxPackage | Where-Object { $_.Name -and $_.NonRemovable -ne $true } | Sort-Object Name)
+            foreach ($app in $apps) {
+                $lstAppxPackages.Items.Add([PSCustomObject]@{
+                        Name    = [string]$app.Name
+                        Package = [string]$app.PackageFullName
+                    }) | Out-Null
             }
-        }
-        Write-GuiLog "Loaded $($lstAppxPackages.Items.Count) removable apps."
+            Write-GuiLog "Loaded $($apps.Count) removable UWP apps."
+        } "Loading UWP apps..."
     })
 
 $btnAppxRemoveSel.Add_Click({
@@ -31678,422 +33715,199 @@ $btnWUDisable.Add_Click({
     })
 
 # --- Taskbar & Clock Tweaks Logic ---
-$btnTaskbarLeft = Get-Ctrl "btnTaskbarLeft"
-$btnTaskbarCenter = Get-Ctrl "btnTaskbarCenter"
-$btnClock24 = Get-Ctrl "btnClock24"
-$btnClock12 = Get-Ctrl "btnClock12"
-$btnClockSecsOn = Get-Ctrl "btnClockSecsOn"
-$btnClockSecsOff = Get-Ctrl "btnClockSecsOff"
-$btnHideSearch = Get-Ctrl "btnHideSearch"
-$btnSearchIcon = Get-Ctrl "btnSearchIcon"
-$btnHideWidgets = Get-Ctrl "btnHideWidgets"
-$btnHideTaskView = Get-Ctrl "btnHideTaskView"
-$btnHideChat = Get-Ctrl "btnHideChat"
-$btnNeverCombine = Get-Ctrl "btnNeverCombine"
-$btnAlwaysCombine = Get-Ctrl "btnAlwaysCombine"
-    
-if ($btnTaskbarLeft) {
-    $btnTaskbarLeft.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Aligning taskbar to the left... (Explorer will restart)"
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnTaskbarCenter) {
-    $btnTaskbarCenter.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarAl" -Value 1 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Aligning taskbar to the center... (Explorer will restart)"
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnClock24) {
-    $btnClock24.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sShortTime" -Value "HH:mm" -Force
-                Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "HH:mm:ss" -Force
-                Stop-Process -Name explorer -Force
-            } "Setting system clock to 24-hour format..."
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnClock12) {
-    $btnClock12.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sShortTime" -Value "h:mm tt" -Force
-                Set-ItemProperty -Path "HKCU:\Control Panel\International" -Name "sTimeFormat" -Value "h:mm:ss tt" -Force
-                Stop-Process -Name explorer -Force
-            } "Setting system clock to 12-hour format..."
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnClockSecsOn) {
-    $btnClockSecsOn.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 1 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Enabling seconds on the system clock..."
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnClockSecsOff) {
-    $btnClockSecsOff.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowSecondsInSystemClock" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Hiding seconds on the system clock..."
-            Update-TweakButtonStates
-        })
-}
-    
-if ($btnHideSearch) {
-    $btnHideSearch.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Hiding Taskbar Search..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnSearchIcon) {
-    $btnSearchIcon.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" -Name "SearchboxTaskbarMode" -Value 1 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Setting Taskbar Search to Icon only..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnHideWidgets) {
-    $btnHideWidgets.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarDa" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Hiding Taskbar Widgets..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnHideTaskView) {
-    $btnHideTaskView.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "ShowTaskViewButton" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Hiding Task View button..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnHideChat) {
-    $btnHideChat.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarMn" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Hiding Chat icon..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnNeverCombine) {
-    $btnNeverCombine.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarGlomLevel" -Value 2 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Setting taskbar to never combine buttons..."
-            Update-TweakButtonStates
-        })
-}
-            
-if ($btnAlwaysCombine) {
-    $btnAlwaysCombine.Add_Click({
-            Invoke-UiCommand {
-                Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "TaskbarGlomLevel" -Value 0 -Type DWord -Force
-                Stop-Process -Name explorer -Force
-            } "Restoring default taskbar combining..."
-            Update-TweakButtonStates
-        })
-}
+$btnToggleTaskbarAlign = Get-Ctrl "btnToggleTaskbarAlign"
+$btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"
+$btnToggleClockSecs = Get-Ctrl "btnToggleClockSecs"
+$btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"
+$btnToggleWidgets = Get-Ctrl "btnToggleWidgets"
+$btnToggleTaskView = Get-Ctrl "btnToggleTaskView"
+$btnToggleChat = Get-Ctrl "btnToggleChat"
+$btnMouseSettings = Get-Ctrl "btnMouseSettings"
+$btnSearchIndexRebuild = Get-Ctrl "btnSearchIndexRebuild"
+$btnMouseSpeedSlow = Get-Ctrl "btnMouseSpeedSlow"
+$btnMouseSpeedDefault = Get-Ctrl "btnMouseSpeedDefault"
+$btnMouseSpeedFast = Get-Ctrl "btnMouseSpeedFast"
+$btnToggleCombine = Get-Ctrl "btnToggleCombine"
 
-function Register-WmtTweakButton {
-    param(
-        [string]$Name,
-        [scriptblock]$Action
-    )
-
-    $button = Get-Ctrl $Name
-    if (-not $button) { return }
-    $button.Add_Click({
-            & $Action
-            Update-TweakButtonStates
-        }.GetNewClosure())
-}
-
-$script:WmtSuggestionContentNames = @(
-    "ContentDeliveryAllowed",
-    "FeatureManagementEnabled",
-    "OemPreInstalledAppsEnabled",
-    "PreInstalledAppsEnabled",
-    "PreInstalledAppsEverEnabled",
-    "SilentInstalledAppsEnabled",
-    "SoftLandingEnabled",
-    "SubscribedContent-310093Enabled",
-    "SubscribedContent-338388Enabled",
-    "SubscribedContent-338389Enabled",
-    "SubscribedContent-338393Enabled",
-    "SubscribedContent-353694Enabled",
-    "SubscribedContent-353696Enabled",
-    "SystemPaneSuggestionsEnabled"
-)
-
-Register-WmtTweakButton "btnExpShowExt" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 0
-        Restart-WmtExplorer
-        Write-GuiLog "File extensions are now visible."
-    } "Showing file extensions..."
-}
-Register-WmtTweakButton "btnExpHideExt" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideFileExt" 1
-        Restart-WmtExplorer
-        Write-GuiLog "Known file extensions are now hidden."
-    } "Hiding file extensions..."
-}
-Register-WmtTweakButton "btnExpShowHidden" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 1
-        Restart-WmtExplorer
-        Write-GuiLog "Hidden files and folders are now visible."
-    } "Showing hidden files..."
-}
-Register-WmtTweakButton "btnExpHideHidden" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Hidden" 2
-        Restart-WmtExplorer
-        Write-GuiLog "Hidden files and folders are now hidden."
-    } "Hiding hidden files..."
-}
-Register-WmtTweakButton "btnExpFullPathOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 1
-        Restart-WmtExplorer
-        Write-GuiLog "Explorer title bars now show full paths."
-    } "Enabling Explorer full path titles..."
-}
-Register-WmtTweakButton "btnExpFullPathOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\CabinetState" "FullPath" 0
-        Restart-WmtExplorer
-        Write-GuiLog "Explorer title bars now use default path display."
-    } "Disabling Explorer full path titles..."
-}
-Register-WmtTweakButton "btnExpLaunchThisPc" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 1
-        Write-GuiLog "File Explorer now opens to This PC."
-    } "Setting Explorer to open This PC..."
-}
-Register-WmtTweakButton "btnExpLaunchQuickAccess" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LaunchTo" 2
-        Write-GuiLog "File Explorer now opens to Quick Access/Home."
-    } "Setting Explorer to open Quick Access..."
-}
-Register-WmtTweakButton "btnExpHideRecents" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 0
-        Restart-WmtExplorer
-        Write-GuiLog "Recent and frequent Quick Access items are hidden."
-    } "Hiding Explorer recent items..."
-}
-Register-WmtTweakButton "btnExpShowRecents" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowRecent" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer" "ShowFrequent" 1
-        Restart-WmtExplorer
-        Write-GuiLog "Recent and frequent Quick Access items are visible."
-    } "Showing Explorer recent items..."
-}
-
-Register-WmtTweakButton "btnMouseSpeedSlow" { Invoke-UiCommand { Set-WmtMouseSpeed 6; Write-GuiLog "Mouse pointer speed set to 6." } "Setting mouse pointer speed..." }
-Register-WmtTweakButton "btnMouseSpeedDefault" { Invoke-UiCommand { Set-WmtMouseSpeed 10; Write-GuiLog "Mouse pointer speed set to 10." } "Setting mouse pointer speed..." }
-Register-WmtTweakButton "btnMouseSpeedFast" { Invoke-UiCommand { Set-WmtMouseSpeed 15; Write-GuiLog "Mouse pointer speed set to 15." } "Setting mouse pointer speed..." }
-Register-WmtTweakButton "btnMouseAccelOn" { Invoke-UiCommand { Set-WmtMouseAcceleration $true; Write-GuiLog "Mouse acceleration enabled." } "Enabling mouse acceleration..." }
-Register-WmtTweakButton "btnMouseAccelOff" { Invoke-UiCommand { Set-WmtMouseAcceleration $false; Write-GuiLog "Mouse acceleration disabled." } "Disabling mouse acceleration..." }
-Register-WmtTweakButton "btnMouseSingleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $true; Write-GuiLog "Single-click folder opening enabled." } "Enabling single-click folder opening..." }
-Register-WmtTweakButton "btnMouseDoubleClick" { Invoke-UiCommand { Set-WmtExplorerClickMode $false; Write-GuiLog "Double-click folder opening restored." } "Restoring double-click folder opening..." }
-Register-WmtTweakButton "btnMouseSettings" { Start-Process "ms-settings:mousetouchpad" }
-
-Register-WmtTweakButton "btnCtxClassic" { Invoke-UiCommand { Set-WmtClassicContextMenu $true; Write-GuiLog "Classic Windows 11 context menu enabled." } "Enabling classic context menu..." }
-Register-WmtTweakButton "btnCtxModern" { Invoke-UiCommand { Set-WmtClassicContextMenu $false; Write-GuiLog "Modern Windows 11 context menu restored." } "Restoring modern context menu..." }
-Register-WmtTweakButton "btnCtxTakeOwnAdd" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $true; Write-GuiLog "Take Ownership context menu installed." } "Adding Take Ownership context menu..." }
-Register-WmtTweakButton "btnCtxTakeOwnRemove" { Invoke-UiCommand { Set-WmtTakeOwnershipMenu $false; Write-GuiLog "Take Ownership context menu removed." } "Removing Take Ownership context menu..." }
-Register-WmtTweakButton "btnCtxPsHereAdd" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $true; Write-GuiLog "Open PowerShell Here context menu installed." } "Adding PowerShell context menu..." }
-Register-WmtTweakButton "btnCtxPsHereRemove" { Invoke-UiCommand { Set-WmtPowerShellHereMenu $false; Write-GuiLog "Open PowerShell Here context menu removed." } "Removing PowerShell context menu..." }
-
-Register-WmtTweakButton "btnPrivacyAdsOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 0; Write-GuiLog "Advertising ID disabled." } "Disabling advertising ID..." }
-Register-WmtTweakButton "btnPrivacyAdsOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1; Write-GuiLog "Advertising ID enabled." } "Enabling advertising ID..." }
-Register-WmtTweakButton "btnPrivacySuggestedOff" {
-    Invoke-UiCommand {
-        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 0
-        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures" 1
-        Write-GuiLog "Suggested content disabled."
-    } "Disabling suggested content..."
-}
-Register-WmtTweakButton "btnPrivacySuggestedOn" {
-    Invoke-UiCommand {
-        Set-WmtContentDeliveryValues $script:WmtSuggestionContentNames 1
-        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsConsumerFeatures"
-        Write-GuiLog "Suggested content restored."
-    } "Restoring suggested content..."
-}
-Register-WmtTweakButton "btnPrivacyTailoredOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 0
-        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData" 1
-        Write-GuiLog "Tailored experiences disabled."
-    } "Disabling tailored experiences..."
-}
-Register-WmtTweakButton "btnPrivacyTailoredOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy" "TailoredExperiencesWithDiagnosticDataEnabled" 1
-        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\CloudContent" "DisableTailoredExperiencesWithDiagnosticData"
-        Write-GuiLog "Tailored experiences restored."
-    } "Restoring tailored experiences..."
-}
-Register-WmtTweakButton "btnPrivacyActivityOff" {
-    Invoke-UiCommand {
-        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-        Set-WmtRegDword $path "EnableActivityFeed" 0
-        Set-WmtRegDword $path "PublishUserActivities" 0
-        Set-WmtRegDword $path "UploadUserActivities" 0
-        Write-GuiLog "Activity history policies disabled."
-    } "Disabling activity history..."
-}
-Register-WmtTweakButton "btnPrivacyActivityOn" {
-    Invoke-UiCommand {
-        $path = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
-        Remove-WmtRegValue $path "EnableActivityFeed"
-        Remove-WmtRegValue $path "PublishUserActivities"
-        Remove-WmtRegValue $path "UploadUserActivities"
-        Write-GuiLog "Activity history policy defaults restored."
-    } "Restoring activity history policies..."
-}
-Register-WmtTweakButton "btnPrivacyAppLaunchOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 0; Write-GuiLog "App launch tracking disabled." } "Disabling app launch tracking..." }
-Register-WmtTweakButton "btnPrivacyAppLaunchOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 1; Write-GuiLog "App launch tracking restored." } "Restoring app launch tracking..." }
-
-Register-WmtTweakButton "btnSearchWebOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 0
-        Restart-WmtExplorer
-        Write-GuiLog "Web results in Start search disabled."
-    } "Disabling web search results..."
-}
-Register-WmtTweakButton "btnSearchWebOn" {
-    Invoke-UiCommand {
-        Remove-WmtRegValue "HKCU:\Software\Policies\Microsoft\Windows\Explorer" "DisableSearchBoxSuggestions"
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "BingSearchEnabled" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "CortanaConsent" 1
-        Restart-WmtExplorer
-        Write-GuiLog "Web results in Start search restored."
-    } "Restoring web search results..."
-}
-Register-WmtTweakButton "btnSearchIndexReduced" {
-    Invoke-UiCommand {
-        Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
-        Set-Service -Name WSearch -StartupType Manual -ErrorAction SilentlyContinue
-        Write-GuiLog "Windows Search indexing reduced."
-    } "Reducing search indexing..."
-}
-Register-WmtTweakButton "btnSearchIndexDefault" {
-    Invoke-UiCommand {
-        Set-Service -Name WSearch -StartupType Automatic -ErrorAction SilentlyContinue
-        Start-Service -Name WSearch -ErrorAction SilentlyContinue
-        Write-GuiLog "Windows Search indexing restored."
-    } "Restoring search indexing..."
-}
-Register-WmtTweakButton "btnSearchIndexRebuild" {
-    if ((Show-WmtMessageBox -Message "Rebuild the Windows Search index? Search results may be incomplete while it rebuilds." -Title "Rebuild Search Index" -Button YesNo -Image Warning) -eq [System.Windows.MessageBoxResult]::Yes) {
-        Invoke-UiCommand {
-            Stop-Service -Name WSearch -Force -ErrorAction SilentlyContinue
-            $db = Join-Path $env:ProgramData "Microsoft\Search\Data\Applications\Windows\Windows.edb"
-            if (Test-Path -LiteralPath $db) {
-                Remove-Item -LiteralPath $db -Force -ErrorAction Stop
-                Write-GuiLog "Deleted Windows.edb; Windows will rebuild the index."
+$btnToggleSuggested = Get-Ctrl "btnToggleSuggested"
+if ($btnToggleSuggested) {
+    $btnToggleSuggested.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+            $names = @("ContentDeliveryAllowed", "FeatureManagementEnabled", "OemPreInstalledAppsEnabled", "PreInstalledAppsEnabled", "PreInstalledAppsEverEnabled", "SilentInstalledAppsEnabled", "SoftLandingEnabled", "SubscribedContent-310093Enabled", "SubscribedContent-338388Enabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled", "SystemPaneSuggestionsEnabled")
+            $anyOn = $false
+            foreach ($n in $names) { if ([int](Get-WmtRegValue $p $n 1) -ne 0) { $anyOn = $true; break } }
+            if ($anyOn) {
+                Invoke-UiCommand { foreach ($n in $names) { Set-WmtRegDword $p $n 0 }; Write-GuiLog "Suggested content disabled." } "Disabling suggestions..."
             }
             else {
-                Write-GuiLog "Search index database was not found."
+                Invoke-UiCommand { foreach ($n in $names) { Set-WmtRegDword $p $n 1 }; Write-GuiLog "Suggested content enabled." } "Enabling suggestions..."
             }
-            Start-Service -Name WSearch -ErrorAction SilentlyContinue
-        } "Rebuilding search index..."
-    }
+            Update-TweakButtonStates
+        })
 }
+
+$btnToggleTailored = Get-Ctrl "btnToggleTailored"
+if ($btnToggleTailored) {
+    $btnToggleTailored.Add_Click({
+            $p1 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Privacy"
+            $p2 = "HKCU:\Software\Policies\Microsoft\Windows\CloudContent"
+            $currentlyOn = ([int](Get-WmtRegValue $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 1) -ne 0 -and [int](Get-WmtRegValue $p2 "DisableTailoredExperiencesWithDiagnosticData" 0) -ne 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 0; Set-WmtRegDword $p2 "DisableTailoredExperiencesWithDiagnosticData" 1; Write-GuiLog "Tailored experiences disabled." } "Disabling tailored experiences..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "TailoredExperiencesWithDiagnosticDataEnabled" 1; Set-WmtRegDword $p2 "DisableTailoredExperiencesWithDiagnosticData" 0; Write-GuiLog "Tailored experiences enabled." } "Enabling tailored experiences..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleActivity = Get-Ctrl "btnToggleActivity"
+if ($btnToggleActivity) {
+    $btnToggleActivity.Add_Click({
+            $p = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\System"
+            $currentlyOff = ([int](Get-WmtRegValue $p "EnableActivityFeed" 1) -eq 0 -and [int](Get-WmtRegValue $p "PublishUserActivities" 1) -eq 0 -and [int](Get-WmtRegValue $p "UploadUserActivities" 1) -eq 0)
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableActivityFeed" 1; Set-WmtRegDword $p "PublishUserActivities" 1; Set-WmtRegDword $p "UploadUserActivities" 1; Write-GuiLog "Activity history enabled." } "Enabling activity history..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableActivityFeed" 0; Set-WmtRegDword $p "PublishUserActivities" 0; Set-WmtRegDword $p "UploadUserActivities" 0; Write-GuiLog "Activity history disabled." } "Disabling activity history..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleAppLaunch = Get-Ctrl "btnToggleAppLaunch"
+if ($btnToggleAppLaunch) {
+    $btnToggleAppLaunch.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOn = ([int](Get-WmtRegValue $p "Start_TrackProgs" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 0; Write-GuiLog "App launch tracking disabled." } "Disabling app launch tracking..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 1; Write-GuiLog "App launch tracking enabled." } "Enabling app launch tracking..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleWebSearch = Get-Ctrl "btnToggleWebSearch"
+if ($btnToggleWebSearch) {
+    $btnToggleWebSearch.Add_Click({
+            $p1 = "HKCU:\Software\Policies\Microsoft\Windows\Explorer"
+            $p2 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
+            $currentlyOn = ([int](Get-WmtRegValue $p1 "DisableSearchBoxSuggestions" 0) -ne 1 -and [int](Get-WmtRegValue $p2 "BingSearchEnabled" 1) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "DisableSearchBoxSuggestions" 1; Set-WmtRegDword $p2 "BingSearchEnabled" 0; Write-GuiLog "Web search in Start Menu disabled." } "Disabling web search..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "DisableSearchBoxSuggestions" 0; Set-WmtRegDword $p2 "BingSearchEnabled" 1; Write-GuiLog "Web search in Start Menu enabled." } "Enabling web search..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSearchIndex = Get-Ctrl "btnToggleSearchIndex"
+if ($btnToggleSearchIndex) {
+    $btnToggleSearchIndex.Add_Click({
+            $svc = Get-Service "WSearch" -ErrorAction SilentlyContinue
+            if ($svc -and $svc.StartType -ne "Automatic") {
+                Invoke-UiCommand { Set-Service -Name WSearch -StartupType Automatic; Start-Service -Name WSearch -ErrorAction SilentlyContinue; Write-GuiLog "Search index set to Automatic." } "Enabling search index..."
+            }
+            else {
+                Invoke-UiCommand { Set-Service -Name WSearch -StartupType Manual; Write-GuiLog "Search index set to Manual." } "Reducing search index..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
 Register-WmtTweakButton "btnSearchIndexOptions" { Start-Process "control.exe" "srchadmin.dll" }
 
-Register-WmtTweakButton "btnGameModeOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1
-        Write-GuiLog "Game Mode enabled."
-    } "Enabling Game Mode..."
+$btnToggleGameMode = Get-Ctrl "btnToggleGameMode"
+if ($btnToggleGameMode) {
+    $btnToggleGameMode.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 0)) -eq 1 -or ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 0)) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 0
+                    Write-GuiLog "Game Mode disabled."
+                } "Disabling Game Mode..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 1
+                    Write-GuiLog "Game Mode enabled."
+                } "Enabling Game Mode..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnGameModeOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "AutoGameModeEnabled" 0
-        Write-GuiLog "Game Mode disabled."
-    } "Disabling Game Mode..."
+$btnToggleGameBar = Get-Ctrl "btnToggleGameBar"
+if ($btnToggleGameBar) {
+    $btnToggleGameBar.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1)) -ne 0 -and ([int](Get-WmtRegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1)) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
+                    Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0
+                    Write-GuiLog "Xbox Game Bar disabled."
+                } "Disabling Xbox Game Bar..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1
+                    Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 1
+                    Write-GuiLog "Xbox Game Bar restored."
+                } "Restoring Xbox Game Bar..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnGameBarOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 0
-        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 0
-        Write-GuiLog "Xbox Game Bar disabled."
-    } "Disabling Xbox Game Bar..."
+$btnToggleGameCapture = Get-Ctrl "btnToggleGameCapture"
+if ($btnToggleGameCapture) {
+    $btnToggleGameCapture.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 1)) -eq 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 1; Write-GuiLog "Background capture restored." } "Restoring background capture..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 0; Write-GuiLog "Background capture disabled." } "Disabling background capture..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnGameBarOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "AppCaptureEnabled" 1
-        Set-WmtRegDword "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\GameBar" "UseNexusForGameBarEnabled" 1
-        Write-GuiLog "Xbox Game Bar restored."
-    } "Restoring Xbox Game Bar..."
-}
-Register-WmtTweakButton "btnGameCaptureOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 0; Write-GuiLog "Background capture disabled." } "Disabling background capture..." }
-Register-WmtTweakButton "btnGameCaptureOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR" "HistoricalCaptureEnabled" 1; Write-GuiLog "Background capture restored." } "Restoring background capture..." }
-Register-WmtTweakButton "btnGameFsoOff" {
-    Invoke-UiCommand {
-        $path = "HKCU:\System\GameConfigStore"
-        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 2
-        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 1
-        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 1
-        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
-        Write-GuiLog "Fullscreen optimizations disabled globally."
-    } "Disabling fullscreen optimizations..."
-}
-Register-WmtTweakButton "btnGameFsoDefault" {
-    Invoke-UiCommand {
-        $path = "HKCU:\System\GameConfigStore"
-        Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 0
-        Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 0
-        Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 0
-        Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
-        Write-GuiLog "Fullscreen optimization defaults restored."
-    } "Restoring fullscreen optimizations..."
+$btnToggleFso = Get-Ctrl "btnToggleFso"
+if ($btnToggleFso) {
+    $btnToggleFso.Add_Click({
+            $fsoPath = "HKCU:\System\GameConfigStore"
+            $currentlyOn = (([int](Get-WmtRegValue $fsoPath "GameDVR_FSEBehaviorMode" 0)) -eq 2 -and ([int](Get-WmtRegValue $fsoPath "GameDVR_HonorUserFSEBehaviorMode" 0)) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    $path = "HKCU:\System\GameConfigStore"
+                    Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 0
+                    Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 0
+                    Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 0
+                    Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+                    Write-GuiLog "Fullscreen optimization defaults restored."
+                } "Restoring fullscreen optimizations..."
+            }
+            else {
+                Invoke-UiCommand {
+                    $path = "HKCU:\System\GameConfigStore"
+                    Set-WmtRegDword $path "GameDVR_FSEBehaviorMode" 2
+                    Set-WmtRegDword $path "GameDVR_HonorUserFSEBehaviorMode" 1
+                    Set-WmtRegDword $path "GameDVR_DXGIHonorFSEWindowsCompatible" 1
+                    Set-WmtRegDword $path "GameDVR_EFSEFeatureFlags" 0
+                    Write-GuiLog "Fullscreen optimizations disabled globally."
+                } "Disabling fullscreen optimizations..."
+            }
+            Update-TweakButtonStates
+        })
 }
 
 Register-WmtTweakButton "btnVisualBestAppearance" { Invoke-UiCommand { Set-WmtVisualPreset "Appearance"; Write-GuiLog "Visual effects set to best appearance." } "Applying best appearance..." }
@@ -32101,97 +33915,164 @@ Register-WmtTweakButton "btnVisualBestPerformance" { Invoke-UiCommand { Set-WmtV
 Register-WmtTweakButton "btnVisualSnappy" { Invoke-UiCommand { Set-WmtVisualPreset "Snappy"; Write-GuiLog "Snappy desktop visual preset applied." } "Applying snappy desktop preset..." }
 
 Register-WmtTweakButton "btnNotifyFocusSettings" { Start-Process "ms-settings:notifications" }
-Register-WmtTweakButton "btnNotifyTipsOff" {
-    Invoke-UiCommand {
-        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0
-        Write-GuiLog "Windows tips and suggestions disabled."
-    } "Disabling notification tips..."
+$btnToggleTips = Get-Ctrl "btnToggleTips"
+if ($btnToggleTips) {
+    $btnToggleTips.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SoftLandingEnabled" 1)) -eq 0 -and ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338389Enabled" 1)) -eq 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1
+                    Write-GuiLog "Windows tips and suggestions restored."
+                } "Restoring notification tips..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0
+                    Write-GuiLog "Windows tips and suggestions disabled."
+                } "Disabling notification tips..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnNotifyTipsOn" {
-    Invoke-UiCommand {
-        Set-WmtContentDeliveryValues @("SoftLandingEnabled", "SubscribedContent-338389Enabled", "SubscribedContent-338393Enabled", "SubscribedContent-353694Enabled", "SubscribedContent-353696Enabled") 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1
-        Write-GuiLog "Windows tips and suggestions restored."
-    } "Restoring notification tips..."
+$btnToggleSetupPrompts = Get-Ctrl "btnToggleSetupPrompts"
+if ($btnToggleSetupPrompts) {
+    $btnToggleSetupPrompts.Add_Click({
+            $setupOff = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1) -eq 0)
+            if ($setupOff) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1; Write-GuiLog "Finish setup prompts restored." } "Restoring setup prompts..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0; Write-GuiLog "Finish setup prompts disabled." } "Disabling setup prompts..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnNotifySetupOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 0; Write-GuiLog "Finish setup prompts disabled." } "Disabling setup prompts..." }
-Register-WmtTweakButton "btnNotifySetupOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\UserProfileEngagement" "ScoobeSystemSettingEnabled" 1; Write-GuiLog "Finish setup prompts restored." } "Restoring setup prompts..." }
-Register-WmtTweakButton "btnLockFactsOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
-        Write-GuiLog "Lock screen fun facts disabled."
-    } "Disabling lock screen fun facts..."
+$btnToggleLockFacts = Get-Ctrl "btnToggleLockFacts"
+if ($btnToggleLockFacts) {
+    $btnToggleLockFacts.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1)) -eq 0 -and ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1)) -eq 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+                    Write-GuiLog "Lock screen fun facts restored."
+                } "Restoring lock screen fun facts..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+                    Write-GuiLog "Lock screen fun facts disabled."
+                } "Disabling lock screen fun facts..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnLockFactsOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
-        Write-GuiLog "Lock screen fun facts restored."
-    } "Restoring lock screen fun facts..."
+$btnToggleLockSpotlight = Get-Ctrl "btnToggleLockSpotlight"
+if ($btnToggleLockSpotlight) {
+    $btnToggleLockSpotlight.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1)) -eq 0 -or ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0)) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+                    Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+                    Write-GuiLog "Lock screen Spotlight restored."
+                } "Restoring lock screen Spotlight..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+                    Write-GuiLog "Lock screen Spotlight disabled."
+                } "Disabling lock screen Spotlight..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnLockSpotlightOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
-        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
-        Write-GuiLog "Lock screen Spotlight disabled."
-    } "Disabling lock screen Spotlight..."
-}
-Register-WmtTweakButton "btnLockSpotlightOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
-        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
-        Write-GuiLog "Lock screen Spotlight restored."
-    } "Restoring lock screen Spotlight..."
-}
-Register-WmtTweakButton "btnLockPlain" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
-        Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
-        Write-GuiLog "Plain lock screen preset applied."
-    } "Applying plain lock screen..."
-}
-Register-WmtTweakButton "btnLockDefault" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
-        Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
-        Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
-        Write-GuiLog "Default lock screen content restored."
-    } "Restoring lock screen defaults..."
+$btnToggleLockScreen = Get-Ctrl "btnToggleLockScreen"
+if ($btnToggleLockScreen) {
+    $btnToggleLockScreen.Add_Click({
+            $lockFactsOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1)) -eq 0 -and ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1)) -eq 0)
+            $spotlightOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1)) -eq 0 -or ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 0)) -eq 1)
+            $currentlyOn = ($lockFactsOff -and $spotlightOff)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 1
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 1
+                    Remove-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures"
+                    Write-GuiLog "Default lock screen content restored."
+                } "Restoring lock screen defaults..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenOverlayEnabled" 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "SubscribedContent-338387Enabled" 0
+                    Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" "RotatingLockScreenEnabled" 0
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent" "DisableWindowsSpotlightFeatures" 1
+                    Write-GuiLog "Plain lock screen preset applied."
+                } "Applying plain lock screen..."
+            }
+            Update-TweakButtonStates
+        })
 }
 
-Register-WmtTweakButton "btnStartupFastOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 0; Write-GuiLog "Fast Startup disabled." } "Disabling Fast Startup..." }
-Register-WmtTweakButton "btnStartupFastOn" {
-    Invoke-UiCommand {
-        powercfg /hibernate on
-        Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1
-        Write-GuiLog "Fast Startup enabled. Hibernation was enabled because Fast Startup depends on it."
-    } "Enabling Fast Startup..."
+$btnToggleFastStartup = Get-Ctrl "btnToggleFastStartup"
+if ($btnToggleFastStartup) {
+    $btnToggleFastStartup.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1)) -eq 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    powercfg /hibernate on
+                    Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 1
+                    Write-GuiLog "Fast Startup enabled. Hibernation was enabled because Fast Startup depends on it."
+                } "Enabling Fast Startup..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Power" "HiberbootEnabled" 0; Write-GuiLog "Fast Startup disabled." } "Disabling Fast Startup..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnStartupRestoreFoldersOn" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 1; Write-GuiLog "Previous folder windows will restore at logon." } "Enabling folder restore at logon..." }
-Register-WmtTweakButton "btnStartupRestoreFoldersOff" { Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 0; Write-GuiLog "Previous folder windows will not restore at logon." } "Disabling folder restore at logon..." }
+$btnToggleRestoreFolders = Get-Ctrl "btnToggleRestoreFolders"
+if ($btnToggleRestoreFolders) {
+    $btnToggleRestoreFolders.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 0)) -ne 0)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 0; Write-GuiLog "Previous folder windows will not restore at logon." } "Disabling folder restore at logon..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "PersistBrowsers" 1; Write-GuiLog "Previous folder windows will restore at logon." } "Enabling folder restore at logon..."
+            }
+            Update-TweakButtonStates
+        })
+}
 
 Register-WmtTweakButton "btnSecurityUacOpen" { Start-Process "UserAccountControlSettings.exe" }
-Register-WmtTweakButton "btnSecurityUacStatus" {
-    $systemPolicy = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
-    Write-GuiLog "UAC EnableLUA: $(Get-WmtRegValue $systemPolicy "EnableLUA" "Unknown")"
-    Write-GuiLog "UAC ConsentPromptBehaviorAdmin: $(Get-WmtRegValue $systemPolicy "ConsentPromptBehaviorAdmin" "Unknown")"
-    Write-GuiLog "UAC PromptOnSecureDesktop: $(Get-WmtRegValue $systemPolicy "PromptOnSecureDesktop" "Unknown")"
+$btnSecurityUacStatus = Get-Ctrl "btnSecurityUacStatus"
+if ($btnSecurityUacStatus) {
+    $btnSecurityUacStatus.Add_Click({
+            $systemPolicy = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System"
+            Write-GuiLog "UAC EnableLUA: $(Get-WmtRegValue $systemPolicy "EnableLUA" "Unknown")"
+            Write-GuiLog "UAC ConsentPromptBehaviorAdmin: $(Get-WmtRegValue $systemPolicy "ConsentPromptBehaviorAdmin" "Unknown")"
+            Write-GuiLog "UAC PromptOnSecureDesktop: $(Get-WmtRegValue $systemPolicy "PromptOnSecureDesktop" "Unknown")"
+        })
 }
 Register-WmtTweakButton "btnSecuritySmartScreenOpen" {
     try { Start-Process "windowsdefender://AppAndBrowser" } catch { Start-Process "ms-settings:windowsdefender" }
 }
-Register-WmtTweakButton "btnSecuritySmartScreenStatus" {
-    Write-GuiLog "Explorer SmartScreen: $(Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" "SmartScreenEnabled" "Unknown")"
-    Write-GuiLog "AppHost Web Content Evaluation: $(Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppHost" "EnableWebContentEvaluation" "Unknown")"
-    if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) {
-        $mp = Get-MpPreference -ErrorAction SilentlyContinue
-        if ($mp) { Write-GuiLog "Defender PUA protection: $($mp.PUAProtection)" }
-    }
+$btnSecuritySmartScreenStatus = Get-Ctrl "btnSecuritySmartScreenStatus"
+if ($btnSecuritySmartScreenStatus) {
+    $btnSecuritySmartScreenStatus.Add_Click({
+            Write-GuiLog "Explorer SmartScreen: $(Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer" "SmartScreenEnabled" "Unknown")"
+            Write-GuiLog "AppHost Web Content Evaluation: $(Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppHost" "EnableWebContentEvaluation" "Unknown")"
+            if (Get-Command Get-MpPreference -ErrorAction SilentlyContinue) {
+                $mp = Get-MpPreference -ErrorAction SilentlyContinue
+                if ($mp) { Write-GuiLog "Defender PUA protection: $($mp.PUAProtection)" }
+            }
+        })
 }
 Register-WmtTweakButton "btnSecurityCfaOpen" {
     try { Start-Process "windowsdefender://RansomwareProtection" } catch { Start-Process "ms-settings:windowsdefender" }
@@ -32200,26 +34081,70 @@ Register-WmtTweakButton "btnSecurityCfaOpen" {
 Register-WmtTweakButton "btnPowerBatterySaverOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 0 -DCOnly; Write-GuiLog "Battery saver threshold set to 0%." } "Setting battery saver threshold..." }
 Register-WmtTweakButton "btnPowerBatterySaver20" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 20 -DCOnly; Write-GuiLog "Battery saver threshold set to 20%." } "Setting battery saver threshold..." }
 Register-WmtTweakButton "btnPowerBatterySaver50" { Invoke-UiCommand { Set-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" 50 -DCOnly; Write-GuiLog "Battery saver threshold set to 50%." } "Setting battery saver threshold..." }
-Register-WmtTweakButton "btnPowerUsbSuspendOn" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 1; Write-GuiLog "USB selective suspend enabled." } "Enabling USB selective suspend..." }
-Register-WmtTweakButton "btnPowerUsbSuspendOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 0; Write-GuiLog "USB selective suspend disabled." } "Disabling USB selective suspend..." }
-Register-WmtTweakButton "btnPowerPcieModerate" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 1; Write-GuiLog "PCI Express link state set to moderate savings." } "Setting PCIe link state savings..." }
-Register-WmtTweakButton "btnPowerPcieOff" { Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 0; Write-GuiLog "PCI Express link state savings disabled." } "Disabling PCIe link state savings..." }
-
-Register-WmtTweakButton "btnDevLongPathsOn" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 1; Write-GuiLog "Win32 long paths enabled." } "Enabling long paths..." }
-Register-WmtTweakButton "btnDevLongPathsOff" { Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0; Write-GuiLog "Win32 long paths disabled." } "Disabling long paths..." }
-Register-WmtTweakButton "btnDevModeOn" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 1
-        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 1
-        Write-GuiLog "Developer Mode policies enabled."
-    } "Enabling Developer Mode..."
+$btnToggleUsbSuspend = Get-Ctrl "btnToggleUsbSuspend"
+if ($btnToggleUsbSuspend) {
+    $btnToggleUsbSuspend.Add_Click({
+            $usbSub = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSetting = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+            $usbAc = Get-WmtPowerSettingIndex $usbSub $usbSetting "AC"; $usbDc = Get-WmtPowerSettingIndex $usbSub $usbSetting "DC"
+            $currentlyOn = ($usbAc -eq 1 -and $usbDc -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 0; Write-GuiLog "USB selective suspend disabled." } "Disabling USB selective suspend..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex "2a737441-1930-4402-8d77-b2bebba308a3" "48e6b7a6-50f5-4782-a5d4-53bb8f07e226" 1; Write-GuiLog "USB selective suspend enabled." } "Enabling USB selective suspend..."
+            }
+            Update-TweakButtonStates
+        })
 }
-Register-WmtTweakButton "btnDevModeOff" {
-    Invoke-UiCommand {
-        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0
-        Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 0
-        Write-GuiLog "Developer Mode policies disabled."
-    } "Disabling Developer Mode..."
+$btnTogglePcie = Get-Ctrl "btnTogglePcie"
+if ($btnTogglePcie) {
+    $btnTogglePcie.Add_Click({
+            $pcieSub = "501a4d13-42af-4429-9fd1-a8218c268e20"; $pcieSetting = "ee12f906-d277-404b-b6da-e5fa1a576df5"
+            $pcieAc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "AC"; $pcieDc = Get-WmtPowerSettingIndex $pcieSub $pcieSetting "DC"
+            $currentlyOn = ($pcieAc -eq 1 -and $pcieDc -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 0; Write-GuiLog "PCI Express link state savings disabled." } "Disabling PCIe link state savings..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtPowerSettingIndex "501a4d13-42af-4429-9fd1-a8218c268e20" "ee12f906-d277-404b-b6da-e5fa1a576df5" 1; Write-GuiLog "PCI Express link state set to moderate savings." } "Setting PCIe link state savings..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLongPaths = Get-Ctrl "btnToggleLongPaths"
+if ($btnToggleLongPaths) {
+    $btnToggleLongPaths.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0)) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 0; Write-GuiLog "Win32 long paths disabled." } "Disabling long paths..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" "LongPathsEnabled" 1; Write-GuiLog "Win32 long paths enabled." } "Enabling long paths..."
+            }
+            Update-TweakButtonStates
+        })
+}
+$btnToggleDevMode = Get-Ctrl "btnToggleDevMode"
+if ($btnToggleDevMode) {
+    $btnToggleDevMode.Add_Click({
+            $currentlyOn = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0)) -eq 1)
+            if ($currentlyOn) {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 0
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 0
+                    Write-GuiLog "Developer Mode policies disabled."
+                } "Disabling Developer Mode..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowDevelopmentWithoutDevLicense" 1
+                    Set-WmtRegDword "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock" "AllowAllTrustedApps" 1
+                    Write-GuiLog "Developer Mode policies enabled."
+                } "Enabling Developer Mode..."
+            }
+            Update-TweakButtonStates
+        })
 }
 Register-WmtTweakButton "btnDevSettings" { Start-Process "ms-settings:developers" }
 
@@ -32290,20 +34215,21 @@ function Get-WmtCatalogItemsByCategory {
     return $results.ToArray()
 }
 
-if ($btnShowCatalog -and $btnBackToUpdates -and $btnCatalogSearch -and $btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $btnCatAll -and $btnCatBrowsers -and $btnCatDev -and $btnCatUtils -and $btnCatMedia -and $btnCatGames -and $btnCatSecurity -and $pnlCatalog -and $lstCatalog -and $txtCatalogSearch) {
+if ($btnShowCatalog -and $btnBackToUpdates -and $btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $btnCatAll -and $btnCatBrowsers -and $btnCatDev -and $btnCatUtils -and $btnCatMedia -and $btnCatGames -and $btnCatSecurity -and $pnlCatalog -and $lstCatalog) {
     $btnShowCatalog.Add_Click({
             $pnlUpdates.Visibility = "Collapsed"
             $pnlCatalog.Visibility = "Visible"
             Add-WmtCatalogListItems -ListView $lstCatalog -Items $script:SoftwareCatalog
+            # Pre-load library scan in the background so "Your Library"
+            # results are ready when the user clicks the button.
+            if (-not $script:WmtLibraryScanResults -and -not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan -Silent
+            }
         })
 
     $btnBackToUpdates.Add_Click({
             $pnlCatalog.Visibility = "Collapsed"
             $pnlUpdates.Visibility = "Visible"
-        })
-
-    $btnCatalogSearch.Add_Click({
-            Add-WmtCatalogListItems -ListView $lstCatalog -Items (Get-WmtCatalogItemsBySearch -Query $txtCatalogSearch.Text)
         })
 
     $btnCatAll.Add_Click({
@@ -32333,6 +34259,941 @@ if ($btnCatalogInstall -and $btnCatalogSelectAll -and $btnCatalogClear -and $lst
     $btnCatalogClear.Add_Click({ $lstCatalog.SelectedItems.Clear() })
 }
 
+# --- YOUR LIBRARY ---
+# Shows owned games from Steam (local manifests), Epic (Legendary cache),
+# and GOG (GOGDL cache). The Steam scan runs in a background runspace
+# because reading manifests can be slow; Legendary/GOGDL read from cache
+# files that are populated by the boot-time library cache builder.
+
+$script:WmtLibraryScanRunspace = $null
+$script:WmtLibraryScanAsyncResult = $null
+
+function Get-WmtSteamInstalledGames {
+    # Read Steam appmanifest_*.acf files to get installed Steam games.
+    # Returns array of [PSCustomObject]@{ Source; Name; Id; Version; Available }
+    $result = [System.Collections.Generic.List[object]]::new()
+
+    function Get-SteamManifestValue([string]$Text, [string]$Key) {
+        $m = [regex]::Match($Text, ('"' + $Key + '"\s+"([^"]*)"'))
+        if ($m.Success) { return $m.Groups[1].Value }
+        return ""
+    }
+
+    function Get-SteamInstallRoots {
+        $roots = @()
+        foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+            try {
+                $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                if ($props) {
+                    foreach ($p in @("SteamPath", "InstallPath")) {
+                        if ($props.PSObject.Properties[$p]) {
+                            $v = [string]$props.$p
+                            if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $roots += $v }
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+        foreach ($c in @("${env:ProgramFiles(x86)}\Steam", "${env:ProgramFiles}\Steam")) {
+            if (-not [string]::IsNullOrWhiteSpace($c) -and (Test-Path -LiteralPath $c) -and $roots -notcontains $c) { $roots += $c }
+        }
+        return $roots
+    }
+
+    $installRoots = @(Get-SteamInstallRoots)
+    $libraryRoots = [System.Collections.Generic.List[string]]::new()
+    foreach ($root in $installRoots) {
+        if (Test-Path -LiteralPath (Join-Path $root "steamapps")) { [void]$libraryRoots.Add($root) }
+        $libFile = Join-Path $root "steamapps\libraryfolders.vdf"
+        if (-not (Test-Path -LiteralPath $libFile)) { continue }
+        $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+        if ([string]::IsNullOrWhiteSpace($libText)) { continue }
+        foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+            $p = $m.Groups[1].Value -replace '\\', ''
+            if ((Test-Path -LiteralPath $p) -and -not $libraryRoots.Contains($p)) { [void]$libraryRoots.Add($p) }
+        }
+    }
+
+    $seenIds = @{}
+    foreach ($libRoot in $libraryRoots) {
+        $steamApps = Join-Path $libRoot "steamapps"
+        if (-not (Test-Path -LiteralPath $steamApps)) { continue }
+        foreach ($manifest in @(Get-ChildItem -LiteralPath $steamApps -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+            $text = Get-Content -LiteralPath $manifest.FullName -Raw -ErrorAction SilentlyContinue
+            if ([string]::IsNullOrWhiteSpace($text)) { continue }
+            $appId = Get-SteamManifestValue $text "appid"
+            if ([string]::IsNullOrWhiteSpace($appId)) { $appId = [regex]::Match($manifest.BaseName, '\d+').Value }
+            if ([string]::IsNullOrWhiteSpace($appId) -or $seenIds.ContainsKey($appId)) { continue }
+            $seenIds[$appId] = $true
+            $name = Get-SteamManifestValue $text "name"
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = "Steam App $appId" }
+            $buildId = Get-SteamManifestValue $text "buildid"
+            $result.Add([PSCustomObject]@{
+                    Source    = "Steam"
+                    Name      = $name
+                    Id        = $appId
+                    Version   = if (-not [string]::IsNullOrWhiteSpace($buildId) -and $buildId -ne "0") { "Build $buildId" } else { "Installed" }
+                    Available = "-"
+                })
+        }
+    }
+    return $result.ToArray()
+}
+
+function Start-WmtLibraryScan {
+    param([switch]$Silent)
+
+    if ($script:WmtLibraryScanRunspace) {
+        try { $script:WmtLibraryScanRunspace.Stop() } catch {}
+        try { $script:WmtLibraryScanRunspace.Dispose() } catch {}
+        $script:WmtLibraryScanRunspace = $null
+        $script:WmtLibraryScanAsyncResult = $null
+    }
+
+    if (-not $Silent) {
+        if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
+    }
+
+    # Resolve cache file paths in main scope.
+    $dataPath = Get-DataPath
+    $legCacheFile = Join-Path $dataPath "legendary_library.json"
+    $gogCacheFile = Join-Path $dataPath "gog_library.json"
+    $steamCacheFile = Join-Path $dataPath "steam_library.json"
+
+    $ps = [PowerShell]::Create()
+    [void]$ps.AddScript({
+            param($LegCacheFile, $GogCacheFile, $SteamCacheFile)
+
+            $all = [System.Collections.Generic.List[object]]::new()
+
+            # --- Steam (read from cache file) ---
+            try {
+                if ($SteamCacheFile -and (Test-Path -LiteralPath $SteamCacheFile -PathType Leaf)) {
+                    $cacheText = [System.IO.File]::ReadAllText($SteamCacheFile)
+                    $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                    if ($library) {
+                        $steamCount = 0
+                        foreach ($game in @($library)) {
+                            $title = [string]$game.Title
+                            if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                            $isInst = $false
+                            try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
+                            $instVer = ""
+                            try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
+                            $all.Add([PSCustomObject]@{
+                                    Source      = "Steam"
+                                    Name        = $title
+                                    Id          = [string]$game.Id
+                                    Version     = if ($isInst) { $instVer } else { "Not installed" }
+                                    Available   = "-"
+                                    IsInstalled = $isInst
+                                    ProviderKey = "steam"
+                                })
+                            $steamCount++
+                        }
+                        Write-Output "LOG:Steam: $steamCount games."
+                    }
+                }
+                else {
+                    Write-Output "LOG:Steam cache not found."
+                }
+            }
+            catch {
+                Write-Output "LOG:Steam library read failed: $($_.Exception.Message)"
+            }
+
+            # --- Legendary (read from cache file) ---
+            try {
+                if (Test-Path -LiteralPath $LegCacheFile -PathType Leaf) {
+                    $cacheText = [System.IO.File]::ReadAllText($LegCacheFile)
+                    $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                    $legCount = 0
+                    foreach ($game in @($library)) {
+                        $title = [string]$game.Title
+                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                        $isInst = $false
+                        try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
+                        $instVer = ""
+                        try { if ($game.PSObject.Properties["InstalledVersion"]) { $instVer = [string]$game.InstalledVersion } } catch {}
+                        $latestVer = [string]$game.Version
+                        $all.Add([PSCustomObject]@{
+                                Source      = "Epic"
+                                Name        = $title
+                                Id          = [string]$game.Id
+                                Version     = if ($isInst -and -not [string]::IsNullOrWhiteSpace($instVer)) { $instVer } else { "Not installed" }
+                                Available   = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
+                                IsInstalled = $isInst
+                                ProviderKey = "legendary"
+                            })
+                        $legCount++
+                    }
+                    Write-Output "LOG:Epic (Legendary): $legCount games."
+                }
+                else {
+                    Write-Output "LOG:Legendary cache not found."
+                }
+            }
+            catch {
+                Write-Output "LOG:Legendary library read failed: $($_.Exception.Message)"
+            }
+
+            # --- GOGDL (read from cache file) ---
+            try {
+                if (Test-Path -LiteralPath $GogCacheFile -PathType Leaf) {
+                    $cacheText = [System.IO.File]::ReadAllText($GogCacheFile)
+                    $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
+                    $gogCount = 0
+                    foreach ($game in @($library)) {
+                        $title = [string]$game.Title
+                        if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                        $all.Add([PSCustomObject]@{
+                                Source      = "GOG"
+                                Name        = $title
+                                Id          = [string]$game.Id
+                                Version     = "Owned"
+                                Available   = [string]$game.Version
+                                IsInstalled = $false
+                                ProviderKey = "gogdl"
+                            })
+                        $gogCount++
+                    }
+                    Write-Output "LOG:GOG: $gogCount games."
+                }
+                else {
+                    Write-Output "LOG:GOG cache not found."
+                }
+            }
+            catch {
+                Write-Output "LOG:GOG library read failed: $($_.Exception.Message)"
+            }
+
+            Write-Output "COUNT:$($all.Count)"
+            foreach ($item in $all) { Write-Output $item }
+        }).AddArgument($legCacheFile).AddArgument($gogCacheFile).AddArgument($steamCacheFile)
+
+    $script:WmtLibraryScanRunspace = $ps
+    $script:WmtLibraryScanAsyncResult = $ps.BeginInvoke()
+
+    # Polling timer to collect results. Use $script: scope so the Tick
+    # handler can restart itself without closure capture issues.
+    $script:WmtLibraryScanTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtLibraryScanTimer.Interval = [TimeSpan]::FromMilliseconds(500)
+    $script:WmtLibraryScanTimer.Add_Tick({
+            if (-not $script:WmtLibraryScanTimer) { return }
+            try { $script:WmtLibraryScanTimer.Stop() } catch {}
+            if (-not $script:WmtLibraryScanAsyncResult) { return }
+            if (-not $script:WmtLibraryScanAsyncResult.IsCompleted) {
+                try { $script:WmtLibraryScanTimer.Start() } catch {}
+                return
+            }
+            try {
+                $results = $script:WmtLibraryScanRunspace.EndInvoke($script:WmtLibraryScanAsyncResult)
+                $collected = [System.Collections.Generic.List[object]]::new()
+                foreach ($line in @($results)) {
+                    if ($line -is [string]) {
+                        if ($line.StartsWith("LOG:")) {
+                            Write-GuiLog ($line.Substring(4))
+                        }
+                    }
+                    elseif ($line -and $line.PSObject.Properties["Name"]) {
+                        [void]$collected.Add($line)
+                    }
+                }
+                # Store results in script scope so "Your Library" can display instantly.
+                $script:WmtLibraryScanResults = $collected.ToArray()
+
+                # If the library list is currently visible, populate it now.
+                if ($lstLibrary -and $brdLibraryList -and $brdLibraryList.Visibility -eq [System.Windows.Visibility]::Visible) {
+                    $lstLibrary.Items.Clear()
+                    foreach ($item in $script:WmtLibraryScanResults) {
+                        [void]$lstLibrary.Items.Add($item)
+                    }
+                    if ($lblLibraryStatus) {
+                        if ($lstLibrary.Items.Count -gt 0) {
+                            $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+                        }
+                        else {
+                            $lblLibraryStatus.Text = "No games found. Install Steam/Legendary/GOGDL and enable them in Providers."
+                        }
+                    }
+                    Write-GuiLog "Library scan complete: $($lstLibrary.Items.Count) game(s)."
+                }
+                else {
+                    Write-GuiLog "Library scan pre-loaded: $($script:WmtLibraryScanResults.Count) game(s) ready."
+                }
+            }
+            catch {
+                Write-GuiLog "Library scan failed: $($_.Exception.Message)"
+                if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Library scan failed." }
+            }
+            try { $script:WmtLibraryScanRunspace.Dispose() } catch {}
+            $script:WmtLibraryScanRunspace = $null
+            $script:WmtLibraryScanAsyncResult = $null
+            try { $script:WmtLibraryScanTimer.Stop() } catch {}
+            $script:WmtLibraryScanTimer = $null
+        })
+    $script:WmtLibraryScanTimer.Start()
+}
+
+if ($btnShowLibrary -and $btnBackToCatalog -and $btnLibraryRefresh -and $brdCatalogList -and $brdLibraryList -and $pnlCatalogActions -and $lstLibrary) {
+    $btnShowLibrary.Add_Click({
+            # Switch to library view (keep all buttons visible).
+            $brdCatalogList.Visibility = "Collapsed"
+            $brdLibraryList.Visibility = "Visible"
+            if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Visible" }
+            if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Visible" }
+
+            # Highlight the Your Library button (AccentBtn style).
+            if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) }
+
+            # If we have pre-loaded results, display them instantly.
+            if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0) {
+                $lstLibrary.Items.Clear()
+                foreach ($item in $script:WmtLibraryScanResults) {
+                    [void]$lstLibrary.Items.Add($item)
+                }
+                if ($lblLibraryStatus) {
+                    $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+                }
+            }
+            elseif (-not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan
+            }
+            else {
+                if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
+            }
+        })
+
+    $btnBackToCatalog.Add_Click({
+            # Switch back to catalog view.
+            $brdLibraryList.Visibility = "Collapsed"
+            $brdCatalogList.Visibility = "Visible"
+            if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Collapsed" }
+            if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Collapsed" }
+            if ($lblLibraryStatus) { $lblLibraryStatus.Text = "" }
+
+            # Restore the Your Library button to ActionBtn style (gray).
+            if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style]) }
+        })
+
+    $btnLibraryRefresh.Add_Click({
+            Start-WmtLibraryScan
+        })
+
+    # --- Library context menu ---
+    # Helper: get the selected library item.
+    function Get-WmtSelectedLibraryItem {
+        if (-not $lstLibrary) { return $null }
+        return @($lstLibrary.SelectedItems | Select-Object -First 1)[0]
+    }
+
+    # Helper: resolve the install directory for a game.
+    function Get-WmtLibraryItemInstallDir {
+        param($Item)
+        if (-not $Item) { return "" }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+
+        if ($source -eq "Steam") {
+            # Find the appmanifest for this app ID and get installdir.
+            $steamInstall = $null
+            foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+                try {
+                    $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                    if ($props) {
+                        foreach ($p in @("SteamPath", "InstallPath")) {
+                            if ($props.PSObject.Properties[$p]) {
+                                $v = [string]$props.$p
+                                if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $steamInstall = $v; break }
+                            }
+                        }
+                    }
+                }
+                catch {}
+                if ($steamInstall) { break }
+            }
+            if (-not $steamInstall) { return "" }
+
+            # Check all library folders for the appmanifest.
+            $libRoots = @($steamInstall)
+            $libFile = Join-Path $steamInstall "steamapps\libraryfolders.vdf"
+            if (Test-Path -LiteralPath $libFile -PathType Leaf) {
+                $libText = Get-Content -LiteralPath $libFile -Raw -ErrorAction SilentlyContinue
+                if (-not [string]::IsNullOrWhiteSpace($libText)) {
+                    foreach ($m in [regex]::Matches($libText, '"path"\s+"([^"]+)"')) {
+                        $p = $m.Groups[1].Value -replace '\\\\', '\'
+                        if ((Test-Path -LiteralPath $p) -and $libRoots -notcontains $p) { $libRoots += $p }
+                    }
+                }
+            }
+
+            foreach ($libRoot in $libRoots) {
+                $manifestPath = Join-Path $libRoot "steamapps\appmanifest_$id.acf"
+                if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                    $mtext = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction SilentlyContinue
+                    if (-not [string]::IsNullOrWhiteSpace($mtext)) {
+                        $instDirMatch = [regex]::Match($mtext, '"installdir"\s+"([^"]*)"')
+                        if ($instDirMatch.Success) {
+                            $installDir = Join-Path (Join-Path $libRoot "steamapps\common") $instDirMatch.Groups[1].Value
+                            if (Test-Path -LiteralPath $installDir) { return $installDir }
+                        }
+                    }
+                }
+            }
+        }
+        elseif ($source -eq "Epic") {
+            # Check legendary installed games.
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = $legExe
+                    $psi.Arguments = "info `"$id`""
+                    $psi.RedirectStandardOutput = $true
+                    $psi.UseShellExecute = $false
+                    $psi.CreateNoWindow = $true
+                    $proc = [System.Diagnostics.Process]::Start($psi)
+                    $stdout = $proc.StandardOutput.ReadToEnd()
+                    try { $proc.WaitForExit(10000) } catch {}
+                    try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+                    # Look for "Install path:" line
+                    foreach ($line in ($stdout -split "`r?`n")) {
+                        if ($line -match "(?i)install\s*(?:path|location)\s*:?\s*(.+)") {
+                            $p = $matches[1].Trim()
+                            if ((Test-Path -LiteralPath $p)) { return $p }
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+        elseif ($source -eq "GOG") {
+            # GOG games installed via GOGDL/Heroic — check common locations.
+            $heroicConfig = Join-Path $env:APPDATA "heroic\gog_store\library.json"
+            if (Test-Path -LiteralPath $heroicConfig -PathType Leaf) {
+                try {
+                    $lib = Get-Content -LiteralPath $heroicConfig -Raw | ConvertFrom-Json
+                    $game = @($lib | Where-Object { [string]$_.appName -eq $id -or [string]$_.id -eq $id }) | Select-Object -First 1
+                    if ($game -and $game.PSObject.Properties["install_path"]) {
+                        $p = [string]$game.install_path
+                        if ((Test-Path -LiteralPath $p)) { return $p }
+                    }
+                }
+                catch {}
+            }
+        }
+        return ""
+    }
+
+    # Helper: launch a game.
+    function Invoke-WmtLibraryLaunch {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://run/$id"
+            Write-GuiLog "Launching Steam game: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    Start-Process -FilePath $legExe -ArgumentList "launch", $id -WindowStyle Normal
+                    Write-GuiLog "Launching Epic game: $name (app $id)"
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot launch Epic games." -Title "Launch Failed" -Image Warning | Out-Null
+                }
+            }
+            catch {
+                Show-WmtMessageBox -Message "Failed to launch: $($_.Exception.Message)" -Title "Launch Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # GOGDL games are DRM-free — find the game executable in the
+            # install directory and launch it directly.
+            $installDir = Get-WmtLibraryItemInstallDir -Item $Item
+            if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                # Look for the most likely executable: prefer one matching
+                # the game name, then any .exe that's not an uninstaller.
+                $exes = @(Get-ChildItem -LiteralPath $installDir -Filter "*.exe" -File -Recurse -Depth 1 -ErrorAction SilentlyContinue |
+                    Where-Object {
+                        $n = $_.Name.ToLowerInvariant()
+                        $n -notmatch "unins|uninstall|setup|redist|installer|crash|report|config|helper" -and
+                        $_.Length -gt 100KB
+                    } | Sort-Object Length -Descending)
+                if ($exes.Count -gt 0) {
+                    Start-Process -FilePath $exes[0].FullName
+                    Write-GuiLog "Launching GOG game: $name ($($exes[0].Name))"
+                }
+                else {
+                    # No exe found — open the install directory instead.
+                    Start-Process "explorer.exe" -ArgumentList "`"$installDir`""
+                    Write-GuiLog "No game executable found for: $name. Opened install directory."
+                }
+            }
+            else {
+                Show-WmtMessageBox -Message "Could not find the install directory for this GOG game." -Title "Launch Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Helper: install a game.
+    function Invoke-WmtLibraryInstall {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://install/$id"
+            Write-GuiLog "Starting Steam install for: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $msg = "Install '$name' via Legendary?`n`nThis will download the game from Epic Games."
+                    if ((Show-WmtMessageBox -Message $msg -Title "Install Game" -Button YesNo -Image Question) -eq [System.Windows.MessageBoxResult]::Yes) {
+                        Start-Process -FilePath $legExe -ArgumentList "-y", "install", $id, "--max-workers", "4", "--dl-timeout", "30", "--skip-sdl", "--skip-dlcs" -WindowStyle Normal
+                        Write-GuiLog "Starting Legendary install for: $name (app $id)"
+                    }
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot install Epic games." -Title "Install Failed" -Image Warning | Out-Null
+                }
+            }
+            catch {
+                Show-WmtMessageBox -Message "Failed to start install: $($_.Exception.Message)" -Title "Install Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # Use GOGDL to download the game (DRM-free, no GOG Galaxy needed).
+            try {
+                $gogdlExe = Get-WmtGogdlExePath
+                if ([string]::IsNullOrWhiteSpace($gogdlExe) -or -not (Test-Path -LiteralPath $gogdlExe -PathType Leaf)) {
+                    foreach ($cmdName in @("gogdl", "gogdl.exe", "gogdl_windows_x86_64.exe")) {
+                        $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+                        if ($cmd -and $cmd.Source) { $gogdlExe = [string]$cmd.Source; break }
+                    }
+                }
+                if ($gogdlExe -and (Test-Path -LiteralPath $gogdlExe -PathType Leaf)) {
+                    $authConfig = Get-WmtGogdlAuthConfigPath
+                    $msg = "Download '$name' via GOGDL?`n`nThis will download the DRM-free game from GOG."
+                    if ((Show-WmtMessageBox -Message $msg -Title "Download Game" -Button YesNo -Image Question) -eq [System.Windows.MessageBoxResult]::Yes) {
+                        $installBase = Join-Path (Get-DataPath) "gog-games"
+                        $gameDir = Join-Path $installBase $id
+                        Start-Process -FilePath $gogdlExe -ArgumentList "--auth-config-path", "`"$authConfig`"", "download", $id, "--path", "`"$gameDir`"", "--os", "windows", "--max-workers", "4" -WindowStyle Normal
+                        Write-GuiLog "Starting GOGDL download for: $name (id $id)"
+                    }
+                }
+                else {
+                    Show-WmtMessageBox -Message "GOGDL is not installed. Cannot download GOG games." -Title "Download Failed" -Image Warning | Out-Null
+                }
+            }
+            catch {
+                Show-WmtMessageBox -Message "Failed to start download: $($_.Exception.Message)" -Title "Download Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Helper: uninstall a game.
+    function Invoke-WmtLibraryUninstall {
+        param($Item)
+        if (-not $Item) { return }
+        $source = [string]$Item.Source
+        $id = [string]$Item.Id
+        $name = [string]$Item.Name
+
+        $msg = "Uninstall '$name'?`n`nThis will remove the game from your system."
+        if ((Show-WmtMessageBox -Message $msg -Title "Uninstall Game" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        if ($source -eq "Steam") {
+            Start-Process "steam://uninstall/$id"
+            Write-GuiLog "Starting Steam uninstall for: $name (app $id)"
+        }
+        elseif ($source -eq "Epic") {
+            try {
+                $legExe = Get-WmtLegendaryExePath
+                if ([string]::IsNullOrWhiteSpace($legExe) -or -not (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                    if ($cmd -and $cmd.Source) { $legExe = [string]$cmd.Source }
+                }
+                if ($legExe -and (Test-Path -LiteralPath $legExe -PathType Leaf)) {
+                    Start-Process -FilePath $legExe -ArgumentList "-y", "uninstall", $id -WindowStyle Normal
+                    Write-GuiLog "Starting Legendary uninstall for: $name (app $id)"
+                }
+                else {
+                    Show-WmtMessageBox -Message "Legendary is not installed. Cannot uninstall Epic games." -Title "Uninstall Failed" -Image Warning | Out-Null
+                }
+            }
+            catch {
+                Show-WmtMessageBox -Message "Failed to start uninstall: $($_.Exception.Message)" -Title "Uninstall Failed" -Image Warning | Out-Null
+            }
+        }
+        elseif ($source -eq "GOG") {
+            # GOGDL games are DRM-free — just delete the install directory.
+            $installDir = Get-WmtLibraryItemInstallDir -Item $Item
+            if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                try {
+                    Remove-Item -LiteralPath $installDir -Recurse -Force -ErrorAction Stop
+                    Write-GuiLog "Deleted GOG game directory: $installDir"
+                }
+                catch {
+                    Show-WmtMessageBox -Message "Failed to delete: $($_.Exception.Message)`n`nThe directory may be in use. Close the game and try again." -Title "Uninstall Failed" -Image Warning | Out-Null
+                }
+            }
+            else {
+                Show-WmtMessageBox -Message "Could not find the install directory for this GOG game." -Title "Uninstall Failed" -Image Warning | Out-Null
+            }
+        }
+    }
+
+    # Wire up context menu: show/hide items based on installed state.
+    if ($ctxLibrary -and $lstLibrary) {
+        $lstLibrary.Add_ContextMenuOpening({
+                $item = Get-WmtSelectedLibraryItem
+                if (-not $item) {
+                    $ctxLibrary.Items | ForEach-Object { $_.Visibility = [System.Windows.Visibility]::Collapsed }
+                    return
+                }
+
+                $isInstalled = $false
+                try { if ($item.PSObject.Properties["IsInstalled"]) { $isInstalled = [bool]$item.IsInstalled } } catch {}
+
+                # Show Launch + Uninstall + Go to Dir only if installed.
+                if ($miLibLaunch) { $miLibLaunch.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+                if ($miLibUninstall) { $miLibUninstall.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+                if ($miLibGoToDir) { $miLibGoToDir.Visibility = if ($isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+
+                # Show Install only if NOT installed.
+                if ($miLibInstall) { $miLibInstall.Visibility = if (-not $isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
+
+                # Store page + Copy ID always visible.
+                if ($miLibStorePage) { $miLibStorePage.Visibility = [System.Windows.Visibility]::Visible }
+                if ($miLibCopyId) { $miLibCopyId.Visibility = [System.Windows.Visibility]::Visible }
+            }.GetNewClosure())
+
+        if ($miLibLaunch) {
+            $miLibLaunch.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryLaunch -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibInstall) {
+            $miLibInstall.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryInstall -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibUninstall) {
+            $miLibUninstall.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    Invoke-WmtLibraryUninstall -Item $item
+                }.GetNewClosure())
+        }
+
+        if ($miLibGoToDir) {
+            $miLibGoToDir.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    $installDir = Get-WmtLibraryItemInstallDir -Item $item
+                    if (-not [string]::IsNullOrWhiteSpace($installDir) -and (Test-Path -LiteralPath $installDir)) {
+                        Start-Process "explorer.exe" -ArgumentList "`"$installDir`""
+                        Write-GuiLog "Opening: $installDir"
+                    }
+                    else {
+                        Show-WmtMessageBox -Message "Could not find the install directory for this game." -Title "Directory Not Found" -Image Information | Out-Null
+                    }
+                }.GetNewClosure())
+        }
+
+        if ($miLibStorePage) {
+            $miLibStorePage.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    if (-not $item) { return }
+                    $source = [string]$item.Source
+                    $id = [string]$item.Id
+                    $url = $null
+                    if ($source -eq "Steam") { $url = "https://store.steampowered.com/app/$id" }
+                    elseif ($source -eq "Epic") { $url = "https://www.epicgames.com/store/en-US/p/$id" }
+                    elseif ($source -eq "GOG") { $url = "https://www.gog.com/en/game/$id" }
+                    if ($url) { Start-Process $url }
+                }.GetNewClosure())
+        }
+
+        if ($miLibCopyId) {
+            $miLibCopyId.Add_Click({
+                    $item = Get-WmtSelectedLibraryItem
+                    if (-not $item) { return }
+                    $id = [string]$item.Id
+                    try { Set-Clipboard -Value $id; Write-GuiLog "Copied ID: $id" } catch {}
+                }.GetNewClosure())
+        }
+    }
+
+    # --- Library search box ---
+    # Filters the library list by name or ID (case-insensitive substring).
+    # Uses a debounce timer so typing doesn't re-filter on every keystroke.
+    $script:WmtLibrarySearchTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $script:WmtLibrarySearchTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+
+    $script:WmtLibrarySearchPlaceholder = "Search library..."
+
+    function Update-WmtLibrarySearch {
+        if (-not $txtLibrarySearch -or -not $lstLibrary) { return }
+        $query = ([string]$txtLibrarySearch.Text).Trim()
+        if ($query -eq $script:WmtLibrarySearchPlaceholder) { $query = "" }
+
+        $lstLibrary.Items.Clear()
+        if (-not $script:WmtLibraryScanResults) { return }
+
+        if ([string]::IsNullOrWhiteSpace($query)) {
+            # No filter — show all.
+            foreach ($item in $script:WmtLibraryScanResults) {
+                [void]$lstLibrary.Items.Add($item)
+            }
+        }
+        else {
+            $needle = $query.ToLowerInvariant()
+            foreach ($item in $script:WmtLibraryScanResults) {
+                $name = ([string]$item.Name).ToLowerInvariant()
+                $id = ([string]$item.Id).ToLowerInvariant()
+                $source = ([string]$item.Source).ToLowerInvariant()
+                if ($name.Contains($needle) -or $id.Contains($needle) -or $source.Contains($needle)) {
+                    [void]$lstLibrary.Items.Add($item)
+                }
+            }
+        }
+
+        # Re-apply sort if active.
+        if ($script:LibrarySortChain -and $script:LibrarySortChain.Count -gt 0) {
+            Set-ListViewSort -ListView $lstLibrary -Chain $script:LibrarySortChain
+        }
+    }
+
+    if ($txtLibrarySearch) {
+        # Placeholder behavior (focus/blur).
+        $txtLibrarySearch.Add_GotFocus({
+                if ($txtLibrarySearch.Text -eq $script:WmtLibrarySearchPlaceholder) {
+                    $txtLibrarySearch.Text = ""
+                    $txtLibrarySearch.Foreground = (New-WmtBrush "TextPrimary")
+                }
+            }.GetNewClosure())
+
+        $txtLibrarySearch.Add_LostFocus({
+                if ([string]::IsNullOrWhiteSpace($txtLibrarySearch.Text)) {
+                    $txtLibrarySearch.Text = $script:WmtLibrarySearchPlaceholder
+                    $txtLibrarySearch.Foreground = (New-WmtBrush "TextSecondary")
+                }
+            }.GetNewClosure())
+
+        # Debounced filter on text change.
+        $txtLibrarySearch.Add_TextChanged({
+                try { $script:WmtLibrarySearchTimer.Stop() } catch {}
+                try { $script:WmtLibrarySearchTimer.Start() } catch {}
+            }.GetNewClosure())
+
+        $script:WmtLibrarySearchTimer.Add_Tick({
+                try { $script:WmtLibrarySearchTimer.Stop() } catch {}
+                Update-WmtLibrarySearch
+                $script:WmtLibrarySearchTimer = $null
+            }.GetNewClosure())
+    }
+
+    if ($btnLibraryClearSearch) {
+        $btnLibraryClearSearch.Add_Click({
+                $txtLibrarySearch.Text = $script:WmtLibrarySearchPlaceholder
+                $txtLibrarySearch.Foreground = (New-WmtBrush "TextSecondary")
+                Update-WmtLibrarySearch
+            }.GetNewClosure())
+    }
+}
+
+$btnToggleMemCompress = Get-Ctrl "btnToggleMemCompress"
+if ($btnToggleMemCompress) {
+    $btnToggleMemCompress.Add_Click({
+            $mma = Get-MMAgent
+            if ($mma -and $null -ne $mma.MemoryCompression) {
+                if ([bool]$mma.MemoryCompression) {
+                    Invoke-UiCommand { Disable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue; Write-GuiLog "Memory compression disabled." } "Disabling memory compression..."
+                }
+                else {
+                    Invoke-UiCommand { Enable-MMAgent -MemoryCompression -ErrorAction SilentlyContinue; Write-GuiLog "Memory compression enabled." } "Enabling memory compression..."
+                }
+                Update-TweakButtonStates
+            }
+        })
+}
+
+$btnToggleHags = Get-Ctrl "btnToggleHags"
+if ($btnToggleHags) {
+    $btnToggleHags.Add_Click({
+            $h = [int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode" 0)
+            if ($h -eq 2) {
+                Set-Hags -Enable $false
+            }
+            else {
+                Set-Hags -Enable $true
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleWidgets = Get-Ctrl "btnToggleWidgets"
+if ($btnToggleWidgets) {
+    $btnToggleWidgets.Add_Click({
+            $currentlyHidden = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarDa" 1) -eq 0)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarDa" 1; Write-GuiLog "Widgets shown." } "Showing widgets..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarDa" 0; Write-GuiLog "Widgets hidden." } "Hiding widgets..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleTaskView = Get-Ctrl "btnToggleTaskView"
+if ($btnToggleTaskView) {
+    $btnToggleTaskView.Add_Click({
+            $currentlyHidden = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowTaskViewButton" 1) -eq 0)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowTaskViewButton" 1; Write-GuiLog "Task View shown." } "Showing Task View..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowTaskViewButton" 0; Write-GuiLog "Task View hidden." } "Hiding Task View..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleChat = Get-Ctrl "btnToggleChat"
+if ($btnToggleChat) {
+    $btnToggleChat.Add_Click({
+            $currentlyHidden = ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarMn" 1) -eq 0)
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarMn" 1; Write-GuiLog "Chat shown." } "Showing Chat..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarMn" 0; Write-GuiLog "Chat hidden." } "Hiding Chat..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleCombine = Get-Ctrl "btnToggleCombine"
+if ($btnToggleCombine) {
+    $btnToggleCombine.Add_Click({
+            $tc = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarGlomLevel" 0)
+            if ($tc -eq 2) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarGlomLevel" 0; Write-GuiLog "Taskbar set to Never Combine." } "Setting taskbar to Never Combine..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarGlomLevel" 2; Write-GuiLog "Taskbar set to Always Combine." } "Setting taskbar to Always Combine..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleTaskbarAlign = Get-Ctrl "btnToggleTaskbarAlign"
+if ($btnToggleTaskbarAlign) {
+    $btnToggleTaskbarAlign.Add_Click({
+            $ta = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarAl" 0)
+            if ($ta -ne 0) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarAl" 0; Write-GuiLog "Taskbar aligned to center." } "Aligning taskbar to center..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "TaskbarAl" 1; Write-GuiLog "Taskbar aligned to left." } "Aligning taskbar to left..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleClockFormat = Get-Ctrl "btnToggleClockFormat"
+if ($btnToggleClockFormat) {
+    $btnToggleClockFormat.Add_Click({
+            $is24 = ([int](Get-WmtRegValue "HKCU:\Control Panel\International" "iTime" 0) -eq 1)
+            $intlPath = "HKCU:\Control Panel\International"
+            if ($is24) {
+                Invoke-UiCommand {
+                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 0 -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "h:mm tt" -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "h:mm tt" -Type String -Force
+                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
+                    $HWND_BROADCAST = [IntPtr]0xffff
+                    $WM_SETTINGCHANGE = 0x1A
+                    $result = [IntPtr]::Zero
+                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
+                    Write-GuiLog "Clock set to 12-hour format."
+                } "Setting 12-hour clock..."
+            }
+            else {
+                Invoke-UiCommand {
+                    Set-ItemProperty -Path $intlPath -Name "iTime" -Value 1 -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sTimeFormat" -Value "H:mm" -Type String -Force
+                    Set-ItemProperty -Path $intlPath -Name "sShortTime" -Value "H:mm" -Type String -Force
+                    Add-Type -Namespace Win32 -Name Native -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)] public static extern bool SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam, string lParam, uint fuFlags, uint uTimeout, out IntPtr lpdwResult);' -ErrorAction SilentlyContinue
+                    $HWND_BROADCAST = [IntPtr]0xffff
+                    $WM_SETTINGCHANGE = 0x1A
+                    $result = [IntPtr]::Zero
+                    [Win32.Native]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [IntPtr]::Zero, "intl", 2, 5000, [ref]$result) | Out-Null
+                    Write-GuiLog "Clock set to 24-hour format."
+                } "Setting 24-hour clock..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSearchDisplay = Get-Ctrl "btnToggleSearchDisplay"
+if ($btnToggleSearchDisplay) {
+    $btnToggleSearchDisplay.Add_Click({
+            $smode = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode" 1)
+            if ($smode -eq 0) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode" 1; Write-GuiLog "Search set to icon." } "Setting search to icon..."
+            }
+            elseif ($smode -eq 1) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode" 2; Write-GuiLog "Search set to full box." } "Setting search to box..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search" "SearchboxTaskbarMode" 0; Write-GuiLog "Search hidden." } "Hiding search..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleClockSecs = Get-Ctrl "btnToggleClockSecs"
+if ($btnToggleClockSecs) {
+    $btnToggleClockSecs.Add_Click({
+            $cs = [int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowSecondsInSystemClock" 0)
+            if ($cs -eq 1) {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowSecondsInSystemClock" 0; Write-GuiLog "Hid seconds on the system clock." } "Hiding seconds on the system clock..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowSecondsInSystemClock" 1; Write-GuiLog "Enabled seconds on the system clock." } "Enabling seconds on the system clock..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
 # My Device shortcuts point at the original page buttons so all confirmations, logging, and state checks stay in one place.
 function Connect-WmtMyDeviceShortcut {
     param(
@@ -32358,36 +35219,33 @@ function Connect-WmtMyDeviceShortcut {
 }
 
 @{
-    btnMyDeviceQuickFix       = "btnQuickFix"
-    btnMyDeviceWinRE          = "btnUtilWinRE"
-    btnMyDeviceSysReport      = "btnUtilSysInfo"
-    btnMyDeviceRestoreMgr     = "btnUtilRestoreMgr"
-    btnMyDeviceStartupMgr     = "btnUtilStartupMgr"
-    btnMyDeviceUpdateRepair   = "btnUpdateRepair"
-    btnMyDeviceUpdateServices = "btnUpdateServices"
-    btnMyDeviceNetInfo        = "btnNetInfo"
-    btnMyDeviceFlushDNS       = "btnFlushDNS"
-    btnMyDeviceResetWifi      = "btnResetWifi"
-    btnMyDeviceNetRepair      = "btnNetRepair"
-    btnMyDeviceDnsCustom      = "btnDnsCustom"
-    btnMyDeviceHostsEdit      = "btnHostsEdit"
-    btnMyDeviceHostsAdBlock   = "btnHostsUpdate"
-    btnMyDeviceRouteView      = "btnRouteView"
-    btnMyDeviceUltimatePower  = "btnPerfUltimatePower"
-    btnMyDeviceHibernateOff   = "btnPerfDisableHibernate"
-    btnMyDeviceHibernateOn    = "btnPerfEnableHibernate"
-    btnMyDeviceMemCompressOff = "btnPerfDisableMemCompress"
-    btnMyDeviceMemCompressOn  = "btnPerfEnableMemCompress"
-    btnMyDeviceHagsOn         = "btnPerfEnableHags"
-    btnMyDeviceHagsOff        = "btnPerfDisableHags"
-    btnMyDeviceDriverReport   = "btnDrvReport"
-    btnMyDeviceDriverBackup   = "btnDrvBackup"
-    btnMyDeviceGhostDrivers   = "btnDrvGhost"
-    btnMyDeviceDriverClean    = "btnDrvClean"
-    btnMyDeviceDriverRestore  = "btnDrvRestore"
-    btnMyDeviceChkdsk         = "btnCHKDSK"
-    btnMyDeviceDiskCleanup    = "btnCleanDisk"
-    btnMyDeviceTempCleanup    = "btnCleanTemp"
+    btnMyDeviceQuickFix          = "btnQuickFix"
+    btnMyDeviceWinRE             = "btnUtilWinRE"
+    btnMyDeviceSysReport         = "btnUtilSysInfo"
+    btnMyDeviceRestoreMgr        = "btnUtilRestoreMgr"
+    btnMyDeviceStartupMgr        = "btnUtilStartupMgr"
+    btnMyDeviceUpdateRepair      = "btnUpdateRepair"
+    btnMyDeviceUpdateServices    = "btnUpdateServices"
+    btnMyDeviceNetInfo           = "btnNetInfo"
+    btnMyDeviceFlushDNS          = "btnFlushDNS"
+    btnMyDeviceResetWifi         = "btnResetWifi"
+    btnMyDeviceNetRepair         = "btnNetRepair"
+    btnMyDeviceDnsCustom         = "btnDnsCustom"
+    btnMyDeviceHostsEdit         = "btnHostsEdit"
+    btnMyDeviceHostsAdBlock      = "btnHostsUpdate"
+    btnMyDeviceRouteView         = "btnRouteView"
+    btnMyDeviceUltimatePower     = "btnPerfUltimatePower"
+    btnMyDeviceHibernateToggle   = "btnToggleHibernate"
+    btnMyDeviceMemCompressToggle = "btnToggleMemCompress"
+    btnMyDeviceHagsToggle        = "btnToggleHags"
+    btnMyDeviceDriverReport      = "btnDrvReport"
+    btnMyDeviceDriverBackup      = "btnDrvBackup"
+    btnMyDeviceGhostDrivers      = "btnDrvGhost"
+    btnMyDeviceDriverClean       = "btnDrvClean"
+    btnMyDeviceDriverRestore     = "btnDrvRestore"
+    btnMyDeviceChkdsk            = "btnCHKDSK"
+    btnMyDeviceDiskCleanup       = "btnCleanDisk"
+    btnMyDeviceTempCleanup       = "btnCleanTemp"
 }.GetEnumerator() | ForEach-Object {
     Connect-WmtMyDeviceShortcut -ShortcutButtonName $_.Key -TargetButtonName $_.Value
 }
@@ -32465,20 +35323,40 @@ $onMainWindowContentRendered = {
     # 1. Click the Updates tab by default.
     (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
 
-    # 2. Warm hidden pages in the background while the Updates scan starts.
-    Start-WmtStartupBackgroundPreload
+    # 2. Warm hidden pages in the background (deferred 1s so UI paints first).
+    $preloadDeferTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $preloadDeferTimer.Interval = [TimeSpan]::FromSeconds(1)
+    $preloadDeferTimer.Add_Tick({
+            try { $preloadDeferTimer.Stop() } catch {}
+            Start-WmtStartupBackgroundPreload
+            $preloadDeferTimer = $null
+        })
+    $preloadDeferTimer.Start()
 
-    # 3. Trigger the background update check.
-    Start-UpdateCheckBackground
+    # 3. Trigger the background update check (deferred).
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::Background,
+        [Action] { Start-UpdateCheckBackground }
+    )
 
     # 3b. Enable periodic update auto scan if configured in Provider settings.
-    if (Get-WmtUpdateNotificationsEnabled -Settings $settings) {
-        [void](Initialize-WmtNativeToastSupport)
-    }
-    Start-WmtUpdateAutoScanTimer -ResetNextRun
+    # Deferred to Background priority — toast registration is not needed immediately.
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::Background,
+        [Action] {
+            if (Get-WmtUpdateNotificationsEnabled -Settings $settings) {
+                [void](Initialize-WmtNativeToastSupport)
+            }
+            Start-WmtUpdateAutoScanTimer -ResetNextRun
+        }
+    )
 
     # 4. Update tweak button states based on system.
-    Update-TweakButtonStates
+    # Deferred to Background priority so the window paints first.
+    [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+        [System.Windows.Threading.DispatcherPriority]::Background,
+        [Action] { Update-TweakButtonStates }
+    )
     Update-MyDeviceResponsiveLayout
 }.GetNewClosure()
 [void]$window.Add_ContentRendered($onMainWindowContentRendered)
@@ -32487,6 +35365,586 @@ $onMainWindowSizeChanged = {
     Update-MyDeviceResponsiveLayout
 }.GetNewClosure()
 [void]$window.Add_SizeChanged($onMainWindowSizeChanged)
+
+# Start background library cache builder for Legendary/GOGDL on boot
+# so the main Updates search box can find owned games without a first-run delay.
+$script:WmtLibraryCacheRunspace = $null
+$script:WmtLibraryCacheAsyncResult = $null
+
+function Start-WmtLibraryCacheBuilder {
+    try {
+        $settings = Get-WmtSettings
+        $enabled = @($settings.EnabledProviders)
+        $toggles = Get-WmtProviderToggles -Settings $settings
+
+        $needLeg = $false
+        $needGog = $false
+        $dataPath = Get-DataPath
+        $legFile = Join-Path $dataPath "legendary_library.json"
+        $gogFile = Join-Path $dataPath "gog_library.json"
+
+        # Cache expiry: re-fetch if the cache file is older than 24 hours
+        # (in case the user bought more games since the cache was last updated).
+        $cacheExpiryHours = 24
+
+        if ("legendary" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("legendary")) {
+                $t = $toggles["legendary"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $legFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $legFile).LastWriteTime
+                        if ($age.TotalHours -ge $cacheExpiryHours) { $isStale = $true }
+                    }
+                    catch {}
+                }
+                $needLeg = (-not $fileExists) -or $isStale
+            }
+        }
+
+        if ("gogdl" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("gogdl")) {
+                $t = $toggles["gogdl"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $gogFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $gogFile).LastWriteTime
+                        if ($age.TotalHours -ge $cacheExpiryHours) { $isStale = $true }
+                    }
+                    catch {}
+                }
+                $needGog = (-not $fileExists) -or $isStale
+            }
+        }
+
+        # Also check PyPI index cache if pip is enabled + search on.
+        $pypiFile = Join-Path $dataPath "pypi_index.json"
+        $needPypi = $false
+        if ("pip" -in $enabled) {
+            $t = $null
+            if ($toggles -is [System.Collections.IDictionary] -and $toggles.Contains("pip")) {
+                $t = $toggles["pip"]
+            }
+            $searchOn = $false
+            if ($t) {
+                if ($t -is [System.Collections.IDictionary]) {
+                    if ($t.Contains("Search")) { $searchOn = [bool]$t["Search"] }
+                }
+                else {
+                    try { if ($t.PSObject.Properties["Search"]) { $searchOn = [bool]$t.Search } } catch {}
+                }
+            }
+            if ($searchOn) {
+                $fileExists = (Test-Path -LiteralPath $pypiFile -PathType Leaf)
+                $isStale = $false
+                if ($fileExists) {
+                    try {
+                        $age = (Get-Date) - (Get-Item -LiteralPath $pypiFile).LastWriteTime
+                        if ($age.TotalHours -ge 24) { $isStale = $true }
+                    }
+                    catch {}
+                }
+                $needPypi = (-not $fileExists) -or $isStale
+            }
+        }
+
+        # Also check Steam library cache if Steam is enabled.
+        $steamFile = Join-Path $dataPath "steam_library.json"
+        $steamAppFile = Join-Path $dataPath "steam_applist.json"
+        $needSteam = $false
+        if ("steam" -in $enabled) {
+            $fileExists = (Test-Path -LiteralPath $steamFile -PathType Leaf)
+            $isStale = $false
+            if ($fileExists) {
+                try {
+                    $age = (Get-Date) - (Get-Item -LiteralPath $steamFile).LastWriteTime
+                    if ($age.TotalHours -ge 24) { $isStale = $true }
+                }
+                catch {}
+            }
+            $needSteam = (-not $fileExists) -or $isStale
+        }
+
+        if (-not $needLeg -and -not $needGog -and -not $needPypi -and -not $needSteam) { return }
+
+        if ($script:WmtLibraryCacheRunspace) {
+            try { $script:WmtLibraryCacheRunspace.Stop() } catch {}
+            try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+            $script:WmtLibraryCacheRunspace = $null
+        }
+
+        # Resolve all paths in the main scope — the background runspace does NOT
+        # have access to main-scope functions like Get-DataPath, Get-WmtLegendaryExePath,
+        # Get-WmtGogdlAuthConfigPath, or Get-WmtLegendaryLibrary.
+        $legendaryExe = Get-WmtLegendaryExePath
+        if ([string]::IsNullOrWhiteSpace($legendaryExe) -or -not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)) {
+            try {
+                $cmd = Get-Command legendary -ErrorAction SilentlyContinue
+                if ($cmd -and $cmd.Source) { $legendaryExe = [string]$cmd.Source }
+            }
+            catch {}
+        }
+        $gogAuthPath = Get-WmtGogdlAuthConfigPath
+        if ([string]::IsNullOrWhiteSpace($gogAuthPath) -or -not (Test-Path -LiteralPath $gogAuthPath -PathType Leaf)) {
+            $heroicAuthPath = Join-Path $env:APPDATA "heroic\gog_store\auth.json"
+            if (Test-Path -LiteralPath $heroicAuthPath -PathType Leaf) { $gogAuthPath = $heroicAuthPath }
+        }
+
+        Write-GuiLog "Building Legendary/GOGDL library caches in background..."
+        $ps = [PowerShell]::Create()
+
+        # Self-contained scriptBlock: all logic is inline, paths are passed as args.
+        # This runspace does NOT share the main script's functions or variables.
+        [void]$ps.AddScript({
+                param($DoLeg, $DoGog, $LegendaryExe, $LegCacheFile, $GogAuthPath, $GogCacheFile, $DoPypi, $PypiCacheFile, $DoSteam, $SteamCacheFile, $SteamAppListFile)
+
+                # --- Fetch Legendary library (inline, self-contained) ---
+                if ($DoLeg) {
+                    try {
+                        Write-Output "LOG:Fetching Legendary library..."
+                        $result = New-Object System.Collections.Generic.List[object]
+
+                        if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
+                            $psi = New-Object System.Diagnostics.ProcessStartInfo
+                            $psi.FileName = $LegendaryExe
+                            $psi.Arguments = "list --json"
+                            $psi.RedirectStandardOutput = $true
+                            $psi.RedirectStandardError = $true
+                            $psi.UseShellExecute = $false
+                            $psi.CreateNoWindow = $true
+                            $proc = [System.Diagnostics.Process]::Start($psi)
+                            $stdout = $proc.StandardOutput.ReadToEnd()
+                            try { $proc.WaitForExit(30000) } catch {}
+                            try { if (-not $proc.HasExited) { $proc.Kill() } } catch {}
+
+                            $parsed = $false
+
+                            # Attempt 1: JSON parsing
+                            if (-not $parsed -and -not [string]::IsNullOrWhiteSpace($stdout)) {
+                                try {
+                                    $json = $stdout | ConvertFrom-Json -ErrorAction Stop
+                                    if ($json) {
+                                        foreach ($game in @($json)) {
+                                            $title = [string]$game.app_title
+                                            if ([string]::IsNullOrWhiteSpace($title)) { $title = [string]$game.title }
+                                            if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                            $isInstalled = $false
+                                            try { if ($game.PSObject.Properties["is_installed"]) { $isInstalled = [bool]$game.is_installed } } catch {}
+                                            $installedVer = ""
+                                            $latestVer = [string]$game.app_version
+                                            if ($isInstalled) {
+                                                try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
+                                                if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
+                                            }
+                                            $result.Add([PSCustomObject]@{
+                                                    Provider         = "legendary"
+                                                    Title            = $title
+                                                    Id               = [string]$game.app_name
+                                                    Version          = $latestVer
+                                                    InstalledVersion = $installedVer
+                                                    IsInstalled      = $isInstalled
+                                                    Source           = "legendary"
+                                                    Kind             = "Library"
+                                                })
+                                        }
+                                        if ($result.Count -gt 0) { $parsed = $true }
+                                    }
+                                }
+                                catch {
+                                    # JSON parse failed — fall through to text parsing
+                                }
+                            }
+
+                            # Attempt 2: Text parsing fallback
+                            if (-not $parsed) {
+                                $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                                foreach ($match in $regex.Matches($stdout)) {
+                                    $title = $match.Groups["title"].Value.Trim()
+                                    if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                    $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                                    $result.Add([PSCustomObject]@{
+                                            Provider = "legendary"
+                                            Title    = $title
+                                            Id       = $match.Groups["app"].Value.Trim()
+                                            Version  = $ver
+                                            Source   = "legendary"
+                                            Kind     = "Library"
+                                        })
+                                }
+                            }
+                        }
+
+                        $arr = $result.ToArray()
+                        $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                        Write-Output "LOG:Legendary library cached: $($arr.Count) games."
+                    }
+                    catch {
+                        Write-Output "LOG:Legendary library cache failed: $($_.Exception.Message)"
+                    }
+                }
+
+                # --- Fetch GOG library (inline, self-contained) ---
+                if ($DoGog) {
+                    try {
+                        Write-Output "LOG:Fetching GOG library..."
+                        $result = New-Object System.Collections.Generic.List[object]
+
+                        if ($GogAuthPath -and (Test-Path -LiteralPath $GogAuthPath -PathType Leaf)) {
+                            $text = [System.IO.File]::ReadAllText($GogAuthPath).TrimStart([char]0xFEFF)
+                            $json = $text | ConvertFrom-Json -ErrorAction Stop
+                            $gogClientId = "46899977096215655"
+                            $creds = $null
+                            $clientProp = $json.PSObject.Properties[$gogClientId]
+                            if ($clientProp) { $creds = $clientProp.Value }
+                            elseif (-not [string]::IsNullOrWhiteSpace([string]$json.access_token)) { $creds = $json }
+                            if ($creds -and -not [string]::IsNullOrWhiteSpace([string]$creds.access_token)) {
+                                try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                                $token = [string]$creds.access_token
+                                $headers = @{
+                                    "Authorization" = "Bearer $token"
+                                    "User-Agent"    = "Windows-Maintenance-Tool"
+                                }
+                                $page = 1
+                                $totalPages = 1
+                                while ($page -le $totalPages -and $page -le 50) {
+                                    $url = "https://embed.gog.com/account/getFilteredProducts?mediaType=1&page=$page"
+                                    $resp = Invoke-RestMethod -Uri $url -Headers $headers -UseBasicParsing -TimeoutSec 20 -ErrorAction Stop
+                                    if (-not $resp) { break }
+                                    if ($resp.totalPages) { $totalPages = [int]$resp.totalPages }
+                                    if ($resp.products) {
+                                        foreach ($prod in @($resp.products)) {
+                                            $title = [string]$prod.title
+                                            if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                            $result.Add([PSCustomObject]@{
+                                                    Provider = "gogdl"
+                                                    Title    = $title
+                                                    Id       = [string]$prod.id
+                                                    Version  = [string]$prod.version
+                                                    Source   = "gogdl"
+                                                    Kind     = "Library"
+                                                })
+                                        }
+                                    }
+                                    $page++
+                                }
+                            }
+                        }
+
+                        $arr = $result.ToArray()
+                        $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $GogCacheFile -Force -Encoding UTF8
+                        Write-Output "LOG:GOG library cached: $($arr.Count) games."
+                    }
+                    catch {
+                        Write-Output "LOG:GOG library cache failed: $($_.Exception.Message)"
+                    }
+                }
+
+                # --- Fetch PyPI index (inline, self-contained) ---
+                if ($DoPypi) {
+                    try {
+                        Write-Output "LOG:Fetching PyPI package index..."
+                        try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                        $headers = @{
+                            "Accept"     = "application/vnd.pypi.simple.v1+json"
+                            "User-Agent" = "Windows-Maintenance-Tool"
+                        }
+                        $resp = Invoke-RestMethod -Uri "https://pypi.org/simple/" -Headers $headers -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+                        if ($resp -and $resp.projects) {
+                            $names = @($resp.projects | ForEach-Object { [string]$_.name })
+                            $names | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $PypiCacheFile -Force -Encoding UTF8
+                            Write-Output "LOG:PyPI index cached: $($names.Count) packages."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:PyPI index fetch failed: $($_.Exception.Message)"
+                    }
+                }
+                # --- Fetch Steam library (inline, self-contained) ---
+                if ($DoSteam) {
+                    try {
+                        Write-Output "LOG:Fetching Steam library..."
+
+                        # Find Steam install path.
+                        $steamInstall = $null
+                        foreach ($reg in @("HKCU:\Software\Valve\Steam", "HKLM:\SOFTWARE\WOW6432Node\Valve\Steam", "HKLM:\SOFTWARE\Valve\Steam")) {
+                            try {
+                                $props = Get-ItemProperty -LiteralPath $reg -ErrorAction SilentlyContinue
+                                if ($props) {
+                                    foreach ($p in @("SteamPath", "InstallPath")) {
+                                        if ($props.PSObject.Properties[$p]) {
+                                            $v = [string]$props.$p
+                                            if (-not [string]::IsNullOrWhiteSpace($v) -and (Test-Path -LiteralPath $v)) { $steamInstall = $v; break }
+                                        }
+                                    }
+                                }
+                            }
+                            catch {}
+                            if ($steamInstall) { break }
+                        }
+                        if (-not $steamInstall) {
+                            foreach ($c in @("${env:ProgramFiles(x86)}\Steam", "${env:ProgramFiles}\Steam")) {
+                                if (-not [string]::IsNullOrWhiteSpace($c) -and (Test-Path -LiteralPath $c)) { $steamInstall = $c; break }
+                            }
+                        }
+
+                        if ($steamInstall) {
+                            # Get installed apps from manifests.
+                            $installedApps = @{}
+                            $libRoots = [System.Collections.Generic.List[string]]::new()
+                            if (Test-Path -LiteralPath (Join-Path $steamInstall "steamapps")) { [void]$libRoots.Add($steamInstall) }
+                            $libF = Join-Path $steamInstall "steamapps\libraryfolders.vdf"
+                            if (Test-Path -LiteralPath $libF -PathType Leaf) {
+                                $libT = Get-Content -LiteralPath $libF -Raw -ErrorAction SilentlyContinue
+                                if (-not [string]::IsNullOrWhiteSpace($libT)) {
+                                    foreach ($m in [regex]::Matches($libT, '"path"\s+"([^"]+)"')) {
+                                        $p = $m.Groups[1].Value -replace '\\\\', '\'
+                                        if ((Test-Path -LiteralPath $p) -and -not $libRoots.Contains($p)) { [void]$libRoots.Add($p) }
+                                    }
+                                }
+                            }
+                            foreach ($libRoot in $libRoots) {
+                                $sa = Join-Path $libRoot "steamapps"
+                                if (-not (Test-Path -LiteralPath $sa)) { continue }
+                                foreach ($man in @(Get-ChildItem -LiteralPath $sa -Filter "appmanifest_*.acf" -File -ErrorAction SilentlyContinue)) {
+                                    $mt = Get-Content -LiteralPath $man.FullName -Raw -ErrorAction SilentlyContinue
+                                    if ([string]::IsNullOrWhiteSpace($mt)) { continue }
+                                    $aid = ""
+                                    $am = [regex]::Match($mt, '"appid"\s+"([^"]*)"')
+                                    if ($am.Success) { $aid = $am.Groups[1].Value }
+                                    if ([string]::IsNullOrWhiteSpace($aid)) { $aid = [regex]::Match($man.BaseName, '\d+').Value }
+                                    if ([string]::IsNullOrWhiteSpace($aid)) { continue }
+                                    $mname = ""
+                                    $nm = [regex]::Match($mt, '"name"\s+"([^"]*)"')
+                                    if ($nm.Success) { $mname = $nm.Groups[1].Value }
+                                    if ([string]::IsNullOrWhiteSpace($mname)) { $mname = "Steam App $aid" }
+                                    $buildId = ""
+                                    $bm = [regex]::Match($mt, '"buildid"\s+"([^"]*)"')
+                                    if ($bm.Success) { $buildId = $bm.Groups[1].Value }
+                                    $installedApps[$aid] = @{ Name = $mname; BuildId = $buildId }
+                                }
+                            }
+
+                            # Get owned app IDs from localconfig.vdf (case-insensitive).
+                            $ownedIds = [System.Collections.Generic.List[string]]::new()
+                            $udPath = Join-Path $steamInstall "userdata"
+                            if (Test-Path -LiteralPath $udPath) {
+                                foreach ($ud in @(Get-ChildItem -LiteralPath $udPath -Directory -ErrorAction SilentlyContinue)) {
+                                    $vdfP = Join-Path $ud.FullName "config\localconfig.vdf"
+                                    if (-not (Test-Path -LiteralPath $vdfP -PathType Leaf)) { continue }
+                                    $vdfT = Get-Content -LiteralPath $vdfP -Raw -ErrorAction SilentlyContinue
+                                    if ([string]::IsNullOrWhiteSpace($vdfT)) { continue }
+                                    $aIdx = $vdfT.IndexOf('"apps"', [System.StringComparison]::OrdinalIgnoreCase)
+                                    if ($aIdx -lt 0) { continue }
+                                    $bIdx = $vdfT.IndexOf('{', $aIdx)
+                                    if ($bIdx -lt 0) { continue }
+                                    $dep = 0
+                                    $ii = $bIdx
+                                    while ($ii -lt $vdfT.Length) {
+                                        $ch = $vdfT[$ii]
+                                        if ($ch -eq '{') { $dep++; $ii++ }
+                                        elseif ($ch -eq '}') { $dep--; if ($dep -le 0) { break }; $ii++ }
+                                        elseif ($ch -eq '"') {
+                                            $eQ = $vdfT.IndexOf('"', $ii + 1)
+                                            if ($eQ -lt 0) { break }
+                                            $s = $vdfT.Substring($ii + 1, $eQ - $ii - 1)
+                                            $ii = $eQ + 1
+                                            if ($dep -eq 1) {
+                                                $jj = $ii
+                                                while ($jj -lt $vdfT.Length -and [char]::IsWhiteSpace($vdfT[$jj])) { $jj++ }
+                                                if ($jj -lt $vdfT.Length -and $vdfT[$jj] -eq '{') {
+                                                    if (-not $ownedIds.Contains($s)) { [void]$ownedIds.Add($s) }
+                                                }
+                                            }
+                                        }
+                                        else { $ii++ }
+                                    }
+                                }
+                            }
+
+                            # Resolve names for ALL apps using the GitHub-hosted Steam app ID
+                            # list (single download, ~17MB for games + ~7.5MB for DLC).
+                            # This is much faster than per-app API calls and contains every
+                            # Steam app ever. Cached in steam_applist.json with 7-day expiry.
+                            $appNames = @{}
+                            $appListFile = $SteamAppListFile
+
+                            # Check if we need to download the app list.
+                            $needAppList = $true
+                            if (Test-Path -LiteralPath $appListFile -PathType Leaf) {
+                                try {
+                                    $aAge = (Get-Date) - (Get-Item -LiteralPath $appListFile).LastWriteTime
+                                    if ($aAge.TotalDays -lt 7) { $needAppList = $false }
+                                }
+                                catch {}
+                            }
+
+                            if ($needAppList) {
+                                try {
+                                    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch {}
+                                    Write-Output "LOG:Downloading Steam app ID list..."
+
+                                    # Download games list.
+                                    $gamesUrl = "https://raw.githubusercontent.com/jsnli/steamappidlist/master/data/games_appid.json"
+                                    $gamesResp = Invoke-RestMethod -Uri $gamesUrl -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+
+                                    # Download DLC list.
+                                    $dlcUrl = "https://raw.githubusercontent.com/jsnli/steamappidlist/master/data/dlc_appid.json"
+                                    $dlcResp = Invoke-RestMethod -Uri $dlcUrl -UseBasicParsing -TimeoutSec 120 -ErrorAction Stop
+
+                                    # Build appNames hashtable from both lists.
+                                    $allApps = [System.Collections.Generic.List[object]]::new()
+                                    if ($gamesResp) {
+                                        foreach ($e in @($gamesResp)) {
+                                            $ea = [string]$e.appid
+                                            $en = [string]$e.name
+                                            if (-not [string]::IsNullOrWhiteSpace($ea) -and -not [string]::IsNullOrWhiteSpace($en)) {
+                                                $appNames[$ea] = $en
+                                                [void]$allApps.Add([PSCustomObject]@{ appid = $ea; name = $en })
+                                            }
+                                        }
+                                    }
+                                    if ($dlcResp) {
+                                        foreach ($e in @($dlcResp)) {
+                                            $ea = [string]$e.appid
+                                            $en = [string]$e.name
+                                            if (-not [string]::IsNullOrWhiteSpace($ea) -and -not [string]::IsNullOrWhiteSpace($en) -and -not $appNames.ContainsKey($ea)) {
+                                                $appNames[$ea] = $en
+                                                [void]$allApps.Add([PSCustomObject]@{ appid = $ea; name = $en })
+                                            }
+                                        }
+                                    }
+
+                                    # Save to cache file.
+                                    $allApps.ToArray() | ConvertTo-Json -Depth 1 | Set-Content -LiteralPath $appListFile -Force -Encoding UTF8
+                                    Write-Output "LOG:Steam app list cached: $($appNames.Count) apps."
+                                }
+                                catch {
+                                    Write-Output "LOG:Steam app list download failed: $($_.Exception.Message)"
+                                }
+                            }
+                            else {
+                                # Load from existing cache.
+                                try {
+                                    $alT = [System.IO.File]::ReadAllText($appListFile)
+                                    $al = $alT | ConvertFrom-Json -ErrorAction Stop
+                                    if ($al) {
+                                        foreach ($e in @($al)) {
+                                            $ea = [string]$e.appid
+                                            $en = [string]$e.name
+                                            if (-not [string]::IsNullOrWhiteSpace($ea) -and -not [string]::IsNullOrWhiteSpace($en)) {
+                                                $appNames[$ea] = $en
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+
+                            # Build result.
+                            $sResult = [System.Collections.Generic.List[object]]::new()
+                            $sSeen = @{}
+                            if ($ownedIds.Count -gt 0) {
+                                foreach ($aid in $ownedIds) {
+                                    if ($sSeen.ContainsKey($aid)) { continue }
+                                    $sSeen[$aid] = $true
+                                    if ($installedApps.ContainsKey($aid)) {
+                                        $info = $installedApps[$aid]
+                                        $sResult.Add([PSCustomObject]@{ Provider = "steam"; Title = [string]$info.Name; Id = $aid; Version = [string]$info.BuildId; Source = "steam"; Kind = "Library"; IsInstalled = $true; InstalledVersion = if (-not [string]::IsNullOrWhiteSpace([string]$info.BuildId) -and [string]$info.BuildId -ne "0") { "Build " + [string]$info.BuildId } else { "Installed" } })
+                                    }
+                                    else {
+                                        $n = if ($appNames.ContainsKey($aid)) { $appNames[$aid] } else { "Steam App $aid" }
+                                        $sResult.Add([PSCustomObject]@{ Provider = "steam"; Title = $n; Id = $aid; Version = ""; Source = "steam"; Kind = "Library"; IsInstalled = $false; InstalledVersion = "Not installed" })
+                                    }
+                                }
+                            }
+                            else {
+                                foreach ($aid in @($installedApps.Keys)) {
+                                    if ($sSeen.ContainsKey($aid)) { continue }
+                                    $sSeen[$aid] = $true
+                                    $info = $installedApps[$aid]
+                                    $sResult.Add([PSCustomObject]@{ Provider = "steam"; Title = [string]$info.Name; Id = $aid; Version = [string]$info.BuildId; Source = "steam"; Kind = "Library"; IsInstalled = $true; InstalledVersion = if (-not [string]::IsNullOrWhiteSpace([string]$info.BuildId) -and [string]$info.BuildId -ne "0") { "Build " + [string]$info.BuildId } else { "Installed" } })
+                                }
+                            }
+                            $sResult.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $SteamCacheFile -Force -Encoding UTF8
+                            Write-Output "LOG:Steam library cached: $($sResult.Count) games."
+                        }
+                        else {
+                            Write-Output "LOG:Steam install not found."
+                        }
+                    }
+                    catch {
+                        Write-Output "LOG:Steam library cache failed: $($_.Exception.Message)"
+                    }
+                }
+            }).AddArgument($needLeg).AddArgument($needGog).AddArgument($legendaryExe).AddArgument($legFile).AddArgument($gogAuthPath).AddArgument($gogFile).AddArgument($needPypi).AddArgument($pypiFile).AddArgument($needSteam).AddArgument($steamFile).AddArgument($steamAppFile)
+
+        $script:WmtLibraryCacheRunspace = $ps
+        $script:WmtLibraryCacheAsyncResult = $ps.BeginInvoke()
+
+        # Polling timer to collect log output and dispose the runspace when done.
+        $timer = New-Object System.Windows.Threading.DispatcherTimer
+        $timer.Interval = [TimeSpan]::FromSeconds(2)
+        $timer.Add_Tick({
+                try { $timer.Stop() } catch {}
+                if (-not $script:WmtLibraryCacheAsyncResult) { return }
+                if (-not $script:WmtLibraryCacheAsyncResult.IsCompleted) {
+                    try { $timer.Start() } catch {}
+                    return
+                }
+                try {
+                    $results = $script:WmtLibraryCacheRunspace.EndInvoke($script:WmtLibraryCacheAsyncResult)
+                    foreach ($line in @($results)) {
+                        if ($line -is [string] -and $line.StartsWith("LOG:")) {
+                            Write-GuiLog ($line.Substring(4))
+                        }
+                    }
+                }
+                catch {}
+                try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+                $script:WmtLibraryCacheRunspace = $null
+                $script:WmtLibraryCacheAsyncResult = $null
+            }.GetNewClosure())
+        $timer.Start()
+    }
+    catch {
+        Write-GuiLog "Library cache builder failed to start: $($_.Exception.Message)"
+    }
+}
+
+# Kick off the background library cache builder shortly after the window opens.
+$bootCacheTimer = New-Object System.Windows.Threading.DispatcherTimer
+$bootCacheTimer.Interval = [TimeSpan]::FromSeconds(2)
+$bootCacheTimer.Add_Tick({
+        try { $bootCacheTimer.Stop() } catch {}
+        Start-WmtLibraryCacheBuilder
+    }.GetNewClosure())
+$bootCacheTimer.Start()
 
 $onMainWindowClosing = {
     param($windowSender, $closeArgs)
@@ -32578,6 +36036,36 @@ $onMainWindowClosing = {
 $onMainWindowClosed = {
     try { Remove-WmtTrayIcon } catch {}
     try { Stop-WmtNotificationFallbackTimers } catch {}
+    try {
+        if ($script:WmtLibraryCacheRunspace) {
+            try { $script:WmtLibraryCacheRunspace.Stop() } catch {}
+            try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
+            $script:WmtLibraryCacheRunspace = $null
+            $script:WmtLibraryCacheAsyncResult = $null
+        }
+    }
+    catch {}
+    try {
+        if ($script:WmtLibraryScanRunspace) {
+            try { $script:WmtLibraryScanRunspace.Stop() } catch {}
+            try { $script:WmtLibraryScanRunspace.Dispose() } catch {}
+            $script:WmtLibraryScanRunspace = $null
+            $script:WmtLibraryScanAsyncResult = $null
+        }
+    }
+    catch {}
+    try { if ($script:WmtLibraryScanTimer) { $script:WmtLibraryScanTimer.Stop(); $script:WmtLibraryScanTimer = $null } } catch {}
+    try { if ($script:WmtLibrarySearchTimer) { $script:WmtLibrarySearchTimer.Stop(); $script:WmtLibrarySearchTimer = $null } } catch {}
+    try { if ($script:StatsTimer) { $script:StatsTimer.Stop(); $script:StatsTimer = $null } } catch {}
+    try { if ($script:UpdateTimer) { $script:UpdateTimer.Stop(); $script:UpdateTimer = $null } } catch {}
+    try { if ($script:WmtProviderMgrLibrarySearchTimer) { $script:WmtProviderMgrLibrarySearchTimer.Stop(); $script:WmtProviderMgrLibrarySearchTimer = $null } } catch {}
+    try {
+        if ($script:bootCacheTimer) {
+            try { $script:bootCacheTimer.Stop() } catch {}
+            $script:bootCacheTimer = $null
+        }
+    }
+    catch {}
     try { Stop-WmtSingleInstanceActivationListener } catch {}
     try { if ($script:WmtSingleInstanceActivationEvent) { $script:WmtSingleInstanceActivationEvent.Dispose() } } catch {}
     try {
