@@ -10,7 +10,8 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 It is built for technicians, power users, and end users who want practical Windows maintenance tools with clear buttons, visible output, confirmation prompts, and local backups where risky changes are involved.
 
 <details>
-<summary><b>Click to expand: Major Antivirus False Positive Submissions</b></summary>
+<summary><b>Click here for links to report a False Positive to your Antivirus provider</b></summary>
+
 If you're recieving a notification of a PUP or false positive regarding our open sourse tool; please submit a report to your AV's developer and whitelist the file locally so you can use it. Do not create an issue in our repository.
 
 ## Submission Directory
@@ -31,6 +32,8 @@ If you're recieving a notification of a PUP or false positive regarding our open
 | **Norton / Symantec** | [Symantec Submit Form](https://symsubmit.symantec.com/) | Choose "Incorrectly Detected by Symantec" at the top of the portal. |
 | **Sophos** | [Sophos Sample Submission](https://secure2.sophos.com/en-us/support/submit-a-sample.aspx) | Clarify in the "Why do you want to send this sample?" section that it is a false positive. |
 | **Trend Micro** | [Detection Re-evaluation](https://www.trendmicro.com/en_us/about/legal/detection-reevaluation.html) | Fill out the web form and provide the SHA-256 hash or file. |
+
+A revolving list of all Antivirus contacts can be found here: https://docs.virustotal.com/docs/false-positive-contacts
 </details>
 
 ## Highlights

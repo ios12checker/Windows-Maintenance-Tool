@@ -34,6 +34,7 @@ If you are submitting via email, most vendors require you to place the file insi
 | **Sophos** | [Sophos Sample Submission](https://secure2.sophos.com/en-us/support/submit-a-sample.aspx) | Clarify in the "Why do you want to send this sample?" section that it is a false positive. |
 | **Trend Micro** | [Detection Re-evaluation](https://www.trendmicro.com/en_us/about/legal/detection-reevaluation.html) | Fill out the web form and provide the SHA-256 hash or file. |
 
+A revolving list of all Antivirus contacts can be found here: https://docs.virustotal.com/docs/false-positive-contacts
 </details>
 
 ---
