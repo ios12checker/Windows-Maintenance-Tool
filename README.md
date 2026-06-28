@@ -9,6 +9,33 @@ Windows Maintenance Tool is an all-in-one GUI toolkit for repairing, cleaning, u
 
 It is built for technicians, power users, and end users who want practical Windows maintenance tools with clear buttons, visible output, confirmation prompts, and local backups where risky changes are involved.
 
+<details>
+<summary><b>Click here for links to report a False Positive to your Antivirus provider</b></summary>
+
+If you're recieving a notification of a PUP or false positive regarding our open sourse tool; please submit a report to your AV's developer and whitelist the file locally so you can use it. Do not create an issue in our repository.
+
+## Submission Directory
+
+| Antivirus Vendor | Submission Link or Email | Notes |
+| :--- | :--- | :--- |
+| **Avast** | [Avast False Positive Form](https://www.avast.com/en-us/false-positive-file-form.php) | Web form for file or URL submission. |
+| **AVG** | [AVG False Positive Form](https://www.avg.com/en-us/false-positive-file-form) | AVG and Avast share engines, but use their respective forms. |
+| **Avira** | [Avira Analysis Submit](https://analysis.avira.com/en/submit) | Requires creating an account or logging in. |
+| **Bitdefender** | [Bitdefender Submission Portal](https://www.bitdefender.com/submit/) | Alternatively, email `virus_submission@bitdefender.com`. |
+| **ClamAV** | [ClamAV False Positives](http://www.clamav.net/reports/fp) | Open-source engine used by many secondary providers. |
+| **ESET** | `samples@eset.com` | Compress file in a `.zip` with the password **infected**. Use the subject "False positive". |
+| **F-Secure** | [F-Secure Sample Submit](https://www.f-secure.com/en/web/labs_global/submit-a-sample) | Check the box for "I want to give more details..." to clarify it is a false positive. |
+| **Kaspersky** | [Kaspersky OpenTip](https://opentip.kaspersky.com/) | Upload the file, analyze it, and then click "Submit to Review". Or email `newvirus@kaspersky.com`. |
+| **Malwarebytes** | [Malwarebytes Forums](https://forums.malwarebytes.com/forum/122-false-positives/) | Submissions are handled directly through their community forums. |
+| **McAfee** | `virus_research@mcafee.com` | Compress file in a `.zip` with password **infected**. Mention it is a false positive in the subject line. |
+| **Microsoft Defender** | [Microsoft Security Intelligence](https://www.microsoft.com/en-us/wdsi/filesubmission) | Select "Software Developer" to submit your own application. Requires Microsoft login. |
+| **Norton / Symantec** | [Symantec Submit Form](https://symsubmit.symantec.com/) | Choose "Incorrectly Detected by Symantec" at the top of the portal. |
+| **Sophos** | [Sophos Sample Submission](https://secure2.sophos.com/en-us/support/submit-a-sample.aspx) | Clarify in the "Why do you want to send this sample?" section that it is a false positive. |
+| **Trend Micro** | [Detection Re-evaluation](https://www.trendmicro.com/en_us/about/legal/detection-reevaluation.html) | Fill out the web form and provide the SHA-256 hash or file. |
+
+A revolving list of all Antivirus contacts can be found here: https://docs.virustotal.com/docs/false-positive-contacts
+</details>
+
 ## Highlights
 
 - Modern grouped GUI for Windows repair, cleanup, updates, drivers, tweaks, firewall, DNS, and utilities.
