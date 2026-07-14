@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6.1"
+$AppVersion = "6.2"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -20253,260 +20253,496 @@ function Set-WmtPowerSettingIndex {
                     </Border>
                 </Grid>
 
-                <!-- TWEAKS PANEL -->
+                <!-- TWEAKS PANEL — Revamped: multi-column iconified cards (My Device pattern) -->
         <ScrollViewer Name="pnlTweaks" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
             <StackPanel>
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <StackPanel Margin="0,0,0,12">
-                            <TextBlock Text="Performance Tweaks" Style="{StaticResource SectionHeader}" Margin="0"/>
-                        </StackPanel>
-                        <TextBlock Text="POWER &amp; PERFORMANCE" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
-                            <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
-                            <Button Name="btnToggleHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Toggle hibernation. When enabled (blue), hibernation is off and hiberfil.sys is deleted."/>
-                            <Button Name="btnToggleSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Toggle SysMain (Superfetch) service. When enabled (blue), Superfetch is disabled."/>
-                            <Button Name="btnToggleMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows memory compression. Compresses inactive RAM pages to free physical memory."/>
-                            <Button Name="btnPerfUltimatePower" Content="Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
-                            <Button Name="btnToggleHags" Content="Enable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Toggle Hardware-Accelerated GPU Scheduling for better VRAM management and lower latency."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                <WrapPanel Name="pnlTweaksCards" Margin="20" ItemWidth="350">
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="APPX BLOATWARE REMOVAL" Style="{StaticResource SubHeader}" ToolTip="Remove pre-installed Windows apps (UWP/Modern apps) that you don't use. Frees disk space and reduces background processes."/>
-                        <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
-                        <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple"
-                                  VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
-                            <ListView.View>
-                                <GridView>
-                                    <GridViewColumn Header="App Name" Width="250" DisplayMemberBinding="{Binding Name}"/>
-                                    <GridViewColumn Header="Package" Width="300" DisplayMemberBinding="{Binding Package}"/>
-                                </GridView>
-                            </ListView.View>
-                        </ListView>
-                        <WrapPanel Margin="0,12,0,0">
-                            <Button Name="btnAppxLoad" Content="Load Apps" Style="{StaticResource ActionBtn}" ToolTip="Scan for installed UWP/Modern apps that can be removed. Populates the list above with removable bloatware."/>
-                            <Button Name="btnAppxRemoveSel" Content="Remove Selected" Style="{StaticResource DestructiveBtn}" ToolTip="Remove the selected apps from your system. These apps can be reinstalled from the Microsoft Store if needed later."/>
-                            <Button Name="btnAppxRemoveAll" Content="Remove All" Style="{StaticResource DestructiveBtn}" ToolTip="Remove ALL listed apps at once. This is faster but be careful - only click if you're sure you don't need any of these apps!"/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- AI &amp; COPILOT (NEW) -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE794;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="AI &amp; Copilot" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Disable Windows AI features and Recall" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleCopilot" Content="Copilot Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows Copilot button and service. Blue = Copilot disabled."/>
+                                    <Button Name="btnToggleRecall" Content="Recall Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows Recall snapshot saving. Blue = Recall disabled."/>
+                                    <Button Name="btnToggleClickToDo" Content="Click To Do Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle Click To Do (25H2 AI snapshot action). Blue = disabled."/>
+                                    <Button Name="btnToggleAISvcAutoStart" Content="AI Svc AutoStart Off" Style="{StaticResource ActionBtn}" ToolTip="Stop the Windows AI service from auto-starting at boot. Blue = autostart disabled."/>
+                                    <Button Name="btnToggleEdgeAI" Content="Edge AI Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Microsoft Edge AI features (Copilot, Bing Discover, etc.). Blue = disabled."/>
+                                    <Button Name="btnTogglePaintAI" Content="Paint AI Off" Style="{StaticResource ActionBtn}" ToolTip="Disable AI features in Microsoft Paint (Cocreator, Generative Fill). Blue = disabled."/>
+                                    <Button Name="btnToggleNotepadAI" Content="Notepad AI Off" Style="{StaticResource ActionBtn}" ToolTip="Disable AI features in Notepad (Rewrite, Summarize). Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="WINDOWS OPTIONAL FEATURES" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnFeatHyperV" Content="Hyper-V" Style="{StaticResource ActionBtn}" ToolTip="Microsoft's hardware virtualization platform. Create and run virtual machines. Requires Pro/Enterprise edition and CPU virtualization support."/>
-                            <Button Name="btnFeatWSL" Content="WSL" Style="{StaticResource ActionBtn}" ToolTip="Windows Subsystem for Linux. Run Linux command-line tools and apps directly on Windows without a VM. Popular for developers."/>
-                            <Button Name="btnFeatSandbox" Content="Sandbox" Style="{StaticResource ActionBtn}" ToolTip="Windows Sandbox - a lightweight, temporary desktop environment to safely run untrusted apps. Discards all changes when closed. Requires Pro/Enterprise."/>
-                            <Button Name="btnFeatDotNet35" Content=".NET 3.5" Style="{StaticResource ActionBtn}" ToolTip=".NET Framework 3.5 (includes 2.0 and 3.0). Required for many older Windows applications and some games."/>
-                            <Button Name="btnFeatNFS" Content="NFS Client" Style="{StaticResource ActionBtn}" ToolTip="Network File System client. Allows Windows to connect to Linux/UNIX NFS file shares and NAS devices."/>
-                            <Button Name="btnFeatTelnet" Content="Telnet" Style="{StaticResource ActionBtn}" ToolTip="Telnet client for command-line remote connections. Not secure (unencrypted) - use SSH when possible."/>
-                            <Button Name="btnFeatIIS" Content="IIS" Style="{StaticResource ActionBtn}" ToolTip="Internet Information Services - Microsoft's web server. Host websites locally, useful for web development."/>
-                            <Button Name="btnFeatLegacy" Content="Legacy Media" Style="{StaticResource ActionBtn}" ToolTip="Windows Media Player and DirectPlay. Required for some older games and media playback."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- PERFORMANCE -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Power &amp; Performance" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Services, hibernation, memory, GPU scheduling" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
+                                    <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
+                                    <Button Name="btnToggleHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Toggle hibernation. When enabled (blue), hibernation is off and hiberfil.sys is deleted."/>
+                                    <Button Name="btnToggleSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Toggle SysMain (Superfetch) service. When enabled (blue), Superfetch is disabled."/>
+                                    <Button Name="btnToggleMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows memory compression. Compresses inactive RAM pages to free physical memory."/>
+                                    <Button Name="btnPerfUltimatePower" Content="Ultimate Performance" Style="{StaticResource PositiveBtn}" ToolTip="Enable the Ultimate Performance power plan. Removes all power throttling for maximum performance. Best for desktops and high-performance laptops."/>
+                                    <Button Name="btnToggleHags" Content="Enable HAGS" Style="{StaticResource ActionBtn}" ToolTip="Toggle Hardware-Accelerated GPU Scheduling for better VRAM management and lower latency."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="SERVICES MANAGEMENT" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnSvcOptimize" Content="Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
-                            <Button Name="btnSvcRestore" Content="Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
-                            <Button Name="btnSvcView" Content="View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- APPX BLOATWARE REMOVAL -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Appx Bloatware" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Remove pre-installed UWP/Modern apps" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <TextBlock Text="Select apps to remove (use Ctrl+Click for multiple)" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8" FontSize="12"/>
+                                <ListView Name="lstAppxPackages" Height="200" Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" SelectionMode="Multiple"
+                                          VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                                    <ListView.View>
+                                        <GridView>
+                                            <GridViewColumn Header="App Name" Width="170" DisplayMemberBinding="{Binding Name}"/>
+                                            <GridViewColumn Header="Package" Width="200" DisplayMemberBinding="{Binding Package}"/>
+                                        </GridView>
+                                    </ListView.View>
+                                </ListView>
+                                <WrapPanel Margin="0,12,0,0">
+                                    <Button Name="btnAppxLoad" Content="Load Apps" Style="{StaticResource ActionBtn}" ToolTip="Scan for installed UWP/Modern apps that can be removed. Populates the list above with removable bloatware."/>
+                                    <Button Name="btnAppxRemoveSel" Content="Remove Selected" Style="{StaticResource DestructiveBtn}" ToolTip="Remove the selected apps from your system. These apps can be reinstalled from the Microsoft Store if needed later."/>
+                                    <Button Name="btnAppxRemoveAll" Content="Remove All" Style="{StaticResource DestructiveBtn}" ToolTip="Remove ALL listed apps at once. This is faster but be careful - only click if you're sure you don't need any of these apps!"/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="SCHEDULED TASKS" Style="{StaticResource SubHeader}"/>
-                        <TextBlock Text="Disable telemetry and tracking tasks" Foreground="{DynamicResource TextSecondary}" Margin="0,0,0,8"/>
-                        <WrapPanel>
-                            <Button Name="btnTasksDisableTelemetry" Content="Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
-                            <Button Name="btnTasksRestore" Content="Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
-                            <Button Name="btnTasksView" Content="View Tasks" Style="{StaticResource ActionBtn}" ToolTip="View telemetry-related scheduled tasks in a grid. Shows task name, path, and current enabled/disabled state."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- WINDOWS OPTIONAL FEATURES -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xEFDA;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Optional Features" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Hyper-V, WSL, Sandbox, .NET, IIS" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnFeatHyperV" Content="Hyper-V" Style="{StaticResource ActionBtn}" ToolTip="Microsoft's hardware virtualization platform. Create and run virtual machines. Requires Pro/Enterprise edition and CPU virtualization support."/>
+                                    <Button Name="btnFeatWSL" Content="WSL" Style="{StaticResource ActionBtn}" ToolTip="Windows Subsystem for Linux. Run Linux command-line tools and apps directly on Windows without a VM. Popular for developers."/>
+                                    <Button Name="btnFeatSandbox" Content="Sandbox" Style="{StaticResource ActionBtn}" ToolTip="Windows Sandbox - a lightweight, temporary desktop environment to safely run untrusted apps. Discards all changes when closed. Requires Pro/Enterprise."/>
+                                    <Button Name="btnFeatDotNet35" Content=".NET 3.5" Style="{StaticResource ActionBtn}" ToolTip=".NET Framework 3.5 (includes 2.0 and 3.0). Required for many older Windows applications and some games."/>
+                                    <Button Name="btnFeatNFS" Content="NFS Client" Style="{StaticResource ActionBtn}" ToolTip="Network File System client. Allows Windows to connect to Linux/UNIX NFS file shares and NAS devices."/>
+                                    <Button Name="btnFeatTelnet" Content="Telnet" Style="{StaticResource ActionBtn}" ToolTip="Telnet client for command-line remote connections. Not secure (unencrypted) - use SSH when possible."/>
+                                    <Button Name="btnFeatIIS" Content="IIS" Style="{StaticResource ActionBtn}" ToolTip="Internet Information Services - Microsoft's web server. Host websites locally, useful for web development."/>
+                                    <Button Name="btnFeatLegacy" Content="Legacy Media" Style="{StaticResource ActionBtn}" ToolTip="Windows Media Player and DirectPlay. Required for some older games and media playback."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="WINDOWS UPDATE PRESETS" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnWUDefault" Content="Default" Style="{StaticResource ActionBtn}" ToolTip="Standard Windows Update behavior. Feature and security updates install automatically. Recommended for most users."/>
-                            <Button Name="btnWUSecurity" Content="Security Only" Style="{StaticResource UtilityBtn}" ToolTip="Defer feature updates for 1 year, install security updates only. Get new features later while staying secure. Good for stability."/>
-                            <Button Name="btnWUDisable" Content="Disable All" Style="{StaticResource DestructiveBtn}" ToolTip="Completely disable Windows Update. NOT RECOMMENDED - your system will become vulnerable to security threats. Use with caution."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- SERVICES MANAGEMENT -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Services Management" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Optimize, restore, or view Windows services" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnSvcOptimize" Content="Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
+                                    <Button Name="btnSvcRestore" Content="Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
+                                    <Button Name="btnSvcView" Content="View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="TASKBAR &amp; SYSTEM CLOCK" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleTaskbarAlign" Content="Align Taskbar Left" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar alignment: Left or Center. Blue = aligned left. Gray = centered (default)."/>
-                            <Button Name="btnToggleClockFormat" Content="24-Hour Clock" Style="{StaticResource ActionBtn}" ToolTip="Toggle clock format: 24-hour or 12-hour. Blue = 24-hour. Gray = 12-hour (default)."/>
-                            <Button Name="btnToggleClockSecs" Content="Show Clock Seconds" Style="{StaticResource ActionBtn}" ToolTip="Toggle seconds display on the system tray clock."/>
-                            <Button Name="btnToggleSearchDisplay" Content="Hide Search" Style="{StaticResource ActionBtn}" ToolTip="Cycle search display: Hidden, Icon only, or Search box. Blue = hidden, Gray = icon, default = box."/>
-                            <Button Name="btnToggleWidgets" Content="Hide Widgets" Style="{StaticResource ActionBtn}" ToolTip="Toggle Widgets/Weather panel on the taskbar. Blue = widgets hidden. Gray = widgets visible (default)."/>
-                            <Button Name="btnToggleTaskView" Content="Hide Task View" Style="{StaticResource ActionBtn}" ToolTip="Toggle Task View button on the taskbar. Blue = task view hidden. Gray = task view visible (default)."/>
-                            <Button Name="btnToggleChat" Content="Hide Chat" Style="{StaticResource ActionBtn}" ToolTip="Toggle Chat (Teams) icon on the taskbar. Blue = chat hidden. Gray = chat visible (default)."/>
-                            <Button Name="btnToggleCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar button combining: Never Combine (show labels) or Always Combine (Windows 11 default)."/>
-                            </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- SCHEDULED TASKS -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Scheduled Tasks" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Disable telemetry and tracking tasks" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnTasksDisableTelemetry" Content="Disable Telemetry Tasks" Style="{StaticResource DestructiveBtn}" ToolTip="Disable Windows telemetry scheduled tasks including: CEIP (Customer Experience), Error Reporting, Compatibility Appraiser. Reduces background activity and privacy concerns."/>
+                                    <Button Name="btnTasksRestore" Content="Restore Tasks" Style="{StaticResource WarningBtn}" ToolTip="Re-enable all telemetry and diagnostic scheduled tasks. Restores Windows default behavior for diagnostics and feedback."/>
+                                    <Button Name="btnTasksView" Content="View Tasks" Style="{StaticResource ActionBtn}" ToolTip="View telemetry-related scheduled tasks in a grid. Shows task name, path, and current enabled/disabled state."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="EXPLORER &amp; FILES" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleExtensions" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show or hide known file extensions in File Explorer."/>
-                            <Button Name="btnToggleHiddenFiles" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show or hide hidden files and folders in File Explorer."/>
-                            <Button Name="btnToggleFullPath" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show or hide the full folder path in File Explorer title bars."/>
-                            <Button Name="btnToggleExplorerLaunch" Content="Open to This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC or Quick Access/Home."/>
-                            <Button Name="btnToggleRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide or restore recent and frequent items in Quick Access/Home."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- WINDOWS UPDATE -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE895;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Windows Update" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Update behavior and delivery optimization" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnWUDefault" Content="Default" Style="{StaticResource ActionBtn}" ToolTip="Standard Windows Update behavior. Feature and security updates install automatically. Recommended for most users."/>
+                                    <Button Name="btnWUSecurity" Content="Security Only" Style="{StaticResource UtilityBtn}" ToolTip="Defer feature updates for 1 year, install security updates only. Get new features later while staying secure. Good for stability."/>
+                                    <Button Name="btnWUDisable" Content="Disable All" Style="{StaticResource DestructiveBtn}" ToolTip="Completely disable Windows Update. NOT RECOMMENDED - your system will become vulnerable to security threats. Use with caution."/>
+                                    <Button Name="btnToggleDeliveryOpt" Content="Delivery Opt Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows Delivery Optimization (peer-to-peer update sharing). Blue = disabled."/>
+                                    <Button Name="btnToggleUpdateASAP" Content="Update ASAP Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle the 'update as soon as possible' setting. Blue = updates will not be rushed (pause-style behavior)."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="MOUSE &amp; FOLDER OPENING" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnMouseSpeedSlow" Content="Cursor Slow" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 6."/>
-                            <Button Name="btnMouseSpeedDefault" Content="Cursor Default" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to the Windows default of 10."/>
-                            <Button Name="btnMouseSpeedFast" Content="Cursor Fast" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 15."/>
-                            <Button Name="btnToggleMouseAccel" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable enhanced pointer precision / mouse acceleration."/>
-                            <Button Name="btnToggleClickMode" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click or restore double-click."/>
-                            <Button Name="btnMouseSettings" Content="Mouse Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows mouse settings."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- TASKBAR &amp; SYSTEM CLOCK -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE75B;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Taskbar &amp; Clock" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Alignment, widgets, chat, combine, end task" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleTaskbarAlign" Content="Align Taskbar Left" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar alignment: Left or Center. Blue = aligned left. Gray = centered (default)."/>
+                                    <Button Name="btnToggleClockFormat" Content="24-Hour Clock" Style="{StaticResource ActionBtn}" ToolTip="Toggle clock format: 24-hour or 12-hour. Blue = 24-hour. Gray = 12-hour (default)."/>
+                                    <Button Name="btnToggleClockSecs" Content="Show Clock Seconds" Style="{StaticResource ActionBtn}" ToolTip="Toggle seconds display on the system tray clock."/>
+                                    <Button Name="btnToggleSearchDisplay" Content="Hide Search" Style="{StaticResource ActionBtn}" ToolTip="Cycle search display: Hidden, Icon only, or Search box. Blue = hidden, Gray = icon, default = box."/>
+                                    <Button Name="btnToggleWidgets" Content="Hide Widgets" Style="{StaticResource ActionBtn}" ToolTip="Toggle Widgets/Weather panel on the taskbar. Blue = widgets hidden. Gray = widgets visible (default)."/>
+                                    <Button Name="btnToggleTaskView" Content="Hide Task View" Style="{StaticResource ActionBtn}" ToolTip="Toggle Task View button on the taskbar. Blue = task view hidden. Gray = task view visible (default)."/>
+                                    <Button Name="btnToggleChat" Content="Hide Chat" Style="{StaticResource ActionBtn}" ToolTip="Toggle Chat (Teams) icon on the taskbar. Blue = chat hidden. Gray = chat visible (default)."/>
+                                    <Button Name="btnToggleCombine" Content="Never Combine" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar button combining: Never Combine (show labels) or Always Combine (Windows 11 default)."/>
+                                    <Button Name="btnToggleEndTask" Content="End Task on Taskbar" Style="{StaticResource ActionBtn}" ToolTip="Enable right-click 'End Task' on taskbar apps (23H2+). Blue = enabled."/>
+                                    <Button Name="btnToggleLastActiveClick" Content="Last Active Click" Style="{StaticResource ActionBtn}" ToolTip="Toggle 'last active click' taskbar behavior - the last-clicked app window becomes active on taskbar click. Blue = enabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="CONTEXT MENU" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleCtxMenu" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu or restore the default Windows 11 context menu."/>
-                            <Button Name="btnToggleTakeOwnership" Content="Add Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Add or remove an elevated Take Ownership action on file, folder, and drive context menus."/>
-                            <Button Name="btnTogglePsHere" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add or remove the Open PowerShell Here context menu action."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- START MENU (NEW) -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE8FC;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Start Menu" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Recommended apps, all apps, phone link" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleStartRecommended" Content="Hide Recommended" Style="{StaticResource ActionBtn}" ToolTip="Toggle the 'Recommended' section on the Start menu. Blue = hidden."/>
+                                    <Button Name="btnToggleStartAllApps" Content="Hide All Apps" Style="{StaticResource ActionBtn}" ToolTip="Toggle the 'All apps' list on the Start menu. Blue = hidden."/>
+                                    <Button Name="btnTogglePhoneLink" Content="Hide Phone Link" Style="{StaticResource ActionBtn}" ToolTip="Toggle the Phone Link shortcut on the Start menu. Blue = hidden."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="PRIVACY" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleAds" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or re-enable the per-user Windows advertising ID."/>
-                            <Button Name="btnToggleSuggested" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore suggested apps, settings suggestions, and consumer content prompts."/>
-                            <Button Name="btnToggleTailored" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore tailored experiences based on diagnostic data."/>
-                            <Button Name="btnToggleActivity" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows activity history publishing and upload policies."/>
-                            <Button Name="btnToggleAppLaunch" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows app launch tracking."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- EXPLORER &amp; FILES -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xEC50;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Explorer &amp; Files" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Extensions, hidden files, gallery, OneDrive" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleExtensions" Content="Show Extensions" Style="{StaticResource ActionBtn}" ToolTip="Show or hide known file extensions in File Explorer."/>
+                                    <Button Name="btnToggleHiddenFiles" Content="Show Hidden Files" Style="{StaticResource ActionBtn}" ToolTip="Show or hide hidden files and folders in File Explorer."/>
+                                    <Button Name="btnToggleFullPath" Content="Full Path On" Style="{StaticResource ActionBtn}" ToolTip="Show or hide the full folder path in File Explorer title bars."/>
+                                    <Button Name="btnToggleExplorerLaunch" Content="Open to This PC" Style="{StaticResource ActionBtn}" ToolTip="Make File Explorer open to This PC or Quick Access/Home."/>
+                                    <Button Name="btnToggleRecents" Content="Hide Recents" Style="{StaticResource ActionBtn}" ToolTip="Hide or restore recent and frequent items in Quick Access/Home."/>
+                                    <Button Name="btnToggleGallery" Content="Hide Gallery" Style="{StaticResource ActionBtn}" ToolTip="Hide the Gallery pane in File Explorer. Blue = hidden."/>
+                                    <Button Name="btnToggleHomeExplorer" Content="Hide Home" Style="{StaticResource ActionBtn}" ToolTip="Hide the Home pane in File Explorer. Blue = hidden."/>
+                                    <Button Name="btnToggleOneDriveFolder" Content="Hide OneDrive" Style="{StaticResource ActionBtn}" ToolTip="Hide the OneDrive folder in File Explorer navigation pane. Blue = hidden."/>
+                                    <Button Name="btnToggle3DObjects" Content="Hide 3D Objects" Style="{StaticResource ActionBtn}" ToolTip="Hide the legacy 3D Objects folder in This PC. Blue = hidden."/>
+                                    <Button Name="btnToggleDupDrive" Content="Hide Dup Drive" Style="{StaticResource ActionBtn}" ToolTip="Hide duplicate removable drive entries in the File Explorer navigation pane. Blue = hidden."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="SEARCH &amp; INDEXING" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleWebSearch" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Bing/web results in Windows Start search."/>
-                            <Button Name="btnToggleSearchIndex" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Reduce Windows Search indexing to Manual or restore it to Automatic."/>
-                            <Button Name="btnSearchIndexRebuild" Content="Rebuild Index" Style="{StaticResource WarningBtn}" ToolTip="Delete the Windows search index database so Windows rebuilds it."/>
-                            <Button Name="btnSearchIndexOptions" Content="Index Options" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Indexing Options."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- MOUSE &amp; FOLDER OPENING -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Mouse &amp; Clicking" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Pointer speed, acceleration, sticky keys" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnMouseSpeedSlow" Content="Cursor Slow" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 6."/>
+                                    <Button Name="btnMouseSpeedDefault" Content="Cursor Default" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to the Windows default of 10."/>
+                                    <Button Name="btnMouseSpeedFast" Content="Cursor Fast" Style="{StaticResource ActionBtn}" ToolTip="Set mouse pointer speed to 15."/>
+                                    <Button Name="btnToggleMouseAccel" Content="Acceleration On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable enhanced pointer precision / mouse acceleration."/>
+                                    <Button Name="btnToggleClickMode" Content="Single-Click Folders" Style="{StaticResource ActionBtn}" ToolTip="Open files and folders with a single click or restore double-click."/>
+                                    <Button Name="btnToggleStickyKeys" Content="Sticky Keys Off" Style="{StaticResource ActionBtn}" ToolTip="Disable the Sticky Keys shortcut (Shift 5x). Blue = disabled."/>
+                                    <Button Name="btnMouseSettings" Content="Mouse Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows mouse settings."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="GAMING" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleGameMode" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Game Mode."/>
-                            <Button Name="btnToggleGameBar" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Xbox Game Bar and Game DVR toggles."/>
-                            <Button Name="btnToggleGameCapture" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore background gameplay capture."/>
-                            <Button Name="btnToggleFso" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Disable fullscreen optimizations globally or restore default registry values."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- CONTEXT MENU -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xEC50;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Context Menu" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Classic menu, take ownership, PowerShell here" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleCtxMenu" Content="Classic Right-Click" Style="{StaticResource ActionBtn}" ToolTip="Use the classic Windows 10-style context menu or restore the default Windows 11 context menu."/>
+                                    <Button Name="btnToggleTakeOwnership" Content="Add Take Ownership" Style="{StaticResource ActionBtn}" ToolTip="Add or remove an elevated Take Ownership action on file, folder, and drive context menus."/>
+                                    <Button Name="btnTogglePsHere" Content="Add PowerShell Here" Style="{StaticResource ActionBtn}" ToolTip="Add or remove the Open PowerShell Here context menu action."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="VISUAL EFFECTS" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnVisualBestAppearance" Content="Best Appearance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best appearance."/>
-                            <Button Name="btnVisualBestPerformance" Content="Best Performance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best performance."/>
-                            <Button Name="btnVisualSnappy" Content="Snappy Desktop" Style="{StaticResource PositiveBtn}" ToolTip="Disable taskbar animations, window minimize animations, Aero Peek, and transparency."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- PRIVACY -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE72E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Privacy" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Ad ID, tracking, find my device, location" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleAds" Content="Ad ID Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or re-enable the per-user Windows advertising ID."/>
+                                    <Button Name="btnToggleSuggested" Content="Suggestions Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore suggested apps, settings suggestions, and consumer content prompts."/>
+                                    <Button Name="btnToggleTailored" Content="Tailored Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore tailored experiences based on diagnostic data."/>
+                                    <Button Name="btnToggleActivity" Content="Activity History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows activity history publishing and upload policies."/>
+                                    <Button Name="btnToggleAppLaunch" Content="Launch Tracking Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows app launch tracking."/>
+                                    <Button Name="btnToggleFindMyDevice" Content="Find My Device Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Find My Device. Blue = disabled."/>
+                                    <Button Name="btnToggleLocationSvc" Content="Location Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows location services. Blue = disabled."/>
+                                    <Button Name="btnToggleModernStandby" Content="Modern Standby Net Off" Style="{StaticResource ActionBtn}" ToolTip="Disconnect from network during Modern Standby sleep. Blue = disconnected."/>
+                                    <Button Name="btnToggleDeviceAutoApp" Content="Device Auto-Apps Off" Style="{StaticResource ActionBtn}" ToolTip="Stop Windows from auto-downloading device-companion apps. Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="NOTIFICATIONS &amp; LOCK SCREEN" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnNotifyFocusSettings" Content="Focus Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Focus Assist / Do Not Disturb settings."/>
-                            <Button Name="btnToggleTips" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows tips, welcome experience, and suggestion notifications."/>
-                            <Button Name="btnToggleSetupPrompts" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle finish setting up this device prompts. When enabled (blue), setup prompts are disabled."/>
-                            <Button Name="btnToggleLockFacts" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore lock screen fun facts, tips, and overlays."/>
-                            <Button Name="btnToggleLockSpotlight" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows Spotlight on the lock screen."/>
-                            <Button Name="btnToggleLockScreen" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Apply a plain lock screen (no Spotlight or overlay) or restore default lock screen content."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- SEARCH &amp; INDEXING -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE8FC;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Search &amp; Indexing" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Bing, history, highlights, index rebuild" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleWebSearch" Content="Web Search Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Bing/web results in Windows Start search."/>
+                                    <Button Name="btnToggleSearchHistory" Content="Search History Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Search history collection. Blue = disabled."/>
+                                    <Button Name="btnToggleSearchIndex" Content="Reduce Indexing" Style="{StaticResource ActionBtn}" ToolTip="Reduce Windows Search indexing to Manual or restore it to Automatic."/>
+                                    <Button Name="btnSearchIndexRebuild" Content="Rebuild Index" Style="{StaticResource WarningBtn}" ToolTip="Delete the Windows search index database so Windows rebuilds it."/>
+                                    <Button Name="btnSearchIndexOptions" Content="Index Options" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Indexing Options."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="STARTUP BEHAVIOR" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleFastStartup" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or enable Windows Fast Startup."/>
-                            <Button Name="btnToggleRestoreFolders" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore or skip previous folder windows at logon."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- GAMING -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE7FC;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Gaming" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Game Mode, Game Bar, DVR, FS optimizations" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleGameMode" Content="Game Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Game Mode."/>
+                                    <Button Name="btnToggleGameBar" Content="Game Bar On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Xbox Game Bar and Game DVR toggles."/>
+                                    <Button Name="btnToggleGameCapture" Content="Capture Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore background gameplay capture."/>
+                                    <Button Name="btnToggleFso" Content="Disable FS Optimizations" Style="{StaticResource ActionBtn}" ToolTip="Disable fullscreen optimizations globally or restore default registry values."/>
+                                    <Button Name="btnToggleGameBarIntegration" Content="Game Bar Int. Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Xbox Game Bar integration (PIN, presence, monitoring service). Blue = disabled."/>
+                                    <Button Name="btnToggleDVR" Content="DVR Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Windows Game DVR (background recording). Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="SECURITY SHORTCUTS" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnSecurityUacOpen" Content="UAC Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open User Account Control settings."/>
-                            <Button Name="btnSecurityUacStatus" Content="UAC Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current UAC registry status."/>
-                            <Button Name="btnSecuritySmartScreenOpen" Content="SmartScreen Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows App and Browser Control settings."/>
-                            <Button Name="btnSecuritySmartScreenStatus" Content="SmartScreen Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current SmartScreen status."/>
-                            <Button Name="btnSecurityCfaOpen" Content="Controlled Folders" Style="{StaticResource UtilityBtn}" ToolTip="Open Controlled Folder Access / ransomware protection settings."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- MULTI-TASKING (NEW) -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE7C4;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Multi-tasking" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Snap assist, snap layouts, window snapping" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleSnapAssist" Content="Snap Assist Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Snap Assist (the app chooser shown when snapping a window). Blue = disabled."/>
+                                    <Button Name="btnToggleSnapLayouts" Content="Snap Layouts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Snap Layouts (the snap grid on window maximize hover). Blue = disabled."/>
+                                    <Button Name="btnToggleWindowSnapping" Content="Window Snapping Off" Style="{StaticResource ActionBtn}" ToolTip="Disable all window snapping behavior entirely. Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="POWER &amp; BATTERY" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnPowerBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 0 percent."/>
-                            <Button Name="btnPowerBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 20 percent."/>
-                            <Button Name="btnPowerBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 50 percent."/>
-                            <Button Name="btnToggleUsbSuspend" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable USB selective suspend for the active power plan."/>
-                            <Button Name="btnTogglePcie" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings or turn it off."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- VISUAL EFFECTS -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE771;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Visual Effects" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Appearance, dark mode, transparency, animations" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnVisualBestAppearance" Content="Best Appearance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best appearance."/>
+                                    <Button Name="btnVisualBestPerformance" Content="Best Performance" Style="{StaticResource ActionBtn}" ToolTip="Set Windows visual effects to best performance."/>
+                                    <Button Name="btnVisualSnappy" Content="Snappy Desktop" Style="{StaticResource PositiveBtn}" ToolTip="Disable taskbar animations, window minimize animations, Aero Peek, and transparency."/>
+                                    <Button Name="btnToggleDarkMode" Content="Dark Mode" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows dark/light mode. Blue = dark."/>
+                                    <Button Name="btnToggleTransparency" Content="Transparency Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle taskbar/window transparency. Blue = disabled."/>
+                                    <Button Name="btnToggleAnimations" Content="Animations Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows UI animations. Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
 
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <TextBlock Text="DEVELOPER" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleLongPaths" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Win32 long path support."/>
-                            <Button Name="btnToggleDevMode" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Developer Mode policies."/>
-                            <Button Name="btnDevSettings" Content="Developer Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Developer Settings."/>
-                        </WrapPanel>
-                    </StackPanel>
-                </Border>
+                    <!-- NOTIFICATIONS &amp; LOCK SCREEN -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Notifications &amp; Lock" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Tips, spotlight, search highlights, setup prompts" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnNotifyFocusSettings" Content="Focus Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Focus Assist / Do Not Disturb settings."/>
+                                    <Button Name="btnToggleTips" Content="Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows tips, welcome experience, and suggestion notifications."/>
+                                    <Button Name="btnToggleSetupPrompts" Content="Setup Prompts Off" Style="{StaticResource ActionBtn}" ToolTip="Toggle finish setting up this device prompts. When enabled (blue), setup prompts are disabled."/>
+                                    <Button Name="btnToggleLockFacts" Content="Lock Facts Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore lock screen fun facts, tips, and overlays."/>
+                                    <Button Name="btnToggleLockSpotlight" Content="Spotlight Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or restore Windows Spotlight on the lock screen."/>
+                                    <Button Name="btnToggleLockScreen" Content="Plain Lock Screen" Style="{StaticResource ActionBtn}" ToolTip="Apply a plain lock screen (no Spotlight or overlay) or restore default lock screen content."/>
+                                    <Button Name="btnToggleLockscreenTips" Content="Lockscreen Tips Off" Style="{StaticResource ActionBtn}" ToolTip="Disable lock screen tips and trick overlays. Blue = disabled."/>
+                                    <Button Name="btnToggleSearchHighlights" Content="Search Highlights Off" Style="{StaticResource ActionBtn}" ToolTip="Disable search highlights (the search box 'highlight' icon and content). Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- STARTUP BEHAVIOR -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Startup Behavior" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Fast startup, folder restore" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleFastStartup" Content="Fast Startup Off" Style="{StaticResource ActionBtn}" ToolTip="Disable or enable Windows Fast Startup."/>
+                                    <Button Name="btnToggleRestoreFolders" Content="Restore Folders On" Style="{StaticResource ActionBtn}" ToolTip="Restore or skip previous folder windows at logon."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- SECURITY SHORTCUTS -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE72E;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Security Shortcuts" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="UAC, SmartScreen, Controlled Folders" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnSecurityUacOpen" Content="UAC Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open User Account Control settings."/>
+                                    <Button Name="btnSecurityUacStatus" Content="UAC Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current UAC registry status."/>
+                                    <Button Name="btnSecuritySmartScreenOpen" Content="SmartScreen Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows App and Browser Control settings."/>
+                                    <Button Name="btnSecuritySmartScreenStatus" Content="SmartScreen Status" Style="{StaticResource ActionBtn}" ToolTip="Log the current SmartScreen status."/>
+                                    <Button Name="btnSecurityCfaOpen" Content="Controlled Folders" Style="{StaticResource UtilityBtn}" ToolTip="Open Controlled Folder Access / ransomware protection settings."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- POWER &amp; BATTERY -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Power &amp; Battery" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Battery saver, USB suspend, Bitlocker" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnPowerBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 0 percent."/>
+                                    <Button Name="btnPowerBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 20 percent."/>
+                                    <Button Name="btnPowerBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" ToolTip="Set battery saver threshold to 50 percent."/>
+                                    <Button Name="btnToggleUsbSuspend" Content="USB Suspend On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable USB selective suspend for the active power plan."/>
+                                    <Button Name="btnTogglePcie" Content="PCIe Savings" Style="{StaticResource ActionBtn}" ToolTip="Set PCI Express link state power management to moderate savings or turn it off."/>
+                                    <Button Name="btnToggleBitlocker" Content="Bitlocker Auto Off" Style="{StaticResource ActionBtn}" ToolTip="Disable Bitlocker automatic device encryption on new OS installs. Blue = disabled."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <!-- DEVELOPER -->
+                    <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" Margin="10" Padding="15">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
+                                <TextBlock Text="&#xE713;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <StackPanel Grid.Column="1">
+                                <TextBlock Text="Developer" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                                <TextBlock Text="Long paths, dev mode, settings" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                                <WrapPanel>
+                                    <Button Name="btnToggleLongPaths" Content="Long Paths On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Win32 long path support."/>
+                                    <Button Name="btnToggleDevMode" Content="Developer Mode On" Style="{StaticResource ActionBtn}" ToolTip="Enable or disable Windows Developer Mode policies."/>
+                                    <Button Name="btnDevSettings" Content="Developer Settings" Style="{StaticResource UtilityBtn}" ToolTip="Open Windows Developer Settings."/>
+                                </WrapPanel>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                </WrapPanel>
             </StackPanel>
         </ScrollViewer>
                 
@@ -21353,6 +21589,37 @@ function Update-MyDeviceResponsiveLayout {
     }
 }
 
+
+function Update-TweaksResponsiveLayout {
+    $cards = Get-Ctrl "pnlTweaksCards"
+    $scroll = Get-Ctrl "pnlTweaks"
+    if (-not $cards -or -not $scroll) { return }
+
+    $available = [double]$scroll.ViewportWidth
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$scroll.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { $available = [double]$window.ActualWidth }
+    if ([double]::IsNaN($available) -or $available -le 0) { return }
+
+    $marginWidth = 40.0
+    $contentWidth = [math]::Max(320.0, $available - $marginWidth)
+    $minCardWidth = 330.0
+    $targetCardWidth = 410.0
+    $columns = [math]::Floor($contentWidth / $targetCardWidth)
+    if ($columns -lt 1) { $columns = 1 }
+    if ($columns -gt 4) { $columns = 4 }
+
+    while ($columns -gt 1 -and ($contentWidth / $columns) -lt $minCardWidth) {
+        $columns--
+    }
+
+    $itemWidth = [math]::Floor($contentWidth / $columns)
+    $newItemWidth = [math]::Max($minCardWidth, $itemWidth)
+    $currentItemWidth = [double]$cards.ItemWidth
+    if ([double]::IsNaN($currentItemWidth) -or [math]::Abs($currentItemWidth - $newItemWidth) -ge 1) {
+        $cards.ItemWidth = $newItemWidth
+    }
+}
+
 function Get-MyDeviceExportTextLines {
     param($Control)
 
@@ -21983,6 +22250,199 @@ function Update-TweakButtonStates {
         $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
         Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
 
+        # --- NEW TOGGLE STATE DETECTION (Win11Debloat ported tweaks) ---
+        $polAI = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
+        $copilotBtn = Get-Ctrl "btnToggleCopilot"
+        if ($copilotBtn) {
+            $copilotOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowCopilotButton" 1) -eq 0) -or ([int](Get-WmtRegValue $polAI "DisableAIDataAnalysis" 0) -eq 1))
+            Update-WmtTweakToggle $copilotBtn $copilotOff "Copilot On" "Copilot Off"
+        }
+        $recallBtn = Get-Ctrl "btnToggleRecall"
+        if ($recallBtn) {
+            $recallOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" "AllowRecallEnablement" 1) -eq 0) -or ([int](Get-WmtRegValue $polAI "DisableAIDataAnalysis" 0) -eq 1))
+            Update-WmtTweakToggle $recallBtn $recallOff "Recall On" "Recall Off"
+        }
+        $ctdBtn = Get-Ctrl "btnToggleClickToDo"
+        if ($ctdBtn) { $v = [int](Get-WmtRegValue $polAI "DisableClickToDo" 0); Update-WmtTweakToggle $ctdBtn ($v -eq 1) "Click To Do On" "Click To Do Off" }
+        $aisvcBtn = Get-Ctrl "btnToggleAISvcAutoStart"
+        if ($aisvcBtn) {
+            $aiSvcOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI" "DisableAIDataAnalysis" 0) -eq 1))
+            Update-WmtTweakToggle $aisvcBtn $aiSvcOff "AI Svc AutoStart On" "AI Svc AutoStart Off"
+        }
+        $edgeAiBtn = Get-Ctrl "btnToggleEdgeAI"
+        if ($edgeAiBtn) {
+            $edgeAiOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Edge" "HubsSidebarEnabled" 1) -eq 0))
+            Update-WmtTweakToggle $edgeAiBtn $edgeAiOff "Edge AI On" "Edge AI Off"
+        }
+        $paintAiBtn = Get-Ctrl "btnTogglePaintAI"
+        if ($paintAiBtn) {
+            $paintAiOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Paint\App" "EnableCopilot" 1) -eq 0))
+            Update-WmtTweakToggle $paintAiBtn $paintAiOff "Paint AI On" "Paint AI Off"
+        }
+        $notepadAiBtn = Get-Ctrl "btnToggleNotepadAI"
+        if ($notepadAiBtn) {
+            $notepadAiOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Notepad" "CocreatorEnabled" 1) -eq 0))
+            Update-WmtTweakToggle $notepadAiBtn $notepadAiOff "Notepad AI On" "Notepad AI Off"
+        }
+
+        $fmdBtn = Get-Ctrl "btnToggleFindMyDevice"
+        if ($fmdBtn) {
+            $fmdOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\FindMyDevice\LocationSync" "Enabled" 0) -eq 0))
+            Update-WmtTweakToggle $fmdBtn $fmdOff "Find My Device On" "Find My Device Off"
+        }
+        $locBtn = Get-Ctrl "btnToggleLocationSvc"
+        if ($locBtn) {
+            $locOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location" "Value" 1) -eq 0))
+            Update-WmtTweakToggle $locBtn $locOff "Location On" "Location Off"
+        }
+        $msBtn = Get-Ctrl "btnToggleModernStandby"
+        if ($msBtn) {
+            $msOff = (([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "EnableAwakeNetworkOnDisconnect" 1) -eq 0) -and ([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\Power" "EnforceConnectedStandby" 1) -eq 0))
+            Update-WmtTweakToggle $msBtn $msOff "Modern Standby Net On" "Modern Standby Net Off"
+        }
+        $daaBtn = Get-Ctrl "btnToggleDeviceAutoApp"
+        if ($daaBtn) {
+            $daaOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceInstall\Settings" "DisableDeviceAutoInstall" 0) -eq 1))
+            Update-WmtTweakToggle $daaBtn $daaOff "Device Auto-Apps On" "Device Auto-Apps Off"
+        }
+
+        $etBtn = Get-Ctrl "btnToggleEndTask"
+        if ($etBtn) {
+            $etOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings" "TaskbarEndTask" 0) -eq 1))
+            Update-WmtTweakToggle $etBtn $etOn "End Task Off" "End Task on Taskbar"
+        }
+        $lacBtn = Get-Ctrl "btnToggleLastActiveClick"
+        if ($lacBtn) {
+            $lacOn = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "LastActiveClick" 0) -eq 1))
+            Update-WmtTweakToggle $lacBtn $lacOn "Last Active Click Off" "Last Active Click"
+        }
+
+        $galBtn = Get-Ctrl "btnToggleGallery"
+        if ($galBtn) {
+            $galHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "GalleryEnabled" 1) -eq 0))
+            Update-WmtTweakToggle $galBtn $galHidden "Show Gallery" "Hide Gallery"
+        }
+        $homeBtn = Get-Ctrl "btnToggleHomeExplorer"
+        if ($homeBtn) {
+            $homeHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "ShowHomeFolder" 1) -eq 0) -or ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_HomeClassicMode" 0) -eq 1))
+            Update-WmtTweakToggle $homeBtn $homeHidden "Show Home" "Hide Home"
+        }
+        $odBtn = Get-Ctrl "btnToggleOneDriveFolder"
+        if ($odBtn) {
+            $odHidden = (([int](Get-WmtRegValue "HKCU:\Software\Classes\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}" "System.IsPinnedToNameSpaceTree" 1) -eq 0))
+            Update-WmtTweakToggle $odBtn $odHidden "Show OneDrive" "Hide OneDrive"
+        }
+        $tdoBtn = Get-Ctrl "btnToggle3DObjects"
+        if ($tdoBtn) {
+            $tdoHidden = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderDescriptions\{31C0DD25-9439-4F12-BF41-7FF4EDA38762}\PropertyBag" "ThisPCPolicy" "Show") -ne "Show"))
+            Update-WmtTweakToggle $tdoBtn $tdoHidden "Show 3D Objects" "Hide 3D Objects"
+        }
+        $ddBtn = Get-Ctrl "btnToggleDupDrive"
+        if ($ddBtn) {
+            $ddHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "HideDuplicatedRemovableDrives" 0) -eq 1))
+            Update-WmtTweakToggle $ddBtn $ddHidden "Show Dup Drive" "Hide Dup Drive"
+        }
+
+        $saBtn = Get-Ctrl "btnToggleSnapAssist"
+        if ($saBtn) {
+            $saOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "SnapAssist" 1) -eq 0))
+            Update-WmtTweakToggle $saBtn $saOff "Snap Assist On" "Snap Assist Off"
+        }
+        $slBtn = Get-Ctrl "btnToggleSnapLayouts"
+        if ($slBtn) {
+            $slOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "EnableSnapLayouts" 1) -eq 0))
+            Update-WmtTweakToggle $slBtn $slOff "Snap Layouts On" "Snap Layouts Off"
+        }
+        $wsBtn = Get-Ctrl "btnToggleWindowSnapping"
+        if ($wsBtn) {
+            $wsOff = (([int](Get-WmtRegValue "HKCU:\Control Panel\Desktop" "WindowArrangementActive" 1) -eq 0))
+            Update-WmtTweakToggle $wsBtn $wsOff "Window Snapping On" "Window Snapping Off"
+        }
+
+        $dmBtn = Get-Ctrl "btnToggleDarkMode"
+        if ($dmBtn) {
+            $dmDark = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" "AppsUseLightTheme" 1) -eq 0))
+            Update-WmtTweakToggle $dmBtn $dmDark "Light Mode" "Dark Mode"
+        }
+        $trBtn = Get-Ctrl "btnToggleTransparency"
+        if ($trBtn) {
+            $trOff = (([int](Get-WmtRegValue "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize" "EnableTransparency" 1) -eq 0))
+            Update-WmtTweakToggle $trBtn $trOff "Transparency On" "Transparency Off"
+        }
+        $anBtn = Get-Ctrl "btnToggleAnimations"
+        if ($anBtn) {
+            $anOff = (([int](Get-WmtRegValue "HKCU:\Control Panel\Desktop\WindowMetrics" "MinAnimate" 1) -eq 0))
+            Update-WmtTweakToggle $anBtn $anOff "Animations On" "Animations Off"
+        }
+
+        $ltBtn = Get-Ctrl "btnToggleLockscreenTips"
+        if ($ltBtn) {
+            $ltOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager\SystemRotators\LockScreen\Toast" "Enabled" 0) -eq 0) -and ([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager\SystemRotators\LockScreen\Tips" "Enabled" 0) -eq 0))
+            Update-WmtTweakToggle $ltBtn $ltOff "Lockscreen Tips On" "Lockscreen Tips Off"
+        }
+        $shBtn = Get-Ctrl "btnToggleSearchHighlights"
+        if ($shBtn) {
+            $shOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings" "IsDynamicSearchBoxEnabled" 1) -eq 0))
+            Update-WmtTweakToggle $shBtn $shOff "Search Highlights On" "Search Highlights Off"
+        }
+
+        $sh2Btn = Get-Ctrl "btnToggleSearchHistory"
+        if ($sh2Btn) {
+            $shOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings" "IsDeviceSearchHistoryEnabled" 1) -eq 0))
+            Update-WmtTweakToggle $sh2Btn $shOff "Search History On" "Search History Off"
+        }
+
+        $gbiBtn = Get-Ctrl "btnToggleGameBarIntegration"
+        if ($gbiBtn) {
+            $gbiOff = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\GameBar" "AllowAutoGameMode" 1) -eq 0) -or ([int](Get-WmtRegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1) -eq 0))
+            Update-WmtTweakToggle $gbiBtn $gbiOff "Game Bar Int. On" "Game Bar Int. Off"
+        }
+        $dvrBtn = Get-Ctrl "btnToggleDVR"
+        if ($dvrBtn) {
+            $dvrOff = (([int](Get-WmtRegValue "HKCU:\System\GameConfigStore" "GameDVR_Enabled" 1) -eq 0))
+            Update-WmtTweakToggle $dvrBtn $dvrOff "DVR On" "DVR Off"
+        }
+
+        $blBtn = Get-Ctrl "btnToggleBitlocker"
+        if ($blBtn) {
+            $blOff = (([int](Get-WmtRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker" "PreventDeviceEncryption" 0) -eq 1))
+            Update-WmtTweakToggle $blBtn $blOff "Bitlocker Auto On" "Bitlocker Auto Off"
+        }
+
+        $skBtn = Get-Ctrl "btnToggleStickyKeys"
+        if ($skBtn) {
+            $skOff = (([int](Get-WmtRegValue "HKCU:\Control Panel\Accessibility\StickyKeys" "Flags" "510") -ne "510"))
+            Update-WmtTweakToggle $skBtn $skOff "Sticky Keys On" "Sticky Keys Off"
+        }
+
+        $doBtn = Get-Ctrl "btnToggleDeliveryOpt"
+        if ($doBtn) {
+            $doOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config" "DODownloadMode" 1) -eq 0))
+            Update-WmtTweakToggle $doBtn $doOff "Delivery Opt On" "Delivery Opt Off"
+        }
+        $uaBtn = Get-Ctrl "btnToggleUpdateASAP"
+        if ($uaBtn) {
+            $uaOff = (([int](Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings" "AllowAutoWindowsUpdateDownloadOverMeteredNetwork" 0) -eq 0))
+            Update-WmtTweakToggle $uaBtn $uaOff "Update ASAP On" "Update ASAP Off"
+        }
+
+        $srBtn = Get-Ctrl "btnToggleStartRecommended"
+        if ($srBtn) {
+            $srHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_TrackProgs" 1) -eq 0))
+            Update-WmtTweakToggle $srBtn $srHidden "Show Recommended" "Hide Recommended"
+        }
+        $saBtn2 = Get-Ctrl "btnToggleStartAllApps"
+        if ($saBtn2) {
+            $saHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_ShowAllApps" 0) -eq 1) -or ([int](Get-WmtRegValue "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer" "HideStartAllApps" 0) -eq 1))
+            Update-WmtTweakToggle $saBtn2 $saHidden "Show All Apps" "Hide All Apps"
+        }
+        $plBtn = Get-Ctrl "btnTogglePhoneLink"
+        if ($plBtn) {
+            $plHidden = (([int](Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" "Start_ShowAccountBadges" 1) -eq 0))
+            Update-WmtTweakToggle $plBtn $plHidden "Show Phone Link" "Hide Phone Link"
+        }
+
+
         $adEnabled = [int](& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\AdvertisingInfo" "Enabled" 1)
         $btnToggleAds = Get-Ctrl "btnToggleAds"
         Update-WmtTweakToggle $btnToggleAds ($adEnabled -eq 0) "Ad ID Off" "Ad ID On"
@@ -22508,6 +22968,562 @@ foreach ($tabButton in $script:WmtTabButtonControls) {
                     Start-MyDeviceQueuedSections
                 }
             }
+            if ($s.Name -eq "btnTabTweaks") {
+                Update-TweaksResponsiveLayout
+                Update-TweakButtonStates
+            }
+        })
+}
+
+
+# --- NEW TWEAK CLICK HANDLERS (Win11Debloat ported tweaks) ---
+
+$btnToggleCopilot = Get-Ctrl "btnToggleCopilot"
+if ($btnToggleCopilot) {
+    $btnToggleCopilot.Add_Click({
+            $adv = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $polUser = "HKCU:\Software\Policies\Microsoft\Windows\WindowsCopilot"
+            $polMachine = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot"
+            $currentlyOff = (([int](Get-WmtRegValue $adv "ShowCopilotButton" 1) -eq 0) -or ([int](Get-WmtRegValue $polUser "TurnOffWindowsCopilot" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $adv "ShowCopilotButton" 1; Remove-ItemProperty -Path $polUser -Name "TurnOffWindowsCopilot" -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $polMachine -Name "TurnOffWindowsCopilot" -ErrorAction SilentlyContinue; Write-GuiLog "Copilot enabled." } "Enabling Copilot..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $adv "ShowCopilotButton" 0; Set-WmtRegDword $polUser "TurnOffWindowsCopilot" 1; Set-WmtRegDword $polMachine "TurnOffWindowsCopilot" 1; Write-GuiLog "Copilot disabled." } "Disabling Copilot..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleRecall = Get-Ctrl "btnToggleRecall"
+if ($btnToggleRecall) {
+    $btnToggleRecall.Add_Click({
+            $polUser = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
+            $polMachine = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"
+            $currentlyOff = (([int](Get-WmtRegValue $polMachine "AllowRecallEnablement" 1) -eq 0) -or ([int](Get-WmtRegValue $polUser "DisableAIDataAnalysis" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Remove-ItemProperty -Path $polMachine -Name "AllowRecallEnablement" -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $polMachine -Name "TurnOffSavingSnapshots" -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $polUser -Name "DisableAIDataAnalysis" -ErrorAction SilentlyContinue; Write-GuiLog "Recall enabled (user must turn it on in Settings)." } "Enabling Recall..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $polUser "DisableAIDataAnalysis" 1; Set-WmtRegDword $polMachine "AllowRecallEnablement" 0; Set-WmtRegDword $polMachine "TurnOffSavingSnapshots" 1; Write-GuiLog "Recall disabled." } "Disabling Recall..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleClickToDo = Get-Ctrl "btnToggleClickToDo"
+if ($btnToggleClickToDo) {
+    $btnToggleClickToDo.Add_Click({
+            $polUser = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
+            $polMachine = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"
+            $currentlyOff = (([int](Get-WmtRegValue $polUser "DisableClickToDo" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Remove-ItemProperty -Path $polUser -Name "DisableClickToDo" -ErrorAction SilentlyContinue; Remove-ItemProperty -Path $polMachine -Name "DisableClickToDo" -ErrorAction SilentlyContinue; Write-GuiLog "Click To Do enabled." } "Enabling Click To Do..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $polUser "DisableClickToDo" 1; Set-WmtRegDword $polMachine "DisableClickToDo" 1; Write-GuiLog "Click To Do disabled." } "Disabling Click To Do..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleAISvcAutoStart = Get-Ctrl "btnToggleAISvcAutoStart"
+if ($btnToggleAISvcAutoStart) {
+    $btnToggleAISvcAutoStart.Add_Click({
+            $polMachine = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI"
+            $currentlyOff = (([int](Get-WmtRegValue $polMachine "DisableAIDataAnalysis" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Remove-ItemProperty -Path $polMachine -Name "DisableAIDataAnalysis" -ErrorAction SilentlyContinue; Write-GuiLog "Windows AI service autostart enabled." } "Enabling AI service autostart..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $polMachine "DisableAIDataAnalysis" 1; Write-GuiLog "Windows AI service autostart disabled." } "Disabling AI service autostart..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleEdgeAI = Get-Ctrl "btnToggleEdgeAI"
+if ($btnToggleEdgeAI) {
+    $btnToggleEdgeAI.Add_Click({
+            $p = "HKLM:\SOFTWARE\Policies\Microsoft\Edge"
+            $currentlyOff = (([int](Get-WmtRegValue $p "HubsSidebarEnabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "HubsSidebarEnabled" 1; Write-GuiLog "Edge AI features enabled." } "Enabling Edge AI..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "HubsSidebarEnabled" 0; Write-GuiLog "Edge AI features disabled." } "Disabling Edge AI..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnTogglePaintAI = Get-Ctrl "btnTogglePaintAI"
+if ($btnTogglePaintAI) {
+    $btnTogglePaintAI.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Paint\App"
+            $currentlyOff = (([int](Get-WmtRegValue $p "EnableCopilot" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableCopilot" 1; Write-GuiLog "Paint AI enabled." } "Enabling Paint AI..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableCopilot" 0; Write-GuiLog "Paint AI disabled." } "Disabling Paint AI..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleNotepadAI = Get-Ctrl "btnToggleNotepadAI"
+if ($btnToggleNotepadAI) {
+    $btnToggleNotepadAI.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Notepad"
+            $currentlyOff = (([int](Get-WmtRegValue $p "CocreatorEnabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "CocreatorEnabled" 1; Write-GuiLog "Notepad AI enabled." } "Enabling Notepad AI..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "CocreatorEnabled" 0; Write-GuiLog "Notepad AI disabled." } "Disabling Notepad AI..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleFindMyDevice = Get-Ctrl "btnToggleFindMyDevice"
+if ($btnToggleFindMyDevice) {
+    $btnToggleFindMyDevice.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\FindMyDevice\LocationSync"
+            $currentlyOff = (([int](Get-WmtRegValue $p "Enabled" 0) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 1; Write-GuiLog "Find My Device enabled." } "Enabling Find My Device..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Enabled" 0; Write-GuiLog "Find My Device disabled." } "Disabling Find My Device..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLocationSvc = Get-Ctrl "btnToggleLocationSvc"
+if ($btnToggleLocationSvc) {
+    $btnToggleLocationSvc.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location"
+            $currentlyOff = (([int](Get-WmtRegValue $p "Value" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Value" 1; Write-GuiLog "Location services enabled." } "Enabling location services..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Value" 0; Write-GuiLog "Location services disabled." } "Disabling location services..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleModernStandby = Get-Ctrl "btnToggleModernStandby"
+if ($btnToggleModernStandby) {
+    $btnToggleModernStandby.Add_Click({
+            $p1 = "HKLM:\SYSTEM\CurrentControlSet\Control\Power"
+            $currentlyOff = (([int](Get-WmtRegValue $p1 "EnableAwakeNetworkOnDisconnect" 1) -eq 0) -and ([int](Get-WmtRegValue $p1 "EnforceConnectedStandby" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "EnableAwakeNetworkOnDisconnect" 1; Set-WmtRegDword $p1 "EnforceConnectedStandby" 1; Write-GuiLog "Modern Standby networking enabled." } "Enabling Modern Standby networking..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "EnableAwakeNetworkOnDisconnect" 0; Set-WmtRegDword $p1 "EnforceConnectedStandby" 0; Write-GuiLog "Modern Standby networking disabled." } "Disabling Modern Standby networking..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleDeviceAutoApp = Get-Ctrl "btnToggleDeviceAutoApp"
+if ($btnToggleDeviceAutoApp) {
+    $btnToggleDeviceAutoApp.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceInstall\Settings"
+            $currentlyOff = (([int](Get-WmtRegValue $p "DisableDeviceAutoInstall" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Remove-ItemProperty -Path $p -Name "DisableDeviceAutoInstall" -ErrorAction SilentlyContinue; Write-GuiLog "Device auto-app download enabled." } "Enabling device auto-apps..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "DisableDeviceAutoInstall" 1; Write-GuiLog "Device auto-app download disabled." } "Disabling device auto-apps..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleEndTask = Get-Ctrl "btnToggleEndTask"
+if ($btnToggleEndTask) {
+    $btnToggleEndTask.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\TaskbarDeveloperSettings"
+            $currentlyOn = (([int](Get-WmtRegValue $p "TaskbarEndTask" 0) -eq 1))
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "TaskbarEndTask" 0; Write-GuiLog "End Task on taskbar disabled." } "Disabling End Task..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "TaskbarEndTask" 1; Write-GuiLog "End Task on taskbar enabled (right-click apps in taskbar)." } "Enabling End Task..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLastActiveClick = Get-Ctrl "btnToggleLastActiveClick"
+if ($btnToggleLastActiveClick) {
+    $btnToggleLastActiveClick.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOn = (([int](Get-WmtRegValue $p "LastActiveClick" 0) -eq 1))
+            if ($currentlyOn) {
+                Invoke-UiCommand { Set-WmtRegDword $p "LastActiveClick" 0; Write-GuiLog "Last Active Click disabled." } "Disabling Last Active Click..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "LastActiveClick" 1; Write-GuiLog "Last Active Click enabled." } "Enabling Last Active Click..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleGallery = Get-Ctrl "btnToggleGallery"
+if ($btnToggleGallery) {
+    $btnToggleGallery.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = (([int](Get-WmtRegValue $p "GalleryEnabled" 1) -eq 0))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "GalleryEnabled" 1; Write-GuiLog "File Explorer Gallery shown." } "Showing Gallery..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "GalleryEnabled" 0; Write-GuiLog "File Explorer Gallery hidden." } "Hiding Gallery..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleHomeExplorer = Get-Ctrl "btnToggleHomeExplorer"
+if ($btnToggleHomeExplorer) {
+    $btnToggleHomeExplorer.Add_Click({
+            $pUser = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $pMachine = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = (([int](Get-WmtRegValue $pUser "ShowHomeFolder" 1) -eq 0) -or ([int](Get-WmtRegValue $pMachine "Start_HomeClassicMode" 0) -eq 1))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $pUser "ShowHomeFolder" 1; Remove-ItemProperty -Path $pMachine -Name "Start_HomeClassicMode" -ErrorAction SilentlyContinue; Write-GuiLog "File Explorer Home shown." } "Showing Home..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $pUser "ShowHomeFolder" 0; Set-WmtRegDword $pMachine "Start_HomeClassicMode" 1; Write-GuiLog "File Explorer Home hidden." } "Hiding Home..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleOneDriveFolder = Get-Ctrl "btnToggleOneDriveFolder"
+if ($btnToggleOneDriveFolder) {
+    $btnToggleOneDriveFolder.Add_Click({
+            $p = "HKCU:\Software\Classes\CLSID\{018D5C66-4533-4307-9B53-224DE2ED1FE6}"
+            $currentlyHidden = (([int](Get-WmtRegValue $p "System.IsPinnedToNameSpaceTree" 1) -eq 0))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "System.IsPinnedToNameSpaceTree" 1; Write-GuiLog "OneDrive folder shown in Explorer." } "Showing OneDrive folder..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "System.IsPinnedToNameSpaceTree" 0; Write-GuiLog "OneDrive folder hidden from Explorer." } "Hiding OneDrive folder..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggle3DObjects = Get-Ctrl "btnToggle3DObjects"
+if ($btnToggle3DObjects) {
+    $btnToggle3DObjects.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\FolderDescriptions\{31C0DD25-9439-4F12-BF41-7FF4EDA38762}\PropertyBag"
+            $currentlyHidden = (([string](Get-WmtRegValue $p "ThisPCPolicy" "Show") -ne "Show"))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "ThisPCPolicy" -Value "Show" -Type String -Force; Write-GuiLog "3D Objects folder shown." } "Showing 3D Objects..."
+            }
+            else {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "ThisPCPolicy" -Value "Hide" -Type String -Force; Write-GuiLog "3D Objects folder hidden." } "Hiding 3D Objects..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleDupDrive = Get-Ctrl "btnToggleDupDrive"
+if ($btnToggleDupDrive) {
+    $btnToggleDupDrive.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = (([int](Get-WmtRegValue $p "HideDuplicatedRemovableDrives" 0) -eq 1))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "HideDuplicatedRemovableDrives" 0; Write-GuiLog "Duplicate removable drives shown." } "Showing duplicate drive..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "HideDuplicatedRemovableDrives" 1; Write-GuiLog "Duplicate removable drives hidden." } "Hiding duplicate drive..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSnapAssist = Get-Ctrl "btnToggleSnapAssist"
+if ($btnToggleSnapAssist) {
+    $btnToggleSnapAssist.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOff = (([int](Get-WmtRegValue $p "SnapAssist" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "SnapAssist" 1; Write-GuiLog "Snap Assist enabled." } "Enabling Snap Assist..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "SnapAssist" 0; Write-GuiLog "Snap Assist disabled." } "Disabling Snap Assist..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSnapLayouts = Get-Ctrl "btnToggleSnapLayouts"
+if ($btnToggleSnapLayouts) {
+    $btnToggleSnapLayouts.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyOff = (([int](Get-WmtRegValue $p "EnableSnapLayouts" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableSnapLayouts" 1; Write-GuiLog "Snap Layouts enabled." } "Enabling Snap Layouts..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableSnapLayouts" 0; Write-GuiLog "Snap Layouts disabled." } "Disabling Snap Layouts..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleWindowSnapping = Get-Ctrl "btnToggleWindowSnapping"
+if ($btnToggleWindowSnapping) {
+    $btnToggleWindowSnapping.Add_Click({
+            $p = "HKCU:\Control Panel\Desktop"
+            $currentlyOff = (([int](Get-WmtRegValue $p "WindowArrangementActive" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "WindowArrangementActive" 1; Write-GuiLog "Window snapping enabled." } "Enabling window snapping..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "WindowArrangementActive" 0; Write-GuiLog "Window snapping disabled." } "Disabling window snapping..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleDarkMode = Get-Ctrl "btnToggleDarkMode"
+if ($btnToggleDarkMode) {
+    $btnToggleDarkMode.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            $currentlyDark = (([int](Get-WmtRegValue $p "AppsUseLightTheme" 1) -eq 0))
+            if ($currentlyDark) {
+                Invoke-UiCommand { Set-WmtRegDword $p "AppsUseLightTheme" 1; Set-WmtRegDword $p "SystemUsesLightTheme" 1; Write-GuiLog "Light mode enabled." } "Switching to light mode..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "AppsUseLightTheme" 0; Set-WmtRegDword $p "SystemUsesLightTheme" 0; Write-GuiLog "Dark mode enabled." } "Switching to dark mode..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleTransparency = Get-Ctrl "btnToggleTransparency"
+if ($btnToggleTransparency) {
+    $btnToggleTransparency.Add_Click({
+            $p = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            $currentlyOff = (([int](Get-WmtRegValue $p "EnableTransparency" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableTransparency" 1; Write-GuiLog "Transparency enabled." } "Enabling transparency..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "EnableTransparency" 0; Write-GuiLog "Transparency disabled." } "Disabling transparency..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleAnimations = Get-Ctrl "btnToggleAnimations"
+if ($btnToggleAnimations) {
+    $btnToggleAnimations.Add_Click({
+            $p = "HKCU:\Control Panel\Desktop\WindowMetrics"
+            $currentlyOff = (([int](Get-WmtRegValue $p "MinAnimate" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "MinAnimate" 1; Write-GuiLog "Window animations enabled." } "Enabling animations..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "MinAnimate" 0; Write-GuiLog "Window animations disabled." } "Disabling animations..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleLockscreenTips = Get-Ctrl "btnToggleLockscreenTips"
+if ($btnToggleLockscreenTips) {
+    $btnToggleLockscreenTips.Add_Click({
+            $p1 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager\SystemRotators\LockScreen\Toast"
+            $p2 = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager\SystemRotators\LockScreen\Tips"
+            $currentlyOff = (([int](Get-WmtRegValue $p1 "Enabled" 0) -eq 0) -and ([int](Get-WmtRegValue $p2 "Enabled" 0) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "Enabled" 1; Set-WmtRegDword $p2 "Enabled" 1; Write-GuiLog "Lockscreen tips enabled." } "Enabling lockscreen tips..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "Enabled" 0; Set-WmtRegDword $p2 "Enabled" 0; Write-GuiLog "Lockscreen tips disabled." } "Disabling lockscreen tips..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSearchHighlights = Get-Ctrl "btnToggleSearchHighlights"
+if ($btnToggleSearchHighlights) {
+    $btnToggleSearchHighlights.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings"
+            $currentlyOff = (([int](Get-WmtRegValue $p "IsDynamicSearchBoxEnabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "IsDynamicSearchBoxEnabled" 1; Write-GuiLog "Search highlights enabled." } "Enabling search highlights..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "IsDynamicSearchBoxEnabled" 0; Write-GuiLog "Search highlights disabled." } "Disabling search highlights..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleSearchHistory = Get-Ctrl "btnToggleSearchHistory"
+if ($btnToggleSearchHistory) {
+    $btnToggleSearchHistory.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\SearchSettings"
+            $currentlyOff = (([int](Get-WmtRegValue $p "IsDeviceSearchHistoryEnabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "IsDeviceSearchHistoryEnabled" 1; Write-GuiLog "Search history enabled." } "Enabling search history..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "IsDeviceSearchHistoryEnabled" 0; Write-GuiLog "Search history disabled." } "Disabling search history..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleGameBarIntegration = Get-Ctrl "btnToggleGameBarIntegration"
+if ($btnToggleGameBarIntegration) {
+    $btnToggleGameBarIntegration.Add_Click({
+            $p1 = "HKCU:\Software\Microsoft\GameBar"
+            $p2 = "HKCU:\System\GameConfigStore"
+            $currentlyOff = (([int](Get-WmtRegValue $p1 "AllowAutoGameMode" 1) -eq 0) -or ([int](Get-WmtRegValue $p2 "GameDVR_Enabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "AllowAutoGameMode" 1; Set-WmtRegDword $p1 "AutoGameModeEnabled" 1; Set-WmtRegDword $p2 "GameDVR_Enabled" 1; Write-GuiLog "Game Bar integration enabled." } "Enabling Game Bar integration..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "AllowAutoGameMode" 0; Set-WmtRegDword $p1 "AutoGameModeEnabled" 0; Set-WmtRegDword $p2 "GameDVR_Enabled" 0; Write-GuiLog "Game Bar integration disabled." } "Disabling Game Bar integration..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleDVR = Get-Ctrl "btnToggleDVR"
+if ($btnToggleDVR) {
+    $btnToggleDVR.Add_Click({
+            $p1 = "HKCU:\System\GameConfigStore"
+            $p2 = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"
+            $currentlyOff = (([int](Get-WmtRegValue $p1 "GameDVR_Enabled" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "GameDVR_Enabled" 1; Set-WmtRegDword $p2 "AllowGameDVR" 1; Write-GuiLog "Game DVR enabled." } "Enabling Game DVR..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p1 "GameDVR_Enabled" 0; Set-WmtRegDword $p2 "AllowGameDVR" 0; Write-GuiLog "Game DVR disabled." } "Disabling Game DVR..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleBitlocker = Get-Ctrl "btnToggleBitlocker"
+if ($btnToggleBitlocker) {
+    $btnToggleBitlocker.Add_Click({
+            $p = "HKLM:\SYSTEM\CurrentControlSet\Control\BitLocker"
+            $currentlyOff = (([int](Get-WmtRegValue $p "PreventDeviceEncryption" 0) -eq 1))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Remove-ItemProperty -Path $p -Name "PreventDeviceEncryption" -ErrorAction SilentlyContinue; Write-GuiLog "Bitlocker auto-encryption restored to default." } "Enabling Bitlocker auto..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "PreventDeviceEncryption" 1; Write-GuiLog "Bitlocker auto-encryption disabled for new OS installs." } "Disabling Bitlocker auto..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleStickyKeys = Get-Ctrl "btnToggleStickyKeys"
+if ($btnToggleStickyKeys) {
+    $btnToggleStickyKeys.Add_Click({
+            $p = "HKCU:\Control Panel\Accessibility\StickyKeys"
+            $currentlyOff = (([string](Get-WmtRegValue $p "Flags" "510") -ne "510"))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "Flags" -Value "510" -Type String -Force; Write-GuiLog "Sticky Keys shortcut enabled." } "Enabling Sticky Keys..."
+            }
+            else {
+                Invoke-UiCommand { Set-ItemProperty -Path $p -Name "Flags" -Value "58" -Type String -Force; Write-GuiLog "Sticky Keys shortcut disabled." } "Disabling Sticky Keys..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleDeliveryOpt = Get-Ctrl "btnToggleDeliveryOpt"
+if ($btnToggleDeliveryOpt) {
+    $btnToggleDeliveryOpt.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config"
+            $currentlyOff = (([int](Get-WmtRegValue $p "DODownloadMode" 1) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "DODownloadMode" 1; Write-GuiLog "Delivery Optimization enabled (LAN only)." } "Enabling Delivery Optimization..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "DODownloadMode" 0; Write-GuiLog "Delivery Optimization disabled." } "Disabling Delivery Optimization..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleUpdateASAP = Get-Ctrl "btnToggleUpdateASAP"
+if ($btnToggleUpdateASAP) {
+    $btnToggleUpdateASAP.Add_Click({
+            $p = "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"
+            $currentlyOff = (([int](Get-WmtRegValue $p "AllowAutoWindowsUpdateDownloadOverMeteredNetwork" 0) -eq 0))
+            if ($currentlyOff) {
+                Invoke-UiCommand { Set-WmtRegDword $p "AllowAutoWindowsUpdateDownloadOverMeteredNetwork" 1; Write-GuiLog "Update ASAP enabled (auto-download over metered connections)." } "Enabling Update ASAP..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "AllowAutoWindowsUpdateDownloadOverMeteredNetwork" 0; Write-GuiLog "Update ASAP disabled (no auto-download over metered connections)." } "Disabling Update ASAP..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleStartRecommended = Get-Ctrl "btnToggleStartRecommended"
+if ($btnToggleStartRecommended) {
+    $btnToggleStartRecommended.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = (([int](Get-WmtRegValue $p "Start_TrackProgs" 1) -eq 0))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 1; Write-GuiLog "Start menu Recommended section shown." } "Showing Recommended..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_TrackProgs" 0; Write-GuiLog "Start menu Recommended section hidden." } "Hiding Recommended..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnToggleStartAllApps = Get-Ctrl "btnToggleStartAllApps"
+if ($btnToggleStartAllApps) {
+    $btnToggleStartAllApps.Add_Click({
+            $pUser = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $pPol = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Explorer"
+            $currentlyHidden = (([int](Get-WmtRegValue $pUser "Start_ShowAllApps" 0) -eq 1) -or ([int](Get-WmtRegValue $pPol "HideStartAllApps" 0) -eq 1))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $pUser "Start_ShowAllApps" 0; Remove-ItemProperty -Path $pPol -Name "HideStartAllApps" -ErrorAction SilentlyContinue; Write-GuiLog "Start menu All Apps list shown." } "Showing All Apps..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $pUser "Start_ShowAllApps" 1; Set-WmtRegDword $pPol "HideStartAllApps" 1; Write-GuiLog "Start menu All Apps list hidden." } "Hiding All Apps..."
+            }
+            Update-TweakButtonStates
+        })
+}
+
+$btnTogglePhoneLink = Get-Ctrl "btnTogglePhoneLink"
+if ($btnTogglePhoneLink) {
+    $btnTogglePhoneLink.Add_Click({
+            $p = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+            $currentlyHidden = (([int](Get-WmtRegValue $p "Start_ShowAccountBadges" 1) -eq 0))
+            if ($currentlyHidden) {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_ShowAccountBadges" 1; Write-GuiLog "Phone Link shown on Start menu." } "Showing Phone Link..."
+            }
+            else {
+                Invoke-UiCommand { Set-WmtRegDword $p "Start_ShowAccountBadges" 0; Write-GuiLog "Phone Link hidden from Start menu." } "Hiding Phone Link..."
+            }
+            Update-TweakButtonStates
         })
 }
 
@@ -22668,6 +23684,46 @@ $searchIndexDeferTimer.Add_Tick({
         Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
         Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
         Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+        # --- NEW TWEAK SEARCH ENTRIES ---
+        Add-SearchIndexEntry "btnToggleCopilot" "Disable Copilot" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleCopilot" "Copilot" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleRecall" "Disable Recall" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleRecall" "Recall" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleClickToDo" "Click To Do" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleAISvcAutoStart" "AI Service Autostart" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleEdgeAI" "Edge AI" "btnTabTweaks"
+        Add-SearchIndexEntry "btnTogglePaintAI" "Paint AI" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleNotepadAI" "Notepad AI" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleFindMyDevice" "Find My Device" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleLocationSvc" "Location Services" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleModernStandby" "Modern Standby Networking" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDeviceAutoApp" "Device Auto-App Download" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleEndTask" "End Task on Taskbar" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleLastActiveClick" "Last Active Click" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleGallery" "Hide Gallery" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleHomeExplorer" "Hide Home Explorer" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleOneDriveFolder" "Hide OneDrive Folder" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggle3DObjects" "Hide 3D Objects" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDupDrive" "Hide Duplicate Drive" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleSnapAssist" "Snap Assist" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleSnapLayouts" "Snap Layouts" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleWindowSnapping" "Window Snapping" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDarkMode" "Dark Mode" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleTransparency" "Transparency" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleAnimations" "Animations" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleLockscreenTips" "Lockscreen Tips" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleSearchHighlights" "Search Highlights" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleSearchHistory" "Search History" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleGameBarIntegration" "Game Bar Integration" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDVR" "Game DVR" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleBitlocker" "Bitlocker Auto Encryption" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleStickyKeys" "Sticky Keys" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleDeliveryOpt" "Delivery Optimization" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleUpdateASAP" "Update ASAP" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleStartRecommended" "Start Recommended" "btnTabTweaks"
+        Add-SearchIndexEntry "btnToggleStartAllApps" "Start All Apps" "btnTabTweaks"
+        Add-SearchIndexEntry "btnTogglePhoneLink" "Phone Link" "btnTabTweaks"
+
         Add-SearchIndexEntry "btnToggleExtensions" "File Extensions" "btnTabTweaks"
         Add-SearchIndexEntry "btnToggleHiddenFiles" "Hidden Files" "btnTabTweaks"
         Add-SearchIndexEntry "btnToggleExplorerLaunch" "File Explorer Launch Folder" "btnTabTweaks"
@@ -35358,11 +36414,13 @@ $onMainWindowContentRendered = {
         [Action] { Update-TweakButtonStates }
     )
     Update-MyDeviceResponsiveLayout
+    Update-TweaksResponsiveLayout
 }.GetNewClosure()
 [void]$window.Add_ContentRendered($onMainWindowContentRendered)
 
 $onMainWindowSizeChanged = {
     Update-MyDeviceResponsiveLayout
+    Update-TweaksResponsiveLayout
 }.GetNewClosure()
 [void]$window.Add_SizeChanged($onMainWindowSizeChanged)
 
