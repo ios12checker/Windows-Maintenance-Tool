@@ -20492,7 +20492,17 @@ function Set-WmtPowerSettingIndex {
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
-                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Viewbox Width="26" Height="26">
+                                    <Canvas Width="512" Height="512">
+                                        <Canvas.RenderTransform>
+                                            <TranslateTransform X="-144" Y="-144"/>
+                                        </Canvas.RenderTransform>
+                                        <Path Fill="{DynamicResource Accent}" Data="m388.03 324.98c0 6.6094 5.3594 11.969 11.969 11.969s11.969-5.3594 11.969-11.969v-61.734c0-6.6094-5.3594-11.969-11.969-11.969s-11.969 5.3594-11.969 11.969z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m429.61 263.24v61.734c0 6.3086-2.0156 12.457-5.7578 17.543-3.7383 5.0859-9.0039 8.8438-15.031 10.727v28.496c63.504-1.1719 114.46-14.957 135.17-34.953v-33.582c-0.003906-36.293-14.098-71.164-39.312-97.27-25.215-26.102-59.582-41.395-95.855-42.652v61.688c6.0273 1.8789 11.293 5.6367 15.031 10.723 3.7422 5.0859 5.7578 11.234 5.7578 17.547z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m396.06 626.71h7.8789c37.145 0 72.766-14.754 99.027-41.016 26.266-26.266 41.02-61.887 41.02-99.031v-117.49c-31.777 20.375-86.621 29.992-141.52 30.273l-5.0039-0.023437c-42.664-0.22266-82.484-6.0469-112.34-16.52l0.003906 0.003906c-10.207-3.4336-19.977-8.043-29.117-13.73v117.49c0 37.145 14.754 72.766 41.02 99.031 26.266 26.262 61.887 41.016 99.027 41.016z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m391.18 353.25c-6.0234-1.8828-11.293-5.6406-15.031-10.727-3.7383-5.0859-5.7578-11.23-5.7578-17.543v-61.734c0-6.3125 2.0195-12.461 5.7578-17.547 3.7383-5.0859 9.0078-8.8438 15.031-10.723v-61.688c-36.27 1.2578-70.637 16.551-95.852 42.652-25.219 26.105-39.312 60.977-39.316 97.27v33.582c20.707 19.992 71.664 33.777 135.17 34.949z"/>
+                                    </Canvas>
+                                </Viewbox>
                             </Border>
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="Mouse &amp; Clicking" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
@@ -20515,7 +20525,24 @@ function Set-WmtPowerSettingIndex {
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
-                                <TextBlock Text="&#xEC50;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Viewbox Width="26" Height="26">
+                                    <Canvas Width="512" Height="512">
+                                        <Canvas.RenderTransform>
+                                            <TranslateTransform X="-144" Y="-144"/>
+                                        </Canvas.RenderTransform>
+                                        <Path Fill="{DynamicResource Accent}" Data="m614.12 400h-188.93v-214.12c0-6.957-5.6367-12.594-12.594-12.594h-226.71c-6.957 0-12.594 5.6367-12.594 12.594v302.29c0 6.957 5.6367 12.598 12.594 12.598h214.12v113.36c0 6.957 5.6367 12.594 12.594 12.594h201.52c6.957 0 12.594-5.6367 12.594-12.594v-201.52c0-6.957-5.6367-12.594-12.594-12.594zm-214.12 12.594v62.977h-201.52v-277.09h201.52zm201.52 188.93h-176.34v-176.34h176.33z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m236.26 248.86h100.76c6.957 0 12.594-5.6367 12.594-12.594s-5.6367-12.598-12.594-12.598h-100.76c-6.957 0-12.594 5.6367-12.594 12.594-0.003907 6.9609 5.6367 12.598 12.594 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m236.26 299.24h75.57c6.957 0 12.594-5.6367 12.594-12.594 0-6.9609-5.6367-12.598-12.594-12.598h-75.57c-6.957 0-12.594 5.6367-12.594 12.594-0.003907 6.957 5.6367 12.598 12.594 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m236.26 349.62h125.95c6.957 0 12.594-5.6367 12.594-12.594 0-6.957-5.6367-12.598-12.598-12.598h-125.95c-6.957 0-12.594 5.6367-12.594 12.594 0 6.9609 5.6406 12.598 12.598 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m236.26 400h100.76c6.957 0 12.594-5.6367 12.594-12.594 0-6.9609-5.6367-12.598-12.594-12.598h-100.76c-6.957 0-12.594 5.6367-12.594 12.594-0.003907 6.957 5.6367 12.598 12.594 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m236.26 450.38h75.57c6.957 0 12.594-5.6367 12.594-12.594 0-6.957-5.6367-12.598-12.594-12.598h-75.57c-6.957 0-12.594 5.6367-12.594 12.594-0.003907 6.9609 5.6367 12.598 12.594 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m462.98 475.57h75.57c6.957 0 12.594-5.6367 12.594-12.594 0-6.9609-5.6367-12.598-12.594-12.598h-75.57c-6.957 0-12.594 5.6367-12.594 12.594-0.003906 6.9609 5.6328 12.598 12.594 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m462.98 525.95h100.76c6.957 0 12.594-5.6367 12.594-12.594s-5.6367-12.594-12.594-12.594h-100.76c-6.957 0-12.594 5.6367-12.594 12.594-0.003906 6.957 5.6328 12.594 12.594 12.594z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m462.98 576.33h50.383c6.957 0 12.594-5.6367 12.594-12.594-0.003906-6.9609-5.6406-12.598-12.598-12.598h-50.383c-6.957 0-12.594 5.6367-12.594 12.594 0 6.9609 5.6367 12.598 12.598 12.598z"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m374.81 437.79c0 6.957-5.6406 12.594-12.598 12.594-6.9531 0-12.594-5.6367-12.594-12.594 0-6.957 5.6406-12.598 12.594-12.598 6.957 0 12.598 5.6406 12.598 12.598"/>
+                                        <Path Fill="{DynamicResource Accent}" Data="m374.81 286.64c0 6.957-5.6406 12.598-12.598 12.598-6.9531 0-12.594-5.6406-12.594-12.598s5.6406-12.594 12.594-12.594c6.957 0 12.598 5.6367 12.598 12.594"/>
+                                    </Canvas>
+                                </Viewbox>
                             </Border>
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="Context Menu" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
@@ -20706,7 +20733,19 @@ function Set-WmtPowerSettingIndex {
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                             <Border Width="48" Height="48" CornerRadius="8" Background="{DynamicResource BgElevated}" VerticalAlignment="Top" Margin="0,0,15,0">
-                                <TextBlock Text="&#xE770;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="22" Foreground="{DynamicResource Accent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                <Viewbox Width="26" Height="26">
+                                    <Canvas Width="94" Height="236">
+                                        <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="7" Data="M8 43v151c0 19 17 35 39 35s39-16 39-35V43c0-19-17-35-39-35S8 24 8 43z"/>
+                                        <Path Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="4" Data="M36 12h22V5c0-3-5-5-11-5s-11 2-11 5z"/>
+                                        <Ellipse Canvas.Left="8" Canvas.Top="25" Width="78" Height="36" Fill="#99CCFF" Stroke="#004D4D" StrokeThickness="5"/>
+                                        <Path Fill="#0080CC" Data="M8 152v42c0 19 17 35 39 35s39-16 39-35v-42c-8 7-22 12-39 12s-31-5-39-12z"/>
+                                        <Ellipse Canvas.Left="31" Canvas.Top="65" Width="32" Height="32" Fill="#66B3FF"/>
+                                        <Path Fill="#99CCFF" Data="M44 72h6v6h6v6h-6v6h-4v-6h-6v-6h6z"/>
+                                        <Path Fill="#0080CC" Data="M41 120l17 12-14 3 13 14-30-18 15-3-11-13z"/>
+                                        <Ellipse Canvas.Left="31" Canvas.Top="191" Width="32" Height="32" Fill="#B3D9FF"/>
+                                        <Path Fill="#0080CC" Data="M38 204h18v6H38z"/>
+                                    </Canvas>
+                                </Viewbox>
                             </Border>
                             <StackPanel Grid.Column="1">
                                 <TextBlock Text="Power &amp; Battery" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
