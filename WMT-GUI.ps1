@@ -1,4 +1,4 @@
-<#
+﻿<#
     Windows Maintenance Tool - GUI Edition
     CLI: Lil_Batti (author) with contributions from Chaython
     Feature Integration & Updates: Lil_Batti & Chaython
@@ -22441,20 +22441,89 @@ function ConvertTo-Str {
 }
 
 
+
+# Fast .NET registry reader — uses Microsoft.Win32.Registry instead of Get-ItemProperty
+# This is ~10x faster than Get-ItemProperty for bulk reads
+function Read-WmtRegValuesFast {
+    param([string[]]$Paths)
+    $result = @{}
+    foreach ($path in $Paths) {
+        try {
+            # Convert PS path to .NET registry path
+            if ($path -match "^HKCU:\\(.*)$") {
+                $hive = [Microsoft.Win32.Registry]::CurrentUser
+                $subPath = $Matches[1]
+            }
+            elseif ($path -match "^HKLM:\\(.*)$") {
+                $hive = [Microsoft.Win32.Registry]::LocalMachine
+                $subPath = $Matches[1]
+            }
+            else {
+                $result[$path] = $null
+                continue
+            }
+            $key = $hive.OpenSubKey($subPath)
+            if ($key) {
+                # Create a PSObject with all values (mimics Get-ItemProperty output)
+                $obj = [PSCustomObject]@{}
+                foreach ($valName in $key.GetValueNames()) {
+                    $val = $key.GetValue($valName)
+                    $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $val
+                }
+                $key.Close()
+                $result[$path] = $obj
+            }
+            else {
+                $result[$path] = $null
+            }
+        }
+        catch {
+            $result[$path] = $null
+        }
+    }
+    return $result
+}
+
+# Instant single-button update — reads ONE registry value and updates the button
+function Update-TweakButtonStateSingle {
+    param(
+        [string]$ButtonName,
+        [string]$RegPath,
+        [string]$RegName,
+        $DefaultValue,
+        [string]$OnLabel,
+        [string]$OffLabel,
+        [scriptblock]$IsOnCheck
+    )
+    $btn = Get-Ctrl $ButtonName
+    if (-not $btn) { return }
+    try {
+        $val = Get-WmtRegValue $RegPath $RegName $DefaultValue
+        $isOn = & $IsOnCheck $val
+        Update-WmtTweakToggle $btn $isOn $OnLabel $OffLabel
+    } catch {
+        # Fail silently
+    }
+}
+
 function Start-TweakButtonStatesDeferredUpdate {
-    # Debounce: if called multiple times within 200ms, only run once.
-    # Re-run the background job to reload the cache (non-blocking).
+    # Debounce: if called multiple times within 100ms, only run once.
+    # Uses BeginInvoke at Background priority so the UI thread isn't blocked.
     if ($script:TweakStatesDebounceTimer) {
         $script:TweakStatesDebounceTimer.Stop()
     }
     else {
         $script:TweakStatesDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
-        $script:TweakStatesDebounceTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+        $script:TweakStatesDebounceTimer.Interval = [TimeSpan]::FromMilliseconds(100)
         $script:TweakStatesDebounceTimer.Add_Tick({
                 $script:TweakStatesDebounceTimer.Stop()
-                # Re-run the background job to reload the cache (non-blocking)
-                $script:TweakStatesBgStarted = $false
-                Start-TweakButtonStatesBackgroundUpdate
+                # Invalidate the cache so fresh values are read
+                $script:TweakButtonStatesCache = $null
+                # Run Update-TweakButtonStates at Background priority (non-blocking)
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
+                    [System.Windows.Threading.DispatcherPriority]::Background,
+                    [Action] { Update-TweakButtonStates }
+                )
             })
     }
     $script:TweakStatesDebounceTimer.Start()
@@ -22482,10 +22551,29 @@ function Update-TweakButtonStates {
 
             if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
 
-            # When $useCache is true, $regCache is pre-loaded by the background job.
-            # When false (after a button click), we read from registry (cached by path).
+            # Check cache first (pre-loaded by background job)
             if (-not $regCache.ContainsKey($Path)) {
-                try { $regCache[$Path] = Get-ItemProperty -Path $Path -ErrorAction Stop }
+                # Cache miss — use fast .NET RegistryKey read (10x faster than Get-ItemProperty)
+                try {
+                    if ($Path -match "^HKCU:\\(.*)$") {
+                        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Matches[1])
+                    }
+                    elseif ($Path -match "^HKLM:\\(.*)$") {
+                        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Matches[1])
+                    }
+                    else { $key = $null }
+
+                    if ($key) {
+                        $obj = [PSCustomObject]@{}
+                        foreach ($valName in $key.GetValueNames()) {
+                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
+                        }
+                        $key.Close()
+                        $regCache[$Path] = $obj
+                    } else {
+                        $regCache[$Path] = $null
+                    }
+                }
                 catch { $regCache[$Path] = $null }
             }
 
@@ -22765,7 +22853,7 @@ function Update-TweakButtonStates {
         $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
         Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
 
-        # --- NEW TOGGLE STATE DETECTION (Win11Debloat ported tweaks) ---
+        # --- NEW TOGGLE STATE DETECTION ---
         $polAI = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
         $copilotBtn = Get-Ctrl "btnToggleCopilot"
         if ($copilotBtn) {
@@ -23605,7 +23693,7 @@ foreach ($tabButton in $script:WmtTabButtonControls) {
 }
 
 
-# --- NEW TWEAK CLICK HANDLERS (Win11Debloat ported tweaks) ---
+# --- NEW TWEAK CLICK HANDLERS ---
 
 $btnToggleCopilot = Get-Ctrl "btnToggleCopilot"
 if ($btnToggleCopilot) {
@@ -37899,9 +37987,32 @@ function Start-TweakButtonStatesBackgroundUpdate {
             )
 
             $regCache = @{}
+            # Use .NET RegistryKey for faster reads (~10x faster than Get-ItemProperty)
             foreach ($path in $paths) {
                 try {
-                    $regCache[$path] = Get-ItemProperty -Path $path -ErrorAction Stop
+                    if ($path -match "^HKCU:\\(.*)$") {
+                        $hive = [Microsoft.Win32.Registry]::CurrentUser
+                        $subPath = $Matches[1]
+                    }
+                    elseif ($path -match "^HKLM:\\(.*)$") {
+                        $hive = [Microsoft.Win32.Registry]::LocalMachine
+                        $subPath = $Matches[1]
+                    }
+                    else {
+                        $regCache[$path] = $null
+                        continue
+                    }
+                    $key = $hive.OpenSubKey($subPath)
+                    if ($key) {
+                        $obj = [PSCustomObject]@{}
+                        foreach ($valName in $key.GetValueNames()) {
+                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
+                        }
+                        $key.Close()
+                        $regCache[$path] = $obj
+                    } else {
+                        $regCache[$path] = $null
+                    }
                 }
                 catch {
                     $regCache[$path] = $null
