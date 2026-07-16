@@ -19480,13 +19480,13 @@ function Get-WmtRegValue {
         $Default = $null
     )
 
-    try {
-        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+
+    $item = Get-WmtRegistryKeyValuesCached -Path $Path
+    if ($item -and $item.PSObject.Properties[$Name]) {
         return $item.$Name
     }
-    catch {
-        return $Default
-    }
+    return $Default
 }
 
 function Set-WmtRegDword {
@@ -22448,30 +22448,23 @@ function Read-WmtRegValuesFast {
     param([string[]]$Paths)
     $result = @{}
     foreach ($path in $Paths) {
+        $baseKey = $null
+        $key = $null
         try {
-            # Convert PS path to .NET registry path
-            if ($path -match "^HKCU:\\(.*)$") {
-                $hive = [Microsoft.Win32.Registry]::CurrentUser
-                $subPath = $Matches[1]
-            }
-            elseif ($path -match "^HKLM:\\(.*)$") {
-                $hive = [Microsoft.Win32.Registry]::LocalMachine
-                $subPath = $Matches[1]
-            }
-            else {
+            $parts = Convert-WmtRegistryPath -Path $path
+            if (-not $parts) {
                 $result[$path] = $null
                 continue
             }
-            $key = $hive.OpenSubKey($subPath)
+
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+            $key = $baseKey.OpenSubKey($parts.SubPath)
             if ($key) {
-                # Create a PSObject with all values (mimics Get-ItemProperty output)
-                $obj = [PSCustomObject]@{}
+                $values = @{}
                 foreach ($valName in $key.GetValueNames()) {
-                    $val = $key.GetValue($valName)
-                    $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $val
+                    $values[$valName] = $key.GetValue($valName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                 }
-                $key.Close()
-                $result[$path] = $obj
+                $result[$path] = [PSCustomObject]$values
             }
             else {
                 $result[$path] = $null
@@ -22479,6 +22472,10 @@ function Read-WmtRegValuesFast {
         }
         catch {
             $result[$path] = $null
+        }
+        finally {
+            if ($key) { $key.Close() }
+            if ($baseKey) { $baseKey.Close() }
         }
     }
     return $result
@@ -22501,8 +22498,97 @@ function Update-TweakButtonStateSingle {
         $val = Get-WmtRegValue $RegPath $RegName $DefaultValue
         $isOn = & $IsOnCheck $val
         Update-WmtTweakToggle $btn $isOn $OnLabel $OffLabel
-    } catch {
+    }
+    catch {
         # Fail silently
+    }
+}
+
+function Get-WmtRegistryKeyValuesCached {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($script:TweakButtonStatesCache -and $script:TweakButtonStatesCache.ContainsKey($Path)) {
+        return $script:TweakButtonStatesCache[$Path]
+    }
+
+    try {
+        $result = Read-WmtRegValuesFast -Paths @($Path)
+        if ($result.ContainsKey($Path)) {
+            if (-not $script:TweakButtonStatesCache) { $script:TweakButtonStatesCache = @{} }
+            $script:TweakButtonStatesCache[$Path] = $result[$Path]
+            return $result[$Path]
+        }
+    }
+    catch {
+    }
+    return $null
+}
+
+function Get-WmtRegValueCached {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+    $item = Get-WmtRegistryKeyValuesCached -Path $Path
+    if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+    return $Default
+}
+
+function Get-WmtRegistryPathExists {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($Path -like '*[*?]*') { return $false }
+
+    try {
+        $parts = Convert-WmtRegistryPath -Path $Path
+        if (-not $parts) { return $false }
+
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+        $key = $baseKey.OpenSubKey($parts.SubPath)
+        $exists = $null -ne $key
+        if ($key) { $key.Close() }
+        if ($baseKey) { $baseKey.Close() }
+        return $exists
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-WmtTweakPathExistsCached {
+    param(
+        [string]$Path,
+        [bool]$Default = $false
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Default }
+    if (-not $script:TweakButtonStatesPathChecks) { $script:TweakButtonStatesPathChecks = @{} }
+    if ($script:TweakButtonStatesPathChecks.ContainsKey($Path)) {
+        return $script:TweakButtonStatesPathChecks[$Path]
+    }
+
+    try {
+        if ($Path -like '*[*?]*') {
+            $exists = Test-Path $Path -ErrorAction SilentlyContinue
+        }
+        else {
+            $exists = Get-WmtRegistryPathExists -Path $Path
+            if (-not $exists) {
+                $exists = Test-Path $Path -ErrorAction SilentlyContinue
+            }
+        }
+
+        $script:TweakButtonStatesPathChecks[$Path] = $exists
+        return $exists
+    }
+    catch {
+        $script:TweakButtonStatesPathChecks[$Path] = $false
+        return $Default
     }
 }
 
@@ -22519,6 +22605,7 @@ function Start-TweakButtonStatesDeferredUpdate {
                 $script:TweakStatesDebounceTimer.Stop()
                 # Invalidate the cache so fresh values are read
                 $script:TweakButtonStatesCache = $null
+                $script:TweakButtonStatesPathChecks = $null
                 # Run Update-TweakButtonStates at Background priority (non-blocking)
                 [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
                     [System.Windows.Threading.DispatcherPriority]::Background,
@@ -22542,6 +22629,11 @@ function Update-TweakButtonStates {
         if ($script:TweakButtonStatesCache -and $script:TweakButtonStatesCache.Count -gt 0) {
             $regCache = $script:TweakButtonStatesCache
         }
+        $pathCheckCache = @{}
+        if ($script:TweakButtonStatesPathChecks -and $script:TweakButtonStatesPathChecks.Count -gt 0) {
+            $pathCheckCache = $script:TweakButtonStatesPathChecks
+        }
+
         $getRegValue = {
             param(
                 [string]$Path,
@@ -22551,35 +22643,23 @@ function Update-TweakButtonStates {
 
             if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
 
-            # Check cache first (pre-loaded by background job)
             if (-not $regCache.ContainsKey($Path)) {
-                # Cache miss — use fast .NET RegistryKey read (10x faster than Get-ItemProperty)
-                try {
-                    if ($Path -match "^HKCU:\\(.*)$") {
-                        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Matches[1])
-                    }
-                    elseif ($Path -match "^HKLM:\\(.*)$") {
-                        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Matches[1])
-                    }
-                    else { $key = $null }
-
-                    if ($key) {
-                        $obj = [PSCustomObject]@{}
-                        foreach ($valName in $key.GetValueNames()) {
-                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
-                        }
-                        $key.Close()
-                        $regCache[$Path] = $obj
-                    } else {
-                        $regCache[$Path] = $null
-                    }
-                }
-                catch { $regCache[$Path] = $null }
+                $values = Get-WmtRegistryKeyValuesCached -Path $Path
+                $regCache[$Path] = $values
             }
 
             $item = $regCache[$Path]
             if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
             return $Default
+        }.GetNewClosure()
+
+        $getPathExists = {
+            param([string]$Path)
+            if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+            if ($pathCheckCache.ContainsKey($Path)) { return $pathCheckCache[$Path] }
+            $exists = Get-WmtTweakPathExistsCached -Path $Path -Default $false
+            $pathCheckCache[$Path] = $exists
+            return $exists
         }.GetNewClosure()
 
         $setButtonEnabled = {
@@ -22843,13 +22923,13 @@ function Update-TweakButtonStates {
         $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
         Update-WmtTweakToggle $btnToggleClickMode $singleClick "Single-Click Folders" "Double-Click Folders"
 
-        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        $classicContext = & $getPathExists "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
         $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
         Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
-        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        $takeOwnInstalled = & $getPathExists "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership"
         $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
         Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
-        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        $psHereInstalled = & $getPathExists "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell"
         $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
         Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
 
@@ -23088,13 +23168,13 @@ function Update-TweakButtonStates {
 
             # Context Menu (round 2)
             $cmdBtn = Get-Ctrl "btnToggleCmdHere"
-            if ($cmdBtn) { $exists = (Test-Path "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"); Update-WmtTweakToggle $cmdBtn $exists "Remove CMD Here" "Add CMD Here" }
+            if ($cmdBtn) { $exists = & $getPathExists "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"; Update-WmtTweakToggle $cmdBtn $exists "Remove CMD Here" "Add CMD Here" }
             $npBtn = Get-Ctrl "btnToggleNotepadCtx"
-            if ($npBtn) { $exists = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad"); Update-WmtTweakToggle $npBtn $exists "Remove Notepad" "Add Notepad" }
+            if ($npBtn) { $exists = & $getPathExists "HKCU:\Software\Classes\*\shell\WmtNotepad"; Update-WmtTweakToggle $npBtn $exists "Remove Notepad" "Add Notepad" }
             $prBtn = Get-Ctrl "btnToggleRemovePrint"
-            if ($prBtn) { $exists = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print")); Update-WmtTweakToggle $prBtn $exists "Restore Print" "Remove Print" }
+            if ($prBtn) { $exists = (-not (& $getPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print")); Update-WmtTweakToggle $prBtn $exists "Restore Print" "Remove Print" }
             $castBtn = Get-Ctrl "btnToggleRemoveCast"
-            if ($castBtn) { $exists = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice")); Update-WmtTweakToggle $castBtn $exists "Restore Cast to Device" "Remove Cast to Device" }
+            if ($castBtn) { $exists = (-not (& $getPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice")); Update-WmtTweakToggle $castBtn $exists "Restore Cast to Device" "Remove Cast to Device" }
 
             # Sound
             $ssBtn = Get-Ctrl "btnToggleStartupSound"
@@ -23104,7 +23184,7 @@ function Update-TweakButtonStates {
             $dsBtn = Get-Ctrl "btnToggleDeviceSound"
             if ($dsBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\AppEvents\Schemes\Apps\.Default\DeviceConnect\.current" "(Default)" ".default") ""); Update-WmtTweakToggle $dsBtn ($v -eq "") "Device Connect Sound On" "Device Connect Sound Off" }
             $saBtn = Get-Ctrl "btnToggleSpatialAudio"
-            if ($saBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SpatialSound" "SpatialAudioFormat" "") ""); Update-WmtTweakToggle $saBtn ($v -ne "") "Spatial Audio Off" "Spatial Audio On" }
+            if ($saBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SpatialSound" "SpatialAudioFormat" "") ""); Update-WmtTweakToggle $saBtn ($v -ne "") "Spatial Audio On" "Spatial Audio Off" }
 
             # Display
             $nlBtn = Get-Ctrl "btnToggleNightLight"
@@ -23246,12 +23326,20 @@ function Update-TweakButtonStates {
         Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
         $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
         $drvMetaDisabled = $false
-        try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $drvMetaDisabled = $true } } catch {}
+        try {
+            $val = Get-WmtRegValue $drvMetaPath "PreventDeviceMetadataFromNetwork" 0
+            if ([int]$val -eq 1) { $drvMetaDisabled = $true }
+        }
+        catch {}
         $btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
         Update-WmtTweakToggle $btnToggleDrvMeta $drvMetaDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
         $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
         $drvWUDisabled = $false
-        try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $drvWUDisabled = $true } } catch {}
+        try {
+            $val = Get-WmtRegValue $drvWUPath "SearchOrderConfig" 0
+            if ([int]$val -eq 1) { $drvWUDisabled = $true }
+        }
+        catch {}
         $btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
         Update-WmtTweakToggle $btnToggleDrvUpdates $drvWUDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
     }
@@ -37990,27 +38078,23 @@ function Start-TweakButtonStatesBackgroundUpdate {
             # Use .NET RegistryKey for faster reads (~10x faster than Get-ItemProperty)
             foreach ($path in $paths) {
                 try {
-                    if ($path -match "^HKCU:\\(.*)$") {
-                        $hive = [Microsoft.Win32.Registry]::CurrentUser
-                        $subPath = $Matches[1]
-                    }
-                    elseif ($path -match "^HKLM:\\(.*)$") {
-                        $hive = [Microsoft.Win32.Registry]::LocalMachine
-                        $subPath = $Matches[1]
-                    }
-                    else {
+                    $parts = Convert-WmtRegistryPath -Path $path
+                    if (-not $parts) {
                         $regCache[$path] = $null
                         continue
                     }
-                    $key = $hive.OpenSubKey($subPath)
+
+                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+                    $key = $baseKey.OpenSubKey($parts.SubPath)
                     if ($key) {
-                        $obj = [PSCustomObject]@{}
+                        $values = @{}
                         foreach ($valName in $key.GetValueNames()) {
-                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
+                            $values[$valName] = $key.GetValue($valName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                         }
                         $key.Close()
-                        $regCache[$path] = $obj
-                    } else {
+                        $regCache[$path] = [PSCustomObject]$values
+                    }
+                    else {
                         $regCache[$path] = $null
                     }
                 }
@@ -38020,14 +38104,36 @@ function Start-TweakButtonStatesBackgroundUpdate {
             }
 
             # Also collect Test-Path results
+            function Get-WmtRegistryPathExists {
+                param([string]$Path)
+
+                if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+                if ($Path -like '*[*?]*') { return $false }
+
+                try {
+                    $parts = Convert-WmtRegistryPath -Path $Path
+                    if (-not $parts) { return $false }
+
+                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+                    $key = $baseKey.OpenSubKey($parts.SubPath)
+                    $exists = $null -ne $key
+                    if ($key) { $key.Close() }
+                    if ($baseKey) { $baseKey.Close() }
+                    return $exists
+                }
+                catch {
+                    return $false
+                }
+            }
+
             $pathChecks = @{
-                "CtxClassicInstalled" = (Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32")
-                "TakeOwnInstalled"    = (Test-Path "HKCU:\Software\Classes\*\shell\runas" -ErrorAction SilentlyContinue)
-                "PsHereInstalled"     = (Test-Path "HKCU:\Software\Classes\Directory\Background\shell\PowerShell")
-                "CmdHereInstalled"    = (Test-Path "HKCU:\Software\Classes\Directory\shell\WmtCmdHere")
-                "NotepadCtxInstalled" = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad")
-                "PrintRemoved"        = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print"))
-                "CastRemoved"         = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice"))
+                "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+                "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership"
+                "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell"
+                "HKCU:\Software\Classes\Directory\shell\WmtCmdHere" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"
+                "HKCU:\Software\Classes\*\shell\WmtNotepad" = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad")
+                "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print"
+                "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice"
             }
 
             return @{ RegCache = $regCache; PathChecks = $pathChecks }
