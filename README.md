@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v6.1-green)
+![Version](https://img.shields.io/badge/version-v6.2-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -53,46 +53,9 @@ A revolving list of all Antivirus contacts can be found here: https://docs.virus
 - Safety prompts, backups, revert actions, and clearer error messages for risky operations.
 
 ## Screenshot
-<img width="1920" height="1033" alt="image" src="https://github.com/user-attachments/assets/e3e7ca22-4e27-4382-a812-7a66d2cc3789" />
+<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/41782c23-7629-4d55-b520-8b78e0935c8d" />
 
 
-
-## What's New in v6.1
-
-### Game Library
-
-- Added a unified Game Library for locally installed Steam, Epic/Legendary, and GOG games.
-- Added library search, provider filtering, sorting, cache refresh, and supported launch/install/uninstall actions.
-- Added Steam library discovery through configured library folders, app manifests, and cached app metadata.
-- Added Epic library discovery through Legendary and GOG library discovery through GOGDL/local metadata.
-- Added Game Library entries to global search.
-- Integrated owned Legendary and GOG games into the main package search when library searching is enabled.
-
-### Providers and Search
-
-- Added individual controls for each provider's update scans, package search, library search, and metadata use.
-- Added provider capability detection so only supported options are displayed.
-- Added package searching for Steam, Scoop, RubyGems, and Cargo.
-- Added a 24-hour cached PyPI index for much faster Python package searches with less network traffic.
-- Added automatic update-scan intervals for 8 hours, 12 hours, and 1 day.
-- Added individual Windows Update category controls.
-
-### Interface and Startup
-
-- Added **Start with Windows** in Support & Credits, with automatic startup-entry validation and repair if WMT is moved.
-- Consolidated 31 paired on/off or enable/disable controls into single state-aware Tweaks buttons.
-- Applied matching unified toggle behavior to relevant My Device and Drivers actions.
-- Added clearer state-aware tooltips and hover descriptions.
-- Added Enter/Space checkbox control and improved click-drag selection in the Updates list.
-
-### Fixes and Performance
-
-- Fixed Advanced Cleanup deletion after the WPF conversion.
-- Fixed Windows Update category handling and provider-toggle persistence.
-- Fixed several consolidated controls showing or applying the wrong action.
-- Fixed Steam library detection across additional configured library folders.
-- Improved Steam metadata caching, provider search performance, and startup registration for script and EXE launches.
-- Reduced repeated C# compilation work and corrected transparency in the EXE/tray icon.
 
 ## Core Features
 
