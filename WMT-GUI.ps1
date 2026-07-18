@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6.2"
+$AppVersion = "6.3"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -1844,6 +1844,30 @@ function Start-MyDeviceQueuedSections {
         $script:MyDevicePendingSections.RemoveAt(0)
         Start-MyDeviceSectionJob -Name $section.Name -Body $section.Body
     }
+}
+
+
+# ============================================================================
+# Safe type-conversion helpers (used by My Device runspaces, tweaks, etc.)
+# Must be defined BEFORE Initialize-WmtBackgroundRunspacePool so the
+# pre-load check (Get-Command) succeeds when populating the runspace.
+# ============================================================================
+function ConvertTo-Int {
+    param($Value, [int]$Default = 0)
+    try {
+        if ($null -eq $Value -or "" -eq $Value) { return $Default }
+        return [int]$Value
+    }
+    catch { return $Default }
+}
+
+function ConvertTo-Str {
+    param($Value, [string]$Default = "")
+    try {
+        if ($null -eq $Value) { return $Default }
+        return [string]$Value
+    }
+    catch { return $Default }
 }
 
 
@@ -8758,7 +8782,7 @@ function Invoke-TempCleanup {
 
                 if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
                     try {
-                        $owner = (ConvertTo-Str (Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop) "").Owner
+                        $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
                         if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
                             [void]$reasons.Add("System-owned")
                         }
@@ -9084,13 +9108,13 @@ function Invoke-TempCleanup {
     function ConvertTo-WmtWinapp2PathRule {
         param($Rule)
 
-        $path = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Path" -Default "") "")).Trim()
+        $path = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Path" -Default "")).Trim()
         if ([string]::IsNullOrWhiteSpace($path)) { return $null }
 
-        $pattern = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Pattern" -Default "*") "")).Trim()
+        $pattern = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Pattern" -Default "*")).Trim()
         if ([string]::IsNullOrWhiteSpace($pattern)) { $pattern = "*" }
 
-        $options = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Options" -Default "") "")).Trim()
+        $options = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Options" -Default "")).Trim()
         $hasRecurseFlag = ($options -match "(?i)(^|[\s,;|])(RECURSE|REMOVESELF)($|[\s,;|])")
         $hasRemoveSelfFlag = ($options -match "(?i)(^|[\s,;|])REMOVESELF($|[\s,;|])")
 
@@ -9111,8 +9135,8 @@ function Invoke-TempCleanup {
             return $Item
         }
 
-        $name = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Item -Name "Name" -Default "") "")).Trim().Trim(" *")
-        if ([string]::IsNullOrWhiteSpace($name)) { return (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Item -Name "ID" -Default "") "") }
+        $name = ([string](Get-WmtCleanupObjectValue -InputObject $Item -Name "Name" -Default "")).Trim().Trim(" *")
+        if ([string]::IsNullOrWhiteSpace($name)) { return [string](Get-WmtCleanupObjectValue -InputObject $Item -Name "ID" -Default "") }
         return $name
     }
 
@@ -9126,18 +9150,18 @@ function Invoke-TempCleanup {
 
             if (Test-WmtCleanupObjectFlag -InputObject $item -Name "IsCleanerML") {
                 foreach ($rule in $itemPaths) {
-                    $path = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Path" -Default "") "")).Trim()
+                    $path = ([string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Path" -Default "")).Trim()
                     if ([string]::IsNullOrWhiteSpace($path)) { continue }
                     [void]$tasks.Add([PSCustomObject]@{
                             Engine      = "CleanerML"
                             RuleName    = $itemName
                             Path        = $path
-                            Search      = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Search" -Default "file") "")
-                            Regex       = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Regex" -Default "") "")
-                            WholeRegex  = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "WholeRegex" -Default "") "")
-                            NRegex      = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "NRegex" -Default "") "")
-                            NWholeRegex = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "NWholeRegex" -Default "") "")
-                            Type        = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Type" -Default "") "")
+                            Search      = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Search" -Default "file")
+                            Regex       = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Regex" -Default "")
+                            WholeRegex  = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "WholeRegex" -Default "")
+                            NRegex      = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "NRegex" -Default "")
+                            NWholeRegex = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "NWholeRegex" -Default "")
+                            Type        = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Type" -Default "")
                         })
                 }
             }
@@ -9290,7 +9314,7 @@ function Invoke-TempCleanup {
 
                         if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
                             try {
-                                $owner = (ConvertTo-Str (Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop) "").Owner
+                                $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
                                 if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
                                     [void]$reasons.Add("System-owned")
                                 }
@@ -11646,7 +11670,8 @@ function Start-WmtRegistryCleanupBackground {
         "Test-WmtRegExeKeyExists",
         "Remove-WmtRegistryKeyRegExe",
         "Remove-RegKeyForced",
-        "Backup-RegKey"
+        "Backup-RegKey",
+        "ConvertTo-Int"
     )
 
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -22419,25 +22444,6 @@ function Update-WmtTweakToggle {
     catch {
         # Fail silently - don't let one button break the rest
     }
-}
-
-
-function ConvertTo-Int {
-    param($Value, [int]$Default = 0)
-    try {
-        if ($null -eq $Value -or "" -eq $Value) { return $Default }
-        return [int]$Value
-    }
-    catch { return $Default }
-}
-
-function ConvertTo-Str {
-    param($Value, [string]$Default = "")
-    try {
-        if ($null -eq $Value) { return $Default }
-        return [string]$Value
-    }
-    catch { return $Default }
 }
 
 
@@ -35132,6 +35138,7 @@ $btnNetInfo.Add_Click({
             $out = ipconfig /all 2>&1
             $txt = ($out | Out-String)
             Write-Output $txt
+            Set-WmtBusyCursor
             Show-TextDialog -Title "IP Configuration" -Text $txt
         } "Showing IP configuration..."
     })
@@ -35190,6 +35197,7 @@ $btnRouteView.Add_Click({
             $out = route print 2>&1
             $txt = ($out | Out-String)
             Write-Output $txt
+            Set-WmtBusyCursor
             Show-TextDialog -Title "Route Table" -Text $txt
         } "Routing table"
     })
