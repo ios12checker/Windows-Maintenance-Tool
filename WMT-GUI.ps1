@@ -17506,6 +17506,7 @@ function Invoke-WinREStatusCheck {
         $res = Show-WmtMessageBox -Message "$headline`r`n`r`n$msg`r`n`r`nShow technical details?" -Title "WinRE Status" -Button YesNo -Image $icon
 
         if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
+            Set-WmtBusyCursor
             Show-TextDialog -Title "WinRE Technical Details" -Text $text
         }
     } "Checking WinRE status..."
