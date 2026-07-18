@@ -1872,6 +1872,46 @@ function ConvertTo-Str {
 
 
 # ============================================================================
+# Safe external CLI text capture (OEM-encoding aware for non-English systems)
+# PowerShell 5.1 misinterprets external CLI encoding in WPF contexts, causing
+# accented characters (e.g. ì, à, è) to be garbled.  This helper uses
+# System.Diagnostics.Process with explicit OEM encoding to avoid that.
+# ============================================================================
+function Invoke-WmtCliText {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string]$Arguments = "",
+        [int]$TimeoutMs = 60000
+    )
+    try {
+        $oem = [System.Text.Encoding]::GetEncoding(
+            [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName               = $FilePath
+        $psi.Arguments              = $Arguments
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.StandardOutputEncoding = $oem
+        $psi.StandardErrorEncoding  = $oem
+
+        $proc   = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill() } catch {}
+        }
+        $global:LASTEXITCODE = $proc.ExitCode
+        $combined = "$stdout$stderr"
+        if ($combined.Length -gt 0) { return $combined.TrimEnd() }
+        return ""
+    }
+    catch { return "" }
+}
+
+
+# ============================================================================
 # Shared RunspacePool for background jobs (My Device stats, Tweak States, etc.)
 # ============================================================================
 function Initialize-WmtBackgroundRunspacePool {
@@ -1892,12 +1932,15 @@ function Initialize-WmtBackgroundRunspacePool {
         }
     }
 
-    # Pre-load ConvertTo-Int and ConvertTo-Str
+    # Pre-load ConvertTo-Int, ConvertTo-Str, and Invoke-WmtCliText
     if (Get-Command ConvertTo-Int -ErrorAction SilentlyContinue) {
         try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("ConvertTo-Int", ${function:ConvertTo-Int}.ToString())) } catch {}
     }
     if (Get-Command ConvertTo-Str -ErrorAction SilentlyContinue) {
         try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("ConvertTo-Str", ${function:ConvertTo-Str}.ToString())) } catch {}
+    }
+    if (Get-Command Invoke-WmtCliText -ErrorAction SilentlyContinue) {
+        try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Invoke-WmtCliText", ${function:Invoke-WmtCliText}.ToString())) } catch {}
     }
 
     $pool = [runspacefactory]::CreateRunspacePool(1, 4, $iss, $Host)
@@ -5184,11 +5227,13 @@ function Show-DownloadStats {
             }
             $msg = $lines -join "`r`n"
             Write-Output $msg
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($msg, "Latest Release Downloads", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         }
         catch {
             $err = "Failed to fetch download stats: $($_.Exception.Message)"
             Write-Output $err
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($err, "Latest Release Downloads", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
         }
     } "Fetching latest release download counts..."
@@ -5661,8 +5706,7 @@ function Clear-WmtDnsResolverCache {
         return "DNS resolver cache cleared."
     }
     catch {
-        $out = ipconfig /flushdns 2>&1
-        $txt = ($out | Out-String).Trim()
+        $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/flushdns"
         if ($txt) { return $txt }
         return "DNS resolver cache flush attempted."
     }
@@ -5756,8 +5800,16 @@ function Start-DnsAssignmentRunspace {
                     return "DNS resolver cache cleared."
                 }
                 catch {
-                    $out = ipconfig /flushdns 2>&1
-                    $txt = ($out | Out-String).Trim()
+                    # Inline OEM-aware capture (isolated runspace — no access to script functions)
+                    $oem = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+                    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                    $psi.FileName = "ipconfig"; $psi.Arguments = "/flushdns"
+                    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+                    $psi.StandardOutputEncoding = $oem; $psi.StandardErrorEncoding = $oem
+                    $p = [System.Diagnostics.Process]::Start($psi)
+                    $txt = "$($p.StandardOutput.ReadToEnd())$($p.StandardError.ReadToEnd())".TrimEnd()
+                    $p.WaitForExit()
                     if ($txt) { return $txt }
                     return "DNS resolver cache flush attempted."
                 }
@@ -11671,7 +11723,8 @@ function Start-WmtRegistryCleanupBackground {
         "Remove-WmtRegistryKeyRegExe",
         "Remove-RegKeyForced",
         "Backup-RegKey",
-        "ConvertTo-Int"
+        "ConvertTo-Int",
+        "Invoke-WmtCliText"
     )
 
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -12115,6 +12168,7 @@ function Invoke-RegistryTask {
                 throw "HKLM backup failed. reg.exe exit code: $LASTEXITCODE"
             }
 
+            Set-WmtBusyCursor
             Show-WmtMessageBox -Message "HKLM export saved to:`n$bkFile" -Title "Registry Export" -Image Information | Out-Null
         } "Exporting HKLM hive..." -ArgumentList $bkDir
         return
@@ -12147,6 +12201,7 @@ function Invoke-RegistryTask {
                 throw "Registry restore failed. reg.exe exit code: $LASTEXITCODE"
             }
 
+            Set-WmtBusyCursor
             Show-WmtMessageBox -Message "Registry backup imported from:`n$BackupFile" -Title "Registry Import" -Image Information | Out-Null
         } "Importing registry backup..." -ArgumentList $restoreFile
         return
@@ -15039,7 +15094,7 @@ function Invoke-SSDTrim {
             catch {
                 $out += "Optimize-Volume failed on $driveLetter`: $($_.Exception.Message)"
                 try {
-                    $fallback = (& defrag "$driveLetter`:" /L 2>&1 | Out-String).TrimEnd()
+                    $fallback = (Invoke-WmtCliText -FilePath "defrag" -Arguments "$driveLetter`: /L").TrimEnd()
                     if (-not [string]::IsNullOrWhiteSpace($fallback)) { $out += $fallback }
                     $out += "Fallback completed on $driveLetter`: defrag /L"
                     $optimized++
@@ -17176,9 +17231,9 @@ function Invoke-SystemReports {
         $sys = Join-Path $outdir "System_Info_$date.txt"
         $net = Join-Path $outdir "Network_Info_$date.txt"
         $drv = Join-Path $outdir "Driver_List_$date.txt"
-        systeminfo | Out-File -FilePath $sys -Encoding UTF8
-        ipconfig /all | Out-File -FilePath $net -Encoding UTF8
-        driverquery | Out-File -FilePath $drv -Encoding UTF8
+        Invoke-WmtCliText -FilePath "systeminfo" | Out-File -FilePath $sys -Encoding UTF8
+        Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/all" | Out-File -FilePath $net -Encoding UTF8
+        Invoke-WmtCliText -FilePath "driverquery" | Out-File -FilePath $drv -Encoding UTF8
         Write-Output "Reports saved to $outdir"
         # CHANGE IS HERE: Passing the argument explicitly
     } "Generating system reports..." -ArgumentList $outdir
@@ -17422,16 +17477,7 @@ function Show-RuleDialog {
 # --- WINRE STATUS CHECK ---
 function Invoke-WinREStatusCheck {
     Invoke-UiCommand {
-        # 1. FIX THE ENCODING
-        $oldEnc = [Console]::OutputEncoding
-        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-        
-        $raw = & reagentc.exe /info 2>&1
-        $exitCode = $LASTEXITCODE
-        
-        [Console]::OutputEncoding = $oldEnc
-
-        $text = ($raw | Out-String).Trim()
+        $text = Invoke-WmtCliText -FilePath "reagentc.exe" -Arguments "/info"
         if ([string]::IsNullOrWhiteSpace($text)) {
             $text = "No output returned from reagentc /info."
         }
@@ -17503,10 +17549,10 @@ function Invoke-WinREStatusCheck {
             [System.Windows.MessageBoxImage]::Warning
         }
 
+        Set-WmtBusyCursor
         $res = Show-WmtMessageBox -Message "$headline`r`n`r`n$msg`r`n`r`nShow technical details?" -Title "WinRE Status" -Button YesNo -Image $icon
 
         if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
-            Set-WmtBusyCursor
             Show-TextDialog -Title "WinRE Technical Details" -Text $text
         }
     } "Checking WinRE status..."
@@ -19483,6 +19529,7 @@ function Set-Hags {
             Set-ItemProperty -Path $path -Name "HwSchMode" -Value 2 -Type DWord
             Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) enabled. Reboot required."
                 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("HAGS enabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Enabling HAGS..."
     }
@@ -19494,6 +19541,7 @@ function Set-Hags {
             Set-ItemProperty -Path $path -Name "HwSchMode" -Value 1 -Type DWord
             Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) disabled. Reboot required."
                 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("HAGS disabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Disabling HAGS..."
     }
@@ -35096,8 +35144,7 @@ $btnSFC.Add_Click({
     })
 $btnDISMCheck.Add_Click({
         Invoke-UiCommand {
-            $output = dism /online /cleanup-image /checkhealth 2>&1
-            $text = ($output | Out-String).Trim()
+            $text = Invoke-WmtCliText -FilePath "dism" -Arguments "/online /cleanup-image /checkhealth" -TimeoutMs 120000
             if ($text) { Write-Output $text }
 
             $message = "DISM Check completed."
@@ -35112,6 +35159,7 @@ $btnDISMCheck.Add_Click({
             elseif ($text -match "The operation completed successfully") {
                 $message = "DISM Check: completed successfully."
             }
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($message, "DISM CheckHealth", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
 
             if ($needsRepair) {
@@ -35136,8 +35184,7 @@ $btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
 # --- NETWORK ---
 $btnNetInfo.Add_Click({
         Invoke-UiCommand {
-            $out = ipconfig /all 2>&1
-            $txt = ($out | Out-String)
+            $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/all"
             Write-Output $txt
             Set-WmtBusyCursor
             Show-TextDialog -Title "IP Configuration" -Text $txt
@@ -35145,9 +35192,9 @@ $btnNetInfo.Add_Click({
     })
 $btnFlushDNS.Add_Click({
         Invoke-UiCommand {
-            $out = ipconfig /flushdns 2>&1
-            $txt = ($out | Out-String).Trim()
+            $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/flushdns"
             if ($txt) { Write-Output $txt }
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("DNS cache flushed.", "Flush DNS", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Flushing DNS cache..."
     })
@@ -35162,6 +35209,7 @@ $btnResetWifi.Add_Click({
                     $ethNames = $eth | Select-Object -ExpandProperty Name
                     $msg += "`nYou appear to be on Ethernet: " + ($ethNames -join ", ")
                 }
+                Set-WmtBusyCursor
                 [System.Windows.MessageBox]::Show($msg, "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                 Write-Output $msg
                 return
@@ -35173,6 +35221,7 @@ $btnResetWifi.Add_Click({
                 Write-Output "Restarted Wi-Fi adapter: $n"
             }
 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("Restarted Wi-Fi adapter(s): " + ($names -join ", "), "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Restarting Wi-Fi adapters..."
     })
@@ -35192,11 +35241,10 @@ $btnNetRepair.Add_Click({
         }
     })
 
-$btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
+$btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; Invoke-WmtCliText -FilePath "route" -Arguments "print" | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
 $btnRouteView.Add_Click({
         Invoke-UiCommand {
-            $out = route print 2>&1
-            $txt = ($out | Out-String)
+            $txt = Invoke-WmtCliText -FilePath "route" -Arguments "print"
             Write-Output $txt
             Set-WmtBusyCursor
             Show-TextDialog -Title "Route Table" -Text $txt
@@ -36275,7 +36323,7 @@ function Update-SingleFeatureButtonState {
             if ($feat -and $feat.State -eq "Enabled") { $isEnabled = $true }
         }
         else {
-            $info = (dism /Online /Get-FeatureInfo /FeatureName:$FeatureName 2>&1) -join "`n"
+            $info = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$FeatureName"
             if ($info -match "State\s*:\s*Enabled") { $isEnabled = $true }
         }
     }
@@ -36295,7 +36343,7 @@ function Switch-WindowsFeature($FeatureName, $DisplayName) {
         param($fn, $dn)
         if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {
             Write-GuiLog "PowerShell feature cmdlets unavailable; trying DISM fallback..."
-            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            $featureInfo = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$fn"
             if ($featureInfo -match "State\\s*:\\s*Enabled") {
                 dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
@@ -36316,7 +36364,7 @@ function Switch-WindowsFeature($FeatureName, $DisplayName) {
             if ($fn -ne "NetFx3") { throw "Feature name $fn is unknown." }
 
             Write-GuiLog "$dn not detected via PowerShell; trying DISM fallback..."
-            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            $featureInfo = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$fn"
             if ($featureInfo -match "State\\s*:\\s*Enabled") {
                 dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
@@ -38238,7 +38286,7 @@ function Start-OptionalFeaturesBackgroundCheck {
 
             # Method 2: Fallback - single DISM call that lists ALL features
             try {
-                $output = (& dism /Online /Get-Features 2>&1) -join "`n"
+                $output = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-Features" -TimeoutMs 120000
                 foreach ($featureName in $map.Keys) {
                     $btnName = $map[$featureName]
                     # Match pattern: "Feature Name : <name>" followed by "State : Enabled"
