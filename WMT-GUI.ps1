@@ -17481,6 +17481,8 @@ function Invoke-WinREStatusCheck {
         $res = Show-WmtMessageBox -Message "$headline`r`n`r`n$msg`r`n`r`nShow technical details?" -Title "WinRE Status" -Button YesNo -Image $icon
 
         if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
+            # Clear the busy cursor BEFORE opening the dialog
+            Set-WmtBusyCursor
             Show-TextDialog -Title "WinRE Technical Details" -Text $text
         }
     } "Checking WinRE status..."
@@ -35044,6 +35046,8 @@ $btnNetInfo.Add_Click({
             $out = ipconfig /all 2>&1
             $txt = ($out | Out-String)
             Write-Output $txt
+            # Clear the busy cursor BEFORE opening the dialog
+            Set-WmtBusyCursor
             Show-TextDialog -Title "IP Configuration" -Text $txt
         } "Showing IP configuration..."
     })
@@ -35102,6 +35106,8 @@ $btnRouteView.Add_Click({
             $out = route print 2>&1
             $txt = ($out | Out-String)
             Write-Output $txt
+            # Clear the busy cursor BEFORE opening the dialog
+            Set-WmtBusyCursor
             Show-TextDialog -Title "Route Table" -Text $txt
         } "Routing table"
     })
