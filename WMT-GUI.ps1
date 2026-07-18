@@ -31678,11 +31678,11 @@ function Start-WingetScanSourcePreflight {
             foreach ($source in @($Sources | Select-Object -Unique)) {
                 try {
                     $refreshTimeoutMs = if ($source -eq "msstore") { 15000 } else { 30000 }
-                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $((ConvertTo-Int ($refreshTimeoutMs / 1000) 0))s)..."
+                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $([int]($refreshTimeoutMs / 1000))s)..."
                     $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs $refreshTimeoutMs
 
                     if ($refresh.TimedOut) {
-                        Add-Log "LOG:$source source refresh timed out after $((ConvertTo-Int ($refreshTimeoutMs / 1000) 0))s; continuing to scan anyway."
+                        Add-Log "LOG:$source source refresh timed out after $([int]($refreshTimeoutMs / 1000))s; continuing to scan anyway."
                     }
                     elseif ($refresh.ExitCode -eq 0) {
                         Add-Log "LOG:$source source refresh completed before scan."
