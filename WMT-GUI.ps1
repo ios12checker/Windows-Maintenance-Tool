@@ -12558,14 +12558,35 @@ function Invoke-RegistryTask {
                             $packageParts = $packageName.Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
                             if ($packageParts.Length -ge 2) {
                                 $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Length - 1])"
+                                # Quick Win32 attribute check — bypasses APC ACL lock on WindowsApps.
+                                # GetFileAttributesW succeeds where Test-Path fails for these paths.
+                                # This catches stale versioned paths (old package version folder deleted).
+                                try {
+                                    if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                        $RegistryPathExistsCache[$cacheKey] = $true
+                                        return $true
+                                    }
+                                }
+                                catch {}
                                 # Fast path: check StateRepository cache key
                                 try {
                                     $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
                                     $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
                                     if ($root) {
                                         $root.Close()
-                                        $RegistryPathExistsCache[$cacheKey] = $true
-                                        return $true
+                                        # Package family is registered, but also verify the
+                                        # versioned folder still exists — updates can remove old
+                                        # version folders while the family remains registered.
+                                        try {
+                                            if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                                $RegistryPathExistsCache[$cacheKey] = $true
+                                                return $true
+                                            }
+                                        }
+                                        catch {}
+                                        # StateRepository hit but file gone — version was likely
+                                        # superseded. Do NOT cache as true; fall through to
+                                        # Get-AppxPackage as final check.
                                     }
                                 }
                                 catch {}
@@ -12583,8 +12604,17 @@ function Invoke-RegistryTask {
                                         $RegistryPathExistsCache[$appxCacheKey] = $found
                                     }
                                     if ($RegistryPathExistsCache[$appxCacheKey]) {
-                                        $RegistryPathExistsCache[$cacheKey] = $true
-                                        return $true
+                                        # Package is installed, but the versioned path may be stale.
+                                        # Verify the specific file/dir still exists.
+                                        try {
+                                            if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                                $RegistryPathExistsCache[$cacheKey] = $true
+                                                return $true
+                                            }
+                                        }
+                                        catch {}
+                                        # Package exists but this specific versioned path is gone.
+                                        # The file is genuinely missing — do not return true.
                                     }
                                 }
                                 catch {}
