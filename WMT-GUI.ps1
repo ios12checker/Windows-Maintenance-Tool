@@ -10315,7 +10315,10 @@ function Show-RegistryCleaner {
         </DataGrid>
 
         <Grid Grid.Row="2" Margin="0,12,0,0">
-            <Button Name="btnClose" Content="Close" IsCancel="True" HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <CheckBox Name="chkShowProtected" Content="Show Protected Entries" Margin="0,0,12,0" VerticalAlignment="Center" ToolTip="When unchecked, protected Microsoft COM registrations (e.g. CrossDevice, DAO, Oracle OLE DB) are hidden from the list. Toggle this to show/hide them."/>
+                <Button Name="btnClose" Content="Close" IsCancel="True"/>
+            </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Name="btnCopySelected" Content="Copy Selected Details" MinWidth="160"/>
                 <Button Name="btnCopyAll" Content="Copy All Details" MinWidth="140"/>
@@ -10334,8 +10337,17 @@ function Show-RegistryCleaner {
     $btnCopySelected = $dialog.FindName("btnCopySelected")
     $btnCopyAll = $dialog.FindName("btnCopyAll")
     $btnClose = $dialog.FindName("btnClose")
+    $chkShowProtected = $dialog.FindName("chkShowProtected")
 
-    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count)"
+    # --- Protected/ReviewOnly filter ---
+    # By default, protected and review-only entries are hidden from the grid.
+    # $registryRows always holds the FULL unfiltered list.
+    # $registryRowsFiltered excludes review-only items.
+    # The checkbox swaps $dg.ItemsSource between the two lists.
+    # (Avoids CollectionView.Filter whose scriptblock closure freezes
+    #  variable values and breaks toggle — .GetNewClosure() snapshots $showProtected.)
+
+    $lblStatus.Text = "Scan complete. Scanning..."
 
     $registryRows = @(
         foreach ($item in $ScanResults) {
@@ -10386,10 +10398,39 @@ function Show-RegistryCleaner {
                 Type          = $item.Type
                 NewData       = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
                 Details       = $details
+                IsReviewOnly  = (-not $autoSelected)
+                IsProtected   = ([string]$item.Problem -eq 'Protected ActiveX Issue')
             }
         }
     )
-    $dg.ItemsSource = $registryRows
+
+    # Build a filtered list excluding only Protected ActiveX entries (the default view).
+    $registryRowsFiltered = @($registryRows | Where-Object { $_.IsProtected -eq $false })
+
+    # Default: hide only protected entries; show everything else including review-only.
+    $dg.ItemsSource = $registryRowsFiltered
+    $protectedCount = ($registryRows | Where-Object { $_.IsProtected }).Count
+    if ($protectedCount -gt 0) {
+        $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden)."
+    } else {
+        $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+    }
+
+    # Checkbox toggle: show/hide only Protected ActiveX entries.
+    # Checked = show protected. Unchecked = hide protected (default).
+    $chkShowProtected.Add_Click({
+        if ($chkShowProtected.IsChecked -eq $true) {
+            $dg.ItemsSource = $registryRows
+            $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+        } else {
+            $dg.ItemsSource = $registryRowsFiltered
+            if ($protectedCount -gt 0) {
+                $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden)."
+            } else {
+                $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+            }
+        }
+    })
 
     $registryContextMenu = [System.Windows.Controls.ContextMenu]::new()
     try { Set-WmtContextMenuChrome -ContextMenu $registryContextMenu } catch {}
@@ -10429,7 +10470,11 @@ function Show-RegistryCleaner {
             try {
                 $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $dg -Checked $true
                 if ($changed -gt 0) {
-                    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                    if ($chkShowProtected.IsChecked -eq $true) {
+                        $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count). Checked $changed highlighted row(s)."
+                    } else {
+                        $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden). Checked $changed highlighted row(s)."
+                    }
                 }
             }
             catch {
@@ -10550,7 +10595,11 @@ function Show-RegistryCleaner {
 
             $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $gridSender -Checked $true
             if ($changed -gt 0) {
-                $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                if ($chkShowProtected.IsChecked -eq $true) {
+                    $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count). Checked $changed highlighted row(s)."
+                } else {
+                    $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden). Checked $changed highlighted row(s)."
+                }
                 $keyArgs.Handled = $true
             }
         })
