@@ -16090,10 +16090,11 @@ function Invoke-RegistryTask {
                                     if (-not $mk) { continue }
                                     $driver = [string]$mk.GetValue("Driver")
                                     if (-not [string]::IsNullOrWhiteSpace($driver)) {
-                                        $dllPath = Join-Path $winDir "$driver.dll"
-                                        # Also try raw value if it looks like a full path
-                                        if ($driver -match '^(?i)[a-z]:\\') {
-                                            $dllPath = $driver
+                                        $dllPath = $driver
+                                        if ($driver -notmatch '^(?i)[a-z]:\\') {
+                                            # Bare filename — resolve against System32, add .dll only if missing
+                                            if ($driver -notmatch '\.dll$') { $dllPath = "$driver.dll" }
+                                            $dllPath = Join-Path $winDir $dllPath
                                         }
                                         $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
                                         if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
@@ -16131,9 +16132,10 @@ function Invoke-RegistryTask {
                                     if (-not $pk) { continue }
                                     $driver = [string]$pk.GetValue("Driver")
                                     if (-not [string]::IsNullOrWhiteSpace($driver)) {
-                                        $dllPath = Join-Path $winDir "$driver.dll"
-                                        if ($driver -match '^(?i)[a-z]:\\') {
-                                            $dllPath = $driver
+                                        $dllPath = $driver
+                                        if ($driver -notmatch '^(?i)[a-z]:\\') {
+                                            if ($driver -notmatch '\.dll$') { $dllPath = "$driver.dll" }
+                                            $dllPath = Join-Path $winDir $dllPath
                                         }
                                         $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
                                         if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
@@ -16202,9 +16204,15 @@ function Invoke-RegistryTask {
                                                     })
                                                 }
                                             } else {
-                                                # Bare DLL name — look in System32
-                                                $sysPath = Join-Path $([Environment]::GetFolderPath("System")) "$expanded"
-                                                if (-not (Test-PathExists $sysPath)) {
+                                                # Bare DLL name — look in System32 (try as-is first, then with .dll appended)
+                                                $sysPath = Join-Path $([Environment]::GetFolderPath("System")) $expanded
+                                                $found = (Test-PathExists $sysPath)
+                                                if (-not $found -and $expanded -notmatch '\.') {
+                                                    $sysPathDotDll = Join-Path $([Environment]::GetFolderPath("System")) "$expanded.dll"
+                                                    $found = (Test-PathExists $sysPathDotDll)
+                                                    if ($found) { $sysPath = $sysPathDotDll }
+                                                }
+                                                if (-not $found) {
                                                     # Only flag if it doesn't look like a known Windows package name
                                                     $knownPackages = @("msv1_0", "wdigest", "tspkg", "pku2u", "cloudAP", "Kerberos", "NTLM", "Negotiate", "Schannel", "CoreCtx", "Livessp", "wusa", "NegoExtender", "CredPack", "DPAPI", "AppLocker", "apphelp", "sbsbsrv")
                                                     $bareName = [System.IO.Path]::GetFileNameWithoutExtension($expanded)
@@ -16239,31 +16247,93 @@ function Invoke-RegistryTask {
                     if ($SelectedScans -contains "BamEntries") {
                         $SyncHash.Status = "Scanning BAM/DAM Activity Entries..."
 
+                        # Build NT device path → drive letter mapping from MountedDevices
+                        $deviceMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        try {
+                            $mdKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\MountedDevices", $false)
+                            if ($mdKey) {
+                                foreach ($mv in $mdKey.GetValueNames()) {
+                                    try {
+                                        if ($mv -match '^\\DosDevices\\([A-Z]):$') {
+                                            $driveLetter = $matches[1] + ":"
+                                            $mdata = $mdKey.GetValue($mv)
+                                            if ($mdata -is [byte[]] -and $mdata.Length -gt 12) {
+                                                $raw = [System.Text.Encoding]::Unicode.GetString($mdata)
+                                                # MountedDevices binary may have a 4-byte or 12-byte header before the NT path.
+                                                # Look for \??\ prefix in the decoded string
+                                                $ntIdx = $raw.IndexOf('\??\')
+                                                if ($ntIdx -ge 0) {
+                                                    $ntPath = $raw.Substring($ntIdx).TrimEnd("`0")
+                                                } else {
+                                                    # Try skipping first 12 bytes (3 Unicode chars header) then look for \Device\
+                                                    if ($mdata.Length -gt 24) {
+                                                        $ntPath = [System.Text.Encoding]::Unicode.GetString($mdata, 12, $mdata.Length - 12).TrimEnd("`0")
+                                                    } else {
+                                                        $ntPath = $raw.TrimEnd("`0")
+                                                    }
+                                                }
+                                                if ($ntPath.Length -gt 3 -and -not $deviceMap.ContainsKey($ntPath)) {
+                                                    $deviceMap.Add($ntPath, $driveLetter)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                }
+                                $mdKey.Close()
+                            }
+                        }
+                        catch {}
+
+                        # Helper function: convert NT device path to DOS path using the map
+                        function script:Convert-BamNtToDos {
+                            param([string]$NtPath)
+                            foreach ($prefix in @($deviceMap.Keys)) {
+                                if ($NtPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    return ($deviceMap[$prefix] + "\" + $NtPath.Substring($prefix.Length))
+                                }
+                            }
+                            return $null
+                        }
+
                         # BAM = Background Activity Moderator, DAM = Desktop Activity Moderator
-                        # Track app executable paths under per-user SID subkeys
                         $bamRoot = "SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
                         $damRoot = "SYSTEM\CurrentControlSet\Services\dam\State\UserSettings"
 
                         foreach ($svcRoot in @($bamRoot, $damRoot)) {
                             $svcName = if ($svcRoot -match '\\bam\\') { "BAM" } else { "DAM" }
-                            $rootKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($svcRoot, $false)
-                            if ($rootKey) {
-                                $sids = $rootKey.GetSubKeyNames()
-                                $total = [math]::Max($sids.Count, 1); $i = 0
-                                foreach ($sid in $sids) {
-                                    $i++; & $Tick "Scanning $svcName SID: $($sid.Substring(0, [math]::Min($sid.Length, 20)))" $i $total
-                                    try {
-                                        $sidKey = $rootKey.OpenSubKey($sid, $false)
-                                        if (-not $sidKey) { continue }
+                            $rootKey = $null
+                            try {
+                                $rootKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($svcRoot, $false)
+                            }
+                            catch { continue }
+                            if (-not $rootKey) { continue }
 
-                                        foreach ($entryName in $sidKey.GetSubKeyNames()) {
-                                            # Entry names are exe paths like "\Device\HarddiskVolume3\Program Files\App\app.exe"
-                                            # or plain paths like "C:\Program Files\App\app.exe"
+                            $sids = @($rootKey.GetSubKeyNames())
+                            $total = [math]::Max($sids.Count, 1); $i = 0
+                            foreach ($sid in $sids) {
+                                $i++; & $Tick "Scanning $svcName SID: $($sid.Substring(0, [math]::Min($sid.Length, 20)))" $i $total
+                                $sidKey = $null
+                                try {
+                                    $sidKey = $rootKey.OpenSubKey($sid, $false)
+                                    if (-not $sidKey) { continue }
+
+                                    foreach ($entryName in $sidKey.GetSubKeyNames()) {
+                                        try {
                                             $cleanPath = $entryName
-                                            # Convert NT device paths to DOS paths if needed
+
+                                            # Convert NT device paths (\Device\HarddiskVolume3\...) to DOS paths
                                             if ($cleanPath -match '^\\Device\\') {
-                                                # Skip NT device paths — conversion requires kernel calls
-                                                continue
+                                                $dosPath = Convert-BamNtToDos -NtPath $cleanPath
+                                                if ($null -ne $dosPath) {
+                                                    $cleanPath = $dosPath
+                                                } else {
+                                                    continue
+                                                }
+                                            }
+                                            # Strip \??\ prefix if present (e.g. \??\C:\...)
+                                            elseif ($cleanPath -match '^\\?\?\\(.+)$') {
+                                                $cleanPath = $matches[1]
                                             }
 
                                             $expanded = [Environment]::ExpandEnvironmentVariables($cleanPath)
@@ -16273,8 +16343,8 @@ function Invoke-RegistryTask {
                                                         Problem    = "Stale BAM/DAM Entry"
                                                         Data       = "App no longer exists: $expanded"
                                                         DisplayKey = "$svcName\$sid\..."
-                                                        RegPath    = "HKLM:\$svcRoot\$sid\$entryName"
-                                                        ValueName  = $null
+                                                        RegPath    = "HKLM:\$svcRoot\$sid"
+                                                        ValueName  = $entryName
                                                         Type       = "Key"
                                                         SafeToFix  = $true
                                                         Risk       = "Low"
@@ -16284,12 +16354,15 @@ function Invoke-RegistryTask {
                                                 }
                                             }
                                         }
-                                        $sidKey.Close()
+                                        catch {}
                                     }
-                                    catch {}
                                 }
-                                $rootKey.Close()
+                                catch {}
+                                finally {
+                                    if ($sidKey) { $sidKey.Close() }
+                                }
                             }
+                            $rootKey.Close()
                         }
 
                         & $EndCategory
@@ -16300,112 +16373,107 @@ function Invoke-RegistryTask {
                         $SyncHash.Status = "Scanning Defender Exclusions..."
 
                         $defRoot = "SOFTWARE\Microsoft\Windows Defender\Exclusions"
-                        $defKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($defRoot, $false)
-                        if ($defKey) {
-                            $exclusionTypes = $defKey.GetSubKeyNames()
-                            $total = [math]::Max($exclusionTypes.Count, 1); $i = 0
-                            foreach ($exType in $exclusionTypes) {
-                                $i++; & $Tick "Scanning Defender Exclusions: $exType" $i $total
-                                try {
-                                    $typeKey = $defKey.OpenSubKey($exType, $false)
-                                    if (-not $typeKey) { continue }
+                        # Scan both HKLM and HKCU
+                        foreach ($defHive in @("HKLM", "HKCU")) {
+                            $defBaseKey = if ($defHive -eq "HKLM") {
+                                [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($defRoot, $false)
+                            } else {
+                                [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($defRoot, $false)
+                            }
+                            if ($defBaseKey) {
+                                $exclusionTypes = $defBaseKey.GetSubKeyNames()
+                                $total = [math]::Max($exclusionTypes.Count, 1); $i = 0
+                                foreach ($exType in $exclusionTypes) {
+                                    $i++; & $Tick "Scanning $defHive Defender Exclusions: $exType" $i $total
+                                    try {
+                                        $typeKey = $defBaseKey.OpenSubKey($exType, $false)
+                                        if (-not $typeKey) { continue }
 
-                                    # Check default value (exclusions are stored as the default value of subkeys)
-                                    foreach ($exName in $typeKey.GetSubKeyNames()) {
-                                        try {
-                                            $exSubKey = $typeKey.OpenSubKey($exName, $false)
-                                            if (-not $exSubKey) { continue }
-                                            $val = [string]$exSubKey.GetValue("")
-                                            if ([string]::IsNullOrWhiteSpace($val)) { $exSubKey.Close(); continue }
-                                            $expanded = [Environment]::ExpandEnvironmentVariables($val)
-                                            $exSubKey.Close()
+                                        $hivePrefix = if ($defHive -eq "HKLM") { "HKLM:" } else { "HKCU:" }
+
+                                        # Defender stores exclusions as VALUES where the VALUE NAME is the excluded path/process/extension
+                                        foreach ($valName in $typeKey.GetValueNames()) {
+                                            $expanded = $valName
+                                            # Skip non-path values (empty default, numeric index values, etc.)
+                                            if ($expanded.Length -lt 2) { continue }
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($expanded)
 
                                             if ($expanded -match '^(?i)[a-z]:\\') {
+                                                # Path-based exclusion — check if it exists
                                                 if (-not (Test-PathExists $expanded)) {
                                                     [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                         Problem    = "Invalid Defender Exclusion"
                                                         Data       = "Excluded path does not exist: $expanded"
-                                                        DisplayKey = $exName
-                                                        RegPath    = "HKLM:\$defRoot\$exType\$exName"
-                                                        ValueName  = ""
+                                                        DisplayKey = $expanded
+                                                        RegPath    = "$hivePrefix\$defRoot\$exType"
+                                                        ValueName  = $valName
                                                         Type       = "Value"
                                                         SafeToFix  = $true
                                                         Risk       = "Medium"
                                                         Confidence = "High"
-                                                        Details    = "Windows Defender exclusion '$expanded' references a path that no longer exists. This could inadvertently protect malware locations if the path is reused. Stale exclusions should be reviewed and removed."
+                                                        Details    = "Windows Defender exclusion ($defHive) '$expanded' references a path that no longer exists. Stale exclusions should be reviewed and removed."
                                                     })
+                                                }
+                                            } elseif ($exType -eq "Processes" -and $expanded -notmatch '^(?i)\*') {
+                                                # Process exclusion (exe name) — check if the exe exists on PATH or in common locations
+                                                $procName = $expanded.Trim()
+                                                if ($procName -match '\.(?:exe|com)$') {
+                                                    $found = $false
+                                                    foreach ($searchDir in @([Environment]::GetFolderPath("System"), [Environment]::GetFolderPath("Windows"), "${env:ProgramFiles}", "${env:ProgramFiles(x86)}")) {
+                                                        if (Test-PathExists (Join-Path $searchDir $procName)) { $found = $true; break }
+                                                    }
+                                                    if (-not $found -and -not (Get-Command $procName -ErrorAction SilentlyContinue)) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Defender Exclusion"
+                                                            Data       = "Excluded process not found: $procName"
+                                                            DisplayKey = $procName
+                                                            RegPath    = "$hivePrefix\$defRoot\$exType"
+                                                            ValueName  = $valName
+                                                            Type       = "Value"
+                                                            SafeToFix  = $true
+                                                            Risk       = "Low"
+                                                            Confidence = "Medium"
+                                                            Details    = "Windows Defender process exclusion ($defHive) '$procName' was not found on the system."
+                                                        })
+                                                    }
                                                 }
                                             }
                                         }
-                                        catch {}
-                                    }
 
-                                    # Also check values directly (some exclusion types use values instead of subkeys)
-                                    foreach ($valName in $typeKey.GetValueNames()) {
-                                        $val = [string]$typeKey.GetValue($valName)
-                                        if ([string]::IsNullOrWhiteSpace($val)) { continue }
-                                        $expanded = [Environment]::ExpandEnvironmentVariables($val)
-                                        if ($expanded -match '^(?i)[a-z]:\\') {
-                                            if (-not (Test-PathExists $expanded)) {
-                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                    Problem    = "Invalid Defender Exclusion"
-                                                    Data       = "Excluded path does not exist: $expanded"
-                                                    DisplayKey = $valName
-                                                    RegPath    = "HKLM:\$defRoot\$exType"
-                                                    ValueName  = $valName
-                                                    Type       = "Value"
-                                                    SafeToFix  = $true
-                                                    Risk       = "Medium"
-                                                    Confidence = "High"
-                                                    Details    = "Windows Defender exclusion value '$expanded' references a path that no longer exists. Stale exclusions should be reviewed and removed."
-                                                })
+                                        # Also check subkeys (some exclusion types store data under subkeys)
+                                        foreach ($exName in $typeKey.GetSubKeyNames()) {
+                                            try {
+                                                $exSubKey = $typeKey.OpenSubKey($exName, $false)
+                                                if (-not $exSubKey) { continue }
+                                                $val = [string]$exSubKey.GetValue("")
+                                                if (-not [string]::IsNullOrWhiteSpace($val)) {
+                                                    $expanded = [Environment]::ExpandEnvironmentVariables($val)
+                                                    if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-PathExists $expanded)) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Defender Exclusion"
+                                                            Data       = "Excluded path does not exist: $expanded"
+                                                            DisplayKey = $exName
+                                                            RegPath    = "$hivePrefix\$defRoot\$exType\$exName"
+                                                            ValueName  = ""
+                                                            Type       = "Value"
+                                                            SafeToFix  = $true
+                                                            Risk       = "Medium"
+                                                            Confidence = "High"
+                                                            Details    = "Windows Defender exclusion ($defHive) '$expanded' references a path that no longer exists."
+                                                        })
+                                                    }
+                                                }
+                                                $exSubKey.Close()
                                             }
+                                            catch {}
                                         }
-                                    }
 
-                                    $typeKey.Close()
-                                }
-                                catch {}
-                            }
-                            $defKey.Close()
-                        }
-
-                        # Also check HKCU Defender exclusions
-                        $defHKCU = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("SOFTWARE\Microsoft\Windows Defender\Exclusions", $false)
-                        if ($defHKCU) {
-                            $exclusionTypes = $defHKCU.GetSubKeyNames()
-                            $total = [math]::Max($exclusionTypes.Count, 1); $i = 0
-                            foreach ($exType in $exclusionTypes) {
-                                $i++; & $Tick "Scanning HKCU Defender Exclusions: $exType" $i $total
-                                try {
-                                    $typeKey = $defHKCU.OpenSubKey($exType, $false)
-                                    if (-not $typeKey) { continue }
-                                    foreach ($valName in $typeKey.GetValueNames()) {
-                                        $val = [string]$typeKey.GetValue($valName)
-                                        if ([string]::IsNullOrWhiteSpace($val)) { continue }
-                                        $expanded = [Environment]::ExpandEnvironmentVariables($val)
-                                        if ($expanded -match '^(?i)[a-z]:\\') {
-                                            if (-not (Test-PathExists $expanded)) {
-                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                    Problem    = "Invalid Defender Exclusion"
-                                                    Data       = "HKCU excluded path does not exist: $expanded"
-                                                    DisplayKey = $valName
-                                                    RegPath    = "HKCU:\SOFTWARE\Microsoft\Windows Defender\Exclusions\$exType"
-                                                    ValueName  = $valName
-                                                    Type       = "Value"
-                                                    SafeToFix  = $true
-                                                    Risk       = "Medium"
-                                                    Confidence = "High"
-                                                    Details    = "Per-user Defender exclusion '$expanded' references a path that no longer exists."
-                                                })
-                                            }
-                                        }
+                                        $typeKey.Close()
                                     }
-                                    $typeKey.Close()
+                                    catch {}
                                 }
-                                catch {}
+                                $defBaseKey.Close()
                             }
-                            $defHKCU.Close()
                         }
 
                         & $EndCategory
@@ -16436,6 +16504,13 @@ function Invoke-RegistryTask {
                                         # If it's just a filename, resolve against System32
                                         if ($dllName -notmatch '^(?i)[a-z]:\\') {
                                             $dllPath = Join-Path $winDir $dllName
+                                            # If no extension, try adding .dll
+                                            if ($dllName -notmatch '\.') {
+                                                $dllPathDll = Join-Path $winDir "$dllName.dll"
+                                                if ((Test-PathExists $dllPathDll) -and -not (Test-PathExists $dllPath)) {
+                                                    $dllPath = $dllPathDll
+                                                }
+                                            }
                                         }
                                         $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
                                         if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
@@ -16541,6 +16616,8 @@ function Invoke-RegistryTask {
                                     if (-not $hk) { continue }
 
                                     $missing = $false
+
+                                    # Method 1: Check "ProviderExePath" value directly (used by some handlers)
                                     $exePath = [string]$hk.GetValue("ProviderExePath")
                                     if (-not [string]::IsNullOrWhiteSpace($exePath)) {
                                         $expanded = [Environment]::ExpandEnvironmentVariables($exePath)
@@ -16549,26 +16626,48 @@ function Invoke-RegistryTask {
                                         }
                                     }
 
-                                    $dllVal = [string]$hk.GetValue("InvokeDLL")
-                                    if (-not $missing -and -not [string]::IsNullOrWhiteSpace($dllVal)) {
-                                        $dllPath = $dllVal
-                                        if ($dllVal -notmatch '^(?i)[a-z]:\\') {
-                                            $dllPath = Join-Path $winDir $dllVal
-                                        }
-                                        $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
-                                        if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
-                                            $missing = $true
+                                    # Method 2: Resolve via ProgID → CLSID → InprocServer32/LocalServer32
+                                    if (-not $missing) {
+                                        $progId = [string]$hk.GetValue("ProgId")
+                                        if (-not [string]::IsNullOrWhiteSpace($progId)) {
+                                            $clsidKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("$progId\CLSID", $false)
+                                            if (-not $clsidKey) {
+                                                $clsidVal = [string]$hk.GetValue("CLSID")
+                                                if (-not [string]::IsNullOrWhiteSpace($clsidVal)) {
+                                                    $clsidKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("CLSID\$clsidVal", $false)
+                                                }
+                                            }
+                                            if ($clsidKey) {
+                                                foreach ($svrKey in @("InprocServer32", "LocalServer32")) {
+                                                    $svr = $clsidKey.OpenSubKey($svrKey, $false)
+                                                    if ($svr) {
+                                                        $bin = [string]$svr.GetValue("")
+                                                        if (-not [string]::IsNullOrWhiteSpace($bin)) {
+                                                            $binClean = $bin.Trim('"').Trim()
+                                                            if ($binClean -match '^(?i)([a-z]:\\[^\s"]+\.(?:exe|dll))') { $binClean = $matches[1] }
+                                                            $expanded = [Environment]::ExpandEnvironmentVariables($binClean)
+                                                            if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                                $missing = $true
+                                                            }
+                                                        }
+                                                        $svr.Close()
+                                                    }
+                                                    if ($missing) { break }
+                                                }
+                                                $clsidKey.Close()
+                                            }
                                         }
                                     }
 
-                                    # Check DefaultIcon for missing icon file
-                                    $iconVal = [string]$hk.GetValue("DefaultIcon")
-                                    if (-not $missing -and -not [string]::IsNullOrWhiteSpace($iconVal)) {
-                                        # DefaultIcon format: "path,-iconIndex"
-                                        $iconPath = ($iconVal -split ',')[0].Trim('"').Trim()
-                                        if ($iconPath -match '^(?i)[a-z]:\\') {
-                                            if (-not (Test-IsProtectedWindowsPath $iconPath) -and -not (Test-PathExists $iconPath)) {
-                                                $missing = $true
+                                    # Method 3: Check DefaultIcon for missing icon file (exe or dll)
+                                    if (-not $missing) {
+                                        $iconVal = [string]$hk.GetValue("DefaultIcon")
+                                        if (-not [string]::IsNullOrWhiteSpace($iconVal)) {
+                                            $iconPath = ($iconVal -split ',')[0].Trim('"').Trim()
+                                            if ($iconPath -match '^(?i)[a-z]:\\') {
+                                                if (-not (Test-IsProtectedWindowsPath $iconPath) -and -not (Test-PathExists $iconPath)) {
+                                                    $missing = $true
+                                                }
                                             }
                                         }
                                     }
@@ -16584,7 +16683,7 @@ function Invoke-RegistryTask {
                                             SafeToFix  = $true
                                             Risk       = "Low"
                                             Confidence = "High"
-                                            Details    = "Autoplay handler '$handler' references executables or DLLs that no longer exist. This handler will appear as a dead option when inserting media. It can be safely removed."
+                                            Details    = "Autoplay handler '$handler' references executables, DLLs, or icons that no longer exist. This handler will appear as a dead option when inserting media. It can be safely removed."
                                         })
                                     }
                                     $hk.Close()
@@ -16667,79 +16766,62 @@ function Invoke-RegistryTask {
                     if ($SelectedScans -contains "NetworkProviders") {
                         $SyncHash.Status = "Scanning Network Provider DLLs..."
 
-                        # --- Part A: Individual provider Service entries ---
-                        $npSvcRoot = "SYSTEM\CurrentControlSet\Services"
-                        $npSvcKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($npSvcRoot, $false)
-                        if ($npSvcKey) {
-                            $services = $npSvcKey.GetSubKeyNames()
-                            $total = [math]::Max($services.Count, 1); $i = 0
-                            foreach ($svc in $services) {
-                                $i++; & $Tick "Scanning Network Provider: $svc" $i $total
-                                try {
-                                    $sk = $npSvcKey.OpenSubKey($svc, $false)
-                                    if (-not $sk) { continue }
-
-                                    # Only check services that have a NetworkProvider subkey
-                                    $npSub = $sk.OpenSubKey("NetworkProvider", $false)
-                                    if ($npSub) {
-                                        $providerPath = [string]$npSub.GetValue("ProviderPath")
-                                        if (-not [string]::IsNullOrWhiteSpace($providerPath)) {
-                                            $expanded = [Environment]::ExpandEnvironmentVariables($providerPath)
-                                            if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
-                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                    Problem    = "Invalid Network Provider DLL"
-                                                    Data       = "Provider DLL not found: $expanded"
-                                                    DisplayKey = "$svc\NetworkProvider"
-                                                    RegPath    = "HKLM:\$npSvcRoot\$svc\NetworkProvider"
-                                                    ValueName  = "ProviderPath"
-                                                    Type       = "Value"
-                                                    SafeToFix  = $true
-                                                    Risk       = "Medium"
-                                                    Confidence = "High"
-                                                    Details    = "Network provider '$svc' references ProviderPath '$expanded' which does not exist. Missing network providers can delay network connectivity during logon."
-                                                })
-                                            }
-                                        }
-                                        $npSub.Close()
-                                    }
-                                    $sk.Close()
-                                }
-                                catch {}
-                            }
-                            $npSvcKey.Close()
-                        }
-
-                        # --- Part B: ProviderOrder listing ---
+                        # Read ProviderOrder to get the small list of registered providers (typically 2-5)
                         $poRoot = "SYSTEM\CurrentControlSet\Control\NetworkProvider\ProviderOrder"
                         $poKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($poRoot, $false)
+                        $providerNames = @()
                         if ($poKey) {
                             $order = [string]$poKey.GetValue("ProviderOrder")
                             if (-not [string]::IsNullOrWhiteSpace($order)) {
-                                $orderedProviders = $order -split ','
-                                foreach ($prov in $orderedProviders) {
-                                    $prov = $prov.Trim()
-                                    if ([string]::IsNullOrWhiteSpace($prov)) { continue }
-                                    # Verify each provider in the order has a corresponding service key
-                                    $provSvcKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$npSvcRoot\$prov\NetworkProvider", $false)
-                                    if (-not $provSvcKey) {
-                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                            Problem    = "Invalid Network Provider Path"
-                                            Data       = "Provider '$prov' in ProviderOrder has no service key"
-                                            DisplayKey = $prov
-                                            RegPath    = "HKLM:\$poRoot"
-                                            ValueName  = "ProviderOrder"
-                                            Type       = "Value"
-                                            SafeToFix  = $true
-                                            Risk       = "Low"
-                                            Confidence = "Medium"
-                                            Details    = "Network ProviderOrder references '$prov' but no corresponding service\NetworkProvider key exists. The entry is orphaned and can be cleaned from the order string."
-                                        })
-                                    } else {
-                                        $provSvcKey.Close()
-                                    }
-                                }
+                                $providerNames = @($order -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
                             }
                             $poKey.Close()
+                        }
+
+                        $npSvcRoot = "SYSTEM\CurrentControlSet\Services"
+                        $total = [math]::Max($providerNames.Count, 1); $i = 0
+                        foreach ($prov in $providerNames) {
+                            $i++; & $Tick "Scanning Network Provider: $prov" $i $total
+                            try {
+                                $npSub = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$npSvcRoot\$prov\NetworkProvider", $false)
+                                if (-not $npSub) {
+                                    # Provider in order but no service key — orphaned
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                        Problem    = "Invalid Network Provider Path"
+                                        Data       = "Provider '$prov' in ProviderOrder has no service key"
+                                        DisplayKey = $prov
+                                        RegPath    = "HKLM:\$poRoot"
+                                        ValueName  = "ProviderOrder"
+                                        Type       = "Value"
+                                        SafeToFix  = $true
+                                        Risk       = "Low"
+                                        Confidence = "Medium"
+                                        Details    = "Network ProviderOrder references '$prov' but no corresponding service\NetworkProvider key exists. The entry is orphaned and can be cleaned from the order string."
+                                    })
+                                    continue
+                                }
+
+                                $providerPath = [string]$npSub.GetValue("ProviderPath")
+                                if (-not [string]::IsNullOrWhiteSpace($providerPath)) {
+                                    $expanded = [Environment]::ExpandEnvironmentVariables($providerPath)
+                                    if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Invalid Network Provider DLL"
+                                            Data       = "Provider DLL not found: $expanded"
+                                            DisplayKey = "$prov\NetworkProvider"
+                                            RegPath    = "HKLM:\$npSvcRoot\$prov\NetworkProvider"
+                                            ValueName  = "ProviderPath"
+                                            Type       = "Value"
+                                            SafeToFix  = $true
+                                            Risk       = "Medium"
+                                            Confidence = "High"
+                                            Details    = "Network provider '$prov' references ProviderPath '$expanded' which does not exist. Missing network providers can delay network connectivity during logon."
+                                        })
+                                    }
+                                }
+                                $npSub.Close()
+                            }
+                            catch {}
                         }
 
                         & $EndCategory
@@ -16842,9 +16924,14 @@ function Invoke-RegistryTask {
                                     }
 
                                     # Skip if already covered by Orphaned AppID scan (empty/no subkeys GUID)
-                                    if (-not $missing -and $ak.GetSubKeyNames().Count -eq 0 -and $ak.GetValueNames().Count -eq 0) {
-                                        $ak.Close()
-                                        continue
+                                    if (-not $missing) {
+                                        $subNames = $null; $valNames = $null
+                                        try { $subNames = @($ak.GetSubKeyNames()) } catch {}
+                                        try { $valNames = @($ak.GetValueNames()) } catch {}
+                                        if (($null -eq $subNames -or $subNames.Count -eq 0) -and ($null -eq $valNames -or $valNames.Count -eq 0)) {
+                                            $ak.Close()
+                                            continue
+                                        }
                                     }
 
                                     if ($missing) {
