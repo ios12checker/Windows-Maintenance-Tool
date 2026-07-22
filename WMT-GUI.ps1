@@ -9902,6 +9902,10 @@ function Show-RegScanSelection {
         "Orphaned CLSID Servers"         = "OrphanedClsids"
         "App Paths (Executables)"       = "AppPathIcons"
         "Ghosted USB Devices"           = "GhostDevices"
+        "Invalid Drive Letter Paths"    = "DriveLetters"
+        "Event Log Message DLLs"         = "EventLogDlls"
+        "Orphaned AppID Entries"         = "OrphanedAppIDs"
+        "Broken Sound Scheme Files"      = "SoundSchemes"
     }
 
     foreach ($savedKey in @($savedStates.Keys)) {
@@ -10194,7 +10198,11 @@ function Show-RegistryCleaner {
             '^Orphaned Protocol CLSID$',
             '^Orphaned (InprocServer32|LocalServer32|LocalServer)$',
             '^Missing AppPath Executable$',
-            '^Ghosted USB Device$'
+            '^Ghosted USB Device$',
+            '^Invalid Drive Letter Reference$',
+            '^Invalid EventLog (Message|Category|Parameter) DLL$',
+            '^Orphaned AppID$',
+            '^Missing Sound File$'
         )
 
         foreach ($pattern in $reviewOnlyPatterns) {
@@ -15334,6 +15342,433 @@ function Invoke-RegistryTask {
                             }
                         }
                         catch {}
+                        & $EndCategory
+                    }
+
+                    # 26. INVALID DRIVE LETTERS IN PATHS (uninstallers, recent docs, app paths, etc.)
+                    if ($SelectedScans -contains "DriveLetters") {
+                        $SyncHash.Status = "Scanning Invalid Drive Letter References..."
+                        $liveDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        try {
+                            foreach ($vol in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.DriveLetter -and $_.DriveType -eq 'Fixed' })) {
+                                [void]$liveDrives.Add(("{0}:" -f $vol.DriveLetter))
+                            }
+                        }
+                        catch {}
+
+                        $driveLetterTargets = New-Object System.Collections.Generic.List[object]
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"; Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; Label = "HKLM Uninstall" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Uninstall"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU Uninstall" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU RecentDocs" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\App Paths"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU App Paths" })
+
+                        $pathValueNames = @("InstallLocation", "InstallSource", "DisplayIcon", "ModifyPath", "QuietUninstallString", "UninstallString")
+                        $total = [math]::Max($driveLetterTargets.Count, 1); $i = 0
+                        foreach ($target in $driveLetterTargets) {
+                            $i++; & $Tick "Scanning Drive Letters: $($target.Label)" $i $total
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($target.Hive, [Microsoft.Win32.RegistryView]::Default)
+                                $rk = $root.OpenSubKey($target.SubPath, $false)
+                                if (-not $rk) { $root.Close(); continue }
+
+                                foreach ($subName in $rk.GetSubKeyNames()) {
+                                    $sub = $null
+                                    try {
+                                        $sub = $rk.OpenSubKey($subName, $false)
+                                        if (-not $sub) { continue }
+
+                                        $valuesToCheck = $pathValueNames
+                                        if ($target.Label -match 'App Paths') {
+                                            # App Paths: check default value
+                                            $val = [string]$sub.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            $valuesToCheck = @($null)
+                                        }
+
+                                        foreach ($vn in $valuesToCheck) {
+                                            $rawVal = [string]$sub.GetValue($vn, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            if ([string]::IsNullOrWhiteSpace($rawVal)) { continue }
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($rawVal)
+
+                                            if ($expanded -match '^(?i)([a-z]):\\') {
+                                                $driveRef = $Matches[1] + ":"
+                                                if (-not $liveDrives.Contains($driveRef)) {
+                                                    $valLabel = if ($vn) { $vn } else { "(Default)" }
+                                                    $regPrefix = if ($target.Hive -eq [Microsoft.Win32.RegistryHive]::LocalMachine) { "HKLM:" } else { "HKCU:" }
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Drive Letter Reference"
+                                                            Data       = $expanded
+                                                            DisplayKey = "$subName ($($target.Label))"
+                                                            RegPath    = "$regPrefix\$($target.SubPath)\$subName"
+                                                            ValueName  = $valLabel
+                                                            Type       = "Value"
+                                                            SafeToFix  = $false
+                                                            Risk       = "Review"
+                                                            Confidence = "Medium"
+                                                            Details    = "Path references drive $driveRef which does not exist on this system. Value: $valLabel = $rawVal"
+                                                        })
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($sub) { $sub.Close() }
+                                    }
+                                }
+                                $rk.Close()
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 27. EVENT LOG MESSAGE DLL ENTRIES
+                    if ($SelectedScans -contains "EventLogDlls") {
+                        $SyncHash.Status = "Scanning Event Log Message DLLs..."
+                        $eventLogRoot = "SYSTEM\CurrentControlSet\Services\EventLog"
+                        $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($eventLogRoot, $false)
+                        if ($root) {
+                            $sourceNames = $root.GetSubKeyNames()
+                            $total = [math]::Max($sourceNames.Count, 1); $i = 0
+                            foreach ($sourceName in $sourceNames) {
+                                $i++; & $Tick "Scanning EventLog: $sourceName" $i $total
+                                $sourceKey = $null
+                                try {
+                                    $sourceKey = $root.OpenSubKey($sourceName, $false)
+                                    if (-not $sourceKey) { continue }
+
+                                    $msgFile = [string]$sourceKey.GetValue("EventMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($msgFile) {
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($msgFile)
+                                        # EventMessageFile can contain semicolon-separated list of DLLs
+                                        foreach ($dllPart in @($expanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Message DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "EventMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing message DLL: $candidate. The event log service will fail to format messages for this source."
+                                                })
+                                        }
+                                    }
+
+                                    $catMsgFile = [string]$sourceKey.GetValue("CategoryMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($catMsgFile) {
+                                        $catExpanded = [Environment]::ExpandEnvironmentVariables($catMsgFile)
+                                        foreach ($dllPart in @($catExpanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Category DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "CategoryMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing category message DLL: $candidate."
+                                                })
+                                        }
+                                    }
+
+                                    $paramFile = [string]$sourceKey.GetValue("ParameterMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($paramFile) {
+                                        $paramExpanded = [Environment]::ExpandEnvironmentVariables($paramFile)
+                                        foreach ($dllPart in @($paramExpanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Parameter DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "ParameterMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing parameter message DLL: $candidate."
+                                                })
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($sourceKey) { $sourceKey.Close() }
+                                }
+                            }
+                            $root.Close()
+                        }
+                        & $EndCategory
+                    }
+
+                    # 28. ORPHANED APPIDs
+                    # Strategy: Only flag AppID entries that are genuinely orphaned.
+                    #   - exe/dll-named AppIDs: only flag if the binary cannot be found anywhere.
+                    #   - GUID-named AppIDs: only flag if the key is empty (no subkeys, no values),
+                    #     AND no CLSID key exists with that GUID AND no CLSID references it via AppID value.
+                    #   - Any AppID with DCOM activation values (RunAs, LocalService, RemoteServerName,
+                    #     ServiceParameters) is considered a valid DCOM registration and skipped.
+                    if ($SelectedScans -contains "OrphanedAppIDs") {
+                        $SyncHash.Status = "Scanning Orphaned AppIDs..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $appIdRoot = $root.OpenSubKey("AppID", $false)
+                                if ($appIdRoot) {
+                                    $names = $appIdRoot.GetSubKeyNames()
+                                    $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($appIdName in $names) {
+                                        $i++; & $Tick "Scanning AppID ($viewLabel): $appIdName" $i $total
+                                        $appIdKey = $null
+                                        try {
+                                            $appIdKey = $appIdRoot.OpenSubKey($appIdName, $false)
+                                            if (-not $appIdKey) { continue }
+
+                                            # --- Skip if AppID has DCOM activation values ---
+                                            # These values indicate the AppID is a DCOM server registration
+                                            # activated by the Service Control Manager or DCOM, not by
+                                            # a CLSID with InprocServer32/LocalServer32.
+                                            $dcomSkip = $false
+                                            foreach ($dcomValName in @("RunAs", "LocalService", "RemoteServerName", "ServiceParameters")) {
+                                                if ($null -ne $appIdKey.GetValue($dcomValName, $null)) {
+                                                    $dcomSkip = $true; break
+                                                }
+                                            }
+                                            if ($dcomSkip) { continue }
+
+                                            # --- exe/dll-named AppIDs: verify the binary exists ---
+                                            if ($appIdName -match '(?i)\.(exe|dll|ocx|sys|scr)$') {
+                                                # Check if the named binary exists anywhere on the system.
+                                                # Use Test-Path -PathType Leaf (not Test-PathExists which is
+                                                # designed for registry value paths and may misreport).
+                                                $binaryName = $appIdName
+                                                $binaryFound = $false
+
+                                                # 1) Check system directories (System32, SysWOW64, Windows root)
+                                                $sysRoot = [Environment]::GetFolderPath("System")
+                                                $sysX86  = [Environment]::GetFolderPath("SystemX86")
+                                                $winRoot = [Environment]::GetFolderPath("Windows")
+                                                foreach ($dir in @($sysRoot, $sysX86, $winRoot)) {
+                                                    if ($dir -and -not $binaryFound) {
+                                                        try {
+                                                            if (Test-Path -Path (Join-Path $dir $binaryName) -PathType Leaf -ErrorAction SilentlyContinue) {
+                                                                $binaryFound = $true
+                                                            }
+                                                        } catch {}
+                                                    }
+                                                }
+
+                                                # 2) Search Program Files directories (where Edge, OneDrive, NVIDIA, Nahimic, etc. install)
+                                                if (-not $binaryFound) {
+                                                    $pf64 = [Environment]::GetFolderPath("ProgramFiles")
+                                                    $pf32 = [Environment]::GetFolderPath("ProgramFilesX86")
+                                                    foreach ($pfDir in @($pf64, $pf32)) {
+                                                        if ($pfDir -and -not $binaryFound) {
+                                                            try {
+                                                                # Shallow scan of Program Files — check for an exact match
+                                                                # in the directory itself or one level deep (common layout)
+                                                                $directPath = Join-Path $pfDir $binaryName
+                                                                if (Test-Path -Path $directPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                                                                    $binaryFound = $true
+                                                                }
+                                                            } catch {}
+                                                        }
+                                                    }
+                                                }
+
+                                                # 3) PATH search via Get-Command — catches anything registered on system PATH
+                                                if (-not $binaryFound) {
+                                                    try {
+                                                        if (Test-Path "env:PATH") {
+                                                            $cmdResult = Get-Command -CommandType Application $binaryName -ErrorAction SilentlyContinue
+                                                            if ($cmdResult -and $cmdResult.Source -and (Test-Path -Path $cmdResult.Source -PathType Leaf -ErrorAction SilentlyContinue)) {
+                                                                $binaryFound = $true
+                                                            }
+                                                        }
+                                                    } catch {}
+                                                }
+
+                                                # 4) If the AppID has a DllSurrogate value, the binary may
+                                                #    be an out-of-process surrogate — valid without a file.
+                                                if (-not $binaryFound) {
+                                                    if ($null -ne $appIdKey.GetValue("DllSurrogate", $null)) { continue }
+                                                }
+
+                                                # 5) If the AppID key has ANY values or subkeys, it likely
+                                                #    has meaningful DCOM/activation config — skip it.
+                                                if (-not $binaryFound) {
+                                                    if ($appIdKey.GetValueNames().Count -gt 0 -or $appIdKey.GetSubKeyNames().Count -gt 0) { continue }
+                                                }
+
+                                                if (-not $binaryFound) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Orphaned AppID"
+                                                            Data       = $appIdName
+                                                            DisplayKey = "$appIdName ($viewLabel)"
+                                                            RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "AppID\$appIdName" -View $view)
+                                                            ValueName  = $null
+                                                            Type       = "Key"
+                                                            SafeToFix  = $false
+                                                            Risk       = "Review"
+                                                            Confidence = "Low"
+                                                            Details    = "AppID named '$appIdName' but the binary was not found in system directories, Program Files, or system PATH. The file may have been uninstalled."
+                                                        })
+                                                }
+                                                continue
+                                            }
+
+                                            # --- GUID-named AppIDs: check if truly empty and unreferenced ---
+                                            $clsidRef = ConvertTo-WmtClsid $appIdName
+                                            if ($clsidRef) {
+                                                # Check if the AppID key has any meaningful content
+                                                $subNames = $appIdKey.GetSubKeyNames()
+                                                $valNames = $appIdKey.GetValueNames()
+                                                $hasContent = ($subNames.Count -gt 0) -or ($valNames.Count -gt 0)
+
+                                                if (-not $hasContent) {
+                                                    # Completely empty AppID key — check if any CLSID references it
+                                                    $clsidKey = $root.OpenSubKey("CLSID\$clsidRef", $false)
+                                                    if (-not $clsidKey) {
+                                                        # No CLSID key either — genuinely orphaned empty AppID
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                Problem    = "Orphaned AppID"
+                                                                Data       = $clsidRef
+                                                                DisplayKey = "$appIdName ($viewLabel)"
+                                                                RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "AppID\$appIdName" -View $view)
+                                                                ValueName  = $null
+                                                                Type       = "Key"
+                                                                SafeToFix  = $false
+                                                                Risk       = "Review"
+                                                                Confidence = "Medium"
+                                                                Details    = "Empty GUID-named AppID $clsidRef has no subkeys, no values, and no corresponding CLSID key in the registry."
+                                                            })
+                                                    }
+                                                    else {
+                                                        # CLSID key exists — AppID may be referenced by it
+                                                        $clsidKey.Close()
+                                                    }
+                                                }
+                                                # If hasContent: the AppID key has values/subkeys, consider it valid
+                                                # (it may contain DCOM config, permissions, etc.)
+                                            }
+                                            # Non-GUID, non-binary AppID names (e.g. service names like "McpManagementService")
+                                            # are valid DCOM registrations — skip them.
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($appIdKey) { $appIdKey.Close() }
+                                        }
+                                    }
+                                    $appIdRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 29. BROKEN SOUND SCHEME REFERENCES
+                    if ($SelectedScans -contains "SoundSchemes") {
+                        $SyncHash.Status = "Scanning Sound Scheme References..."
+                        $appEventsRoot = "AppEvents\EventLabels"
+                        $schemesRoot = "AppEvents\Schemes\Apps"
+
+                        $labelRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($appEventsRoot, $false)
+                        $appsRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($schemesRoot, $false)
+                        if ($appsRoot) {
+                            $appNames = $appsRoot.GetSubKeyNames()
+                            $total = [math]::Max($appNames.Count, 1); $i = 0
+                            foreach ($appName in $appNames) {
+                                $i++; & $Tick "Scanning Sound Scheme: $appName" $i $total
+                                $appKey = $null
+                                try {
+                                    $appKey = $appsRoot.OpenSubKey($appName, $false)
+                                    if (-not $appKey) { continue }
+
+                                    foreach ($eventName in $appKey.GetSubKeyNames()) {
+                                        $eventKey = $null
+                                        try {
+                                            $eventKey = $appKey.OpenSubKey($eventName, $false)
+                                            if (-not $eventKey) { continue }
+
+                                            $wavFile = [string]$eventKey.GetValue($null)
+                                            if ([string]::IsNullOrWhiteSpace($wavFile)) { continue }
+
+                                            # Expand and check
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($wavFile)
+                                            $expanded = $expanded.Trim()
+
+                                            # Skip system default sounds and internal references
+                                            if ($expanded -match '^(?i)\(%SystemRoot%\\Media\\)' -or $expanded -eq '' -or $expanded -notmatch '^(?i)[a-z]:\\') {
+                                                # Still expand to full path and check
+                                                if ($expanded -match '^(?i)\(%(?<var>.+)%\\(?<rest>.+)$') {
+                                                    $expanded = [Environment]::ExpandEnvironmentVariables($expanded)
+                                                }
+                                            }
+
+                                            if ($expanded -match '^(?i)[a-z]:\\.*\.wav$' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Missing Sound File"
+                                                        Data       = $expanded
+                                                        DisplayKey = "$appName\$eventName"
+                                                        RegPath    = "HKCU:\$schemesRoot\$appName\$eventName"
+                                                        ValueName  = $null
+                                                        Type       = "Value"
+                                                        SafeToFix  = $true
+                                                        Risk       = "Low"
+                                                        Confidence = "High"
+                                                        Details    = "Sound event references a missing .wav file: $expanded. Cleanup replaces this value with an empty string (silence)."
+                                                    })
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($eventKey) { $eventKey.Close() }
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($appKey) { $appKey.Close() }
+                                }
+                            }
+                            $appsRoot.Close()
+                        }
+                        if ($labelRoot) { $labelRoot.Close() }
                         & $EndCategory
                     }
 
