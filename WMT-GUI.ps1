@@ -5855,6 +5855,26 @@ function Start-DnsAssignmentRunspace {
                 }
 
                 if ($successCount -gt 0) {
+                    # Register-DnsClient forces the DNS Client service to re-read
+                    # adapter config AND fires NotifyAddrChange so Edge/Chromium's
+                    # built-in DNS watcher picks up the new servers immediately.
+                    try {
+                        Register-DnsClient -ErrorAction Stop
+                        Add-DnsLine "DNS client re-registered with new server addresses."
+                    }
+                    catch {
+                        # Fallback for systems where the cmdlet is unavailable
+                        $oem = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+                        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                        $psi.FileName = "ipconfig"; $psi.Arguments = "/registerdns"
+                        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+                        $psi.StandardOutputEncoding = $oem; $psi.StandardErrorEncoding = $oem
+                        $p = [System.Diagnostics.Process]::Start($psi)
+                        $regResult = "$($p.StandardOutput.ReadToEnd())$($p.StandardError.ReadToEnd())".TrimEnd()
+                        $p.WaitForExit()
+                        if ($regResult) { Add-DnsLine $regResult }
+                    }
                     Add-DnsLine (Clear-DnsResolverCacheInRunspace)
                     if ($ResetAddresses) {
                         Add-DnsLine "[Auto DNS] Reset $successCount of $adapterCount active adapter(s)."
