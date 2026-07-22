@@ -5876,6 +5876,7 @@ function Start-DnsAssignmentRunspace {
                         if ($regResult) { Add-DnsLine $regResult }
                     }
                     Add-DnsLine (Clear-DnsResolverCacheInRunspace)
+                    try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue; Add-DnsLine "DNS Client service restarted." } catch {}
                     if ($ResetAddresses) {
                         Add-DnsLine "[Auto DNS] Reset $successCount of $adapterCount active adapter(s)."
                     }
@@ -9896,6 +9897,11 @@ function Show-RegScanSelection {
         "Per-User Shell Commands"         = "UserShellCommands"
         "Image File Execution Options"    = "IFEO"
         "Firewall Rules"                  = "Firewall"
+        "Context Menu Handlers"          = "ContextMenu"
+        "URL Protocol Handlers"          = "UrlProtocols"
+        "Orphaned CLSID Servers"         = "OrphanedClsids"
+        "App Paths (Executables)"       = "AppPathIcons"
+        "Ghosted USB Devices"           = "GhostDevices"
     }
 
     foreach ($savedKey in @($savedStates.Keys)) {
@@ -10181,7 +10187,14 @@ function Show-RegistryCleaner {
             '^Missing HelpDir$',
             '^Missing TypeLib Path$',
             '^Invalid Default Icon$',
-            '^Missing Shared Ref$'
+            '^Missing Shared Ref$',
+            '^Invalid Context Menu Command$',
+            '^Orphaned Context Menu Delegate$',
+            '^Invalid Protocol Handler$',
+            '^Orphaned Protocol CLSID$',
+            '^Orphaned (InprocServer32|LocalServer32|LocalServer)$',
+            '^Missing AppPath Executable$',
+            '^Ghosted USB Device$'
         )
 
         foreach ($pattern in $reviewOnlyPatterns) {
@@ -12484,14 +12497,35 @@ function Invoke-RegistryTask {
                             }
                         }
                         if ($candidate -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
-                            $packageParts = ([string]$Matches.PackageName).Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
+                            $packageName = [string]$Matches.PackageName
+                            $packageParts = $packageName.Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
                             if ($packageParts.Length -ge 2) {
                                 $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Length - 1])"
+                                # Fast path: check StateRepository cache key
                                 try {
                                     $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
                                     $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
                                     if ($root) {
                                         $root.Close()
+                                        $RegistryPathExistsCache[$cacheKey] = $true
+                                        return $true
+                                    }
+                                }
+                                catch {}
+                                # Fallback: use Get-AppxPackage to verify the package is installed.
+                                # Some systems lack StateRepository keys but have live packages registered.
+                                try {
+                                    $appxCacheKey = "__appx_$packageFamily"
+                                    if (-not $RegistryPathExistsCache.ContainsKey($appxCacheKey)) {
+                                        $found = $false
+                                        try {
+                                            $pkg = Get-AppxPackage -PackageFamilyFilter $packageFamily -ErrorAction SilentlyContinue | Select-Object -First 1
+                                            $found = ($null -ne $pkg)
+                                        }
+                                        catch {}
+                                        $RegistryPathExistsCache[$appxCacheKey] = $found
+                                    }
+                                    if ($RegistryPathExistsCache[$appxCacheKey]) {
                                         $RegistryPathExistsCache[$cacheKey] = $true
                                         return $true
                                     }
@@ -14980,6 +15014,326 @@ function Invoke-RegistryTask {
                                 if ($val -match '^[a-zA-Z]:\\' -and -not (Test-IsProtectedWindowsPath $val) -and -not(Test-PathExists $val)) { [void]$SyncHash.Findings.Add([PSCustomObject]@{ Problem = "Missing Installer Folder"; Data = $val; DisplayKey = "Installer"; RegPath = "HKLM:\$k"; ValueName = $val; Type = "Value" }) } 
                             }; $rk.Close() 
                         } 
+                        & $EndCategory
+                    }
+
+                    # 21. CONTEXT MENU HANDLERS (shell\ext\* and shell\registercommands\*)
+                    if ($SelectedScans -contains "ContextMenu") {
+                        $SyncHash.Status = "Scanning Context Menu Handlers..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $names = $root.GetSubKeyNames()
+                                $total = [math]::Max($names.Count, 1); $i = 0
+                                foreach ($ext in $names) {
+                                    $i++; & $Tick "Scanning Context Menu ($viewLabel): $ext" $i $total
+                                    $extKey = $null
+                                    try {
+                                        $extKey = $root.OpenSubKey($ext, $false)
+                                        if (-not $extKey) { continue }
+                                        $shellKey = $extKey.OpenSubKey("shell", $false)
+                                        if ($shellKey) {
+                                            foreach ($verb in $shellKey.GetSubKeyNames()) {
+                                                $verbKey = $null
+                                                try {
+                                                    $verbKey = $shellKey.OpenSubKey($verb, $false)
+                                                    if (-not $verbKey) { continue }
+
+                                                    $commandKey = $verbKey.OpenSubKey("command", $false)
+                                                    if ($commandKey) {
+                                                        $cmd = [string]$commandKey.GetValue($null)
+                                                        $clean = Get-ServiceImageExecutablePath $cmd
+                                                        if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
+                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                    Problem    = "Invalid Context Menu Command"
+                                                                    Data       = $clean
+                                                                    DisplayKey = "$ext\shell\$verb ($viewLabel)"
+                                                                    RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$ext\shell\$verb\command" -View $view)
+                                                                    ValueName  = $null
+                                                                    Type       = "Key"
+                                                                    Details    = "Context menu handler command points to a missing executable."
+                                                                })
+                                                        }
+                                                        $commandKey.Close()
+                                                    }
+
+                                                    $delegateExec = [string]$verbKey.GetValue("DelegateExecute", $null)
+                                                    if (-not [string]::IsNullOrWhiteSpace($delegateExec)) {
+                                                        $normalized = ConvertTo-WmtClsid $delegateExec
+                                                        if ($normalized -and -not (Test-WmtClsidExists $normalized)) {
+                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                    Problem    = "Orphaned Context Menu Delegate"
+                                                                    Data       = $delegateExec
+                                                                    DisplayKey = "$ext\shell\$verb ($viewLabel)"
+                                                                    RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$ext\shell\$verb" -View $view)
+                                                                    ValueName  = "DelegateExecute"
+                                                                    Type       = "Value"
+                                                                    Details    = "Context menu DelegateExecute CLSID is not registered."
+                                                                })
+                                                        }
+                                                    }
+                                                }
+                                                catch {}
+                                                finally {
+                                                    if ($verbKey) { $verbKey.Close() }
+                                                }
+                                            }
+                                            $shellKey.Close()
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($extKey) { $extKey.Close() }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 22. URL PROTOCOL HANDLERS
+                    if ($SelectedScans -contains "UrlProtocols") {
+                        $SyncHash.Status = "Scanning URL Protocol Handlers..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $names = $root.GetSubKeyNames()
+                                $total = [math]::Max($names.Count, 1); $i = 0
+                                foreach ($name in $names) {
+                                    $i++; & $Tick "Scanning Protocol ($viewLabel): $name" $i $total
+                                    if (-not ($name -match '^(?i)\w+(?::|$)')) { continue }
+
+                                    $protoKey = $null
+                                    try {
+                                        $protoKey = $root.OpenSubKey($name, $false)
+                                        if (-not $protoKey) { continue }
+
+                                        $shellKey = $protoKey.OpenSubKey("shell\open\command", $false)
+                                        if ($shellKey) {
+                                            $cmd = [string]$shellKey.GetValue($null)
+                                            $clean = Get-ServiceImageExecutablePath $cmd
+                                            if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid Protocol Handler"
+                                                        Data       = $clean
+                                                        DisplayKey = "$name ($viewLabel)"
+                                                        RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$name\shell\open\command" -View $view)
+                                                        ValueName  = $null
+                                                        Type       = "Key"
+                                                        Details    = "URL protocol handler command points to a missing executable."
+                                                    })
+                                            }
+                                            $shellKey.Close()
+                                        }
+
+                                        $urlProtoVal = [string]$protoKey.GetValue("URL Protocol", $null)
+                                        if ([string]::IsNullOrWhiteSpace($urlProtoVal)) {
+                                            $clsidVal = [string]$protoKey.GetValue("CLSID", $null)
+                                            if ($clsidVal) {
+                                                $normalized = ConvertTo-WmtClsid $clsidVal
+                                                if ($normalized -and -not (Test-WmtClsidExists $normalized)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Orphaned Protocol CLSID"
+                                                            Data       = $clsidVal
+                                                            DisplayKey = "$name ($viewLabel)"
+                                                            RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$name" -View $view)
+                                                            ValueName  = "CLSID"
+                                                            Type       = "Value"
+                                                            Details    = "Protocol handler CLSID is not registered."
+                                                        })
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($protoKey) { $protoKey.Close() }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 23. ORPHANED CLSID SERVERS (InprocServer32 / LocalServer32 with missing binaries)
+                    if ($SelectedScans -contains "OrphanedClsids") {
+                        $SyncHash.Status = "Scanning Orphaned CLSID Servers..."
+                        $serverSubkeys = @("InprocServer32", "LocalServer32", "LocalServer")
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $clsidRoot = $root.OpenSubKey("CLSID", $false)
+                                if ($clsidRoot) {
+                                    $names = $clsidRoot.GetSubKeyNames()
+                                    $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($clsid in $names) {
+                                        $i++; & $Tick "Scanning CLSID ($viewLabel): $clsid" $i $total
+                                        $clsidKey = $null
+                                        try {
+                                            $clsidKey = $clsidRoot.OpenSubKey($clsid, $false)
+                                            if (-not $clsidKey) { continue }
+
+                                            foreach ($serverType in $serverSubkeys) {
+                                                $serverKey = $clsidKey.OpenSubKey($serverType, $false)
+                                                if (-not $serverKey) { continue }
+
+                                                $serverPath = [string]$serverKey.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                $clean = Get-RealExePath $serverPath
+                                                if ($clean -and $clean -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists -Path $clean -RegistryView $view)) {
+                                                    $missingPath = Get-WmtMissingRegistryPathTarget -RawValue $serverPath -RegistryView $view
+                                                    if ($missingPath) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                Problem    = "Orphaned $serverType"
+                                                                Data       = $missingPath
+                                                                DisplayKey = "$clsid ($viewLabel)"
+                                                                RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "CLSID\$clsid\$serverType" -View $view)
+                                                                ValueName  = $null
+                                                                Type       = "Key"
+                                                                Details    = "COM server $serverType points to a missing file in the $viewLabel registry view."
+                                                            })
+                                                    }
+                                                }
+                                                $serverKey.Close()
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($clsidKey) { $clsidKey.Close() }
+                                        }
+                                    }
+                                    $clsidRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 24. APPPATH EXECUTABLE VALIDATION
+                    if ($SelectedScans -contains "AppPathIcons") {
+                        $SyncHash.Status = "Scanning AppPath Executables..."
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $appPathRoot = $root.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths", $false)
+                                if ($appPathRoot) {
+                                    $names = $appPathRoot.GetSubKeyNames(); $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($app in $names) {
+                                        $i++; & $Tick "Scanning AppPath ($viewLabel): $app" $i $total
+                                        $appKey = $null
+                                        try {
+                                            $appKey = $appPathRoot.OpenSubKey($app, $false)
+                                            if (-not $appKey) { continue }
+
+                                            $defaultExe = [string]$appKey.GetValue($null)
+                                            if ($defaultExe) {
+                                                $clean = Get-ServiceImageExecutablePath $defaultExe
+                                                if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists -Path $clean -RegistryView $view)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Missing AppPath Executable"
+                                                            Data       = $clean
+                                                            DisplayKey = "$app ($viewLabel)"
+                                                            RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$app" -View $view)"
+                                                            ValueName  = $null
+                                                            Type       = "Key"
+                                                            Details    = "App Paths default executable is missing in the $viewLabel registry view."
+                                                        })
+                                                }
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($appKey) { $appKey.Close() }
+                                        }
+                                    }
+                                    $appPathRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 25. GHOSTED USB/DRIVE ENTRIES (Device Manager leftover devices)
+                    if ($SelectedScans -contains "GhostDevices") {
+                        $SyncHash.Status = "Scanning Ghosted USB Devices..."
+                        $ghostedCount = 0
+                        try {
+                            $setupDevKey = "SYSTEM\CurrentControlSet\Control\DeviceClasses"
+                            $classesRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($setupDevKey)
+                            if ($classesRoot) {
+                                $classesRoot.Close()
+                            }
+
+                            # Check USBSTOR for devices with no hardware present
+                            $usbKey = "SYSTEM\CurrentControlSet\Enum\USBSTOR"
+                            $usbRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($usbKey)
+                            if ($usbRoot) {
+                                $classNames = $usbRoot.GetSubKeyNames()
+                                $total = [math]::Max($classNames.Count, 1); $i = 0
+                                foreach ($className in $classNames) {
+                                    $i++; & $Tick "Scanning USB Ghost: $className" $i $total
+                                    $classKey = $usbRoot.OpenSubKey($className, $false)
+                                    if ($classKey) {
+                                        foreach ($instanceId in $classKey.GetSubKeyNames()) {
+                                            $instanceKey = $classKey.OpenSubKey($instanceId, $false)
+                                            if (-not $instanceKey) { continue }
+
+                                            $friendlyName = [string]$instanceKey.GetValue("FriendlyName")
+                                            $deviceDesc = if ($friendlyName) { $friendlyName } else { $instanceId }
+
+                                            # A device is ghosted if it has no Hardware subkey
+                                            $hwKey = $instanceKey.OpenSubKey("Hardware", $false)
+                                            $isGhost = (-not $hwKey)
+                                            if ($hwKey) { $hwKey.Close() }
+
+                                            if ($isGhost) {
+                                                $ghostedCount++
+                                                $regPath = "HKLM:\$usbKey\$className\$instanceId"
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Ghosted USB Device"
+                                                        Data       = $deviceDesc
+                                                        DisplayKey = "$className\$instanceId"
+                                                        RegPath    = $regPath
+                                                        ValueName  = $null
+                                                        Type       = "ReviewOnly"
+                                                        SafeToFix  = $false
+                                                        Risk       = "Review"
+                                                        Confidence = "Medium"
+                                                        Details    = "USB mass storage device has no hardware present. This is a ghosted entry from a previously connected device. Device: $deviceDesc. Remove only if you no longer need this device's settings."
+                                                    })
+                                            }
+                                            $instanceKey.Close()
+                                        }
+                                        $classKey.Close()
+                                    }
+                                }
+                                $usbRoot.Close()
+                            }
+                        }
+                        catch {}
                         & $EndCategory
                     }
 
