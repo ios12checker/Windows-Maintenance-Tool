@@ -150,6 +150,85 @@ function Add-WmtPS2EXESwitch {
     }
 }
 
+function Remove-WmtCommentsFromScript {
+    <#
+    .SYNOPSIS
+        Strips all comments (line and block) from a PowerShell source file and returns
+        the path to a temporary minified copy.
+    .DESCRIPTION
+        Uses the PowerShell AST parser to identify every comment token, then removes
+        those regions from the raw source text. Lines that become empty after comment
+        removal are also collapsed, and leading blank lines at the top of the file are
+        trimmed. The result is written to a temp file whose path is returned to the
+        caller; the caller is responsible for cleaning up the temp file when done.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+        $Path, [ref]$tokens, [ref]$parseErrors
+    )
+
+    if ($parseErrors -and $parseErrors.Count -gt 0) {
+        $messages = $parseErrors | ForEach-Object {
+            "{0}:{1}: {2}" -f $_.Extent.StartLineNumber, $_.Extent.StartColumnNumber, $_.Message
+        }
+        throw "Parse errors during minification:`r`n$($messages -join "`r`n")"
+    }
+
+    $commentNodes = $ast.FindAll({
+        param($node)
+        $node.GetType().FullName -eq 'System.Management.Automation.Language.CommentAst'
+    }, $true)
+
+    if ($commentNodes.Count -eq 0) {
+        Write-Host "No comments found in source; minification is a no-op."
+        return $Path
+    }
+
+    $source = Get-Content -LiteralPath $Path -Raw
+    $sb = New-Object -TypeName System.Text.StringBuilder($source.Length)
+
+    $position = 0
+
+    foreach ($comment in $commentNodes) {
+        $extent = $comment.Extent
+        $startOffset = $extent.StartOffset
+        $endOffset = $extent.EndOffset
+
+        if ($startOffset -gt $position) {
+            [void]$sb.Append($source.Substring($position, $startOffset - $position))
+        }
+
+        $position = $endOffset
+    }
+
+    if ($position -lt $source.Length) {
+        [void]$sb.Append($source.Substring($position))
+    }
+
+    $minified = $sb.ToString()
+
+    $minified = $minified -replace '(?m)^\s*\r?\n', ''
+
+    $tempFile = Join-Path ([System.IO.Path]::GetTempPath()) (
+        "WMT-minified-{0}.ps1" -f [System.Guid]::NewGuid().ToString("N").Substring(0, 8)
+    )
+
+    [System.IO.File]::WriteAllText($tempFile, $minified, [System.Text.UTF8Encoding]::new($true))
+
+    $originalSize = (Get-Item -LiteralPath $Path).Length
+    $minifiedSize = (Get-Item -LiteralPath $tempFile).Length
+    $savedBytes = $originalSize - $minifiedSize
+    $savedPct = if ($originalSize -gt 0) { [math]::Round(($savedBytes / $originalSize) * 100, 1) } else { 0 }
+
+    Write-Host ("Minified {0} comment(s): {1:N0} -> {2:N0} bytes ({3:N1}% smaller)") `
+        -f $commentNodes.Count, $originalSize, $minifiedSize, $savedPct
+
+    return $tempFile
+}
+
 $resolvedInput = Resolve-WmtBuildPath -Path $InputFile -BasePath $script:WmtProjectRoot
 $resolvedOutput = Resolve-WmtBuildPath -Path $OutputFile -BasePath $script:WmtProjectRoot
 $resolvedIcon = Resolve-WmtBuildPath -Path $IconFile -BasePath $script:WmtBuildScriptRoot
@@ -174,33 +253,42 @@ $fileVersion = ConvertTo-WmtFileVersion -Version $appVersion
 $ps2exe = Get-WmtPS2EXECommand -Install:$InstallPS2EXE
 $availableParameters = @($ps2exe.Parameters.Keys)
 
-$invokeArguments = @{
-    InputFile  = $resolvedInput
-    OutputFile = $resolvedOutput
+$minifiedInput = Remove-WmtCommentsFromScript -Path $resolvedInput
+
+try {
+    $invokeArguments = @{
+        InputFile  = $minifiedInput
+        OutputFile = $resolvedOutput
+    }
+
+    Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "NoConsole"
+    Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "STA"
+    Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "RequireAdmin"
+    Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "DPIAware"
+    Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "LongPaths"
+
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "IconFile" -Value $resolvedIcon
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Title" -Value "Windows Maintenance Tool"
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Description" -Value "Windows Maintenance Tool GUI"
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Product" -Value "Windows Maintenance Tool"
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Company" -Value "Windows Maintenance Tool"
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Copyright" -Value "MIT License"
+    Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Version" -Value $fileVersion
+
+    Write-Host "Building Windows Maintenance Tool v$appVersion..."
+    Write-Host "Source: $resolvedInput"
+    Write-Host "Icon:   $resolvedIcon"
+    Write-Host "Output: $resolvedOutput"
+    Invoke-PS2EXE @invokeArguments
+
+    if (-not (Test-Path -LiteralPath $resolvedOutput -PathType Leaf)) {
+        throw "Build finished, but the EXE was not created: $resolvedOutput"
+    }
+
+    Write-Host "Built: $resolvedOutput"
 }
-
-Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "NoConsole"
-Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "STA"
-Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "RequireAdmin"
-Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "DPIAware"
-Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "LongPaths"
-
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "IconFile" -Value $resolvedIcon
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Title" -Value "Windows Maintenance Tool"
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Description" -Value "Windows Maintenance Tool GUI"
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Product" -Value "Windows Maintenance Tool"
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Company" -Value "Windows Maintenance Tool"
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Copyright" -Value "MIT License"
-Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Version" -Value $fileVersion
-
-Write-Host "Building Windows Maintenance Tool v$appVersion..."
-Write-Host "Source: $resolvedInput"
-Write-Host "Icon:   $resolvedIcon"
-Write-Host "Output: $resolvedOutput"
-Invoke-PS2EXE @invokeArguments
-
-if (-not (Test-Path -LiteralPath $resolvedOutput -PathType Leaf)) {
-    throw "Build finished, but the EXE was not created: $resolvedOutput"
+finally {
+    if ($minifiedInput -ne $resolvedInput -and (Test-Path -LiteralPath $minifiedInput -PathType Leaf)) {
+        Remove-Item -LiteralPath $minifiedInput -Force
+    }
 }
-
-Write-Host "Built: $resolvedOutput"

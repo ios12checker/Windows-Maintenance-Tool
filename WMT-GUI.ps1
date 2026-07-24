@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6.2"
+$AppVersion = "6.3"
 $ErrorActionPreference = "SilentlyContinue"
 # Set encoding dynamically based on the user's local Windows language
 $OEMEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
@@ -1848,6 +1848,70 @@ function Start-MyDeviceQueuedSections {
 
 
 # ============================================================================
+# Safe type-conversion helpers (used by My Device runspaces, tweaks, etc.)
+# Must be defined BEFORE Initialize-WmtBackgroundRunspacePool so the
+# pre-load check (Get-Command) succeeds when populating the runspace.
+# ============================================================================
+function ConvertTo-Int {
+    param($Value, [int]$Default = 0)
+    try {
+        if ($null -eq $Value -or "" -eq $Value) { return $Default }
+        return [int]$Value
+    }
+    catch { return $Default }
+}
+
+function ConvertTo-Str {
+    param($Value, [string]$Default = "")
+    try {
+        if ($null -eq $Value) { return $Default }
+        return [string]$Value
+    }
+    catch { return $Default }
+}
+
+
+# ============================================================================
+# Safe external CLI text capture (OEM-encoding aware for non-English systems)
+# PowerShell 5.1 misinterprets external CLI encoding in WPF contexts, causing
+# accented characters (e.g. ì, à, è) to be garbled.  This helper uses
+# System.Diagnostics.Process with explicit OEM encoding to avoid that.
+# ============================================================================
+function Invoke-WmtCliText {
+    param(
+        [Parameter(Mandatory = $true)][string]$FilePath,
+        [string]$Arguments = "",
+        [int]$TimeoutMs = 60000
+    )
+    try {
+        $oem = [System.Text.Encoding]::GetEncoding(
+            [System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName               = $FilePath
+        $psi.Arguments              = $Arguments
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.StandardOutputEncoding = $oem
+        $psi.StandardErrorEncoding  = $oem
+
+        $proc   = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $proc.StandardOutput.ReadToEnd()
+        $stderr = $proc.StandardError.ReadToEnd()
+        if (-not $proc.WaitForExit($TimeoutMs)) {
+            try { $proc.Kill() } catch {}
+        }
+        $global:LASTEXITCODE = $proc.ExitCode
+        $combined = "$stdout$stderr"
+        if ($combined.Length -gt 0) { return $combined.TrimEnd() }
+        return ""
+    }
+    catch { return "" }
+}
+
+
+# ============================================================================
 # Shared RunspacePool for background jobs (My Device stats, Tweak States, etc.)
 # ============================================================================
 function Initialize-WmtBackgroundRunspacePool {
@@ -1868,12 +1932,15 @@ function Initialize-WmtBackgroundRunspacePool {
         }
     }
 
-    # Pre-load ConvertTo-Int and ConvertTo-Str
+    # Pre-load ConvertTo-Int, ConvertTo-Str, and Invoke-WmtCliText
     if (Get-Command ConvertTo-Int -ErrorAction SilentlyContinue) {
         try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("ConvertTo-Int", ${function:ConvertTo-Int}.ToString())) } catch {}
     }
     if (Get-Command ConvertTo-Str -ErrorAction SilentlyContinue) {
         try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("ConvertTo-Str", ${function:ConvertTo-Str}.ToString())) } catch {}
+    }
+    if (Get-Command Invoke-WmtCliText -ErrorAction SilentlyContinue) {
+        try { $iss.Commands.Add([System.Management.Automation.Runspaces.SessionStateFunctionEntry]::new("Invoke-WmtCliText", ${function:Invoke-WmtCliText}.ToString())) } catch {}
     }
 
     $pool = [runspacefactory]::CreateRunspacePool(1, 4, $iss, $Host)
@@ -5160,11 +5227,13 @@ function Show-DownloadStats {
             }
             $msg = $lines -join "`r`n"
             Write-Output $msg
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($msg, "Latest Release Downloads", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         }
         catch {
             $err = "Failed to fetch download stats: $($_.Exception.Message)"
             Write-Output $err
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($err, "Latest Release Downloads", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
         }
     } "Fetching latest release download counts..."
@@ -5637,8 +5706,7 @@ function Clear-WmtDnsResolverCache {
         return "DNS resolver cache cleared."
     }
     catch {
-        $out = ipconfig /flushdns 2>&1
-        $txt = ($out | Out-String).Trim()
+        $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/flushdns"
         if ($txt) { return $txt }
         return "DNS resolver cache flush attempted."
     }
@@ -5732,8 +5800,16 @@ function Start-DnsAssignmentRunspace {
                     return "DNS resolver cache cleared."
                 }
                 catch {
-                    $out = ipconfig /flushdns 2>&1
-                    $txt = ($out | Out-String).Trim()
+                    # Inline OEM-aware capture (isolated runspace — no access to script functions)
+                    $oem = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+                    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                    $psi.FileName = "ipconfig"; $psi.Arguments = "/flushdns"
+                    $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                    $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+                    $psi.StandardOutputEncoding = $oem; $psi.StandardErrorEncoding = $oem
+                    $p = [System.Diagnostics.Process]::Start($psi)
+                    $txt = "$($p.StandardOutput.ReadToEnd())$($p.StandardError.ReadToEnd())".TrimEnd()
+                    $p.WaitForExit()
                     if ($txt) { return $txt }
                     return "DNS resolver cache flush attempted."
                 }
@@ -5779,7 +5855,28 @@ function Start-DnsAssignmentRunspace {
                 }
 
                 if ($successCount -gt 0) {
+                    # Register-DnsClient forces the DNS Client service to re-read
+                    # adapter config AND fires NotifyAddrChange so Edge/Chromium's
+                    # built-in DNS watcher picks up the new servers immediately.
+                    try {
+                        Register-DnsClient -ErrorAction Stop
+                        Add-DnsLine "DNS client re-registered with new server addresses."
+                    }
+                    catch {
+                        # Fallback for systems where the cmdlet is unavailable
+                        $oem = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
+                        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+                        $psi.FileName = "ipconfig"; $psi.Arguments = "/registerdns"
+                        $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
+                        $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true
+                        $psi.StandardOutputEncoding = $oem; $psi.StandardErrorEncoding = $oem
+                        $p = [System.Diagnostics.Process]::Start($psi)
+                        $regResult = "$($p.StandardOutput.ReadToEnd())$($p.StandardError.ReadToEnd())".TrimEnd()
+                        $p.WaitForExit()
+                        if ($regResult) { Add-DnsLine $regResult }
+                    }
                     Add-DnsLine (Clear-DnsResolverCacheInRunspace)
+                    try { Restart-Service Dnscache -Force -ErrorAction SilentlyContinue; Add-DnsLine "DNS Client service restarted." } catch {}
                     if ($ResetAddresses) {
                         Add-DnsLine "[Auto DNS] Reset $successCount of $adapterCount active adapter(s)."
                     }
@@ -8758,7 +8855,7 @@ function Invoke-TempCleanup {
 
                 if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
                     try {
-                        $owner = (ConvertTo-Str (Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop) "").Owner
+                        $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
                         if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
                             [void]$reasons.Add("System-owned")
                         }
@@ -9084,13 +9181,13 @@ function Invoke-TempCleanup {
     function ConvertTo-WmtWinapp2PathRule {
         param($Rule)
 
-        $path = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Path" -Default "") "")).Trim()
+        $path = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Path" -Default "")).Trim()
         if ([string]::IsNullOrWhiteSpace($path)) { return $null }
 
-        $pattern = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Pattern" -Default "*") "")).Trim()
+        $pattern = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Pattern" -Default "*")).Trim()
         if ([string]::IsNullOrWhiteSpace($pattern)) { $pattern = "*" }
 
-        $options = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Rule -Name "Options" -Default "") "")).Trim()
+        $options = ([string](Get-WmtCleanupObjectValue -InputObject $Rule -Name "Options" -Default "")).Trim()
         $hasRecurseFlag = ($options -match "(?i)(^|[\s,;|])(RECURSE|REMOVESELF)($|[\s,;|])")
         $hasRemoveSelfFlag = ($options -match "(?i)(^|[\s,;|])REMOVESELF($|[\s,;|])")
 
@@ -9111,8 +9208,8 @@ function Invoke-TempCleanup {
             return $Item
         }
 
-        $name = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Item -Name "Name" -Default "") "")).Trim().Trim(" *")
-        if ([string]::IsNullOrWhiteSpace($name)) { return (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $Item -Name "ID" -Default "") "") }
+        $name = ([string](Get-WmtCleanupObjectValue -InputObject $Item -Name "Name" -Default "")).Trim().Trim(" *")
+        if ([string]::IsNullOrWhiteSpace($name)) { return [string](Get-WmtCleanupObjectValue -InputObject $Item -Name "ID" -Default "") }
         return $name
     }
 
@@ -9126,18 +9223,18 @@ function Invoke-TempCleanup {
 
             if (Test-WmtCleanupObjectFlag -InputObject $item -Name "IsCleanerML") {
                 foreach ($rule in $itemPaths) {
-                    $path = ((ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Path" -Default "") "")).Trim()
+                    $path = ([string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Path" -Default "")).Trim()
                     if ([string]::IsNullOrWhiteSpace($path)) { continue }
                     [void]$tasks.Add([PSCustomObject]@{
                             Engine      = "CleanerML"
                             RuleName    = $itemName
                             Path        = $path
-                            Search      = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Search" -Default "file") "")
-                            Regex       = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Regex" -Default "") "")
-                            WholeRegex  = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "WholeRegex" -Default "") "")
-                            NRegex      = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "NRegex" -Default "") "")
-                            NWholeRegex = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "NWholeRegex" -Default "") "")
-                            Type        = (ConvertTo-Str (Get-WmtCleanupObjectValue -InputObject $rule -Name "Type" -Default "") "")
+                            Search      = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Search" -Default "file")
+                            Regex       = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Regex" -Default "")
+                            WholeRegex  = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "WholeRegex" -Default "")
+                            NRegex      = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "NRegex" -Default "")
+                            NWholeRegex = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "NWholeRegex" -Default "")
+                            Type        = [string](Get-WmtCleanupObjectValue -InputObject $rule -Name "Type" -Default "")
                         })
                 }
             }
@@ -9290,7 +9387,7 @@ function Invoke-TempCleanup {
 
                         if ($isSystemArea -or (($attrs -band [System.IO.FileAttributes]::System) -eq [System.IO.FileAttributes]::System)) {
                             try {
-                                $owner = (ConvertTo-Str (Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop) "").Owner
+                                $owner = [string](Get-Acl -LiteralPath $ItemInfo.FullName -ErrorAction Stop).Owner
                                 if ($owner -match "(?i)TrustedInstaller|NT AUTHORITY\\SYSTEM|^SYSTEM$") {
                                     [void]$reasons.Add("System-owned")
                                 }
@@ -9800,6 +9897,27 @@ function Show-RegScanSelection {
         "Per-User Shell Commands"         = "UserShellCommands"
         "Image File Execution Options"    = "IFEO"
         "Firewall Rules"                  = "Firewall"
+        "Context Menu Handlers"          = "ContextMenu"
+        "URL Protocol Handlers"          = "UrlProtocols"
+        "Orphaned CLSID Servers"         = "OrphanedClsids"
+        "App Paths (Executables)"       = "AppPathIcons"
+        "Ghosted USB Devices"           = "GhostDevices"
+        "Invalid Drive Letter Paths"    = "DriveLetters"
+        "Event Log Message DLLs"         = "EventLogDlls"
+        "Orphaned AppID Entries"         = "OrphanedAppIDs"
+        "Broken Sound Scheme Files"      = "SoundSchemes"
+        "Invalid Mic Permissions"       = "MicPermissions"
+        "Invalid Window Placements"     = "WindowPlacements"
+        "Invalid Print Monitor DLLs"    = "PrintMonitors"
+        "Invalid LSA Package DLLs"      = "LSAPackages"
+        "Stale BAM/DAM Entries"         = "BamEntries"
+        "Invalid Defender Exclusions"   = "DefenderExclusions"
+        "Invalid Keyboard Layout DLLs"  = "KeyboardLayouts"
+        "Invalid App Recovery Entries"  = "AppRecovery"
+        "Broken Autoplay Handlers"      = "AutoplayHandlers"
+        "Invalid Pending Renames"       = "PendingRenames"
+        "Invalid Network Provider DLLs" = "NetworkProviders"
+        "Orphaned COM+ / DCOM Apps"    = "OrphanedComPlus"
     }
 
     foreach ($savedKey in @($savedStates.Keys)) {
@@ -10085,7 +10203,30 @@ function Show-RegistryCleaner {
             '^Missing HelpDir$',
             '^Missing TypeLib Path$',
             '^Invalid Default Icon$',
-            '^Missing Shared Ref$'
+            '^Missing Shared Ref$',
+            '^Invalid Context Menu Command$',
+            '^Orphaned Context Menu Delegate$',
+            '^Invalid Protocol Handler$',
+            '^Orphaned Protocol CLSID$',
+            '^Orphaned (InprocServer32|LocalServer32|LocalServer)$',
+            '^Missing AppPath Executable$',
+            '^Ghosted USB Device$',
+            '^Invalid Drive Letter Reference$',
+            '^Invalid EventLog (Message|Category|Parameter) DLL$',
+            '^Orphaned AppID$',
+            '^Missing Sound File$',
+            '^Invalid Mic Permission Package$',
+            '^Invalid Window Placement$',
+            '^Invalid Print (Monitor|Processor) DLL$',
+            '^Invalid (LSA Security|Authentication) Package DLL$',
+            '^Stale BAM/DAM Entry$',
+            '^Invalid Defender Exclusion$',
+            '^Invalid (Keyboard|IME) Layout DLL$',
+            '^Invalid App (Recovery|Restart) Entry$',
+            '^Broken Autoplay Handler$',
+            '^Invalid Pending (File )?Rename$',
+            '^Invalid Network Provider (DLL|Path)$',
+            '^Orphaned (COM\+|DCOM) Application$'
         )
 
         foreach ($pattern in $reviewOnlyPatterns) {
@@ -10198,7 +10339,10 @@ function Show-RegistryCleaner {
         </DataGrid>
 
         <Grid Grid.Row="2" Margin="0,12,0,0">
-            <Button Name="btnClose" Content="Close" IsCancel="True" HorizontalAlignment="Left"/>
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left" VerticalAlignment="Center">
+                <CheckBox Name="chkShowProtected" Content="Show Protected Entries" Margin="0,0,12,0" VerticalAlignment="Center" ToolTip="When unchecked, protected Microsoft COM registrations (e.g. CrossDevice, DAO, Oracle OLE DB) are hidden from the list. Toggle this to show/hide them."/>
+                <Button Name="btnClose" Content="Close" IsCancel="True"/>
+            </StackPanel>
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Name="btnCopySelected" Content="Copy Selected Details" MinWidth="160"/>
                 <Button Name="btnCopyAll" Content="Copy All Details" MinWidth="140"/>
@@ -10217,8 +10361,21 @@ function Show-RegistryCleaner {
     $btnCopySelected = $dialog.FindName("btnCopySelected")
     $btnCopyAll = $dialog.FindName("btnCopyAll")
     $btnClose = $dialog.FindName("btnClose")
+    $chkShowProtected = $dialog.FindName("chkShowProtected")
 
-    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count)"
+    # Enable row virtualization so the grid scrolls smoothly with hundreds of findings
+    # instead of rendering every row at once and lagging.
+    Enable-WmtWpfItemsVirtualization -Control $dg
+
+    # --- Protected/ReviewOnly filter ---
+    # By default, protected and review-only entries are hidden from the grid.
+    # $registryRows always holds the FULL unfiltered list.
+    # $registryRowsFiltered excludes review-only items.
+    # The checkbox swaps $dg.ItemsSource between the two lists.
+    # (Avoids CollectionView.Filter whose scriptblock closure freezes
+    #  variable values and breaks toggle — .GetNewClosure() snapshots $showProtected.)
+
+    $lblStatus.Text = "Scan complete. Scanning..."
 
     $registryRows = @(
         foreach ($item in $ScanResults) {
@@ -10256,23 +10413,53 @@ function Show-RegistryCleaner {
                 $details = "Review only; not selected by default. $details"
             }
             [PSCustomObject]@{
-                Check         = $autoSelected
-                Problem       = $item.Problem
-                Data          = $item.Data
-                Key           = $item.DisplayKey
-                FullPath      = $item.RegPath
-                ValueName     = $item.ValueName
-                FixAction     = $fixAction
-                Risk          = $risk
-                Confidence    = $confidence
-                DefaultAction = if ($autoSelected) { "Selected" } else { "Review" }
-                Type          = $item.Type
-                NewData       = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
-                Details       = $details
+                Check              = $autoSelected
+                Problem            = $item.Problem
+                Data               = $item.Data
+                Key                = $item.DisplayKey
+                FullPath           = $item.RegPath
+                ValueName          = $item.ValueName
+                FixAction          = $fixAction
+                Risk               = $risk
+                Confidence         = $confidence
+                DefaultAction      = if ($autoSelected) { "Selected" } else { "Review" }
+                Type               = $item.Type
+                NewData            = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
+                Details            = $details
+                IsReviewOnly       = (-not $autoSelected)
+                IsProtected        = ([string]$item.Problem -eq 'Protected ActiveX Issue')
+                _ConsolidatedFrom  = if ($item.PSObject.Properties["_ConsolidatedFrom"]) { $item._ConsolidatedFrom } else { $null }
             }
         }
     )
-    $dg.ItemsSource = $registryRows
+
+    # Build a filtered list excluding only Protected ActiveX entries (the default view).
+    $registryRowsFiltered = @($registryRows | Where-Object { $_.IsProtected -eq $false })
+
+    # Default: hide only protected entries; show everything else including review-only.
+    $dg.ItemsSource = $registryRowsFiltered
+    $protectedCount = ($registryRows | Where-Object { $_.IsProtected }).Count
+    if ($protectedCount -gt 0) {
+        $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden)."
+    } else {
+        $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+    }
+
+    # Checkbox toggle: show/hide only Protected ActiveX entries.
+    # Checked = show protected. Unchecked = hide protected (default).
+    $chkShowProtected.Add_Click({
+        if ($chkShowProtected.IsChecked -eq $true) {
+            $dg.ItemsSource = $registryRows
+            $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+        } else {
+            $dg.ItemsSource = $registryRowsFiltered
+            if ($protectedCount -gt 0) {
+                $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden)."
+            } else {
+                $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count)"
+            }
+        }
+    })
 
     $registryContextMenu = [System.Windows.Controls.ContextMenu]::new()
     try { Set-WmtContextMenuChrome -ContextMenu $registryContextMenu } catch {}
@@ -10312,7 +10499,11 @@ function Show-RegistryCleaner {
             try {
                 $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $dg -Checked $true
                 if ($changed -gt 0) {
-                    $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                    if ($chkShowProtected.IsChecked -eq $true) {
+                        $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count). Checked $changed highlighted row(s)."
+                    } else {
+                        $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden). Checked $changed highlighted row(s)."
+                    }
                 }
             }
             catch {
@@ -10433,7 +10624,11 @@ function Show-RegistryCleaner {
 
             $changed = Set-WmtRegistryHighlightedRowsChecked -Grid $gridSender -Checked $true
             if ($changed -gt 0) {
-                $lblStatus.Text = "Scan complete. Issues found: $($ScanResults.Count). Checked $changed highlighted row(s)."
+                if ($chkShowProtected.IsChecked -eq $true) {
+                    $lblStatus.Text = "Scan complete. Issues found: $($registryRows.Count). Checked $changed highlighted row(s)."
+                } else {
+                    $lblStatus.Text = "Scan complete. Showing $($registryRowsFiltered.Count) of $($registryRows.Count) issues ($protectedCount protected hidden). Checked $changed highlighted row(s)."
+                }
                 $keyArgs.Handled = $true
             }
         })
@@ -10474,20 +10669,42 @@ function Show-RegistryCleaner {
             catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
-                    [void]$toFix.Add([PSCustomObject]@{
-                            Problem       = $row.Problem
-                            Action        = $row.FixAction
-                            Risk          = $row.Risk
-                            Confidence    = $row.Confidence
-                            DefaultAction = $row.DefaultAction
-                            RegPath       = $row.FullPath
-                            ValueName     = $row.ValueName
-                            Type          = $row.Type
-                            DisplayKey    = $row.Key
-                            Data          = $row.Data
-                            WhyFlagged    = $row.Details
-                            NewData       = $row.NewData
-                        })
+                    # If this row was consolidated from multiple originals, expand
+                    # all of them so every underlying entry gets cleaned.
+                    if ($row._ConsolidatedFrom -and $row._ConsolidatedFrom.Count -gt 0) {
+                        foreach ($orig in @($row._ConsolidatedFrom)) {
+                            if ($null -eq $orig) { continue }
+                            [void]$toFix.Add([PSCustomObject]@{
+                                Problem       = $orig.Problem
+                                Action        = if ($orig.Type -eq "Key") { "Delete key" } elseif ($orig.Type -eq "SetValue") { "Update value" } else { "Delete value" }
+                                Risk          = if ($orig.PSObject.Properties["Risk"]) { [string]$orig.Risk } else { "Medium" }
+                                Confidence    = if ($orig.PSObject.Properties["Confidence"]) { [string]$orig.Confidence } else { "High" }
+                                DefaultAction = "Selected"
+                                RegPath       = $orig.RegPath
+                                ValueName     = $orig.ValueName
+                                Type          = $orig.Type
+                                DisplayKey    = if ($orig.PSObject.Properties["DisplayKey"]) { $orig.DisplayKey } else { $orig.RegPath }
+                                Data          = $orig.Data
+                                WhyFlagged    = if ($orig.PSObject.Properties["Details"]) { $orig.Details } else { "" }
+                                NewData       = if ($orig.PSObject.Properties["NewData"]) { [string]$orig.NewData } else { $null }
+                            })
+                        }
+                    } else {
+                        [void]$toFix.Add([PSCustomObject]@{
+                                Problem       = $row.Problem
+                                Action        = $row.FixAction
+                                Risk          = $row.Risk
+                                Confidence    = $row.Confidence
+                                DefaultAction = $row.DefaultAction
+                                RegPath       = $row.FullPath
+                                ValueName     = $row.ValueName
+                                Type          = $row.Type
+                                DisplayKey    = $row.Key
+                                Data          = $row.Data
+                                WhyFlagged    = $row.Details
+                                NewData       = $row.NewData
+                            })
+                    }
                 }
             }
 
@@ -11646,7 +11863,9 @@ function Start-WmtRegistryCleanupBackground {
         "Test-WmtRegExeKeyExists",
         "Remove-WmtRegistryKeyRegExe",
         "Remove-RegKeyForced",
-        "Backup-RegKey"
+        "Backup-RegKey",
+        "ConvertTo-Int",
+        "Invoke-WmtCliText"
     )
 
     $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
@@ -12090,6 +12309,7 @@ function Invoke-RegistryTask {
                 throw "HKLM backup failed. reg.exe exit code: $LASTEXITCODE"
             }
 
+            Set-WmtBusyCursor
             Show-WmtMessageBox -Message "HKLM export saved to:`n$bkFile" -Title "Registry Export" -Image Information | Out-Null
         } "Exporting HKLM hive..." -ArgumentList $bkDir
         return
@@ -12122,6 +12342,7 @@ function Invoke-RegistryTask {
                 throw "Registry restore failed. reg.exe exit code: $LASTEXITCODE"
             }
 
+            Set-WmtBusyCursor
             Show-WmtMessageBox -Message "Registry backup imported from:`n$BackupFile" -Title "Registry Import" -Image Information | Out-Null
         } "Importing registry backup..." -ArgumentList $restoreFile
         return
@@ -12384,16 +12605,67 @@ function Invoke-RegistryTask {
                             }
                         }
                         if ($candidate -match '^(?i)[a-z]:\\Program Files\\WindowsApps\\(?<PackageName>[^\\]+)') {
-                            $packageParts = ([string]$Matches.PackageName).Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
+                            $packageName = [string]$Matches.PackageName
+                            $packageParts = $packageName.Split([char[]]@('_'), [System.StringSplitOptions]::RemoveEmptyEntries)
                             if ($packageParts.Length -ge 2) {
                                 $packageFamily = "$($packageParts[0])_$($packageParts[$packageParts.Length - 1])"
+                                # Quick Win32 attribute check — bypasses APC ACL lock on WindowsApps.
+                                # GetFileAttributesW succeeds where Test-Path fails for these paths.
+                                # This catches stale versioned paths (old package version folder deleted).
+                                try {
+                                    if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                        $RegistryPathExistsCache[$cacheKey] = $true
+                                        return $true
+                                    }
+                                }
+                                catch {}
+                                # Fast path: check StateRepository cache key
                                 try {
                                     $packageFamilyKey = "SOFTWARE\Microsoft\Windows\CurrentVersion\AppModel\StateRepository\Cache\PackageFamily\Index\PackageFamilyName\$packageFamily"
                                     $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($packageFamilyKey)
                                     if ($root) {
                                         $root.Close()
-                                        $RegistryPathExistsCache[$cacheKey] = $true
-                                        return $true
+                                        # Package family is registered, but also verify the
+                                        # versioned folder still exists — updates can remove old
+                                        # version folders while the family remains registered.
+                                        try {
+                                            if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                                $RegistryPathExistsCache[$cacheKey] = $true
+                                                return $true
+                                            }
+                                        }
+                                        catch {}
+                                        # StateRepository hit but file gone — version was likely
+                                        # superseded. Do NOT cache as true; fall through to
+                                        # Get-AppxPackage as final check.
+                                    }
+                                }
+                                catch {}
+                                # Fallback: use Get-AppxPackage to verify the package is installed.
+                                # Some systems lack StateRepository keys but have live packages registered.
+                                try {
+                                    $appxCacheKey = "__appx_$packageFamily"
+                                    if (-not $RegistryPathExistsCache.ContainsKey($appxCacheKey)) {
+                                        $found = $false
+                                        try {
+                                            $pkg = Get-AppxPackage -PackageFamilyFilter $packageFamily -ErrorAction SilentlyContinue | Select-Object -First 1
+                                            $found = ($null -ne $pkg)
+                                        }
+                                        catch {}
+                                        $RegistryPathExistsCache[$appxCacheKey] = $found
+                                    }
+                                    if ($RegistryPathExistsCache[$appxCacheKey]) {
+                                        # Package is installed, but the versioned path may be stale.
+                                        # Verify the specific file/dir still exists.
+                                        try {
+                                            if ([System.IO.File]::Exists($candidate) -or [System.IO.Directory]::Exists($candidate)) {
+                                                $RegistryPathExistsCache[$cacheKey] = $true
+                                                return $true
+                                            }
+                                        }
+                                        catch {}
+                                        # Package exists but this specific versioned path is gone.
+                                        # The file is genuinely missing — do not return true.
                                     }
                                 }
                                 catch {}
@@ -14883,6 +15155,1963 @@ function Invoke-RegistryTask {
                         & $EndCategory
                     }
 
+                    # 21. CONTEXT MENU HANDLERS (shell\ext\* and shell\registercommands\*)
+                    if ($SelectedScans -contains "ContextMenu") {
+                        $SyncHash.Status = "Scanning Context Menu Handlers..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $names = $root.GetSubKeyNames()
+                                $total = [math]::Max($names.Count, 1); $i = 0
+                                foreach ($ext in $names) {
+                                    $i++; & $Tick "Scanning Context Menu ($viewLabel): $ext" $i $total
+                                    $extKey = $null
+                                    try {
+                                        $extKey = $root.OpenSubKey($ext, $false)
+                                        if (-not $extKey) { continue }
+                                        $shellKey = $extKey.OpenSubKey("shell", $false)
+                                        if ($shellKey) {
+                                            foreach ($verb in $shellKey.GetSubKeyNames()) {
+                                                $verbKey = $null
+                                                try {
+                                                    $verbKey = $shellKey.OpenSubKey($verb, $false)
+                                                    if (-not $verbKey) { continue }
+
+                                                    $commandKey = $verbKey.OpenSubKey("command", $false)
+                                                    if ($commandKey) {
+                                                        $cmd = [string]$commandKey.GetValue($null)
+                                                        $clean = Get-ServiceImageExecutablePath $cmd
+                                                        if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
+                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                    Problem    = "Invalid Context Menu Command"
+                                                                    Data       = $clean
+                                                                    DisplayKey = "$ext\shell\$verb ($viewLabel)"
+                                                                    RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$ext\shell\$verb\command" -View $view)
+                                                                    ValueName  = $null
+                                                                    Type       = "Key"
+                                                                    Details    = "Context menu handler command points to a missing executable."
+                                                                })
+                                                        }
+                                                        $commandKey.Close()
+                                                    }
+
+                                                    $delegateExec = [string]$verbKey.GetValue("DelegateExecute", $null)
+                                                    if (-not [string]::IsNullOrWhiteSpace($delegateExec)) {
+                                                        $normalized = ConvertTo-WmtClsid $delegateExec
+                                                        if ($normalized -and -not (Test-WmtClsidExists $normalized)) {
+                                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                    Problem    = "Orphaned Context Menu Delegate"
+                                                                    Data       = $delegateExec
+                                                                    DisplayKey = "$ext\shell\$verb ($viewLabel)"
+                                                                    RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$ext\shell\$verb" -View $view)
+                                                                    ValueName  = "DelegateExecute"
+                                                                    Type       = "Value"
+                                                                    Details    = "Context menu DelegateExecute CLSID is not registered."
+                                                                })
+                                                        }
+                                                    }
+                                                }
+                                                catch {}
+                                                finally {
+                                                    if ($verbKey) { $verbKey.Close() }
+                                                }
+                                            }
+                                            $shellKey.Close()
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($extKey) { $extKey.Close() }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 22. URL PROTOCOL HANDLERS
+                    if ($SelectedScans -contains "UrlProtocols") {
+                        $SyncHash.Status = "Scanning URL Protocol Handlers..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $names = $root.GetSubKeyNames()
+                                $total = [math]::Max($names.Count, 1); $i = 0
+                                foreach ($name in $names) {
+                                    $i++; & $Tick "Scanning Protocol ($viewLabel): $name" $i $total
+                                    if (-not ($name -match '^(?i)\w+(?::|$)')) { continue }
+
+                                    $protoKey = $null
+                                    try {
+                                        $protoKey = $root.OpenSubKey($name, $false)
+                                        if (-not $protoKey) { continue }
+
+                                        $shellKey = $protoKey.OpenSubKey("shell\open\command", $false)
+                                        if ($shellKey) {
+                                            $cmd = [string]$shellKey.GetValue($null)
+                                            $clean = Get-ServiceImageExecutablePath $cmd
+                                            if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists $clean)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid Protocol Handler"
+                                                        Data       = $clean
+                                                        DisplayKey = "$name ($viewLabel)"
+                                                        RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$name\shell\open\command" -View $view)
+                                                        ValueName  = $null
+                                                        Type       = "Key"
+                                                        Details    = "URL protocol handler command points to a missing executable."
+                                                    })
+                                            }
+                                            $shellKey.Close()
+                                        }
+
+                                        $urlProtoVal = [string]$protoKey.GetValue("URL Protocol", $null)
+                                        if ([string]::IsNullOrWhiteSpace($urlProtoVal)) {
+                                            $clsidVal = [string]$protoKey.GetValue("CLSID", $null)
+                                            if ($clsidVal) {
+                                                $normalized = ConvertTo-WmtClsid $clsidVal
+                                                if ($normalized -and -not (Test-WmtClsidExists $normalized)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Orphaned Protocol CLSID"
+                                                            Data       = $clsidVal
+                                                            DisplayKey = "$name ($viewLabel)"
+                                                            RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "$name" -View $view)
+                                                            ValueName  = "CLSID"
+                                                            Type       = "Value"
+                                                            Details    = "Protocol handler CLSID is not registered."
+                                                        })
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($protoKey) { $protoKey.Close() }
+                                    }
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 23. ORPHANED CLSID SERVERS (InprocServer32 / LocalServer32 with missing binaries)
+                    if ($SelectedScans -contains "OrphanedClsids") {
+                        $SyncHash.Status = "Scanning Orphaned CLSID Servers..."
+                        $serverSubkeys = @("InprocServer32", "LocalServer32", "LocalServer")
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $clsidRoot = $root.OpenSubKey("CLSID", $false)
+                                if ($clsidRoot) {
+                                    $names = $clsidRoot.GetSubKeyNames()
+                                    $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($clsid in $names) {
+                                        $i++; & $Tick "Scanning CLSID ($viewLabel): $clsid" $i $total
+                                        $clsidKey = $null
+                                        try {
+                                            $clsidKey = $clsidRoot.OpenSubKey($clsid, $false)
+                                            if (-not $clsidKey) { continue }
+
+                                            foreach ($serverType in $serverSubkeys) {
+                                                $serverKey = $clsidKey.OpenSubKey($serverType, $false)
+                                                if (-not $serverKey) { continue }
+
+                                                $serverPath = [string]$serverKey.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                                $clean = Get-RealExePath $serverPath
+                                                if ($clean -and $clean -match '^[a-zA-Z]:\\' -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists -Path $clean -RegistryView $view)) {
+                                                    $missingPath = Get-WmtMissingRegistryPathTarget -RawValue $serverPath -RegistryView $view
+                                                    if ($missingPath) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                Problem    = "Orphaned $serverType"
+                                                                Data       = $missingPath
+                                                                DisplayKey = "$clsid ($viewLabel)"
+                                                                RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "CLSID\$clsid\$serverType" -View $view)
+                                                                ValueName  = $null
+                                                                Type       = "Key"
+                                                                Details    = "COM server $serverType points to a missing file in the $viewLabel registry view."
+                                                            })
+                                                    }
+                                                }
+                                                $serverKey.Close()
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($clsidKey) { $clsidKey.Close() }
+                                        }
+                                    }
+                                    $clsidRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 24. APPPATH EXECUTABLE VALIDATION
+                    if ($SelectedScans -contains "AppPathIcons") {
+                        $SyncHash.Status = "Scanning AppPath Executables..."
+                        foreach ($view in @(Get-WmtRegistryViews)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $appPathRoot = $root.OpenSubKey("SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths", $false)
+                                if ($appPathRoot) {
+                                    $names = $appPathRoot.GetSubKeyNames(); $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($app in $names) {
+                                        $i++; & $Tick "Scanning AppPath ($viewLabel): $app" $i $total
+                                        $appKey = $null
+                                        try {
+                                            $appKey = $appPathRoot.OpenSubKey($app, $false)
+                                            if (-not $appKey) { continue }
+
+                                            $defaultExe = [string]$appKey.GetValue($null)
+                                            if ($defaultExe) {
+                                                $clean = Get-ServiceImageExecutablePath $defaultExe
+                                                if ($clean -and -not (Test-IsWhitelisted $clean) -and -not (Test-IsProtectedWindowsPath $clean) -and -not (Test-PathExists -Path $clean -RegistryView $view)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Missing AppPath Executable"
+                                                            Data       = $clean
+                                                            DisplayKey = "$app ($viewLabel)"
+                                                            RegPath    = "$(ConvertTo-WmtHklmViewPath -SubPath "SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\$app" -View $view)"
+                                                            ValueName  = $null
+                                                            Type       = "Key"
+                                                            Details    = "App Paths default executable is missing in the $viewLabel registry view."
+                                                        })
+                                                }
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($appKey) { $appKey.Close() }
+                                        }
+                                    }
+                                    $appPathRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 25. GHOSTED USB/DRIVE ENTRIES (Device Manager leftover devices)
+                    if ($SelectedScans -contains "GhostDevices") {
+                        $SyncHash.Status = "Scanning Ghosted USB Devices..."
+                        $ghostedCount = 0
+                        try {
+                            $setupDevKey = "SYSTEM\CurrentControlSet\Control\DeviceClasses"
+                            $classesRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($setupDevKey)
+                            if ($classesRoot) {
+                                $classesRoot.Close()
+                            }
+
+                            # Check USBSTOR for devices with no hardware present
+                            $usbKey = "SYSTEM\CurrentControlSet\Enum\USBSTOR"
+                            $usbRoot = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($usbKey)
+                            if ($usbRoot) {
+                                $classNames = $usbRoot.GetSubKeyNames()
+                                $total = [math]::Max($classNames.Count, 1); $i = 0
+                                foreach ($className in $classNames) {
+                                    $i++; & $Tick "Scanning USB Ghost: $className" $i $total
+                                    $classKey = $usbRoot.OpenSubKey($className, $false)
+                                    if ($classKey) {
+                                        foreach ($instanceId in $classKey.GetSubKeyNames()) {
+                                            $instanceKey = $classKey.OpenSubKey($instanceId, $false)
+                                            if (-not $instanceKey) { continue }
+
+                                            $friendlyName = [string]$instanceKey.GetValue("FriendlyName")
+                                            $deviceDesc = if ($friendlyName) { $friendlyName } else { $instanceId }
+
+                                            # A device is ghosted if it has no Hardware subkey
+                                            $hwKey = $instanceKey.OpenSubKey("Hardware", $false)
+                                            $isGhost = (-not $hwKey)
+                                            if ($hwKey) { $hwKey.Close() }
+
+                                            if ($isGhost) {
+                                                $ghostedCount++
+                                                $regPath = "HKLM:\$usbKey\$className\$instanceId"
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Ghosted USB Device"
+                                                        Data       = $deviceDesc
+                                                        DisplayKey = "$className\$instanceId"
+                                                        RegPath    = $regPath
+                                                        ValueName  = $null
+                                                        Type       = "ReviewOnly"
+                                                        SafeToFix  = $false
+                                                        Risk       = "Review"
+                                                        Confidence = "Medium"
+                                                        Details    = "USB mass storage device has no hardware present. This is a ghosted entry from a previously connected device. Device: $deviceDesc. Remove only if you no longer need this device's settings."
+                                                    })
+                                            }
+                                            $instanceKey.Close()
+                                        }
+                                        $classKey.Close()
+                                    }
+                                }
+                                $usbRoot.Close()
+                            }
+                        }
+                        catch {}
+                        & $EndCategory
+                    }
+
+                    # 26. INVALID DRIVE LETTERS IN PATHS (uninstallers, recent docs, app paths, etc.)
+                    if ($SelectedScans -contains "DriveLetters") {
+                        $SyncHash.Status = "Scanning Invalid Drive Letter References..."
+                        $liveDrives = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        try {
+                            foreach ($vol in @(Get-Volume -ErrorAction SilentlyContinue | Where-Object { $null -ne $_.DriveLetter -and $_.DriveType -eq 'Fixed' })) {
+                                [void]$liveDrives.Add(("{0}:" -f $vol.DriveLetter))
+                            }
+                        }
+                        catch {}
+
+                        $driveLetterTargets = New-Object System.Collections.Generic.List[object]
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"; Hive = [Microsoft.Win32.RegistryHive]::LocalMachine; Label = "HKLM Uninstall" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Uninstall"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU Uninstall" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\Explorer\RecentDocs"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU RecentDocs" })
+                        [void]$driveLetterTargets.Add([PSCustomObject]@{ SubPath = "Software\Microsoft\Windows\CurrentVersion\App Paths"; Hive = [Microsoft.Win32.RegistryHive]::CurrentUser; Label = "HKCU App Paths" })
+
+                        $pathValueNames = @("InstallLocation", "InstallSource", "DisplayIcon", "ModifyPath", "QuietUninstallString", "UninstallString")
+                        $total = [math]::Max($driveLetterTargets.Count, 1); $i = 0
+                        foreach ($target in $driveLetterTargets) {
+                            $i++; & $Tick "Scanning Drive Letters: $($target.Label)" $i $total
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey($target.Hive, [Microsoft.Win32.RegistryView]::Default)
+                                $rk = $root.OpenSubKey($target.SubPath, $false)
+                                if (-not $rk) { $root.Close(); continue }
+
+                                foreach ($subName in $rk.GetSubKeyNames()) {
+                                    $sub = $null
+                                    try {
+                                        $sub = $rk.OpenSubKey($subName, $false)
+                                        if (-not $sub) { continue }
+
+                                        $valuesToCheck = $pathValueNames
+                                        if ($target.Label -match 'App Paths') {
+                                            # App Paths: check default value
+                                            $val = [string]$sub.GetValue($null, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            $valuesToCheck = @($null)
+                                        }
+
+                                        foreach ($vn in $valuesToCheck) {
+                                            $rawVal = [string]$sub.GetValue($vn, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                            if ([string]::IsNullOrWhiteSpace($rawVal)) { continue }
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($rawVal)
+
+                                            if ($expanded -match '^(?i)([a-z]):\\') {
+                                                $driveRef = $Matches[1] + ":"
+                                                if (-not $liveDrives.Contains($driveRef)) {
+                                                    $valLabel = if ($vn) { $vn } else { "(Default)" }
+                                                    $regPrefix = if ($target.Hive -eq [Microsoft.Win32.RegistryHive]::LocalMachine) { "HKLM:" } else { "HKCU:" }
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Drive Letter Reference"
+                                                            Data       = $expanded
+                                                            DisplayKey = "$subName ($($target.Label))"
+                                                            RegPath    = "$regPrefix\$($target.SubPath)\$subName"
+                                                            ValueName  = $valLabel
+                                                            Type       = "Value"
+                                                            SafeToFix  = $false
+                                                            Risk       = "Review"
+                                                            Confidence = "Medium"
+                                                            Details    = "Path references drive $driveRef which does not exist on this system. Value: $valLabel = $rawVal"
+                                                        })
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                    finally {
+                                        if ($sub) { $sub.Close() }
+                                    }
+                                }
+                                $rk.Close()
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 27. EVENT LOG MESSAGE DLL ENTRIES
+                    if ($SelectedScans -contains "EventLogDlls") {
+                        $SyncHash.Status = "Scanning Event Log Message DLLs..."
+                        $eventLogRoot = "SYSTEM\CurrentControlSet\Services\EventLog"
+                        $root = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($eventLogRoot, $false)
+                        if ($root) {
+                            $sourceNames = $root.GetSubKeyNames()
+                            $total = [math]::Max($sourceNames.Count, 1); $i = 0
+                            foreach ($sourceName in $sourceNames) {
+                                $i++; & $Tick "Scanning EventLog: $sourceName" $i $total
+                                $sourceKey = $null
+                                try {
+                                    $sourceKey = $root.OpenSubKey($sourceName, $false)
+                                    if (-not $sourceKey) { continue }
+
+                                    $msgFile = [string]$sourceKey.GetValue("EventMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($msgFile) {
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($msgFile)
+                                        # EventMessageFile can contain semicolon-separated list of DLLs
+                                        foreach ($dllPart in @($expanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Message DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "EventMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing message DLL: $candidate. The event log service will fail to format messages for this source."
+                                                })
+                                        }
+                                    }
+
+                                    $catMsgFile = [string]$sourceKey.GetValue("CategoryMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($catMsgFile) {
+                                        $catExpanded = [Environment]::ExpandEnvironmentVariables($catMsgFile)
+                                        foreach ($dllPart in @($catExpanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Category DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "CategoryMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing category message DLL: $candidate."
+                                                })
+                                        }
+                                    }
+
+                                    $paramFile = [string]$sourceKey.GetValue("ParameterMessageFile", $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+                                    if ($paramFile) {
+                                        $paramExpanded = [Environment]::ExpandEnvironmentVariables($paramFile)
+                                        foreach ($dllPart in @($paramExpanded -split ';')) {
+                                            $candidate = ($dllPart).Trim()
+                                            if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                                            if ($candidate -notmatch '^(?i)[a-z]:\\') { continue }
+                                            if (Test-IsProtectedWindowsPath $candidate) { continue }
+                                            if (Test-IsWhitelisted $candidate) { continue }
+                                            if (Test-PathExists $candidate) { continue }
+
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid EventLog Parameter DLL"
+                                                    Data       = $candidate
+                                                    DisplayKey = "$sourceName"
+                                                    RegPath    = "HKLM:\$eventLogRoot\$sourceName"
+                                                    ValueName  = "ParameterMessageFile"
+                                                    Type       = "Value"
+                                                    SafeToFix  = $false
+                                                    Risk       = "Review"
+                                                    Confidence = "High"
+                                                    Details    = "Event log source '$sourceName' references a missing parameter message DLL: $candidate."
+                                                })
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($sourceKey) { $sourceKey.Close() }
+                                }
+                            }
+                            $root.Close()
+                        }
+                        & $EndCategory
+                    }
+
+                    # 28. ORPHANED APPIDs
+                    # Strategy: Only flag AppID entries that are genuinely orphaned.
+                    #   - exe/dll-named AppIDs: only flag if the binary cannot be found anywhere.
+                    #   - GUID-named AppIDs: only flag if the key is empty (no subkeys, no values),
+                    #     AND no CLSID key exists with that GUID AND no CLSID references it via AppID value.
+                    #   - Any AppID with DCOM activation values (RunAs, LocalService, RemoteServerName,
+                    #     ServiceParameters) is considered a valid DCOM registration and skipped.
+                    if ($SelectedScans -contains "OrphanedAppIDs") {
+                        $SyncHash.Status = "Scanning Orphaned AppIDs..."
+                        foreach ($view in @([Microsoft.Win32.RegistryView]::Default)) {
+                            $root = $null
+                            try {
+                                $root = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::ClassesRoot, $view)
+                                $viewLabel = Get-WmtRegistryViewLabel $view
+                                $appIdRoot = $root.OpenSubKey("AppID", $false)
+                                if ($appIdRoot) {
+                                    $names = $appIdRoot.GetSubKeyNames()
+                                    $total = [math]::Max($names.Count, 1); $i = 0
+                                    foreach ($appIdName in $names) {
+                                        $i++; & $Tick "Scanning AppID ($viewLabel): $appIdName" $i $total
+                                        $appIdKey = $null
+                                        try {
+                                            $appIdKey = $appIdRoot.OpenSubKey($appIdName, $false)
+                                            if (-not $appIdKey) { continue }
+
+                                            # --- Skip if AppID has DCOM activation values ---
+                                            # These values indicate the AppID is a DCOM server registration
+                                            # activated by the Service Control Manager or DCOM, not by
+                                            # a CLSID with InprocServer32/LocalServer32.
+                                            $dcomSkip = $false
+                                            foreach ($dcomValName in @("RunAs", "LocalService", "RemoteServerName", "ServiceParameters")) {
+                                                if ($null -ne $appIdKey.GetValue($dcomValName, $null)) {
+                                                    $dcomSkip = $true; break
+                                                }
+                                            }
+                                            if ($dcomSkip) { continue }
+
+                                            # --- exe/dll-named AppIDs: verify the binary exists ---
+                                            if ($appIdName -match '(?i)\.(exe|dll|ocx|sys|scr)$') {
+                                                # Check if the named binary exists anywhere on the system.
+                                                # Use Test-Path -PathType Leaf (not Test-PathExists which is
+                                                # designed for registry value paths and may misreport).
+                                                $binaryName = $appIdName
+                                                $binaryFound = $false
+
+                                                # 1) Check system directories (System32, SysWOW64, Windows root)
+                                                $sysRoot = [Environment]::GetFolderPath("System")
+                                                $sysX86  = [Environment]::GetFolderPath("SystemX86")
+                                                $winRoot = [Environment]::GetFolderPath("Windows")
+                                                foreach ($dir in @($sysRoot, $sysX86, $winRoot)) {
+                                                    if ($dir -and -not $binaryFound) {
+                                                        try {
+                                                            if (Test-Path -Path (Join-Path $dir $binaryName) -PathType Leaf -ErrorAction SilentlyContinue) {
+                                                                $binaryFound = $true
+                                                            }
+                                                        } catch {}
+                                                    }
+                                                }
+
+                                                # 2) Search Program Files directories (where Edge, OneDrive, NVIDIA, Nahimic, etc. install)
+                                                if (-not $binaryFound) {
+                                                    $pf64 = [Environment]::GetFolderPath("ProgramFiles")
+                                                    $pf32 = [Environment]::GetFolderPath("ProgramFilesX86")
+                                                    foreach ($pfDir in @($pf64, $pf32)) {
+                                                        if ($pfDir -and -not $binaryFound) {
+                                                            try {
+                                                                # Shallow scan of Program Files — check for an exact match
+                                                                # in the directory itself or one level deep (common layout)
+                                                                $directPath = Join-Path $pfDir $binaryName
+                                                                if (Test-Path -Path $directPath -PathType Leaf -ErrorAction SilentlyContinue) {
+                                                                    $binaryFound = $true
+                                                                }
+                                                            } catch {}
+                                                        }
+                                                    }
+                                                }
+
+                                                # 3) PATH search via Get-Command — catches anything registered on system PATH
+                                                if (-not $binaryFound) {
+                                                    try {
+                                                        if (Test-Path "env:PATH") {
+                                                            $cmdResult = Get-Command -CommandType Application $binaryName -ErrorAction SilentlyContinue
+                                                            if ($cmdResult -and $cmdResult.Source -and (Test-Path -Path $cmdResult.Source -PathType Leaf -ErrorAction SilentlyContinue)) {
+                                                                $binaryFound = $true
+                                                            }
+                                                        }
+                                                    } catch {}
+                                                }
+
+                                                # 4) If the AppID has a DllSurrogate value, the binary may
+                                                #    be an out-of-process surrogate — valid without a file.
+                                                if (-not $binaryFound) {
+                                                    if ($null -ne $appIdKey.GetValue("DllSurrogate", $null)) { continue }
+                                                }
+
+                                                # 5) If the AppID key has ANY values or subkeys, it likely
+                                                #    has meaningful DCOM/activation config — skip it.
+                                                if (-not $binaryFound) {
+                                                    if ($appIdKey.GetValueNames().Count -gt 0 -or $appIdKey.GetSubKeyNames().Count -gt 0) { continue }
+                                                }
+
+                                                if (-not $binaryFound) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Orphaned AppID"
+                                                            Data       = $appIdName
+                                                            DisplayKey = "$appIdName ($viewLabel)"
+                                                            RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "AppID\$appIdName" -View $view)
+                                                            ValueName  = $null
+                                                            Type       = "Key"
+                                                            SafeToFix  = $false
+                                                            Risk       = "Review"
+                                                            Confidence = "Low"
+                                                            Details    = "AppID named '$appIdName' but the binary was not found in system directories, Program Files, or system PATH. The file may have been uninstalled."
+                                                        })
+                                                }
+                                                continue
+                                            }
+
+                                            # --- GUID-named AppIDs: check if truly empty and unreferenced ---
+                                            $clsidRef = ConvertTo-WmtClsid $appIdName
+                                            if ($clsidRef) {
+                                                # Check if the AppID key has any meaningful content
+                                                $subNames = $appIdKey.GetSubKeyNames()
+                                                $valNames = $appIdKey.GetValueNames()
+                                                $hasContent = ($subNames.Count -gt 0) -or ($valNames.Count -gt 0)
+
+                                                if (-not $hasContent) {
+                                                    # Completely empty AppID key — check if any CLSID references it
+                                                    $clsidKey = $root.OpenSubKey("CLSID\$clsidRef", $false)
+                                                    if (-not $clsidKey) {
+                                                        # No CLSID key either — genuinely orphaned empty AppID
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                                Problem    = "Orphaned AppID"
+                                                                Data       = $clsidRef
+                                                                DisplayKey = "$appIdName ($viewLabel)"
+                                                                RegPath    = (ConvertTo-WmtClassesViewPath -SubPath "AppID\$appIdName" -View $view)
+                                                                ValueName  = $null
+                                                                Type       = "Key"
+                                                                SafeToFix  = $false
+                                                                Risk       = "Review"
+                                                                Confidence = "Medium"
+                                                                Details    = "Empty GUID-named AppID $clsidRef has no subkeys, no values, and no corresponding CLSID key in the registry."
+                                                            })
+                                                    }
+                                                    else {
+                                                        # CLSID key exists — AppID may be referenced by it
+                                                        $clsidKey.Close()
+                                                    }
+                                                }
+                                                # If hasContent: the AppID key has values/subkeys, consider it valid
+                                                # (it may contain DCOM config, permissions, etc.)
+                                            }
+                                            # Non-GUID, non-binary AppID names (e.g. service names like "McpManagementService")
+                                            # are valid DCOM registrations — skip them.
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($appIdKey) { $appIdKey.Close() }
+                                        }
+                                    }
+                                    $appIdRoot.Close()
+                                }
+                            }
+                            catch {}
+                            finally {
+                                if ($root) { $root.Close() }
+                            }
+                        }
+                        & $EndCategory
+                    }
+
+                    # 29. BROKEN SOUND SCHEME REFERENCES
+                    if ($SelectedScans -contains "SoundSchemes") {
+                        $SyncHash.Status = "Scanning Sound Scheme References..."
+                        $appEventsRoot = "AppEvents\EventLabels"
+                        $schemesRoot = "AppEvents\Schemes\Apps"
+
+                        $labelRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($appEventsRoot, $false)
+                        $appsRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($schemesRoot, $false)
+                        if ($appsRoot) {
+                            $appNames = $appsRoot.GetSubKeyNames()
+                            $total = [math]::Max($appNames.Count, 1); $i = 0
+                            foreach ($appName in $appNames) {
+                                $i++; & $Tick "Scanning Sound Scheme: $appName" $i $total
+                                $appKey = $null
+                                try {
+                                    $appKey = $appsRoot.OpenSubKey($appName, $false)
+                                    if (-not $appKey) { continue }
+
+                                    foreach ($eventName in $appKey.GetSubKeyNames()) {
+                                        $eventKey = $null
+                                        try {
+                                            $eventKey = $appKey.OpenSubKey($eventName, $false)
+                                            if (-not $eventKey) { continue }
+
+                                            $wavFile = [string]$eventKey.GetValue($null)
+                                            if ([string]::IsNullOrWhiteSpace($wavFile)) { continue }
+
+                                            # Expand and check
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($wavFile)
+                                            $expanded = $expanded.Trim()
+
+                                            # Skip system default sounds and internal references
+                                            if ($expanded -match '^(?i)\(%SystemRoot%\\Media\\)' -or $expanded -eq '' -or $expanded -notmatch '^(?i)[a-z]:\\') {
+                                                # Still expand to full path and check
+                                                if ($expanded -match '^(?i)\(%(?<var>.+)%\\(?<rest>.+)$') {
+                                                    $expanded = [Environment]::ExpandEnvironmentVariables($expanded)
+                                                }
+                                            }
+
+                                            if ($expanded -match '^(?i)[a-z]:\\.*\.wav$' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Missing Sound File"
+                                                        Data       = $expanded
+                                                        DisplayKey = "$appName\$eventName"
+                                                        RegPath    = "HKCU:\$schemesRoot\$appName\$eventName"
+                                                        ValueName  = $null
+                                                        Type       = "Value"
+                                                        SafeToFix  = $true
+                                                        Risk       = "Low"
+                                                        Confidence = "High"
+                                                        Details    = "Sound event references a missing .wav file: $expanded. Cleanup replaces this value with an empty string (silence)."
+                                                    })
+                                            }
+                                        }
+                                        catch {}
+                                        finally {
+                                            if ($eventKey) { $eventKey.Close() }
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($appKey) { $appKey.Close() }
+                                }
+                            }
+                            $appsRoot.Close()
+                        }
+                        if ($labelRoot) { $labelRoot.Close() }
+                        & $EndCategory
+                    }
+
+                    # 30. INVALID MICROPHONE PRIVACY PERMISSIONS
+                    if ($SelectedScans -contains "MicPermissions") {
+                        $SyncHash.Status = "Scanning Microphone Privacy Permissions..."
+
+                        # --- Part A: NonPackaged entries (HKCU) referencing missing executables ---
+                        $micNonPackedRoot = "SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\NonPackaged"
+                        $micHKCU = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($micNonPackedRoot, $false)
+                        if ($micHKCU) {
+                            $entries = $micHKCU.GetSubKeyNames()
+                            $total = [math]::Max($entries.Count, 1); $i = 0
+                            foreach ($entry in $entries) {
+                                $i++; & $Tick "Scanning Mic Permission: $entry" $i $total
+                                $entryKey = $null
+                                try {
+                                    $entryKey = $micHKCU.OpenSubKey($entry, $false)
+                                    if (-not $entryKey) { continue }
+
+                                    # The entry name is typically the exe path (e.g. "C:\Program Files\App\app.exe")
+                                    # Expand environment variables in the entry name itself
+                                    $expandedEntry = [Environment]::ExpandEnvironmentVariables($entry)
+                                    $expandedEntry = $expandedEntry.Trim()
+
+                                    if ($expandedEntry -match '^(?i)[a-z]:\\') {
+                                        # Skip system/protected paths
+                                        if (-not (Test-IsProtectedWindowsPath $expandedEntry) -and -not (Test-PathExists $expandedEntry)) {
+                                            # Verify it looks like a real exe path
+                                            if ($expandedEntry -match '\.(?:exe|msi|bat|cmd|ps1|com)$') {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid Mic Permission Package"
+                                                    Data       = "NonPackaged app path does not exist: $expandedEntry"
+                                                    DisplayKey = $entry
+                                                    RegPath    = "HKCU:\$micNonPackedRoot\$entry"
+                                                    ValueName  = $null
+                                                    Type       = "Key"
+                                                    SafeToFix  = $true
+                                                    Risk       = "Low"
+                                                    Confidence = "High"
+                                                    Details    = "CapabilityAccessManager references a non-packaged app '$expandedEntry' for microphone permission, but the executable no longer exists. The stale permission entry can be safely removed."
+                                                })
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($entryKey) { $entryKey.Close() }
+                                }
+                            }
+                            $micHKCU.Close()
+                        }
+
+                        # --- Part B: Packaged entries (HKLM) referencing uninstalled AppX packages ---
+                        $micPackedRoot = "SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone\Packaged"
+                        $micHKLM = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($micPackedRoot, $false)
+                        if ($micHKLM) {
+                            $entries = $micHKLM.GetSubKeyNames()
+                            $total = [math]::Max($entries.Count, 1); $i = 0
+                            foreach ($entry in $entries) {
+                                $i++; & $Tick "Scanning Mic Package Permission: $entry" $i $total
+
+                                # Entry names are PackageFamilyNames like "Microsoft.SkypeApp_kzf8qxf38zg5c"
+                                # Check if the package is still registered
+                                $pkg = $null
+                                try {
+                                    $pkg = Get-AppxPackage -PackageFamilyName $entry -ErrorAction Stop
+                                }
+                                catch {}
+
+                                if (-not $pkg) {
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                        Problem    = "Invalid Mic Permission Package"
+                                        Data       = "Packaged app no longer installed: $entry"
+                                        DisplayKey = $entry
+                                        RegPath    = "HKLM:\$micPackedRoot\$entry"
+                                        ValueName  = $null
+                                        Type       = "Key"
+                                        SafeToFix  = $true
+                                        Risk       = "Low"
+                                        Confidence = "High"
+                                        Details    = "CapabilityAccessManager holds a microphone permission entry for package family '$entry', but the AppX package is no longer installed. The stale entry can be safely removed."
+                                    })
+                                }
+                            }
+                            $micHKLM.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 31. INVALID WINDOW PLACEMENT ENTRIES
+                    if ($SelectedScans -contains "WindowPlacements") {
+                        $SyncHash.Status = "Scanning Window Placement Entries..."
+
+                        # WindowPlacement binary values remember window positions for applications.
+                        # Key locations:
+                        #   HKCU\Software\<Vendor>\<App>  — per-app WindowPlacement values (key name = exe path)
+                        #   HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\WindowPos — per-app stored positions
+                        #   HKCU\Software\Microsoft\Windows\Shell\Bags — desktop/explorer window positions
+                        #
+                        # Strategy:
+                        #   Part A: Walk HKCU\Software one level deep, skip known heavy system vendor keys,
+                        #          look for subkeys whose NAMES look like exe paths with WindowPlacement/AppID values.
+                        #   Part B: Scan Explorer\WindowPos for per-app window positions referencing missing exes.
+
+                        # Vendor keys to skip (hundreds of children, none are exe-path names)
+                        $wpSkipVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        foreach ($skip in @("Microsoft", "Classes", "Policies", "OEM", "RegisteredApplications", "Google")) {
+                            [void]$wpSkipVendors.Add($skip)
+                        }
+
+                        # Helper: add a window placement finding
+                        $AddWpFinding = {
+                            param([string]$ExePath, [string]$RegPath, [string]$ValueName, [string]$Details)
+                            if (-not (Test-IsProtectedWindowsPath $ExePath) -and -not (Test-PathExists $ExePath)) {
+                                $fixType = if ($null -eq $ValueName) { "Key" } else { "Value" }
+                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                    Problem    = "Invalid Window Placement"
+                                    Data       = "Executable no longer exists: $ExePath"
+                                    DisplayKey = $ExePath
+                                    RegPath    = $RegPath
+                                    ValueName  = $ValueName
+                                    Type       = $fixType
+                                    SafeToFix  = $true
+                                    Risk       = "Low"
+                                    Confidence = "Medium"
+                                    Details    = $Details
+                                })
+                                return $true
+                            }
+                            return $false
+                        }
+
+                        # --- Part A: HKCU\Software scan ---
+                        $wpRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software", $false)
+                        if ($wpRoot) {
+                            $topKeys = @($wpRoot.GetSubKeyNames())
+                            $total = [math]::Max($topKeys.Count, 1); $i = 0
+                            foreach ($topKey in $topKeys) {
+                                $i++; & $Tick "Scanning Window Placement: $topKey" $i $total
+                                try {
+                                    $swKey = $wpRoot.OpenSubKey($topKey, $false)
+                                    if (-not $swKey) { continue }
+
+                                    # --- Check top-level key name as exe path + has WindowPlacement value ---
+                                    $wpValue = $swKey.GetValue("WindowPlacement")
+                                    if ($null -ne $wpValue -and $wpValue -is [byte[]] -and $wpValue.Length -ge 8) {
+                                        if ($topKey -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                            & $AddWpFinding -ExePath $topKey -RegPath "HKCU:\Software\$topKey" -ValueName "WindowPlacement" -Details "WindowPlacement entry at HKCU\Software\$topKey references '$topKey' which no longer exists. Windows will recreate placement data when the app is launched again."
+                                        }
+                                    }
+
+                                    # --- Check second-level subkeys (e.g. Software\Vendor\App.exe) ---
+                                    # Skip known heavy system vendor keys to avoid enumerating hundreds of children
+                                    if ($wpSkipVendors.Contains($topKey)) { $swKey.Close(); continue }
+
+                                    $subKeys = $swKey.GetSubKeyNames()
+                                    $exeSubKeys = @($subKeys | Where-Object { $_ -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$' })
+                                    foreach ($subKey in $exeSubKeys) {
+                                        try {
+                                            $targetKey = $swKey.OpenSubKey($subKey, $false)
+                                            if (-not $targetKey) { continue }
+
+                                            $wpVal = $targetKey.GetValue("WindowPlacement")
+                                            if ($null -ne $wpVal -and $wpVal -is [byte[]] -and $wpVal.Length -ge 8) {
+                                                & $AddWpFinding -ExePath $subKey -RegPath "HKCU:\Software\$topKey\$subKey" -ValueName "WindowPlacement" -Details "WindowPlacement entry under HKCU\Software\$topKey\$subKey references '$subKey' which no longer exists. Windows will recreate placement data when the app is launched again."
+                                            }
+
+                                            # Check for exe-path-valued AppID or similar values under the subkey
+                                            $appIdVal = [string]$targetKey.GetValue("AppID")
+                                            if (-not [string]::IsNullOrWhiteSpace($appIdVal) -and $appIdVal -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                                & $AddWpFinding -ExePath $appIdVal -RegPath "HKCU:\Software\$topKey\$subKey" -ValueName "AppID" -Details "AppID value under HKCU\Software\$topKey\$subKey references '$appIdVal' which no longer exists."
+                                            }
+
+                                            $targetKey.Close()
+                                        }
+                                        catch {}
+                                    }
+
+                                    $swKey.Close()
+                                }
+                                catch {}
+                            }
+                            $wpRoot.Close()
+                        }
+
+                        # --- Part B: Explorer\WindowPos ---
+                        $wpPosRoot = "Software\Microsoft\Windows\CurrentVersion\Explorer\WindowPos"
+                        $wpPosKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($wpPosRoot, $false)
+                        if ($wpPosKey) {
+                            $posEntries = @($wpPosKey.GetSubKeyNames())
+                            $total = [math]::Max($posEntries.Count, 1); $i = 0
+                            foreach ($posEntry in $posEntries) {
+                                $i++; & $Tick "Scanning WindowPos: $posEntry" $i $total
+                                try {
+                                    $peKey = $wpPosKey.OpenSubKey($posEntry, $false)
+                                    if (-not $peKey) { continue }
+
+                                    # WindowPos entries may have "WinPos" or "Normal" values with embedded exe paths
+                                    # Also check if the entry name itself is an exe path
+                                    if ($posEntry -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                        & $AddWpFinding -ExePath $posEntry -RegPath "HKCU:\$wpPosRoot\$posEntry" -ValueName $null -Details "WindowPos entry '$posEntry' references a missing executable."
+                                    }
+
+                                    # Check for exe-path-valued "Application" or "Command" values
+                                    foreach ($val in @("Application", "Command")) {
+                                        $appVal = [string]$peKey.GetValue($val)
+                                        if (-not [string]::IsNullOrWhiteSpace($appVal) -and $appVal -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                            & $AddWpFinding -ExePath $appVal -RegPath "HKCU:\$wpPosRoot\$posEntry" -ValueName $val -Details "WindowPos '$posEntry' $val value references '$appVal' which no longer exists."
+                                        }
+                                    }
+
+                                    $peKey.Close()
+                                }
+                                catch {}
+                            }
+                            $wpPosKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 32. INVALID PRINT MONITOR / PRINT PROCESSOR DLLs
+                    if ($SelectedScans -contains "PrintMonitors") {
+                        $SyncHash.Status = "Scanning Print Monitors & Processors..."
+                        $winDir = [Environment]::GetFolderPath("System")
+
+                        # --- Part A: Print Monitors ---
+                        $monRoot = "SYSTEM\CurrentControlSet\Control\Print\Monitors"
+                        $monKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($monRoot, $false)
+                        if ($monKey) {
+                            $monitors = $monKey.GetSubKeyNames()
+                            $total = [math]::Max($monitors.Count, 1); $i = 0
+                            foreach ($mon in $monitors) {
+                                $i++; & $Tick "Scanning Print Monitor: $mon" $i $total
+                                try {
+                                    $mk = $monKey.OpenSubKey($mon, $false)
+                                    if (-not $mk) { continue }
+                                    $driver = [string]$mk.GetValue("Driver")
+                                    if (-not [string]::IsNullOrWhiteSpace($driver)) {
+                                        $dllPath = $driver
+                                        if ($driver -notmatch '^(?i)[a-z]:\\') {
+                                            # Bare filename — resolve against System32, add .dll only if missing
+                                            if ($driver -notmatch '\.dll$') { $dllPath = "$driver.dll" }
+                                            $dllPath = Join-Path $winDir $dllPath
+                                        }
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
+                                        if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                Problem    = "Invalid Print Monitor DLL"
+                                                Data       = "Driver DLL not found: $expanded"
+                                                DisplayKey = $mon
+                                                RegPath    = "HKLM:\$monRoot\$mon"
+                                                ValueName  = "Driver"
+                                                Type       = "Value"
+                                                SafeToFix  = $true
+                                                Risk       = "Medium"
+                                                Confidence = "High"
+                                                Details    = "Print monitor '$mon' references driver DLL '$expanded' which does not exist. Stale print monitors can cause print spooler issues. Remove only if you do not use this printer/monitor."
+                                            })
+                                        }
+                                    }
+                                    $mk.Close()
+                                }
+                                catch {}
+                            }
+                            $monKey.Close()
+                        }
+
+                        # --- Part B: Print Processors ---
+                        $procRoot = "SYSTEM\CurrentControlSet\Control\Print\Print Processors"
+                        $procKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($procRoot, $false)
+                        if ($procKey) {
+                            $processors = $procKey.GetSubKeyNames()
+                            $total = [math]::Max($processors.Count, 1); $i = 0
+                            foreach ($proc in $processors) {
+                                $i++; & $Tick "Scanning Print Processor: $proc" $i $total
+                                try {
+                                    $pk = $procKey.OpenSubKey($proc, $false)
+                                    if (-not $pk) { continue }
+                                    $driver = [string]$pk.GetValue("Driver")
+                                    if (-not [string]::IsNullOrWhiteSpace($driver)) {
+                                        $dllPath = $driver
+                                        if ($driver -notmatch '^(?i)[a-z]:\\') {
+                                            if ($driver -notmatch '\.dll$') { $dllPath = "$driver.dll" }
+                                            $dllPath = Join-Path $winDir $dllPath
+                                        }
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
+                                        if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                Problem    = "Invalid Print Processor DLL"
+                                                Data       = "Driver DLL not found: $expanded"
+                                                DisplayKey = $proc
+                                                RegPath    = "HKLM:\$procRoot\$proc"
+                                                ValueName  = "Driver"
+                                                Type       = "Value"
+                                                SafeToFix  = $true
+                                                Risk       = "Medium"
+                                                Confidence = "High"
+                                                Details    = "Print processor '$proc' references driver DLL '$expanded' which does not exist. Stale print processors can cause print spooler issues."
+                                            })
+                                        }
+                                    }
+                                    $pk.Close()
+                                }
+                                catch {}
+                            }
+                            $procKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 33. INVALID LSA SECURITY / AUTHENTICATION PACKAGE DLLs
+                    if ($SelectedScans -contains "LSAPackages") {
+                        $SyncHash.Status = "Scanning LSA Packages..."
+                        $lsaRoot = "SYSTEM\CurrentControlSet\Control\Lsa"
+                        $lsaKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($lsaRoot, $false)
+                        if ($lsaKey) {
+                            # Check both "Security Packages" and "Authentication Packages" (multi-string values)
+                            $valueNames = @("Security Packages", "Authentication Packages")
+                            $total = [math]::Max($valueNames.Count, 1); $i = 0
+                            foreach ($valName in $valueNames) {
+                                $i++; & $Tick "Scanning LSA: $valName" $i $total
+                                try {
+                                    $dllNames = $lsaKey.GetValue($valName)
+                                    if ($null -ne $dllNames) {
+                                        # Multi-string value: could be string[] or single string
+                                        $dllList = @()
+                                        if ($dllNames -is [string[]]) {
+                                            $dllList = @($dllNames)
+                                        } elseif ($dllNames -is [string]) {
+                                            $dllList = @($dllNames)
+                                        }
+                                        foreach ($dllName in $dllList) {
+                                            if ([string]::IsNullOrWhiteSpace($dllName)) { continue }
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($dllName)
+                                            # Skip built-in Windows LSA packages (just the DLL name, not a full path)
+                                            if ($expanded -match '^(?i)[a-z]:\\') {
+                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid LSA Security Package DLL"
+                                                        Data       = "DLL not found: $expanded"
+                                                        DisplayKey = $dllName
+                                                        RegPath    = "HKLM:\$lsaRoot"
+                                                        ValueName  = $valName
+                                                        Type       = "Value"
+                                                        SafeToFix  = $false
+                                                        Risk       = "High"
+                                                        Confidence = "Medium"
+                                                        Details    = "LSA '$valName' multi-string value contains '$dllName' which resolves to a non-existent file. This is loaded by LSASS during logon — do NOT remove this entry yourself unless you know what you are doing. Stale entries from uninstalled security software can delay or break logon."
+                                                    })
+                                                }
+                                            } else {
+                                                # Bare DLL name — look in System32 (try as-is first, then with .dll appended)
+                                                $sysPath = Join-Path $([Environment]::GetFolderPath("System")) $expanded
+                                                $found = (Test-PathExists $sysPath)
+                                                if (-not $found -and $expanded -notmatch '\.') {
+                                                    $sysPathDotDll = Join-Path $([Environment]::GetFolderPath("System")) "$expanded.dll"
+                                                    $found = (Test-PathExists $sysPathDotDll)
+                                                    if ($found) { $sysPath = $sysPathDotDll }
+                                                }
+                                                if (-not $found) {
+                                                    # Only flag if it doesn't look like a known Windows package name
+                                                    $knownPackages = @("msv1_0", "wdigest", "tspkg", "pku2u", "cloudAP", "Kerberos", "NTLM", "Negotiate", "Schannel", "CoreCtx", "Livessp", "wusa", "NegoExtender", "CredPack", "DPAPI", "AppLocker", "apphelp", "sbsbsrv")
+                                                    $bareName = [System.IO.Path]::GetFileNameWithoutExtension($expanded)
+                                                    if ($bareName -notin $knownPackages) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Authentication Package DLL"
+                                                            Data       = "DLL not found in System32: $sysPath"
+                                                            DisplayKey = $dllName
+                                                            RegPath    = "HKLM:\$lsaRoot"
+                                                            ValueName  = $valName
+                                                            Type       = "Value"
+                                                            SafeToFix  = $false
+                                                            Risk       = "High"
+                                                            Confidence = "Low"
+                                                            Details    = "LSA '$valName' contains bare DLL name '$dllName' which was not found in System32. If this is from uninstalled security software, it can slow logon. Verify carefully before removing — this value is loaded by LSASS."
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+                            $lsaKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 34. STALE BAM/DAM ENTRIES
+                    if ($SelectedScans -contains "BamEntries") {
+                        $SyncHash.Status = "Scanning BAM/DAM Activity Entries..."
+
+                        # Build NT device path → drive letter mapping from MountedDevices
+                        $deviceMap = [System.Collections.Generic.Dictionary[string,string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        try {
+                            $mdKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("SYSTEM\MountedDevices", $false)
+                            if ($mdKey) {
+                                foreach ($mv in $mdKey.GetValueNames()) {
+                                    try {
+                                        if ($mv -match '^\\DosDevices\\([A-Z]):$') {
+                                            $driveLetter = $matches[1] + ":"
+                                            $mdata = $mdKey.GetValue($mv)
+                                            if ($mdata -is [byte[]] -and $mdata.Length -gt 12) {
+                                                $raw = [System.Text.Encoding]::Unicode.GetString($mdata)
+                                                # MountedDevices binary may have a 4-byte or 12-byte header before the NT path.
+                                                # Look for \??\ prefix in the decoded string
+                                                $ntIdx = $raw.IndexOf('\??\')
+                                                if ($ntIdx -ge 0) {
+                                                    $ntPath = $raw.Substring($ntIdx).TrimEnd("`0")
+                                                } else {
+                                                    # Try skipping first 12 bytes (3 Unicode chars header) then look for \Device\
+                                                    if ($mdata.Length -gt 24) {
+                                                        $ntPath = [System.Text.Encoding]::Unicode.GetString($mdata, 12, $mdata.Length - 12).TrimEnd("`0")
+                                                    } else {
+                                                        $ntPath = $raw.TrimEnd("`0")
+                                                    }
+                                                }
+                                                if ($ntPath.Length -gt 3 -and -not $deviceMap.ContainsKey($ntPath)) {
+                                                    $deviceMap.Add($ntPath, $driveLetter)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                }
+                                $mdKey.Close()
+                            }
+                        }
+                        catch {}
+
+                        # Helper function: convert NT device path to DOS path using the map
+                        # Sort keys longest-first so more specific prefixes match before shorter ones
+                        $sortedPrefixes = @($deviceMap.Keys | Sort-Object { $_.Length } -Descending)
+                        function script:Convert-BamNtToDos {
+                            param([string]$NtPath)
+                            foreach ($prefix in $sortedPrefixes) {
+                                if ($NtPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+                                    return ($deviceMap[$prefix] + "\" + $NtPath.Substring($prefix.Length))
+                                }
+                            }
+                            return $null
+                        }
+
+                        # BAM = Background Activity Moderator, DAM = Desktop Activity Moderator
+                        $bamRoot = "SYSTEM\CurrentControlSet\Services\bam\State\UserSettings"
+                        $damRoot = "SYSTEM\CurrentControlSet\Services\dam\State\UserSettings"
+
+                        foreach ($svcRoot in @($bamRoot, $damRoot)) {
+                            $svcName = if ($svcRoot -match '\\bam\\') { "BAM" } else { "DAM" }
+                            $rootKey = $null
+                            try {
+                                $rootKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($svcRoot, $false)
+                            }
+                            catch { continue }
+                            if (-not $rootKey) { continue }
+
+                            $sids = @($rootKey.GetSubKeyNames())
+                            $total = [math]::Max($sids.Count, 1); $i = 0
+                            foreach ($sid in $sids) {
+                                $i++; & $Tick "Scanning $svcName SID: $($sid.Substring(0, [math]::Min($sid.Length, 20)))" $i $total
+                                $sidKey = $null
+                                try {
+                                    $sidKey = $rootKey.OpenSubKey($sid, $false)
+                                    if (-not $sidKey) { continue }
+
+                                    foreach ($entryName in $sidKey.GetSubKeyNames()) {
+                                        try {
+                                            $cleanPath = $entryName
+
+                                            # Convert NT device paths (\Device\HarddiskVolume3\...) to DOS paths
+                                            if ($cleanPath -match '^\\Device\\') {
+                                                $dosPath = Convert-BamNtToDos -NtPath $cleanPath
+                                                if ($null -ne $dosPath) {
+                                                    $cleanPath = $dosPath
+                                                } else {
+                                                    continue
+                                                }
+                                            }
+                                            # Strip \??\ prefix if present (e.g. \??\C:\...)
+                                            elseif ($cleanPath -match '^\\\?\?\\(.+)$') {
+                                                $cleanPath = $matches[1]
+                                            }
+
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($cleanPath)
+                                            if ($expanded -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Stale BAM/DAM Entry"
+                                                        Data       = "App no longer exists: $expanded"
+                                                        DisplayKey = "$svcName\$sid\$entryName"
+                                                        RegPath    = "HKLM:\$svcRoot\$sid\$entryName"
+                                                        ValueName  = $null
+                                                        Type       = "Key"
+                                                        SafeToFix  = $true
+                                                        Risk       = "Low"
+                                                        Confidence = "High"
+                                                        Details    = "$svcName activity tracking has an entry for '$expanded' but the executable no longer exists. Stale BAM/DAM entries accumulate over time and can be safely cleaned."
+                                                    })
+                                                }
+                                            }
+                                        }
+                                        catch {}
+                                    }
+                                }
+                                catch {}
+                                finally {
+                                    if ($sidKey) { $sidKey.Close() }
+                                }
+                            }
+                            $rootKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 35. WINDOWS DEFENDER EXCLUSION PATH VALIDATION
+                    if ($SelectedScans -contains "DefenderExclusions") {
+                        $SyncHash.Status = "Scanning Defender Exclusions..."
+
+                        $defRoot = "SOFTWARE\Microsoft\Windows Defender\Exclusions"
+                        # Scan both HKLM and HKCU
+                        foreach ($defHive in @("HKLM", "HKCU")) {
+                            $defBaseKey = if ($defHive -eq "HKLM") {
+                                [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($defRoot, $false)
+                            } else {
+                                [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($defRoot, $false)
+                            }
+                            if ($defBaseKey) {
+                                $exclusionTypes = $defBaseKey.GetSubKeyNames()
+                                $total = [math]::Max($exclusionTypes.Count, 1); $i = 0
+                                foreach ($exType in $exclusionTypes) {
+                                    $i++; & $Tick "Scanning $defHive Defender Exclusions: $exType" $i $total
+                                    try {
+                                        $typeKey = $defBaseKey.OpenSubKey($exType, $false)
+                                        if (-not $typeKey) { continue }
+
+                                        $hivePrefix = if ($defHive -eq "HKLM") { "HKLM:" } else { "HKCU:" }
+
+                                        # Defender stores exclusions as VALUES where the VALUE NAME is the excluded path/process/extension
+                                        foreach ($valName in $typeKey.GetValueNames()) {
+                                            $expanded = $valName
+                                            # Skip non-path values (empty default, numeric index values, etc.)
+                                            if ($expanded.Length -lt 2) { continue }
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($expanded)
+
+                                            if ($expanded -match '^(?i)[a-z]:\\') {
+                                                # Path-based exclusion — check if it exists
+                                                if (-not (Test-PathExists $expanded)) {
+                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                        Problem    = "Invalid Defender Exclusion"
+                                                        Data       = "Excluded path does not exist: $expanded"
+                                                        DisplayKey = $expanded
+                                                        RegPath    = "$hivePrefix\$defRoot\$exType"
+                                                        ValueName  = $valName
+                                                        Type       = "Value"
+                                                        SafeToFix  = $true
+                                                        Risk       = "Medium"
+                                                        Confidence = "High"
+                                                        Details    = "Windows Defender exclusion ($defHive) '$expanded' references a path that no longer exists. Stale exclusions should be reviewed and removed."
+                                                    })
+                                                }
+                                            } elseif ($exType -eq "Processes" -and $expanded -notmatch '^(?i)\*') {
+                                                # Process exclusion (exe name) — check if the exe exists on PATH or in common locations
+                                                $procName = $expanded.Trim()
+                                                if ($procName -match '\.(?:exe|com)$') {
+                                                    $found = $false
+                                                    foreach ($searchDir in @([Environment]::GetFolderPath("System"), [Environment]::GetFolderPath("Windows"), "${env:ProgramFiles}", "${env:ProgramFiles(x86)}")) {
+                                                        if (Test-PathExists (Join-Path $searchDir $procName)) { $found = $true; break }
+                                                    }
+                                                    if (-not $found) {
+                                                        # Also check LocalAppData and user profile directories
+                                                        foreach ($searchDir in @($env:LOCALAPPDATA, $env:APPDATA)) {
+                                                            if (-not [string]::IsNullOrWhiteSpace($searchDir) -and (Test-PathExists $searchDir)) {
+                                                                try {
+                                                                    $hits = Get-ChildItem -LiteralPath $searchDir -Filter $procName -Recurse -Depth 3 -File -ErrorAction SilentlyContinue
+                                                                    if ($hits) { $found = $true; break }
+                                                                } catch {}
+                                                            }
+                                                        }
+                                                    }
+                                                    if (-not $found) {
+                                                        try {
+                                                            $cmd = Get-Command $procName -CommandType Application -ErrorAction SilentlyContinue
+                                                            if ($cmd) { $found = $true }
+                                                        } catch {}
+                                                    }
+                                                    if (-not $found) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Defender Exclusion"
+                                                            Data       = "Excluded process not found: $procName"
+                                                            DisplayKey = $procName
+                                                            RegPath    = "$hivePrefix\$defRoot\$exType"
+                                                            ValueName  = $valName
+                                                            Type       = "Value"
+                                                            SafeToFix  = $true
+                                                            Risk       = "Low"
+                                                            Confidence = "Medium"
+                                                            Details    = "Windows Defender process exclusion ($defHive) '$procName' was not found on the system."
+                                                        })
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        # Also check subkeys (some exclusion types store data under subkeys)
+                                        foreach ($exName in $typeKey.GetSubKeyNames()) {
+                                            try {
+                                                $exSubKey = $typeKey.OpenSubKey($exName, $false)
+                                                if (-not $exSubKey) { continue }
+                                                $val = [string]$exSubKey.GetValue("")
+                                                if (-not [string]::IsNullOrWhiteSpace($val)) {
+                                                    $expanded = [Environment]::ExpandEnvironmentVariables($val)
+                                                    if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-PathExists $expanded)) {
+                                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                            Problem    = "Invalid Defender Exclusion"
+                                                            Data       = "Excluded path does not exist: $expanded"
+                                                            DisplayKey = $exName
+                                                            RegPath    = "$hivePrefix\$defRoot\$exType\$exName"
+                                                            ValueName  = ""
+                                                            Type       = "Value"
+                                                            SafeToFix  = $true
+                                                            Risk       = "Medium"
+                                                            Confidence = "High"
+                                                            Details    = "Windows Defender exclusion ($defHive) '$expanded' references a path that no longer exists."
+                                                        })
+                                                    }
+                                                }
+                                                $exSubKey.Close()
+                                            }
+                                            catch {}
+                                        }
+
+                                        $typeKey.Close()
+                                    }
+                                    catch {}
+                                }
+                                $defBaseKey.Close()
+                            }
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 36. INVALID IME / KEYBOARD LAYOUT DLLs
+                    if ($SelectedScans -contains "KeyboardLayouts") {
+                        $SyncHash.Status = "Scanning Keyboard Layout DLLs..."
+                        $winDir = [Environment]::GetFolderPath("System")
+
+                        $kbRoot = "SYSTEM\CurrentControlSet\Control\Keyboard Layouts"
+                        $kbKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($kbRoot, $false)
+                        if ($kbKey) {
+                            $layouts = $kbKey.GetSubKeyNames()
+                            $total = [math]::Max($layouts.Count, 1); $i = 0
+                            foreach ($layout in $layouts) {
+                                $i++; & $Tick "Scanning Keyboard Layout: $layout" $i $total
+                                try {
+                                    $lk = $kbKey.OpenSubKey($layout, $false)
+                                    if (-not $lk) { continue }
+
+                                    # Check "Layout File", "Layout DLL", and "IME File" values
+                                    foreach ($dllValue in @("Layout File", "Layout DLL", "IME File")) {
+                                        $dllName = [string]$lk.GetValue($dllValue)
+                                        if ([string]::IsNullOrWhiteSpace($dllName)) { continue }
+
+                                        $dllPath = $dllName
+                                        # If it's just a filename, resolve against System32
+                                        if ($dllName -notmatch '^(?i)[a-z]:\\') {
+                                            $dllPath = Join-Path $winDir $dllName
+                                            # If no extension, try adding .dll
+                                            if ($dllName -notmatch '\.') {
+                                                $dllPathDll = Join-Path $winDir "$dllName.dll"
+                                                if ((Test-PathExists $dllPathDll) -and -not (Test-PathExists $dllPath)) {
+                                                    $dllPath = $dllPathDll
+                                                }
+                                            }
+                                        }
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($dllPath)
+                                        if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                Problem    = "Invalid Keyboard Layout DLL"
+                                                Data       = "DLL not found: $expanded"
+                                                DisplayKey = "$layout ($dllValue)"
+                                                RegPath    = "HKLM:\$kbRoot\$layout"
+                                                ValueName  = $dllValue
+                                                Type       = "Value"
+                                                SafeToFix  = $true
+                                                Risk       = "Low"
+                                                Confidence = "High"
+                                                Details    = "Keyboard layout '$layout' references $dllValue '$expanded' which does not exist. This can cause issues with input language switching. Remove only if you do not need this layout."
+                                            })
+                                        }
+                                    }
+                                    $lk.Close()
+                                }
+                                catch {}
+                            }
+                            $kbKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 37. INVALID APPLICATION RECOVERY / RESTART ENTRIES
+                    if ($SelectedScans -contains "AppRecovery") {
+                        $SyncHash.Status = "Scanning App Recovery/Restart Entries..."
+
+                        # HKCU: ApplicationRecovery and ApplicationRestart
+                        $arRoot = "Software\Microsoft\Windows NT\CurrentVersion"
+                        foreach ($arType in @("ApplicationRecovery", "ApplicationRestart")) {
+                            $arKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("$arRoot\$arType", $false)
+                            if ($arKey) {
+                                $entries = $arKey.GetSubKeyNames()
+                                $total = [math]::Max($entries.Count, 1); $i = 0
+                                foreach ($entry in $entries) {
+                                    $i++; & $Tick "Scanning App $arType : $entry" $i $total
+                                    try {
+                                        $ek = $arKey.OpenSubKey($entry, $false)
+                                        if (-not $ek) { continue }
+
+                                        $exeVal = [string]$ek.GetValue("ApplicationRecoveryExe")
+                                        if ([string]::IsNullOrWhiteSpace($exeVal)) {
+                                            $exeVal = [string]$ek.GetValue("ApplicationRestartCmd")
+                                        }
+                                        $cmdVal = [string]$ek.GetValue("Command")
+
+                                        foreach ($exePath in @($exeVal, $cmdVal)) {
+                                            if ([string]::IsNullOrWhiteSpace($exePath)) { continue }
+                                            # Strip quotes and extract exe path from command line
+                                            $cleanExe = $exePath.Trim('"').Trim()
+                                            if ($cleanExe -match '^(?i)([a-z]:\\[^\s"]+\.(?:exe|msi|bat|cmd|com))') {
+                                                $cleanExe = $matches[1]
+                                            } elseif ($cleanExe -notmatch '^(?i)[a-z]:\\') {
+                                                continue
+                                            }
+
+                                            $expanded = [Environment]::ExpandEnvironmentVariables($cleanExe)
+                                            if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                                    Problem    = "Invalid App Recovery Entry"
+                                                    Data       = "Executable no longer exists: $expanded"
+                                                    DisplayKey = $entry
+                                                    RegPath    = "HKCU:\$arRoot\$arType\$entry"
+                                                    ValueName  = $null
+                                                    Type       = "Key"
+                                                    SafeToFix  = $true
+                                                    Risk       = "Low"
+                                                    Confidence = "Medium"
+                                                    Details    = "Application $arType entry '$entry' references '$expanded' which no longer exists. Windows uses this to restart/recover apps after crashes. The app should re-register when reinstalled."
+                                                })
+                                                break  # Only flag once per entry
+                                            }
+                                        }
+                                        $ek.Close()
+                                    }
+                                    catch {}
+                                }
+                                $arKey.Close()
+                            }
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 38. BROKEN AUTOPLAY / AUTORUN HANDLERS
+                    if ($SelectedScans -contains "AutoplayHandlers") {
+                        $SyncHash.Status = "Scanning Autoplay Handlers..."
+                        $winDir = [Environment]::GetFolderPath("System")
+
+                        $apRoot = "SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\AutoplayHandlers\Handlers"
+                        $apKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($apRoot, $false)
+                        if ($apKey) {
+                            $handlers = $apKey.GetSubKeyNames()
+                            $total = [math]::Max($handlers.Count, 1); $i = 0
+                            foreach ($handler in $handlers) {
+                                $i++; & $Tick "Scanning Autoplay Handler: $handler" $i $total
+                                try {
+                                    $hk = $apKey.OpenSubKey($handler, $false)
+                                    if (-not $hk) { continue }
+
+                                    $missing = $false
+
+                                    # Method 1: Check "ProviderExePath" value directly (used by some handlers)
+                                    $exePath = [string]$hk.GetValue("ProviderExePath")
+                                    if (-not [string]::IsNullOrWhiteSpace($exePath)) {
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($exePath)
+                                        if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            $missing = $true
+                                        }
+                                    }
+
+                                    # Method 2: Resolve via ProgID → CLSID → InprocServer32/LocalServer32
+                                    if (-not $missing) {
+                                        $progId = [string]$hk.GetValue("ProgId")
+                                        if (-not [string]::IsNullOrWhiteSpace($progId)) {
+                                            $clsidKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("$progId\CLSID", $false)
+                                            if (-not $clsidKey) {
+                                                $clsidVal = [string]$hk.GetValue("CLSID")
+                                                if (-not [string]::IsNullOrWhiteSpace($clsidVal)) {
+                                                    $clsidKey = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("CLSID\$clsidVal", $false)
+                                                }
+                                            }
+                                            if ($clsidKey) {
+                                                foreach ($svrKey in @("InprocServer32", "LocalServer32")) {
+                                                    $svr = $clsidKey.OpenSubKey($svrKey, $false)
+                                                    if ($svr) {
+                                                        $bin = [string]$svr.GetValue("")
+                                                        if (-not [string]::IsNullOrWhiteSpace($bin)) {
+                                                            $binClean = $bin.Trim('"').Trim()
+                                                            if ($binClean -match '^(?i)([a-z]:\\[^\s"]+\.(?:exe|dll))') { $binClean = $matches[1] }
+                                                            $expanded = [Environment]::ExpandEnvironmentVariables($binClean)
+                                                            if ($expanded -match '^(?i)[a-z]:\\') {
+                                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                                    $missing = $true
+                                                                }
+                                                            } else {
+                                                                # Bare DLL name (e.g. "shell32.dll") — resolve against System32
+                                                                $sysPath = Join-Path $winDir $binClean
+                                                                if ($binClean -notmatch '\.') { $sysPath = "$sysPath.dll" }
+                                                                $expanded = [Environment]::ExpandEnvironmentVariables($sysPath)
+                                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                                    $missing = $true
+                                                                }
+                                                            }
+                                                        }
+                                                        $svr.Close()
+                                                    }
+                                                    if ($missing) { break }
+                                                }
+                                                $clsidKey.Close()
+                                            }
+                                        }
+                                    }
+
+                                    # Method 3: Check DefaultIcon for missing icon file (exe or dll)
+                                    if (-not $missing) {
+                                        $iconVal = [string]$hk.GetValue("DefaultIcon")
+                                        if (-not [string]::IsNullOrWhiteSpace($iconVal)) {
+                                            $iconPath = ($iconVal -split ',')[0].Trim('"').Trim()
+                                            if ($iconPath -match '^(?i)[a-z]:\\') {
+                                                if (-not (Test-IsProtectedWindowsPath $iconPath) -and -not (Test-PathExists $iconPath)) {
+                                                    $missing = $true
+                                                }
+                                            } elseif ($iconPath.Length -ge 4 -and $iconPath -notmatch '[\\/:]') {
+                                                # Bare filename (e.g. "shell32.dll,-1") — resolve against System32
+                                                $iconSysPath = Join-Path $winDir $iconPath
+                                                if ($iconPath -notmatch '\.') { $iconSysPath = "$iconSysPath.dll" }
+                                                if (-not (Test-IsProtectedWindowsPath $iconSysPath) -and -not (Test-PathExists $iconSysPath)) {
+                                                    $missing = $true
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    if ($missing) {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Broken Autoplay Handler"
+                                            Data       = "Handler references missing files"
+                                            DisplayKey = $handler
+                                            RegPath    = "HKLM:\$apRoot\$handler"
+                                            ValueName  = $null
+                                            Type       = "Key"
+                                            SafeToFix  = $true
+                                            Risk       = "Low"
+                                            Confidence = "High"
+                                            Details    = "Autoplay handler '$handler' references executables, DLLs, or icons that no longer exist. This handler will appear as a dead option when inserting media. It can be safely removed."
+                                        })
+                                    }
+                                    $hk.Close()
+                                }
+                                catch {}
+                            }
+                            $apKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 39. PENDING FILE RENAME OPERATIONS (INVALID DRIVES)
+                    if ($SelectedScans -contains "PendingRenames") {
+                        $SyncHash.Status = "Scanning Pending File Rename Operations..."
+
+                        $smRoot = "SYSTEM\CurrentControlSet\Control\Session Manager"
+                        $smKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($smRoot, $false)
+                        if ($smKey) {
+                            $valNames = @("PendingFileRenameOperations", "PendingFileRenameOperations2")
+                            $total = [math]::Max($valNames.Count, 1); $i = 0
+                            foreach ($valName in $valNames) {
+                                $i++; & $Tick "Scanning: $valName" $i $total
+                                try {
+                                    $data = $smKey.GetValue($valName)
+                                    if ($null -eq $data) { continue }
+
+                                    # Multi-string: each pair is (source, destination)
+                                    $lines = @()
+                                    if ($data -is [string[]]) {
+                                        $lines = @($data)
+                                    } elseif ($data -is [string]) {
+                                        $lines = @($data)
+                                    }
+
+                                    $driveLetters = @()
+                                    try {
+                                        $driveLetters = @([System.IO.DriveInfo]::GetDrives() | Where-Object { $_.IsReady } | ForEach-Object { $_.Name.Substring(0,1).ToUpper() })
+                                    }
+                                    catch {}
+
+                                    $flaggedLines = [System.Collections.Generic.List[string]]::new()
+                                    for ($lineIdx = 0; $lineIdx -lt $lines.Count; $lineIdx++) {
+                                        $line = $lines[$lineIdx]
+                                        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                                        # Check if the path references a drive that doesn't exist
+                                        if ($line -match '(?i)^\\\?\?([a-z]):\\') {
+                                            $drive = $matches[1].ToUpper()
+                                            if ($drive -notin $driveLetters) {
+                                                [void]$flaggedLines.Add($line)
+                                            }
+                                        }
+                                    }
+
+                                    if ($flaggedLines.Count -gt 0) {
+                                        $sampleLines = @($flaggedLines | Select-Object -First 3) -join "; "
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Invalid Pending Rename"
+                                            Data       = "References non-existent drive(s). $($flaggedLines.Count) entries flagged. Sample: $sampleLines"
+                                            DisplayKey = $valName
+                                            RegPath    = "HKLM:\$smRoot"
+                                            ValueName  = $valName
+                                            Type       = "Value"
+                                            SafeToFix  = $true
+                                            Risk       = "Low"
+                                            Confidence = "High"
+                                            Details    = "Pending file rename operations reference drive letter(s) that do not exist. These operations fail silently on every boot and never complete. The entire value can be cleared safely."
+                                        })
+                                    }
+                                }
+                                catch {}
+                            }
+                            $smKey.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 40. INVALID NETWORK PROVIDER ORDER DLLs
+                    if ($SelectedScans -contains "NetworkProviders") {
+                        $SyncHash.Status = "Scanning Network Provider DLLs..."
+
+                        # Read ProviderOrder to get the small list of registered providers (typically 2-5)
+                        $poRoot = "SYSTEM\CurrentControlSet\Control\NetworkProvider\ProviderOrder"
+                        $poKey = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($poRoot, $false)
+                        $providerNames = @()
+                        if ($poKey) {
+                            $order = [string]$poKey.GetValue("ProviderOrder")
+                            if (-not [string]::IsNullOrWhiteSpace($order)) {
+                                $providerNames = @($order -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                            }
+                            $poKey.Close()
+                        }
+
+                        $npSvcRoot = "SYSTEM\CurrentControlSet\Services"
+                        $total = [math]::Max($providerNames.Count, 1); $i = 0
+                        foreach ($prov in $providerNames) {
+                            $i++; & $Tick "Scanning Network Provider: $prov" $i $total
+                            try {
+                                $npSub = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey("$npSvcRoot\$prov\NetworkProvider", $false)
+                                if (-not $npSub) {
+                                    # Provider in order but no service key — orphaned
+                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                        Problem    = "Invalid Network Provider Path"
+                                        Data       = "Provider '$prov' in ProviderOrder has no service key"
+                                        DisplayKey = $prov
+                                        RegPath    = "HKLM:\$poRoot"
+                                        ValueName  = "ProviderOrder"
+                                        Type       = "Value"
+                                        SafeToFix  = $false
+                                        Risk       = "Medium"
+                                        Confidence = "Medium"
+                                        Details    = "Network ProviderOrder references '$prov' but no corresponding service\NetworkProvider key exists. The entry is orphaned, but removing it from the ProviderOrder string requires editing the comma-separated value — not just deleting it. Manually remove '$prov' from the ProviderOrder value if desired."
+                                    })
+                                    continue
+                                }
+
+                                $providerPath = [string]$npSub.GetValue("ProviderPath")
+                                if (-not [string]::IsNullOrWhiteSpace($providerPath)) {
+                                    $expanded = [Environment]::ExpandEnvironmentVariables($providerPath)
+                                    if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Invalid Network Provider DLL"
+                                            Data       = "Provider DLL not found: $expanded"
+                                            DisplayKey = "$prov\NetworkProvider"
+                                            RegPath    = "HKLM:\$npSvcRoot\$prov\NetworkProvider"
+                                            ValueName  = "ProviderPath"
+                                            Type       = "Value"
+                                            SafeToFix  = $true
+                                            Risk       = "Medium"
+                                            Confidence = "High"
+                                            Details    = "Network provider '$prov' references ProviderPath '$expanded' which does not exist. Missing network providers can delay network connectivity during logon."
+                                        })
+                                    }
+                                }
+                                $npSub.Close()
+                            }
+                            catch {}
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # 41. ORPHANED COM+ / LEGACY DCOM APPLICATIONS
+                    if ($SelectedScans -contains "OrphanedComPlus") {
+                        $SyncHash.Status = "Scanning COM+ / DCOM Applications..."
+
+                        # --- Part A: COM+ registrations (HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\COM3) ---
+                        $com3Root = "SOFTWARE\Microsoft\Windows NT\CurrentVersion\COM3"
+                        $com3Key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($com3Root, $false)
+                        if ($com3Key) {
+                            $guids = $com3Key.GetSubKeyNames()
+                            $total = [math]::Max($guids.Count, 1); $i = 0
+                            foreach ($guid in $guids) {
+                                $i++; & $Tick "Scanning COM+ App: $guid" $i $total
+                                try {
+                                    $gk = $com3Key.OpenSubKey($guid, $false)
+                                    if (-not $gk) { continue }
+
+                                    # COM+ apps may reference executables
+                                    $exeVal = [string]$gk.GetValue("Executable")
+                                    $dllVal = [string]$gk.GetValue("DllPath")
+                                    $missing = $false
+
+                                    foreach ($exePath in @($exeVal, $dllVal)) {
+                                        if ([string]::IsNullOrWhiteSpace($exePath)) { continue }
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($exePath)
+                                        if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            $missing = $true
+                                            break
+                                        }
+                                    }
+
+                                    # Also check for sxsname, progid, description to filter empty/system entries
+                                    if (-not $missing) {
+                                        $sxsName = [string]$gk.GetValue("sxsname")
+                                        $progId = [string]$gk.GetValue("ProgId")
+                                        if ([string]::IsNullOrWhiteSpace($sxsName) -and [string]::IsNullOrWhiteSpace($progId) -and [string]::IsNullOrWhiteSpace($exeVal) -and [string]::IsNullOrWhiteSpace($dllVal)) {
+                                            # Completely empty COM+ entry — orphaned shell
+                                            if ($gk.GetSubKeyNames().Count -eq 0 -and $gk.GetValueNames().Count -eq 0) {
+                                                $missing = $true
+                                            }
+                                        }
+                                    }
+
+                                    if ($missing) {
+                                        $display = if (-not [string]::IsNullOrWhiteSpace($exeVal)) { $exeVal } elseif (-not [string]::IsNullOrWhiteSpace($dllVal)) { $dllVal } else { $guid }
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Orphaned COM+ Application"
+                                            Data       = "COM+ application '$display' references missing files or is empty"
+                                            DisplayKey = $guid
+                                            RegPath    = "HKLM:\$com3Root\$guid"
+                                            ValueName  = $null
+                                            Type       = "Key"
+                                            SafeToFix  = $true
+                                            Risk       = "Low"
+                                            Confidence = "Medium"
+                                            Details    = "COM+ application '$guid' references executables/DLLs that no longer exist, or is completely empty. Orphaned COM+ registrations can slow COM+ activation."
+                                        })
+                                    }
+                                    $gk.Close()
+                                }
+                                catch {}
+                            }
+                            $com3Key.Close()
+                        }
+
+                        # --- Part B: Legacy DCOM entries with missing LocalServer32 / ServiceParameters ---
+                        $dcomRoot = [Microsoft.Win32.Registry]::ClassesRoot.OpenSubKey("AppID", $false)
+                        if ($dcomRoot) {
+                            $appIds = $dcomRoot.GetSubKeyNames()
+                            $total = [math]::Max($appIds.Count, 1); $i = 0
+                            foreach ($appId in $appIds) {
+                                $i++; & $Tick "Scanning DCOM AppID: $appId" $i $total
+                                try {
+                                    $ak = $dcomRoot.OpenSubKey($appId, $false)
+                                    if (-not $ak) { continue }
+
+                                    # Check for LocalServer32 or ServiceParameters referencing missing binaries
+                                    $ls32 = [string]$ak.GetValue("LocalServer32")
+                                    $sp = [string]$ak.GetValue("ServiceParameters")
+                                    $missing = $false
+                                    $missingPath = ""
+
+                                    foreach ($exeRef in @($ls32, $sp)) {
+                                        if ([string]::IsNullOrWhiteSpace($exeRef)) { continue }
+                                        # Extract exe path from potential command-line args
+                                        $cleanPath = $exeRef.Trim('"').Trim()
+                                        if ($cleanPath -match '^(?i)([a-z]:\\[^\s"]+\.(?:exe|dll))') {
+                                            $cleanPath = $matches[1]
+                                        }
+                                        $expanded = [Environment]::ExpandEnvironmentVariables($cleanPath)
+                                        if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                            $missing = $true
+                                            $missingPath = $expanded
+                                            break
+                                        }
+                                    }
+
+                                    # Skip if already covered by Orphaned AppID scan (empty/no subkeys GUID)
+                                    if (-not $missing) {
+                                        $subNames = $null; $valNames = $null
+                                        try { $subNames = @($ak.GetSubKeyNames()) } catch {}
+                                        try { $valNames = @($ak.GetValueNames()) } catch {}
+                                        if (($null -eq $subNames -or $subNames.Count -eq 0) -and ($null -eq $valNames -or $valNames.Count -eq 0)) {
+                                            $ak.Close()
+                                            continue
+                                        }
+                                    }
+
+                                    if ($missing) {
+                                        [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                            Problem    = "Orphaned DCOM Application"
+                                            Data       = "DCOM AppID references missing binary: $missingPath"
+                                            DisplayKey = $appId
+                                            RegPath    = "HKCR:\AppID\$appId"
+                                            ValueName  = $null
+                                            Type       = "Key"
+                                            SafeToFix  = $true
+                                            Risk       = "Low"
+                                            Confidence = "Medium"
+                                            Details    = "DCOM AppID '$appId' has a LocalServer32 or ServiceParameters value referencing '$missingPath' which no longer exists. This DCOM activation entry is orphaned."
+                                        })
+                                    }
+                                    $ak.Close()
+                                }
+                                catch {}
+                            }
+                            $dcomRoot.Close()
+                        }
+
+                        & $EndCategory
+                    }
+
+                    # --- POST-SCAN: Consolidate high-volume duplicate findings ---
+                    # When many findings share the same Problem + Data (e.g. 89 VS file extensions
+                    # all pointing to the same missing devenv.exe), collapse into a single grouped
+                    # entry with a count and sample RegPaths to reduce UI noise and lag.
+                    try {
+                        $consolidated = [System.Collections.Generic.List[object]]::new()
+                        $groups = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $consolidateThreshold = 4
+                        # Problems eligible for consolidation (same exe missing from many extensions/keys)
+                        $consolidatePattern = '^(Invalid Context Menu Command|Invalid App Command \([^)]+\)|Invalid FileExt MRU|Obsolete Notify Icon|Unused Extension|Stale BAM/DAM Entry|Invalid Window Placement)$'
+
+                        foreach ($finding in @($SyncHash.Findings)) {
+                            if ($finding.Problem -match $consolidatePattern -and -not [string]::IsNullOrWhiteSpace([string]$finding.Data)) {
+                                # Normalize group key: strip verb suffix so "Invalid App Command (Open)" and
+                                # "Invalid App Command (Edit)" pointing to same exe consolidate together
+                                $groupProblem = $finding.Problem -replace ' \([^)]+\)$', ''
+                                $groupKey = "$groupProblem|||$($finding.Data)"
+                                if (-not $groups.ContainsKey($groupKey)) {
+                                    $groups[$groupKey] = [System.Collections.Generic.List[object]]::new()
+                                }
+                                [void]$groups[$groupKey].Add($finding)
+                            } else {
+                                [void]$consolidated.Add($finding)
+                            }
+                        }
+
+                        foreach ($kvp in $groups.GetEnumerator()) {
+                            $items = $kvp.Value
+                            if ($items.Count -ge $consolidateThreshold) {
+                                $sample = @($items | Select-Object -First 3 | ForEach-Object { $_.RegPath })
+                                $sampleText = $sample -join ", "
+                                $first = $items[0]
+                                $suffix = if ($items.Count -gt 3) { " (+$($items.Count - 3) more)" } else { "" }
+                                # Preserve the original Type so the cleanup worker processes
+                                # all expanded originals correctly when the user fixes this row.
+                                # Use SafeToFix from originals: safe only if ALL originals agree.
+                                $anyUnsafe = $false
+                                foreach ($ci in $items) {
+                                    if ($ci.PSObject.Properties["SafeToFix"] -and -not [bool]$ci.SafeToFix) { $anyUnsafe = $true; break }
+                                    if ([string]$ci.Type -eq "Key" -and [string]$ci.Problem -ne "Obsolete Notify Icon") { $anyUnsafe = $true; break }
+                                }
+                                [void]$consolidated.Add([PSCustomObject]@{
+                                    Problem      = $first.Problem
+                                    Data         = "$($first.Data) ($($items.Count) entries)"
+                                    DisplayKey   = "$($first.DisplayKey) ($($items.Count) similar)"
+                                    RegPath      = $first.RegPath
+                                    ValueName    = $first.ValueName
+                                    Type         = $first.Type
+                                    SafeToFix    = (-not $anyUnsafe)
+                                    Risk         = if ($first.PSObject.Properties["Risk"]) { [string]$first.Risk } else { "Medium" }
+                                    Confidence   = if ($first.PSObject.Properties["Confidence"]) { [string]$first.Confidence } else { "High" }
+                                    Details      = "$($first.Details) $suffix Samples: $sampleText"
+                                    _ConsolidatedFrom = $items
+                                })
+                            } else {
+                                foreach ($item in $items) {
+                                    [void]$consolidated.Add($item)
+                                }
+                            }
+                        }
+
+                        # Store original full list for expand/detail view, replace display list
+                        $SyncHash.FindingsFull = [System.Collections.ObjectModel.ObservableCollection[object]]::new(@($SyncHash.Findings))
+                        $SyncHash.Findings = [System.Collections.ObjectModel.ObservableCollection[object]]::new(@($consolidated))
+                    }
+                    catch {}
+
                     $SyncHash.IsCompleted = $true
                 }
                 catch {
@@ -15014,7 +17243,7 @@ function Invoke-SSDTrim {
             catch {
                 $out += "Optimize-Volume failed on $driveLetter`: $($_.Exception.Message)"
                 try {
-                    $fallback = (& defrag "$driveLetter`:" /L 2>&1 | Out-String).TrimEnd()
+                    $fallback = (Invoke-WmtCliText -FilePath "defrag" -Arguments "$driveLetter`: /L").TrimEnd()
                     if (-not [string]::IsNullOrWhiteSpace($fallback)) { $out += $fallback }
                     $out += "Fallback completed on $driveLetter`: defrag /L"
                     $optimized++
@@ -17151,9 +19380,9 @@ function Invoke-SystemReports {
         $sys = Join-Path $outdir "System_Info_$date.txt"
         $net = Join-Path $outdir "Network_Info_$date.txt"
         $drv = Join-Path $outdir "Driver_List_$date.txt"
-        systeminfo | Out-File -FilePath $sys -Encoding UTF8
-        ipconfig /all | Out-File -FilePath $net -Encoding UTF8
-        driverquery | Out-File -FilePath $drv -Encoding UTF8
+        Invoke-WmtCliText -FilePath "systeminfo" | Out-File -FilePath $sys -Encoding UTF8
+        Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/all" | Out-File -FilePath $net -Encoding UTF8
+        Invoke-WmtCliText -FilePath "driverquery" | Out-File -FilePath $drv -Encoding UTF8
         Write-Output "Reports saved to $outdir"
         # CHANGE IS HERE: Passing the argument explicitly
     } "Generating system reports..." -ArgumentList $outdir
@@ -17397,16 +19626,7 @@ function Show-RuleDialog {
 # --- WINRE STATUS CHECK ---
 function Invoke-WinREStatusCheck {
     Invoke-UiCommand {
-        # 1. FIX THE ENCODING
-        $oldEnc = [Console]::OutputEncoding
-        [Console]::OutputEncoding = [System.Text.Encoding]::GetEncoding([System.Globalization.CultureInfo]::CurrentCulture.TextInfo.OEMCodePage)
-        
-        $raw = & reagentc.exe /info 2>&1
-        $exitCode = $LASTEXITCODE
-        
-        [Console]::OutputEncoding = $oldEnc
-
-        $text = ($raw | Out-String).Trim()
+        $text = Invoke-WmtCliText -FilePath "reagentc.exe" -Arguments "/info"
         if ([string]::IsNullOrWhiteSpace($text)) {
             $text = "No output returned from reagentc /info."
         }
@@ -17478,6 +19698,7 @@ function Invoke-WinREStatusCheck {
             [System.Windows.MessageBoxImage]::Warning
         }
 
+        Set-WmtBusyCursor
         $res = Show-WmtMessageBox -Message "$headline`r`n`r`n$msg`r`n`r`nShow technical details?" -Title "WinRE Status" -Button YesNo -Image $icon
 
         if ($res -eq [System.Windows.MessageBoxResult]::Yes) {
@@ -19457,6 +21678,7 @@ function Set-Hags {
             Set-ItemProperty -Path $path -Name "HwSchMode" -Value 2 -Type DWord
             Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) enabled. Reboot required."
                 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("HAGS enabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Enabling HAGS..."
     }
@@ -19468,6 +21690,7 @@ function Set-Hags {
             Set-ItemProperty -Path $path -Name "HwSchMode" -Value 1 -Type DWord
             Write-Output "Hardware-Accelerated GPU Scheduling (HAGS) disabled. Reboot required."
                 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("HAGS disabled successfully. Please restart your computer to apply the changes.", "HAGS Status", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Disabling HAGS..."
     }
@@ -19480,13 +21703,13 @@ function Get-WmtRegValue {
         $Default = $null
     )
 
-    try {
-        $item = Get-ItemProperty -Path $Path -Name $Name -ErrorAction Stop
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+
+    $item = Get-WmtRegistryKeyValuesCached -Path $Path
+    if ($item -and $item.PSObject.Properties[$Name]) {
         return $item.$Name
     }
-    catch {
-        return $Default
-    }
+    return $Default
 }
 
 function Set-WmtRegDword {
@@ -22422,25 +24645,6 @@ function Update-WmtTweakToggle {
 }
 
 
-function ConvertTo-Int {
-    param($Value, [int]$Default = 0)
-    try {
-        if ($null -eq $Value -or "" -eq $Value) { return $Default }
-        return [int]$Value
-    }
-    catch { return $Default }
-}
-
-function ConvertTo-Str {
-    param($Value, [string]$Default = "")
-    try {
-        if ($null -eq $Value) { return $Default }
-        return [string]$Value
-    }
-    catch { return $Default }
-}
-
-
 
 # Fast .NET registry reader — uses Microsoft.Win32.Registry instead of Get-ItemProperty
 # This is ~10x faster than Get-ItemProperty for bulk reads
@@ -22448,30 +24652,23 @@ function Read-WmtRegValuesFast {
     param([string[]]$Paths)
     $result = @{}
     foreach ($path in $Paths) {
+        $baseKey = $null
+        $key = $null
         try {
-            # Convert PS path to .NET registry path
-            if ($path -match "^HKCU:\\(.*)$") {
-                $hive = [Microsoft.Win32.Registry]::CurrentUser
-                $subPath = $Matches[1]
-            }
-            elseif ($path -match "^HKLM:\\(.*)$") {
-                $hive = [Microsoft.Win32.Registry]::LocalMachine
-                $subPath = $Matches[1]
-            }
-            else {
+            $parts = Convert-WmtRegistryPath -Path $path
+            if (-not $parts) {
                 $result[$path] = $null
                 continue
             }
-            $key = $hive.OpenSubKey($subPath)
+
+            $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+            $key = $baseKey.OpenSubKey($parts.SubPath)
             if ($key) {
-                # Create a PSObject with all values (mimics Get-ItemProperty output)
-                $obj = [PSCustomObject]@{}
+                $values = @{}
                 foreach ($valName in $key.GetValueNames()) {
-                    $val = $key.GetValue($valName)
-                    $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $val
+                    $values[$valName] = $key.GetValue($valName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                 }
-                $key.Close()
-                $result[$path] = $obj
+                $result[$path] = [PSCustomObject]$values
             }
             else {
                 $result[$path] = $null
@@ -22479,6 +24676,10 @@ function Read-WmtRegValuesFast {
         }
         catch {
             $result[$path] = $null
+        }
+        finally {
+            if ($key) { $key.Close() }
+            if ($baseKey) { $baseKey.Close() }
         }
     }
     return $result
@@ -22501,8 +24702,97 @@ function Update-TweakButtonStateSingle {
         $val = Get-WmtRegValue $RegPath $RegName $DefaultValue
         $isOn = & $IsOnCheck $val
         Update-WmtTweakToggle $btn $isOn $OnLabel $OffLabel
-    } catch {
+    }
+    catch {
         # Fail silently
+    }
+}
+
+function Get-WmtRegistryKeyValuesCached {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    if ($script:TweakButtonStatesCache -and $script:TweakButtonStatesCache.ContainsKey($Path)) {
+        return $script:TweakButtonStatesCache[$Path]
+    }
+
+    try {
+        $result = Read-WmtRegValuesFast -Paths @($Path)
+        if ($result.ContainsKey($Path)) {
+            if (-not $script:TweakButtonStatesCache) { $script:TweakButtonStatesCache = @{} }
+            $script:TweakButtonStatesCache[$Path] = $result[$Path]
+            return $result[$Path]
+        }
+    }
+    catch {
+    }
+    return $null
+}
+
+function Get-WmtRegValueCached {
+    param(
+        [string]$Path,
+        [string]$Name,
+        $Default = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
+    $item = Get-WmtRegistryKeyValuesCached -Path $Path
+    if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
+    return $Default
+}
+
+function Get-WmtRegistryPathExists {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    if ($Path -like '*[*?]*') { return $false }
+
+    try {
+        $parts = Convert-WmtRegistryPath -Path $Path
+        if (-not $parts) { return $false }
+
+        $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+        $key = $baseKey.OpenSubKey($parts.SubPath)
+        $exists = $null -ne $key
+        if ($key) { $key.Close() }
+        if ($baseKey) { $baseKey.Close() }
+        return $exists
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-WmtTweakPathExistsCached {
+    param(
+        [string]$Path,
+        [bool]$Default = $false
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $Default }
+    if (-not $script:TweakButtonStatesPathChecks) { $script:TweakButtonStatesPathChecks = @{} }
+    if ($script:TweakButtonStatesPathChecks.ContainsKey($Path)) {
+        return $script:TweakButtonStatesPathChecks[$Path]
+    }
+
+    try {
+        if ($Path -like '*[*?]*') {
+            $exists = Test-Path $Path -ErrorAction SilentlyContinue
+        }
+        else {
+            $exists = Get-WmtRegistryPathExists -Path $Path
+            if (-not $exists) {
+                $exists = Test-Path $Path -ErrorAction SilentlyContinue
+            }
+        }
+
+        $script:TweakButtonStatesPathChecks[$Path] = $exists
+        return $exists
+    }
+    catch {
+        $script:TweakButtonStatesPathChecks[$Path] = $false
+        return $Default
     }
 }
 
@@ -22519,6 +24809,7 @@ function Start-TweakButtonStatesDeferredUpdate {
                 $script:TweakStatesDebounceTimer.Stop()
                 # Invalidate the cache so fresh values are read
                 $script:TweakButtonStatesCache = $null
+                $script:TweakButtonStatesPathChecks = $null
                 # Run Update-TweakButtonStates at Background priority (non-blocking)
                 [System.Windows.Threading.Dispatcher]::CurrentDispatcher.BeginInvoke(
                     [System.Windows.Threading.DispatcherPriority]::Background,
@@ -22542,6 +24833,11 @@ function Update-TweakButtonStates {
         if ($script:TweakButtonStatesCache -and $script:TweakButtonStatesCache.Count -gt 0) {
             $regCache = $script:TweakButtonStatesCache
         }
+        $pathCheckCache = @{}
+        if ($script:TweakButtonStatesPathChecks -and $script:TweakButtonStatesPathChecks.Count -gt 0) {
+            $pathCheckCache = $script:TweakButtonStatesPathChecks
+        }
+
         $getRegValue = {
             param(
                 [string]$Path,
@@ -22551,35 +24847,23 @@ function Update-TweakButtonStates {
 
             if ([string]::IsNullOrWhiteSpace($Path) -or [string]::IsNullOrWhiteSpace($Name)) { return $Default }
 
-            # Check cache first (pre-loaded by background job)
             if (-not $regCache.ContainsKey($Path)) {
-                # Cache miss — use fast .NET RegistryKey read (10x faster than Get-ItemProperty)
-                try {
-                    if ($Path -match "^HKCU:\\(.*)$") {
-                        $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($Matches[1])
-                    }
-                    elseif ($Path -match "^HKLM:\\(.*)$") {
-                        $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($Matches[1])
-                    }
-                    else { $key = $null }
-
-                    if ($key) {
-                        $obj = [PSCustomObject]@{}
-                        foreach ($valName in $key.GetValueNames()) {
-                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
-                        }
-                        $key.Close()
-                        $regCache[$Path] = $obj
-                    } else {
-                        $regCache[$Path] = $null
-                    }
-                }
-                catch { $regCache[$Path] = $null }
+                $values = Get-WmtRegistryKeyValuesCached -Path $Path
+                $regCache[$Path] = $values
             }
 
             $item = $regCache[$Path]
             if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
             return $Default
+        }.GetNewClosure()
+
+        $getPathExists = {
+            param([string]$Path)
+            if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+            if ($pathCheckCache.ContainsKey($Path)) { return $pathCheckCache[$Path] }
+            $exists = Get-WmtTweakPathExistsCached -Path $Path -Default $false
+            $pathCheckCache[$Path] = $exists
+            return $exists
         }.GetNewClosure()
 
         $setButtonEnabled = {
@@ -22843,13 +25127,13 @@ function Update-TweakButtonStates {
         $btnToggleClickMode = Get-Ctrl "btnToggleClickMode"
         Update-WmtTweakToggle $btnToggleClickMode $singleClick "Single-Click Folders" "Double-Click Folders"
 
-        $classicContext = Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+        $classicContext = & $getPathExists "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
         $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
         Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
-        $takeOwnInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\shell\WMT_TakeOwnership"
+        $takeOwnInstalled = & $getPathExists "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership"
         $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
         Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
-        $psHereInstalled = Test-Path "Registry::HKEY_CLASSES_ROOT\Directory\Background\shell\WMT_OpenPowerShell"
+        $psHereInstalled = & $getPathExists "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell"
         $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
         Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
 
@@ -23088,13 +25372,13 @@ function Update-TweakButtonStates {
 
             # Context Menu (round 2)
             $cmdBtn = Get-Ctrl "btnToggleCmdHere"
-            if ($cmdBtn) { $exists = (Test-Path "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"); Update-WmtTweakToggle $cmdBtn $exists "Remove CMD Here" "Add CMD Here" }
+            if ($cmdBtn) { $exists = & $getPathExists "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"; Update-WmtTweakToggle $cmdBtn $exists "Remove CMD Here" "Add CMD Here" }
             $npBtn = Get-Ctrl "btnToggleNotepadCtx"
-            if ($npBtn) { $exists = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad"); Update-WmtTweakToggle $npBtn $exists "Remove Notepad" "Add Notepad" }
+            if ($npBtn) { $exists = & $getPathExists "HKCU:\Software\Classes\*\shell\WmtNotepad"; Update-WmtTweakToggle $npBtn $exists "Remove Notepad" "Add Notepad" }
             $prBtn = Get-Ctrl "btnToggleRemovePrint"
-            if ($prBtn) { $exists = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print")); Update-WmtTweakToggle $prBtn $exists "Restore Print" "Remove Print" }
+            if ($prBtn) { $exists = (-not (& $getPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print")); Update-WmtTweakToggle $prBtn $exists "Restore Print" "Remove Print" }
             $castBtn = Get-Ctrl "btnToggleRemoveCast"
-            if ($castBtn) { $exists = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice")); Update-WmtTweakToggle $castBtn $exists "Restore Cast to Device" "Remove Cast to Device" }
+            if ($castBtn) { $exists = (-not (& $getPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice")); Update-WmtTweakToggle $castBtn $exists "Restore Cast to Device" "Remove Cast to Device" }
 
             # Sound
             $ssBtn = Get-Ctrl "btnToggleStartupSound"
@@ -23104,7 +25388,7 @@ function Update-TweakButtonStates {
             $dsBtn = Get-Ctrl "btnToggleDeviceSound"
             if ($dsBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\AppEvents\Schemes\Apps\.Default\DeviceConnect\.current" "(Default)" ".default") ""); Update-WmtTweakToggle $dsBtn ($v -eq "") "Device Connect Sound On" "Device Connect Sound Off" }
             $saBtn = Get-Ctrl "btnToggleSpatialAudio"
-            if ($saBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SpatialSound" "SpatialAudioFormat" "") ""); Update-WmtTweakToggle $saBtn ($v -ne "") "Spatial Audio Off" "Spatial Audio On" }
+            if ($saBtn) { $v = (ConvertTo-Str (& $getRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\SpatialSound" "SpatialAudioFormat" "") ""); Update-WmtTweakToggle $saBtn ($v -ne "") "Spatial Audio On" "Spatial Audio Off" }
 
             # Display
             $nlBtn = Get-Ctrl "btnToggleNightLight"
@@ -23246,12 +25530,20 @@ function Update-TweakButtonStates {
         Update-WmtTweakToggle $btnToggleDevMode $devModeOn "Developer Mode On" "Developer Mode Off"
         $drvMetaPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata"
         $drvMetaDisabled = $false
-        try { $val = Get-ItemProperty -Path $drvMetaPath -Name "PreventDeviceMetadataFromNetwork" -ErrorAction SilentlyContinue; if ($val -and [int]$val.PreventDeviceMetadataFromNetwork -eq 1) { $drvMetaDisabled = $true } } catch {}
+        try {
+            $val = Get-WmtRegValue $drvMetaPath "PreventDeviceMetadataFromNetwork" 0
+            if ([int]$val -eq 1) { $drvMetaDisabled = $true }
+        }
+        catch {}
         $btnToggleDrvMeta = Get-Ctrl "btnToggleDrvMeta"
         Update-WmtTweakToggle $btnToggleDrvMeta $drvMetaDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
         $drvWUPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching"
         $drvWUDisabled = $false
-        try { $val = Get-ItemProperty -Path $drvWUPath -Name "SearchOrderConfig" -ErrorAction SilentlyContinue; if ($val -and [int]$val.SearchOrderConfig -eq 1) { $drvWUDisabled = $true } } catch {}
+        try {
+            $val = Get-WmtRegValue $drvWUPath "SearchOrderConfig" 0
+            if ([int]$val -eq 1) { $drvWUDisabled = $true }
+        }
+        catch {}
         $btnToggleDrvUpdates = Get-Ctrl "btnToggleDrvUpdates"
         Update-WmtTweakToggle $btnToggleDrvUpdates $drvWUDisabled "Enable Auto-Drivers" "Disable Auto-Drivers" "Toggle automatic driver updates via Windows Update."
     }
@@ -31584,11 +33876,11 @@ function Start-WingetScanSourcePreflight {
             foreach ($source in @($Sources | Select-Object -Unique)) {
                 try {
                     $refreshTimeoutMs = if ($source -eq "msstore") { 15000 } else { 30000 }
-                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $((ConvertTo-Int ($refreshTimeoutMs / 1000) 0))s)..."
+                    Add-Log "LOG:Refreshing $source source before scan (quick preflight, max $([int]($refreshTimeoutMs / 1000))s)..."
                     $refresh = Invoke-WingetProcess -Arguments "source update --name $source --disable-interactivity" -TimeoutMs $refreshTimeoutMs
 
                     if ($refresh.TimedOut) {
-                        Add-Log "LOG:$source source refresh timed out after $((ConvertTo-Int ($refreshTimeoutMs / 1000) 0))s; continuing to scan anyway."
+                        Add-Log "LOG:$source source refresh timed out after $([int]($refreshTimeoutMs / 1000))s; continuing to scan anyway."
                     }
                     elseif ($refresh.ExitCode -eq 0) {
                         Add-Log "LOG:$source source refresh completed before scan."
@@ -35001,8 +37293,7 @@ $btnSFC.Add_Click({
     })
 $btnDISMCheck.Add_Click({
         Invoke-UiCommand {
-            $output = dism /online /cleanup-image /checkhealth 2>&1
-            $text = ($output | Out-String).Trim()
+            $text = Invoke-WmtCliText -FilePath "dism" -Arguments "/online /cleanup-image /checkhealth" -TimeoutMs 120000
             if ($text) { Write-Output $text }
 
             $message = "DISM Check completed."
@@ -35017,6 +37308,7 @@ $btnDISMCheck.Add_Click({
             elseif ($text -match "The operation completed successfully") {
                 $message = "DISM Check: completed successfully."
             }
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show($message, "DISM CheckHealth", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
 
             if ($needsRepair) {
@@ -35041,17 +37333,17 @@ $btnCHKDSK.Add_Click({ Invoke-ChkdskAll })
 # --- NETWORK ---
 $btnNetInfo.Add_Click({
         Invoke-UiCommand {
-            $out = ipconfig /all 2>&1
-            $txt = ($out | Out-String)
+            $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/all"
             Write-Output $txt
+            Set-WmtBusyCursor
             Show-TextDialog -Title "IP Configuration" -Text $txt
         } "Showing IP configuration..."
     })
 $btnFlushDNS.Add_Click({
         Invoke-UiCommand {
-            $out = ipconfig /flushdns 2>&1
-            $txt = ($out | Out-String).Trim()
+            $txt = Invoke-WmtCliText -FilePath "ipconfig" -Arguments "/flushdns"
             if ($txt) { Write-Output $txt }
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("DNS cache flushed.", "Flush DNS", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Flushing DNS cache..."
     })
@@ -35066,6 +37358,7 @@ $btnResetWifi.Add_Click({
                     $ethNames = $eth | Select-Object -ExpandProperty Name
                     $msg += "`nYou appear to be on Ethernet: " + ($ethNames -join ", ")
                 }
+                Set-WmtBusyCursor
                 [System.Windows.MessageBox]::Show($msg, "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                 Write-Output $msg
                 return
@@ -35077,6 +37370,7 @@ $btnResetWifi.Add_Click({
                 Write-Output "Restarted Wi-Fi adapter: $n"
             }
 
+            Set-WmtBusyCursor
             [System.Windows.MessageBox]::Show("Restarted Wi-Fi adapter(s): " + ($names -join ", "), "Restart Wi-Fi", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
         } "Restarting Wi-Fi adapters..."
     })
@@ -35096,12 +37390,12 @@ $btnNetRepair.Add_Click({
         }
     })
 
-$btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; route print | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
+$btnRouteTable.Add_Click({ Invoke-UiCommand { $path = Join-Path (Get-DataPath) "RouteTable.txt"; Invoke-WmtCliText -FilePath "route" -Arguments "print" | Out-File -FilePath $path -Encoding UTF8; Write-Output "Saved to $path" } "Saving routing table..." })
 $btnRouteView.Add_Click({
         Invoke-UiCommand {
-            $out = route print 2>&1
-            $txt = ($out | Out-String)
+            $txt = Invoke-WmtCliText -FilePath "route" -Arguments "print"
             Write-Output $txt
+            Set-WmtBusyCursor
             Show-TextDialog -Title "Route Table" -Text $txt
         } "Routing table"
     })
@@ -36178,7 +38472,7 @@ function Update-SingleFeatureButtonState {
             if ($feat -and $feat.State -eq "Enabled") { $isEnabled = $true }
         }
         else {
-            $info = (dism /Online /Get-FeatureInfo /FeatureName:$FeatureName 2>&1) -join "`n"
+            $info = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$FeatureName"
             if ($info -match "State\s*:\s*Enabled") { $isEnabled = $true }
         }
     }
@@ -36198,7 +38492,7 @@ function Switch-WindowsFeature($FeatureName, $DisplayName) {
         param($fn, $dn)
         if (-not (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue)) {
             Write-GuiLog "PowerShell feature cmdlets unavailable; trying DISM fallback..."
-            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            $featureInfo = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$fn"
             if ($featureInfo -match "State\\s*:\\s*Enabled") {
                 dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
@@ -36219,7 +38513,7 @@ function Switch-WindowsFeature($FeatureName, $DisplayName) {
             if ($fn -ne "NetFx3") { throw "Feature name $fn is unknown." }
 
             Write-GuiLog "$dn not detected via PowerShell; trying DISM fallback..."
-            $featureInfo = (dism /Online /Get-FeatureInfo /FeatureName:$fn 2>&1) -join "`n"
+            $featureInfo = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-FeatureInfo /FeatureName:$fn"
             if ($featureInfo -match "State\\s*:\\s*Enabled") {
                 dism /Online /Disable-Feature /FeatureName:$fn /NoRestart | Out-Null
                 if ($LASTEXITCODE -eq 0) { Write-GuiLog "Disabled: $dn (DISM)" }
@@ -37990,27 +40284,23 @@ function Start-TweakButtonStatesBackgroundUpdate {
             # Use .NET RegistryKey for faster reads (~10x faster than Get-ItemProperty)
             foreach ($path in $paths) {
                 try {
-                    if ($path -match "^HKCU:\\(.*)$") {
-                        $hive = [Microsoft.Win32.Registry]::CurrentUser
-                        $subPath = $Matches[1]
-                    }
-                    elseif ($path -match "^HKLM:\\(.*)$") {
-                        $hive = [Microsoft.Win32.Registry]::LocalMachine
-                        $subPath = $Matches[1]
-                    }
-                    else {
+                    $parts = Convert-WmtRegistryPath -Path $path
+                    if (-not $parts) {
                         $regCache[$path] = $null
                         continue
                     }
-                    $key = $hive.OpenSubKey($subPath)
+
+                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+                    $key = $baseKey.OpenSubKey($parts.SubPath)
                     if ($key) {
-                        $obj = [PSCustomObject]@{}
+                        $values = @{}
                         foreach ($valName in $key.GetValueNames()) {
-                            $obj | Add-Member -MemberType NoteProperty -Name $valName -Value $key.GetValue($valName)
+                            $values[$valName] = $key.GetValue($valName, $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
                         }
                         $key.Close()
-                        $regCache[$path] = $obj
-                    } else {
+                        $regCache[$path] = [PSCustomObject]$values
+                    }
+                    else {
                         $regCache[$path] = $null
                     }
                 }
@@ -38020,14 +40310,36 @@ function Start-TweakButtonStatesBackgroundUpdate {
             }
 
             # Also collect Test-Path results
+            function Get-WmtRegistryPathExists {
+                param([string]$Path)
+
+                if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+                if ($Path -like '*[*?]*') { return $false }
+
+                try {
+                    $parts = Convert-WmtRegistryPath -Path $Path
+                    if (-not $parts) { return $false }
+
+                    $baseKey = [Microsoft.Win32.RegistryKey]::OpenBaseKey($parts.Hive, [Microsoft.Win32.RegistryView]::Default)
+                    $key = $baseKey.OpenSubKey($parts.SubPath)
+                    $exists = $null -ne $key
+                    if ($key) { $key.Close() }
+                    if ($baseKey) { $baseKey.Close() }
+                    return $exists
+                }
+                catch {
+                    return $false
+                }
+            }
+
             $pathChecks = @{
-                "CtxClassicInstalled" = (Test-Path "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32")
-                "TakeOwnInstalled"    = (Test-Path "HKCU:\Software\Classes\*\shell\runas" -ErrorAction SilentlyContinue)
-                "PsHereInstalled"     = (Test-Path "HKCU:\Software\Classes\Directory\Background\shell\PowerShell")
-                "CmdHereInstalled"    = (Test-Path "HKCU:\Software\Classes\Directory\shell\WmtCmdHere")
-                "NotepadCtxInstalled" = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad")
-                "PrintRemoved"        = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print"))
-                "CastRemoved"         = (-not (Test-Path "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice"))
+                "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
+                "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership"
+                "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell"
+                "HKCU:\Software\Classes\Directory\shell\WmtCmdHere" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\shell\WmtCmdHere"
+                "HKCU:\Software\Classes\*\shell\WmtNotepad" = (Test-Path "HKCU:\Software\Classes\*\shell\WmtNotepad")
+                "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\print"
+                "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice" = Get-WmtRegistryPathExists "HKCU:\Software\Classes\SystemFileAssociations\image\shell\CastToDevice"
             }
 
             return @{ RegCache = $regCache; PathChecks = $pathChecks }
@@ -38123,7 +40435,7 @@ function Start-OptionalFeaturesBackgroundCheck {
 
             # Method 2: Fallback - single DISM call that lists ALL features
             try {
-                $output = (& dism /Online /Get-Features 2>&1) -join "`n"
+                $output = Invoke-WmtCliText -FilePath "dism" -Arguments "/Online /Get-Features" -TimeoutMs 120000
                 foreach ($featureName in $map.Keys) {
                     $btnName = $map[$featureName]
                     # Match pattern: "Feature Name : <name>" followed by "State : Enabled"
