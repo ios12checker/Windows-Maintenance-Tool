@@ -9906,18 +9906,18 @@ function Show-RegScanSelection {
         "Event Log Message DLLs"         = "EventLogDlls"
         "Orphaned AppID Entries"         = "OrphanedAppIDs"
         "Broken Sound Scheme Files"      = "SoundSchemes"
-        "Invalid Mic Permissions"        = "MicPermissions"
-        "Invalid Window Placements"      = "WindowPlacements"
-        "Invalid Print Monitor DLLs"     = "PrintMonitors"
-        "Invalid LSA Package DLLs"       = "LSAPackages"
-        "Stale BAM/DAM Entries"           = "BamEntries"
-        "Invalid Defender Exclusions"    = "DefenderExclusions"
-        "Invalid Keyboard Layout DLLs"   = "KeyboardLayouts"
-        "Invalid App Recovery Entries"    = "AppRecovery"
-        "Broken Autoplay Handlers"        = "AutoplayHandlers"
-        "Invalid Pending Renames"        = "PendingRenames"
-        "Invalid Network Provider DLLs"   = "NetworkProviders"
-        "Orphaned COM+ / DCOM Apps"      = "OrphanedComPlus"
+        "Invalid Mic Permissions"       = "MicPermissions"
+        "Invalid Window Placements"     = "WindowPlacements"
+        "Invalid Print Monitor DLLs"    = "PrintMonitors"
+        "Invalid LSA Package DLLs"      = "LSAPackages"
+        "Stale BAM/DAM Entries"         = "BamEntries"
+        "Invalid Defender Exclusions"   = "DefenderExclusions"
+        "Invalid Keyboard Layout DLLs"  = "KeyboardLayouts"
+        "Invalid App Recovery Entries"  = "AppRecovery"
+        "Broken Autoplay Handlers"      = "AutoplayHandlers"
+        "Invalid Pending Renames"       = "PendingRenames"
+        "Invalid Network Provider DLLs" = "NetworkProviders"
+        "Orphaned COM+ / DCOM Apps"    = "OrphanedComPlus"
     }
 
     foreach ($savedKey in @($savedStates.Keys)) {
@@ -10363,6 +10363,10 @@ function Show-RegistryCleaner {
     $btnClose = $dialog.FindName("btnClose")
     $chkShowProtected = $dialog.FindName("chkShowProtected")
 
+    # Enable row virtualization so the grid scrolls smoothly with hundreds of findings
+    # instead of rendering every row at once and lagging.
+    Enable-WmtWpfItemsVirtualization -Control $dg
+
     # --- Protected/ReviewOnly filter ---
     # By default, protected and review-only entries are hidden from the grid.
     # $registryRows always holds the FULL unfiltered list.
@@ -10409,21 +10413,22 @@ function Show-RegistryCleaner {
                 $details = "Review only; not selected by default. $details"
             }
             [PSCustomObject]@{
-                Check         = $autoSelected
-                Problem       = $item.Problem
-                Data          = $item.Data
-                Key           = $item.DisplayKey
-                FullPath      = $item.RegPath
-                ValueName     = $item.ValueName
-                FixAction     = $fixAction
-                Risk          = $risk
-                Confidence    = $confidence
-                DefaultAction = if ($autoSelected) { "Selected" } else { "Review" }
-                Type          = $item.Type
-                NewData       = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
-                Details       = $details
-                IsReviewOnly  = (-not $autoSelected)
-                IsProtected   = ([string]$item.Problem -eq 'Protected ActiveX Issue')
+                Check              = $autoSelected
+                Problem            = $item.Problem
+                Data               = $item.Data
+                Key                = $item.DisplayKey
+                FullPath           = $item.RegPath
+                ValueName          = $item.ValueName
+                FixAction          = $fixAction
+                Risk               = $risk
+                Confidence         = $confidence
+                DefaultAction      = if ($autoSelected) { "Selected" } else { "Review" }
+                Type               = $item.Type
+                NewData            = if ($item.PSObject.Properties["NewData"]) { [string]$item.NewData } else { $null }
+                Details            = $details
+                IsReviewOnly       = (-not $autoSelected)
+                IsProtected        = ([string]$item.Problem -eq 'Protected ActiveX Issue')
+                _ConsolidatedFrom  = if ($item.PSObject.Properties["_ConsolidatedFrom"]) { $item._ConsolidatedFrom } else { $null }
             }
         }
     )
@@ -10664,20 +10669,42 @@ function Show-RegistryCleaner {
             catch {}
             foreach ($row in $registryRows) {
                 if ($row.Check -eq $true) {
-                    [void]$toFix.Add([PSCustomObject]@{
-                            Problem       = $row.Problem
-                            Action        = $row.FixAction
-                            Risk          = $row.Risk
-                            Confidence    = $row.Confidence
-                            DefaultAction = $row.DefaultAction
-                            RegPath       = $row.FullPath
-                            ValueName     = $row.ValueName
-                            Type          = $row.Type
-                            DisplayKey    = $row.Key
-                            Data          = $row.Data
-                            WhyFlagged    = $row.Details
-                            NewData       = $row.NewData
-                        })
+                    # If this row was consolidated from multiple originals, expand
+                    # all of them so every underlying entry gets cleaned.
+                    if ($row._ConsolidatedFrom -and $row._ConsolidatedFrom.Count -gt 0) {
+                        foreach ($orig in @($row._ConsolidatedFrom)) {
+                            if ($null -eq $orig) { continue }
+                            [void]$toFix.Add([PSCustomObject]@{
+                                Problem       = $orig.Problem
+                                Action        = if ($orig.Type -eq "Key") { "Delete key" } elseif ($orig.Type -eq "SetValue") { "Update value" } else { "Delete value" }
+                                Risk          = if ($orig.PSObject.Properties["Risk"]) { [string]$orig.Risk } else { "Medium" }
+                                Confidence    = if ($orig.PSObject.Properties["Confidence"]) { [string]$orig.Confidence } else { "High" }
+                                DefaultAction = "Selected"
+                                RegPath       = $orig.RegPath
+                                ValueName     = $orig.ValueName
+                                Type          = $orig.Type
+                                DisplayKey    = if ($orig.PSObject.Properties["DisplayKey"]) { $orig.DisplayKey } else { $orig.RegPath }
+                                Data          = $orig.Data
+                                WhyFlagged    = if ($orig.PSObject.Properties["Details"]) { $orig.Details } else { "" }
+                                NewData       = if ($orig.PSObject.Properties["NewData"]) { [string]$orig.NewData } else { $null }
+                            })
+                        }
+                    } else {
+                        [void]$toFix.Add([PSCustomObject]@{
+                                Problem       = $row.Problem
+                                Action        = $row.FixAction
+                                Risk          = $row.Risk
+                                Confidence    = $row.Confidence
+                                DefaultAction = $row.DefaultAction
+                                RegPath       = $row.FullPath
+                                ValueName     = $row.ValueName
+                                Type          = $row.Type
+                                DisplayKey    = $row.Key
+                                Data          = $row.Data
+                                WhyFlagged    = $row.Details
+                                NewData       = $row.NewData
+                            })
+                    }
                 }
             }
 
@@ -15971,12 +15998,43 @@ function Invoke-RegistryTask {
                         # WindowPlacement binary values remember window positions for applications.
                         # Key locations:
                         #   HKCU\Software\<Vendor>\<App>  — per-app WindowPlacement values (key name = exe path)
-                        #   HKCU\Software\Microsoft\Windows\Shell\Bags\1\Desktop — desktop window positions (child key names are ClassIDs, skip these)
                         #   HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\WindowPos — per-app stored positions
+                        #   HKCU\Software\Microsoft\Windows\Shell\Bags — desktop/explorer window positions
                         #
-                        # Strategy: Walk HKCU\Software one level deep looking for subkeys whose NAMES look like exe paths
-                        # and that contain a "WindowPlacement" binary value. If the exe no longer exists, flag it.
+                        # Strategy:
+                        #   Part A: Walk HKCU\Software one level deep, skip known heavy system vendor keys,
+                        #          look for subkeys whose NAMES look like exe paths with WindowPlacement/AppID values.
+                        #   Part B: Scan Explorer\WindowPos for per-app window positions referencing missing exes.
 
+                        # Vendor keys to skip (hundreds of children, none are exe-path names)
+                        $wpSkipVendors = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        foreach ($skip in @("Microsoft", "Classes", "Policies", "OEM", "RegisteredApplications", "Google")) {
+                            [void]$wpSkipVendors.Add($skip)
+                        }
+
+                        # Helper: add a window placement finding
+                        $AddWpFinding = {
+                            param([string]$ExePath, [string]$RegPath, [string]$ValueName, [string]$Details)
+                            if (-not (Test-IsProtectedWindowsPath $ExePath) -and -not (Test-PathExists $ExePath)) {
+                                $fixType = if ($null -eq $ValueName) { "Key" } else { "Value" }
+                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
+                                    Problem    = "Invalid Window Placement"
+                                    Data       = "Executable no longer exists: $ExePath"
+                                    DisplayKey = $ExePath
+                                    RegPath    = $RegPath
+                                    ValueName  = $ValueName
+                                    Type       = $fixType
+                                    SafeToFix  = $true
+                                    Risk       = "Low"
+                                    Confidence = "Medium"
+                                    Details    = $Details
+                                })
+                                return $true
+                            }
+                            return $false
+                        }
+
+                        # --- Part A: HKCU\Software scan ---
                         $wpRoot = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Software", $false)
                         if ($wpRoot) {
                             $topKeys = @($wpRoot.GetSubKeyNames())
@@ -15991,27 +16049,14 @@ function Invoke-RegistryTask {
                                     $wpValue = $swKey.GetValue("WindowPlacement")
                                     if ($null -ne $wpValue -and $wpValue -is [byte[]] -and $wpValue.Length -ge 8) {
                                         if ($topKey -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
-                                            if (-not (Test-IsProtectedWindowsPath $topKey) -and -not (Test-PathExists $topKey)) {
-                                                [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                    Problem    = "Invalid Window Placement"
-                                                    Data       = "Executable no longer exists: $topKey"
-                                                    DisplayKey = $topKey
-                                                    RegPath    = "HKCU:\Software\$topKey"
-                                                    ValueName  = "WindowPlacement"
-                                                    Type       = "Value"
-                                                    SafeToFix  = $true
-                                                    Risk       = "Low"
-                                                    Confidence = "Medium"
-                                                    Details    = "WindowPlacement entry at HKCU\Software\$topKey references '$topKey' which no longer exists. Windows will recreate placement data when the app is launched again."
-                                                })
-                                            }
+                                            & $AddWpFinding -ExePath $topKey -RegPath "HKCU:\Software\$topKey" -ValueName "WindowPlacement" -Details "WindowPlacement entry at HKCU\Software\$topKey references '$topKey' which no longer exists. Windows will recreate placement data when the app is launched again."
                                         }
                                     }
 
                                     # --- Check second-level subkeys (e.g. Software\Vendor\App.exe) ---
-                                    # Only enumerate subkeys if we have a reason to — skip if top key is a known
-                                    # system vendor with hundreds of children (Microsoft, Google, etc.) and none
-                                    # will be exe-path names. Fast path: first enumerate, then filter by exe pattern.
+                                    # Skip known heavy system vendor keys to avoid enumerating hundreds of children
+                                    if ($wpSkipVendors.Contains($topKey)) { $swKey.Close(); continue }
+
                                     $subKeys = $swKey.GetSubKeyNames()
                                     $exeSubKeys = @($subKeys | Where-Object { $_ -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$' })
                                     foreach ($subKey in $exeSubKeys) {
@@ -16021,40 +16066,13 @@ function Invoke-RegistryTask {
 
                                             $wpVal = $targetKey.GetValue("WindowPlacement")
                                             if ($null -ne $wpVal -and $wpVal -is [byte[]] -and $wpVal.Length -ge 8) {
-                                                # Key name is the exe path (already filtered above)
-                                                if (-not (Test-IsProtectedWindowsPath $subKey) -and -not (Test-PathExists $subKey)) {
-                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                        Problem    = "Invalid Window Placement"
-                                                        Data       = "Executable no longer exists: $subKey"
-                                                        DisplayKey = $subKey
-                                                        RegPath    = "HKCU:\Software\$topKey\$subKey"
-                                                        ValueName  = "WindowPlacement"
-                                                        Type       = "Value"
-                                                        SafeToFix  = $true
-                                                        Risk       = "Low"
-                                                        Confidence = "Medium"
-                                                        Details    = "WindowPlacement entry under HKCU\Software\$topKey\$subKey references '$subKey' which no longer exists. Windows will recreate placement data when the app is launched again."
-                                                    })
-                                                }
+                                                & $AddWpFinding -ExePath $subKey -RegPath "HKCU:\Software\$topKey\$subKey" -ValueName "WindowPlacement" -Details "WindowPlacement entry under HKCU\Software\$topKey\$subKey references '$subKey' which no longer exists. Windows will recreate placement data when the app is launched again."
                                             }
 
                                             # Check for exe-path-valued AppID or similar values under the subkey
                                             $appIdVal = [string]$targetKey.GetValue("AppID")
                                             if (-not [string]::IsNullOrWhiteSpace($appIdVal) -and $appIdVal -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
-                                                if (-not (Test-IsProtectedWindowsPath $appIdVal) -and -not (Test-PathExists $appIdVal)) {
-                                                    [void]$SyncHash.Findings.Add([PSCustomObject]@{
-                                                        Problem    = "Invalid Window Placement"
-                                                        Data       = "AppID executable no longer exists: $appIdVal"
-                                                        DisplayKey = "$topKey\$subKey"
-                                                        RegPath    = "HKCU:\Software\$topKey\$subKey"
-                                                        ValueName  = "AppID"
-                                                        Type       = "Value"
-                                                        SafeToFix  = $true
-                                                        Risk       = "Low"
-                                                        Confidence = "Medium"
-                                                        Details    = "AppID value under HKCU\Software\$topKey\$subKey references '$appIdVal' which no longer exists."
-                                                    })
-                                                }
+                                                & $AddWpFinding -ExePath $appIdVal -RegPath "HKCU:\Software\$topKey\$subKey" -ValueName "AppID" -Details "AppID value under HKCU\Software\$topKey\$subKey references '$appIdVal' which no longer exists."
                                             }
 
                                             $targetKey.Close()
@@ -16067,6 +16085,39 @@ function Invoke-RegistryTask {
                                 catch {}
                             }
                             $wpRoot.Close()
+                        }
+
+                        # --- Part B: Explorer\WindowPos ---
+                        $wpPosRoot = "Software\Microsoft\Windows\CurrentVersion\Explorer\WindowPos"
+                        $wpPosKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($wpPosRoot, $false)
+                        if ($wpPosKey) {
+                            $posEntries = @($wpPosKey.GetSubKeyNames())
+                            $total = [math]::Max($posEntries.Count, 1); $i = 0
+                            foreach ($posEntry in $posEntries) {
+                                $i++; & $Tick "Scanning WindowPos: $posEntry" $i $total
+                                try {
+                                    $peKey = $wpPosKey.OpenSubKey($posEntry, $false)
+                                    if (-not $peKey) { continue }
+
+                                    # WindowPos entries may have "WinPos" or "Normal" values with embedded exe paths
+                                    # Also check if the entry name itself is an exe path
+                                    if ($posEntry -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                        & $AddWpFinding -ExePath $posEntry -RegPath "HKCU:\$wpPosRoot\$posEntry" -ValueName $null -Details "WindowPos entry '$posEntry' references a missing executable."
+                                    }
+
+                                    # Check for exe-path-valued "Application" or "Command" values
+                                    foreach ($val in @("Application", "Command")) {
+                                        $appVal = [string]$peKey.GetValue($val)
+                                        if (-not [string]::IsNullOrWhiteSpace($appVal) -and $appVal -match '^(?i)[a-z]:\\.*\.(?:exe|msi|bat|cmd|com)$') {
+                                            & $AddWpFinding -ExePath $appVal -RegPath "HKCU:\$wpPosRoot\$posEntry" -ValueName $val -Details "WindowPos '$posEntry' $val value references '$appVal' which no longer exists."
+                                        }
+                                    }
+
+                                    $peKey.Close()
+                                }
+                                catch {}
+                            }
+                            $wpPosKey.Close()
                         }
 
                         & $EndCategory
@@ -16286,9 +16337,11 @@ function Invoke-RegistryTask {
                         catch {}
 
                         # Helper function: convert NT device path to DOS path using the map
+                        # Sort keys longest-first so more specific prefixes match before shorter ones
+                        $sortedPrefixes = @($deviceMap.Keys | Sort-Object { $_.Length } -Descending)
                         function script:Convert-BamNtToDos {
                             param([string]$NtPath)
-                            foreach ($prefix in @($deviceMap.Keys)) {
+                            foreach ($prefix in $sortedPrefixes) {
                                 if ($NtPath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
                                     return ($deviceMap[$prefix] + "\" + $NtPath.Substring($prefix.Length))
                                 }
@@ -16332,7 +16385,7 @@ function Invoke-RegistryTask {
                                                 }
                                             }
                                             # Strip \??\ prefix if present (e.g. \??\C:\...)
-                                            elseif ($cleanPath -match '^\\?\?\\(.+)$') {
+                                            elseif ($cleanPath -match '^\\\?\?\\(.+)$') {
                                                 $cleanPath = $matches[1]
                                             }
 
@@ -16342,9 +16395,9 @@ function Invoke-RegistryTask {
                                                     [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                         Problem    = "Stale BAM/DAM Entry"
                                                         Data       = "App no longer exists: $expanded"
-                                                        DisplayKey = "$svcName\$sid\..."
-                                                        RegPath    = "HKLM:\$svcRoot\$sid"
-                                                        ValueName  = $entryName
+                                                        DisplayKey = "$svcName\$sid\$entryName"
+                                                        RegPath    = "HKLM:\$svcRoot\$sid\$entryName"
+                                                        ValueName  = $null
                                                         Type       = "Key"
                                                         SafeToFix  = $true
                                                         Risk       = "Low"
@@ -16422,7 +16475,24 @@ function Invoke-RegistryTask {
                                                     foreach ($searchDir in @([Environment]::GetFolderPath("System"), [Environment]::GetFolderPath("Windows"), "${env:ProgramFiles}", "${env:ProgramFiles(x86)}")) {
                                                         if (Test-PathExists (Join-Path $searchDir $procName)) { $found = $true; break }
                                                     }
-                                                    if (-not $found -and -not (Get-Command $procName -ErrorAction SilentlyContinue)) {
+                                                    if (-not $found) {
+                                                        # Also check LocalAppData and user profile directories
+                                                        foreach ($searchDir in @($env:LOCALAPPDATA, $env:APPDATA)) {
+                                                            if (-not [string]::IsNullOrWhiteSpace($searchDir) -and (Test-PathExists $searchDir)) {
+                                                                try {
+                                                                    $hits = Get-ChildItem -LiteralPath $searchDir -Filter $procName -Recurse -Depth 3 -File -ErrorAction SilentlyContinue
+                                                                    if ($hits) { $found = $true; break }
+                                                                } catch {}
+                                                            }
+                                                        }
+                                                    }
+                                                    if (-not $found) {
+                                                        try {
+                                                            $cmd = Get-Command $procName -CommandType Application -ErrorAction SilentlyContinue
+                                                            if ($cmd) { $found = $true }
+                                                        } catch {}
+                                                    }
+                                                    if (-not $found) {
                                                         [void]$SyncHash.Findings.Add([PSCustomObject]@{
                                                             Problem    = "Invalid Defender Exclusion"
                                                             Data       = "Excluded process not found: $procName"
@@ -16557,7 +16627,7 @@ function Invoke-RegistryTask {
 
                                         $exeVal = [string]$ek.GetValue("ApplicationRecoveryExe")
                                         if ([string]::IsNullOrWhiteSpace($exeVal)) {
-                                            $exeVal = [string]$ek.GetValue("ApplicationRestartExe")
+                                            $exeVal = [string]$ek.GetValue("ApplicationRestartCmd")
                                         }
                                         $cmdVal = [string]$ek.GetValue("Command")
 
@@ -16646,8 +16716,18 @@ function Invoke-RegistryTask {
                                                             $binClean = $bin.Trim('"').Trim()
                                                             if ($binClean -match '^(?i)([a-z]:\\[^\s"]+\.(?:exe|dll))') { $binClean = $matches[1] }
                                                             $expanded = [Environment]::ExpandEnvironmentVariables($binClean)
-                                                            if ($expanded -match '^(?i)[a-z]:\\' -and -not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
-                                                                $missing = $true
+                                                            if ($expanded -match '^(?i)[a-z]:\\') {
+                                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                                    $missing = $true
+                                                                }
+                                                            } else {
+                                                                # Bare DLL name (e.g. "shell32.dll") — resolve against System32
+                                                                $sysPath = Join-Path $winDir $binClean
+                                                                if ($binClean -notmatch '\.') { $sysPath = "$sysPath.dll" }
+                                                                $expanded = [Environment]::ExpandEnvironmentVariables($sysPath)
+                                                                if (-not (Test-IsProtectedWindowsPath $expanded) -and -not (Test-PathExists $expanded)) {
+                                                                    $missing = $true
+                                                                }
                                                             }
                                                         }
                                                         $svr.Close()
@@ -16666,6 +16746,13 @@ function Invoke-RegistryTask {
                                             $iconPath = ($iconVal -split ',')[0].Trim('"').Trim()
                                             if ($iconPath -match '^(?i)[a-z]:\\') {
                                                 if (-not (Test-IsProtectedWindowsPath $iconPath) -and -not (Test-PathExists $iconPath)) {
+                                                    $missing = $true
+                                                }
+                                            } elseif ($iconPath.Length -ge 4 -and $iconPath -notmatch '[\\/:]') {
+                                                # Bare filename (e.g. "shell32.dll,-1") — resolve against System32
+                                                $iconSysPath = Join-Path $winDir $iconPath
+                                                if ($iconPath -notmatch '\.') { $iconSysPath = "$iconSysPath.dll" }
+                                                if (-not (Test-IsProtectedWindowsPath $iconSysPath) -and -not (Test-PathExists $iconSysPath)) {
                                                     $missing = $true
                                                 }
                                             }
@@ -16730,7 +16817,7 @@ function Invoke-RegistryTask {
                                         $line = $lines[$lineIdx]
                                         if ([string]::IsNullOrWhiteSpace($line)) { continue }
                                         # Check if the path references a drive that doesn't exist
-                                        if ($line -match '^(?i)\\??([a-z]):\\') {
+                                        if ($line -match '(?i)^\\\?\?([a-z]):\\') {
                                             $drive = $matches[1].ToUpper()
                                             if ($drive -notin $driveLetters) {
                                                 [void]$flaggedLines.Add($line)
@@ -16793,10 +16880,10 @@ function Invoke-RegistryTask {
                                         RegPath    = "HKLM:\$poRoot"
                                         ValueName  = "ProviderOrder"
                                         Type       = "Value"
-                                        SafeToFix  = $true
-                                        Risk       = "Low"
+                                        SafeToFix  = $false
+                                        Risk       = "Medium"
                                         Confidence = "Medium"
-                                        Details    = "Network ProviderOrder references '$prov' but no corresponding service\NetworkProvider key exists. The entry is orphaned and can be cleaned from the order string."
+                                        Details    = "Network ProviderOrder references '$prov' but no corresponding service\NetworkProvider key exists. The entry is orphaned, but removing it from the ProviderOrder string requires editing the comma-separated value — not just deleting it. Manually remove '$prov' from the ProviderOrder value if desired."
                                     })
                                     continue
                                 }
@@ -16957,6 +17044,73 @@ function Invoke-RegistryTask {
 
                         & $EndCategory
                     }
+
+                    # --- POST-SCAN: Consolidate high-volume duplicate findings ---
+                    # When many findings share the same Problem + Data (e.g. 89 VS file extensions
+                    # all pointing to the same missing devenv.exe), collapse into a single grouped
+                    # entry with a count and sample RegPaths to reduce UI noise and lag.
+                    try {
+                        $consolidated = [System.Collections.Generic.List[object]]::new()
+                        $groups = [System.Collections.Generic.Dictionary[string,System.Collections.Generic.List[object]]]::new([System.StringComparer]::OrdinalIgnoreCase)
+                        $consolidateThreshold = 4
+                        # Problems eligible for consolidation (same exe missing from many extensions/keys)
+                        $consolidatePattern = '^(Invalid Context Menu Command|Invalid App Command \([^)]+\)|Invalid FileExt MRU|Obsolete Notify Icon|Unused Extension|Stale BAM/DAM Entry|Invalid Window Placement)$'
+
+                        foreach ($finding in @($SyncHash.Findings)) {
+                            if ($finding.Problem -match $consolidatePattern -and -not [string]::IsNullOrWhiteSpace([string]$finding.Data)) {
+                                # Normalize group key: strip verb suffix so "Invalid App Command (Open)" and
+                                # "Invalid App Command (Edit)" pointing to same exe consolidate together
+                                $groupProblem = $finding.Problem -replace ' \([^)]+\)$', ''
+                                $groupKey = "$groupProblem|||$($finding.Data)"
+                                if (-not $groups.ContainsKey($groupKey)) {
+                                    $groups[$groupKey] = [System.Collections.Generic.List[object]]::new()
+                                }
+                                [void]$groups[$groupKey].Add($finding)
+                            } else {
+                                [void]$consolidated.Add($finding)
+                            }
+                        }
+
+                        foreach ($kvp in $groups.GetEnumerator()) {
+                            $items = $kvp.Value
+                            if ($items.Count -ge $consolidateThreshold) {
+                                $sample = @($items | Select-Object -First 3 | ForEach-Object { $_.RegPath })
+                                $sampleText = $sample -join ", "
+                                $first = $items[0]
+                                $suffix = if ($items.Count -gt 3) { " (+$($items.Count - 3) more)" } else { "" }
+                                # Preserve the original Type so the cleanup worker processes
+                                # all expanded originals correctly when the user fixes this row.
+                                # Use SafeToFix from originals: safe only if ALL originals agree.
+                                $anyUnsafe = $false
+                                foreach ($ci in $items) {
+                                    if ($ci.PSObject.Properties["SafeToFix"] -and -not [bool]$ci.SafeToFix) { $anyUnsafe = $true; break }
+                                    if ([string]$ci.Type -eq "Key" -and [string]$ci.Problem -ne "Obsolete Notify Icon") { $anyUnsafe = $true; break }
+                                }
+                                [void]$consolidated.Add([PSCustomObject]@{
+                                    Problem      = $first.Problem
+                                    Data         = "$($first.Data) ($($items.Count) entries)"
+                                    DisplayKey   = "$($first.DisplayKey) ($($items.Count) similar)"
+                                    RegPath      = $first.RegPath
+                                    ValueName    = $first.ValueName
+                                    Type         = $first.Type
+                                    SafeToFix    = (-not $anyUnsafe)
+                                    Risk         = if ($first.PSObject.Properties["Risk"]) { [string]$first.Risk } else { "Medium" }
+                                    Confidence   = if ($first.PSObject.Properties["Confidence"]) { [string]$first.Confidence } else { "High" }
+                                    Details      = "$($first.Details) $suffix Samples: $sampleText"
+                                    _ConsolidatedFrom = $items
+                                })
+                            } else {
+                                foreach ($item in $items) {
+                                    [void]$consolidated.Add($item)
+                                }
+                            }
+                        }
+
+                        # Store original full list for expand/detail view, replace display list
+                        $SyncHash.FindingsFull = [System.Collections.ObjectModel.ObservableCollection[object]]::new(@($SyncHash.Findings))
+                        $SyncHash.Findings = [System.Collections.ObjectModel.ObservableCollection[object]]::new(@($consolidated))
+                    }
+                    catch {}
 
                     $SyncHash.IsCompleted = $true
                 }
