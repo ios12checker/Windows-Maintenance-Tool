@@ -3606,7 +3606,10 @@ $apply = {
 $btnOpenScheduler.Add_Click({
     # The dialog lists everything itself, but one click also hands over the
     # real Task Scheduler (taskschd.msc) for anyone who wants the native
-    # view - the same launch the Startup Manager's Scheduled Tasks tab uses.
+    # view. The console cannot be deep-linked to a specific task from the
+    # command line - taskschd.msc's only documented switches are the remote
+    # /s /u /p, and it ignores anything else - so it always opens on the
+    # root view and the user navigates to the task from there.
     try {
         Start-Process -FilePath "taskschd.msc" -ErrorAction Stop
         Write-GuiLog "[Scheduled Tasks] Opened Windows Task Scheduler (taskschd.msc)."
@@ -23149,6 +23152,17 @@ function Show-StartupRowDetails {
         $key.SetValue("", [string]$Value)
     }
 
+    function Get-WmtTaskFileLocation {
+        # Scheduled tasks are stored on disk as XML definitions inside the
+        # task store: %SystemRoot%\System32\Tasks\<TaskPath><TaskName>. That
+        # per-task file (the "taskdir" location) is what Open Location should
+        # reveal - never C:\Windows root.
+        param([string]$TaskPath, [string]$TaskName)
+        $relative = (("{0}{1}" -f $TaskPath, $TaskName) -replace '/', '\').TrimStart('\')
+        if ([string]::IsNullOrWhiteSpace($relative)) { return "" }
+        return (Join-Path (Join-Path $env:SystemRoot "System32\Tasks") $relative)
+    }
+
     $content = @'
 <Grid Margin="16">
     <Grid.RowDefinitions>
@@ -23169,6 +23183,7 @@ function Show-StartupRowDetails {
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -23198,6 +23213,9 @@ function Show-StartupRowDetails {
 
             <TextBlock Name="lblEnabled" Grid.Row="6" Grid.Column="0" Text="Enabled" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
             <CheckBox Name="chkEnabled" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10" VerticalAlignment="Center" Content="Enabled" Foreground="{DynamicResource TextPrimary}"/>
+
+            <TextBlock Name="lblTaskFile" Grid.Row="7" Grid.Column="0" Text="Task file" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+            <TextBox Name="txtTaskFile" Grid.Row="7" Grid.Column="1" Height="34" Margin="0,0,0,10" VerticalContentAlignment="Center"/>
         </Grid>
     </ScrollViewer>
 
@@ -23237,6 +23255,8 @@ function Show-StartupRowDetails {
     $cboStartupType = $editor.FindName("cboStartupType")
     $lblEnabled = $editor.FindName("lblEnabled")
     $chkEnabled = $editor.FindName("chkEnabled")
+    $lblTaskFile = $editor.FindName("lblTaskFile")
+    $txtTaskFile = $editor.FindName("txtTaskFile")
     $lblStatus = $editor.FindName("lblStatus")
     $btnBrowse = $editor.FindName("btnBrowse")
     $btnOpenLocation = $editor.FindName("btnOpenLocation")
@@ -23267,6 +23287,7 @@ function Show-StartupRowDetails {
     $chkEnabled.IsChecked = ((Get-StartupCellValue $row "Enabled") -ne "No")
 
     Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $false
+    Set-StartupEditorVisibility @($lblTaskFile, $txtTaskFile) $false
     $btnBrowse.Visibility = [System.Windows.Visibility]::Visible
 
     switch ($tabName) {
@@ -23296,10 +23317,20 @@ function Show-StartupRowDetails {
             $lblCommand.Text = "Notes"
             $lblLocation.Text = "Task path"
             $lblValueName.Text = "Task identity"
-            Set-StartupEditorVisibility @($btnBrowse, $btnOpenNative) $true
+            # The task's on-disk definition (its own "taskdir" file under the
+            # task store, not C:\Windows) is exposed as an editable line so the
+            # Open Location button reveals exactly what the user points it at.
+            $txtTaskFile.Text = (Get-WmtTaskFileLocation -TaskPath $taskPath -TaskName $taskName)
+            Set-StartupEditorVisibility @($btnBrowse) $true
+            Set-StartupEditorVisibility @($lblTaskFile, $txtTaskFile) $true
             $btnBrowse.Visibility = [System.Windows.Visibility]::Collapsed
-            $btnOpenNative.Content = "Open Task Scheduler"
-            $lblHint.Text = "Task names/paths are read-only here. Use Save to enable or disable, or open Task Scheduler for advanced edits."
+            # No per-task "Open Task Scheduler" button here: taskschd.msc
+            # cannot be deep-linked to a specific task from the command line,
+            # so the button would just open the scheduler root and mislead.
+            # The main window's Scheduled Tasks row carries the scheduler
+            # button instead. btnOpenNative stays hidden (it was hidden for
+            # all tabs before the per-tab switch ran).
+            $lblHint.Text = "Task names/paths are read-only. The Task file line is editable - Open Location reveals it in the task store. Use the Task Scheduler button on the main window for the native console."
         }
         "Context Menu" {
             $display = Get-WmtRegistryDefaultValue $ctxPath
@@ -23364,7 +23395,43 @@ function Show-StartupRowDetails {
                         if ($entryType -eq "StartupFolder" -and -not [string]::IsNullOrWhiteSpace($itemPath) -and [System.IO.File]::Exists($itemPath)) { Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $itemPath) }
                         elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Start-Process regedit.exe }
                     }
-                    "Scheduled Tasks" { Start-Process taskschd.msc }
+                    "Scheduled Tasks" {
+                        # Reveal the task's own file inside the task store (the
+                        # taskdir), selecting it in Explorer - never dump the
+                        # user at C:\Windows root. The editable Task file line
+                        # drives this, so it can be repointed before opening.
+                        $taskFileLine = ([string]$txtTaskFile.Text).Trim()
+                        if ([string]::IsNullOrWhiteSpace($taskFileLine)) { $taskFileLine = Get-WmtTaskFileLocation -TaskPath $taskPath -TaskName $taskName }
+                        if ([string]::IsNullOrWhiteSpace($taskFileLine)) { throw "Task file location is unknown." }
+                        $taskFileLine = [Environment]::ExpandEnvironmentVariables($taskFileLine)
+                        # Scheduler-style values ("\Microsoft\Windows\Foo") and
+                        # bare relative paths resolve into the task store; only
+                        # drive-lettered or UNC paths are used verbatim.
+                        if (-not ($taskFileLine -match '^([A-Za-z]:|\\\\)')) {
+                            $taskFileLine = Join-Path (Join-Path $env:SystemRoot "System32\Tasks") ($taskFileLine.TrimStart('\', '/'))
+                        }
+                        if ([System.IO.File]::Exists($taskFileLine)) {
+                            Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $taskFileLine)
+                        }
+                        else {
+                            # Missing file: walk up to the nearest existing
+                            # folder. The task store root always exists, so the
+                            # climb stops inside System32\Tasks instead of
+                            # surfacing C:\Windows root.
+                            $folder = Split-Path $taskFileLine -Parent
+                            while (-not [string]::IsNullOrEmpty($folder) -and -not [System.IO.Directory]::Exists($folder)) {
+                                $parent = Split-Path $folder -Parent
+                                if ([string]::IsNullOrEmpty($parent) -or $parent -ieq $folder) { $folder = ""; break }
+                                $folder = $parent
+                            }
+                            if (-not [string]::IsNullOrEmpty($folder) -and [System.IO.Directory]::Exists($folder)) {
+                                Start-Process explorer.exe -ArgumentList ("`"{0}`"" -f $folder)
+                            }
+                            else {
+                                throw "Task file was not found on disk: $taskFileLine"
+                            }
+                        }
+                    }
                     "Context Menu" { Start-Process regedit.exe }
                     "Services" { Start-Process services.msc }
                 }
@@ -23375,7 +23442,6 @@ function Show-StartupRowDetails {
     $btnOpenNative.Add_Click({
             try {
                 switch ($tabName) {
-                    "Scheduled Tasks" { Start-Process taskschd.msc }
                     "Services" { Start-Process services.msc }
                     default { Start-Process regedit.exe }
                 }
@@ -23825,10 +23891,12 @@ Add-GridContextMenu -TabObj $winTab -Buttons @($btnWinRefresh, $btnWinDetails, $
 
 $btnTaskRefresh = New-StartupButton $taskTab.Buttons "Refresh" "Standard"
 $btnTaskDetails = New-StartupButton $taskTab.Buttons "Details" "Standard"
+$btnTaskScheduler = New-StartupButton $taskTab.Buttons "Task Scheduler" "Standard"
+$btnTaskScheduler.ToolTip = "Open the native Task Scheduler console (taskschd.msc). The console cannot jump straight to a task, so use its search/navigation to reach the one you want."
 $btnTaskEnable = New-StartupButton $taskTab.Buttons "Enable" "Success"
 $btnTaskDisable = New-StartupButton $taskTab.Buttons "Disable" "Warning"
 $btnTaskDelete = New-StartupButton $taskTab.Buttons "Delete" "Danger"
-Add-GridContextMenu -TabObj $taskTab -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
+Add-GridContextMenu -TabObj $taskTab -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskScheduler, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
 
 $btnCtxRefresh = New-StartupButton $ctxTab.Buttons "Refresh" "Standard"
 $btnCtxDetails = New-StartupButton $ctxTab.Buttons "Details" "Standard"
@@ -23865,6 +23933,17 @@ $btnWinDelete.Add_Click({
 
 $btnTaskRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Scheduled Tasks" $true }.GetNewClosure())
 $btnTaskDetails.Add_Click({ & $fnShowStartupRowDetails $taskTab "Task Details" }.GetNewClosure())
+$btnTaskScheduler.Add_Click({
+        # taskschd.msc cannot be deep-linked to a specific task from the
+        # command line (its only documented switches are the remote /s /u /p),
+        # so this hands over the console itself rather than pretending to
+        # focus a task.
+        try {
+            Start-Process -FilePath "taskschd.msc" -ErrorAction Stop
+            Write-GuiLog "[Scheduled Tasks] Opened Windows Task Scheduler (taskschd.msc)."
+        }
+        catch { Write-GuiLog "[Scheduled Tasks] Could not open Task Scheduler: $($_.Exception.Message)" }
+    }.GetNewClosure())
 $btnTaskEnable.Add_Click({ & $fnInvokeStartupTaskSelection Enable }.GetNewClosure())
 $btnTaskDisable.Add_Click({ & $fnInvokeStartupTaskSelection Disable }.GetNewClosure())
 $btnTaskDelete.Add_Click({ & $fnInvokeStartupTaskSelection Delete }.GetNewClosure())
