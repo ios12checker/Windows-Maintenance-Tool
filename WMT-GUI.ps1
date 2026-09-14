@@ -2439,6 +2439,82 @@ try {
     <Setter Property="Background" Value="{DynamicResource BgDark}"/>
     <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
     <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="10,0,8,0"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <!-- The default Aero ComboBox template paints the closed selection box
+         with its own static white brushes and ignores the Background/Border
+         setters, leaving a light box in the dark theme. This template themes
+         the closed box and hosts the themed dropdown surface itself; items
+         inside are themed by the implicit ComboBoxItem style below. Hover
+         only changes the border so combos with explicit light colors keep
+         their readable background. -->
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid x:Name="templateRoot" SnapsToDevicePixels="True">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                        <Grid>
+                            <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" Margin="{TemplateBinding Padding}" HorizontalAlignment="Left" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" IsHitTestVisible="False"/>
+                            <Path x:Name="Arrow" Data="M 0 0 L 4 4 L 8 0" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,1,9,0" IsHitTestVisible="False"/>
+                        </Grid>
+                    </Border>
+                    <ToggleButton x:Name="toggleButton" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" Focusable="False" ClickMode="Press"/>
+                    <Popup x:Name="PART_Popup" AllowsTransparency="True" Focusable="False" IsOpen="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" Placement="Bottom" PopupAnimation="Fade">
+                        <Border x:Name="DropDownBorder" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Margin="0,2,0,0" Padding="0,4" MinWidth="{Binding ActualWidth, ElementName=templateRoot}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                            </ScrollViewer>
+                        </Border>
+                    </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource TextSecondary}"/>
+                    </Trigger>
+                    <Trigger Property="IsDropDownOpen" Value="True">
+                        <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                        <Setter TargetName="Arrow" Property="LayoutTransform">
+                            <Setter.Value>
+                                <RotateTransform Angle="180"/>
+                            </Setter.Value>
+                        </Setter>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                        <Setter Property="Opacity" Value="0.55"/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
+</Style>
+
+<!-- The default ComboBoxItem template paints SystemColors.Window (white) and
+     generated items inherit the combo's light foreground - light-on-white,
+     unreadable. Give items an opaque themed surface and a BgHover highlight. -->
+<Style TargetType="{x:Type ComboBoxItem}">
+    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+    <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+    <Setter Property="Padding" Value="9,5"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                    <ContentPresenter/>
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsHighlighted" Value="True">
+                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                        <Setter Property="Opacity" Value="0.55"/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
 </Style>
 
 <Style TargetType="{x:Type CheckBox}">
@@ -23002,6 +23078,264 @@ function Update-StartupTabFilter {
     $TabObj.CountLabel.Text = "$($TabObj.Meta.View.Count) shown / $($TabObj.Meta.Table.Rows.Count) total"
 }
 
+# --- Startup Manager shared helpers (GLOBAL scope) ---
+# These helpers are defined in the GLOBAL scope ON PURPOSE. The dialog's
+# event handlers are bound with GetNewClosure(), and Show-StartupRowDetails
+# itself is invoked through a closure-bound function reference
+# (${function:...}.GetNewClosure()); global functions are the terminal of
+# every command-lookup chain (dynamic-module closures, script scopes, any
+# runspace), so they resolve from every handler and every invocation path.
+# Nested functions inside the dialog function are NOT reachable from
+# GetNewClosure() handlers ("is not recognized as a cmdlet" on click).
+
+function global:Get-StartupCellValue {
+    param($Row, [string]$Name)
+    try {
+        if ($Row -is [System.Data.DataRow]) {
+            if ($Row.Table.Columns.Contains($Name)) { return [string]$Row[$Name] }
+        }
+        elseif ($Row -is [System.Data.DataRowView]) {
+            if ($Row.Row.Table.Columns.Contains($Name)) { return [string]$Row.Row[$Name] }
+        }
+        elseif ($Row -is [System.Collections.IDictionary]) {
+            if ($Row.Contains($Name)) { return [string]$Row[$Name] }
+        }
+        else {
+            $prop = $Row.PSObject.Properties[$Name]
+            if ($prop) { return [string]$prop.Value }
+        }
+    }
+    catch {}
+    return ""
+}
+
+function global:Set-StartupCellValue {
+    param($Row, [string]$Name, [string]$Value)
+    try {
+        if ($Row -is [System.Data.DataRow]) {
+            if ($Row.Table.Columns.Contains($Name)) { $Row[$Name] = $Value }
+        }
+        elseif ($Row -is [System.Data.DataRowView]) {
+            if ($Row.Row.Table.Columns.Contains($Name)) { $Row.Row[$Name] = $Value }
+        }
+        elseif ($Row -is [System.Collections.IDictionary]) {
+            $Row[$Name] = $Value
+        }
+        else {
+            $prop = $Row.PSObject.Properties[$Name]
+            if ($prop) { $prop.Value = $Value }
+        }
+    }
+    catch {}
+}
+
+function global:Set-StartupEditorVisibility {
+    param([object[]]$Controls, [bool]$Visible)
+    $visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+    foreach ($control in @($Controls)) {
+        try { if ($control) { $control.Visibility = $visibility } } catch {}
+    }
+}
+
+function global:Split-WmtStartupCommandLine {
+    param([string]$CommandLine)
+    $cmd = ([string]$CommandLine).Trim()
+    if ([string]::IsNullOrWhiteSpace($cmd)) { return [PSCustomObject]@{ Target = ""; Arguments = "" } }
+    if ($cmd.StartsWith('"')) {
+        $closingQuote = $cmd.IndexOf('"', 1)
+        if ($closingQuote -gt 1) {
+            return [PSCustomObject]@{
+                Target    = $cmd.Substring(1, $closingQuote - 1)
+                Arguments = $cmd.Substring($closingQuote + 1).Trim()
+            }
+        }
+    }
+    $exeMatch = [regex]::Match($cmd, '^(?<target>.+?\.exe)(?<args>\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($exeMatch.Success) {
+        return [PSCustomObject]@{
+            Target    = $exeMatch.Groups['target'].Value.Trim()
+            Arguments = $exeMatch.Groups['args'].Value.Trim()
+        }
+    }
+    $firstSpace = $cmd.IndexOf(' ')
+    if ($firstSpace -gt 0) {
+        return [PSCustomObject]@{
+            Target    = $cmd.Substring(0, $firstSpace).Trim()
+            Arguments = $cmd.Substring($firstSpace + 1).Trim()
+        }
+    }
+    return [PSCustomObject]@{ Target = $cmd; Arguments = "" }
+}
+
+function global:Get-WmtShortcutCommandLine {
+    param([string]$ShortcutPath)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -or -not [System.IO.File]::Exists($ShortcutPath)) { return "" }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $target = [string]$shortcut.TargetPath
+        $arguments = [string]$shortcut.Arguments
+        if ([string]::IsNullOrWhiteSpace($target)) { return "" }
+        if ($target -match '\s') { $target = '"{0}"' -f $target }
+        return (($target, $arguments) -join " ").Trim()
+    }
+    catch { return "" }
+    finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+}
+
+function global:Set-WmtShortcutCommandLine {
+    param([string]$ShortcutPath, [string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    if (-not [System.IO.File]::Exists($ShortcutPath)) { throw "Shortcut file was not found: $ShortcutPath" }
+    $parts = Split-WmtStartupCommandLine $CommandLine
+    if ([string]::IsNullOrWhiteSpace([string]$parts.Target)) { throw "Shortcut target cannot be blank." }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $shortcut.TargetPath = [string]$parts.Target
+        $shortcut.Arguments = [string]$parts.Arguments
+        $expandedTarget = [Environment]::ExpandEnvironmentVariables(([string]$parts.Target).Trim('"'))
+        if ([System.IO.File]::Exists($expandedTarget)) {
+            $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
+            if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) { $shortcut.WorkingDirectory = $targetDir }
+        }
+        $shortcut.Save()
+    }
+    finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+}
+
+function global:Get-WmtRegistryDefaultValue {
+    param([string]$Path)
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path)) {
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return [string]$key.GetValue("")
+        }
+    }
+    catch {}
+    return ""
+}
+
+function global:Set-WmtRegistryDefaultValue {
+    param([string]$Path, [string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Registry key was not found: $Path" }
+    $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $key.SetValue("", [string]$Value)
+}
+
+function global:Get-WmtTaskFileLocation {
+    # Scheduled tasks are stored on disk as XML definitions inside the
+    # task store: %SystemRoot%\System32\Tasks\<TaskPath><TaskName>. That
+    # per-task file (the "taskdir" location) is what Open Location should
+    # reveal - never C:\Windows root.
+    param([string]$TaskPath, [string]$TaskName)
+    $relative = (("{0}{1}" -f $TaskPath, $TaskName) -replace '/', '\').TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($relative)) { return "" }
+    return (Join-Path (Join-Path $env:SystemRoot "System32\Tasks") $relative)
+}
+
+function global:Get-WmtServiceFilePath {
+    # Resolves a service's on-disk binary from its HKLM registry entry:
+    # ImagePath is expanded (env vars, \SystemRoot and \??\ boot-path
+    # notation), the executable token is split off the arguments, and
+    # svchost services are followed into their ServiceDll parameter so
+    # the location points at the actual payload, not the generic host.
+    param([string]$ServiceName)
+    if ([string]::IsNullOrWhiteSpace($ServiceName)) { return "" }
+    $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    $imagePath = ""
+    try { $imagePath = [string](Get-ItemProperty -LiteralPath $svcKey -ErrorAction Stop).ImagePath } catch { return "" }
+    $imagePath = [Environment]::ExpandEnvironmentVariables(([string]$imagePath).Trim())
+    if ([string]::IsNullOrWhiteSpace($imagePath)) { return "" }
+    if ($imagePath.StartsWith("\SystemRoot", [System.StringComparison]::OrdinalIgnoreCase)) { $imagePath = $env:SystemRoot + $imagePath.Substring("\SystemRoot".Length) }
+    if ($imagePath.StartsWith("\??\", [System.StringComparison]::OrdinalIgnoreCase)) { $imagePath = $imagePath.Substring(4) }
+    if ($imagePath.StartsWith('"')) {
+        $end = $imagePath.IndexOf('"', 1)
+        if ($end -gt 1) { $imagePath = $imagePath.Substring(1, $end - 1) } else { $imagePath = $imagePath.Trim('"') }
+    }
+    else {
+        $space = $imagePath.IndexOf(' ')
+        if ($space -gt 0) { $imagePath = $imagePath.Substring(0, $space) }
+    }
+    $imagePath = ([string]$imagePath).Trim()
+    if ([string]::IsNullOrWhiteSpace($imagePath)) { return "" }
+    if (-not [System.IO.Path]::IsPathRooted($imagePath)) { $imagePath = Join-Path $env:SystemRoot $imagePath }
+    if ($imagePath -imatch 'svchost\.exe$') {
+        try {
+            $dll = [string](Get-ItemProperty -LiteralPath "$svcKey\Parameters" -Name ServiceDll -ErrorAction Stop).ServiceDll
+            $dll = [Environment]::ExpandEnvironmentVariables(([string]$dll).Trim())
+            if (-not [string]::IsNullOrWhiteSpace($dll)) {
+                if ($dll.StartsWith('"')) {
+                    $end = $dll.IndexOf('"', 1)
+                    if ($end -gt 1) { $dll = $dll.Substring(1, $end - 1) }
+                }
+                $dll = ([string]$dll).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($dll)) {
+                    if (-not [System.IO.Path]::IsPathRooted($dll)) { $dll = Join-Path (Join-Path $env:SystemRoot "System32") $dll }
+                    return $dll
+                }
+            }
+        } catch {}
+    }
+    return $imagePath
+}
+
+function global:Show-WmtFileInExplorer {
+    # Selects the file in Explorer; if it is gone, walks up to the nearest
+    # existing folder so the user still lands somewhere useful (the climb
+    # stops at the drive root, never surfacing an error dialog).
+    param([string]$FilePath, [string]$MissingMessage)
+    if ([System.IO.File]::Exists($FilePath)) {
+        Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $FilePath)
+        return
+    }
+    $folder = Split-Path $FilePath -Parent
+    while (-not [string]::IsNullOrEmpty($folder) -and -not [System.IO.Directory]::Exists($folder)) {
+        $parent = Split-Path $folder -Parent
+        if ([string]::IsNullOrEmpty($parent) -or $parent -ieq $folder) { $folder = ""; break }
+        $folder = $parent
+    }
+    if (-not [string]::IsNullOrEmpty($folder) -and [System.IO.Directory]::Exists($folder)) {
+        Start-Process explorer.exe -ArgumentList ("`"{0}`"" -f $folder)
+        return
+    }
+    throw $MissingMessage
+}
+
+function global:Open-WmtRegistryKey {
+    # Regedit reopens its last key on launch (the technique RegJump uses):
+    # point HKCU's Regedit LastKey at the target, then start regedit. The
+    # PowerShell-style path (HKLM:\...) is converted to regedit's native
+    # "Computer\HKEY_..." form; failures fall back to a plain regedit.
+    param([string]$RegistryPath)
+    $psPath = ([string]$RegistryPath).Trim()
+    $rootMap = @{
+        "HKLM" = "HKEY_LOCAL_MACHINE"
+        "HKCU" = "HKEY_CURRENT_USER"
+        "HKCR" = "HKEY_CLASSES_ROOT"
+        "HKU"  = "HKEY_USERS"
+        "HKCC" = "HKEY_CURRENT_CONFIG"
+    }
+    $rootName = ""
+    $rest = $psPath
+    if ($psPath -match '^(HKLM|HKCU|HKCR|HKU|HKCC)(:|\\|$)') {
+        $rootName = $Matches[1]
+        $rest = $psPath.Substring($rootName.Length).TrimStart(':', '\')
+    }
+    if (-not [string]::IsNullOrEmpty($rootName)) {
+        $fullKey = ("Computer\{0}\{1}" -f $rootMap[$rootName], $rest).TrimEnd('\')
+        try {
+            $applet = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit"
+            if (-not (Test-Path -LiteralPath $applet)) { New-Item -Path $applet -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -LiteralPath $applet -Name "LastKey" -Value $fullKey -Type String -ErrorAction Stop
+        } catch {}
+    }
+    Start-Process regedit.exe
+}
+
 function Show-StartupRowDetails {
     param($TabObj, [string]$Title)
 
@@ -23014,154 +23348,6 @@ function Show-StartupRowDetails {
     $row = $selectedRows | Select-Object -First 1
     $tabName = [string]$TabObj.Header
 
-    function Get-StartupCellValue {
-        param($Row, [string]$Name)
-        try {
-            if ($Row -is [System.Data.DataRow]) {
-                if ($Row.Table.Columns.Contains($Name)) { return [string]$Row[$Name] }
-            }
-            elseif ($Row -is [System.Data.DataRowView]) {
-                if ($Row.Row.Table.Columns.Contains($Name)) { return [string]$Row.Row[$Name] }
-            }
-            elseif ($Row -is [System.Collections.IDictionary]) {
-                if ($Row.Contains($Name)) { return [string]$Row[$Name] }
-            }
-            else {
-                $prop = $Row.PSObject.Properties[$Name]
-                if ($prop) { return [string]$prop.Value }
-            }
-        }
-        catch {}
-        return ""
-    }
-
-    function Set-StartupCellValue {
-        param($Row, [string]$Name, [string]$Value)
-        try {
-            if ($Row -is [System.Data.DataRow]) {
-                if ($Row.Table.Columns.Contains($Name)) { $Row[$Name] = $Value }
-            }
-            elseif ($Row -is [System.Data.DataRowView]) {
-                if ($Row.Row.Table.Columns.Contains($Name)) { $Row.Row[$Name] = $Value }
-            }
-            elseif ($Row -is [System.Collections.IDictionary]) {
-                $Row[$Name] = $Value
-            }
-            else {
-                $prop = $Row.PSObject.Properties[$Name]
-                if ($prop) { $prop.Value = $Value }
-            }
-        }
-        catch {}
-    }
-
-    function Set-StartupEditorVisibility {
-        param([object[]]$Controls, [bool]$Visible)
-        $visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-        foreach ($control in @($Controls)) {
-            try { if ($control) { $control.Visibility = $visibility } } catch {}
-        }
-    }
-
-    function Split-WmtStartupCommandLine {
-        param([string]$CommandLine)
-        $cmd = ([string]$CommandLine).Trim()
-        if ([string]::IsNullOrWhiteSpace($cmd)) { return [PSCustomObject]@{ Target = ""; Arguments = "" } }
-        if ($cmd.StartsWith('"')) {
-            $closingQuote = $cmd.IndexOf('"', 1)
-            if ($closingQuote -gt 1) {
-                return [PSCustomObject]@{
-                    Target    = $cmd.Substring(1, $closingQuote - 1)
-                    Arguments = $cmd.Substring($closingQuote + 1).Trim()
-                }
-            }
-        }
-        $exeMatch = [regex]::Match($cmd, '^(?<target>.+?\.exe)(?<args>\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if ($exeMatch.Success) {
-            return [PSCustomObject]@{
-                Target    = $exeMatch.Groups['target'].Value.Trim()
-                Arguments = $exeMatch.Groups['args'].Value.Trim()
-            }
-        }
-        $firstSpace = $cmd.IndexOf(' ')
-        if ($firstSpace -gt 0) {
-            return [PSCustomObject]@{
-                Target    = $cmd.Substring(0, $firstSpace).Trim()
-                Arguments = $cmd.Substring($firstSpace + 1).Trim()
-            }
-        }
-        return [PSCustomObject]@{ Target = $cmd; Arguments = "" }
-    }
-
-    function Get-WmtShortcutCommandLine {
-        param([string]$ShortcutPath)
-        if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -or -not [System.IO.File]::Exists($ShortcutPath)) { return "" }
-        $shell = $null
-        try {
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut($ShortcutPath)
-            $target = [string]$shortcut.TargetPath
-            $arguments = [string]$shortcut.Arguments
-            if ([string]::IsNullOrWhiteSpace($target)) { return "" }
-            if ($target -match '\s') { $target = '"{0}"' -f $target }
-            return (($target, $arguments) -join " ").Trim()
-        }
-        catch { return "" }
-        finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
-    }
-
-    function Set-WmtShortcutCommandLine {
-        param([string]$ShortcutPath, [string]$CommandLine)
-        if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) { return }
-        if (-not [System.IO.File]::Exists($ShortcutPath)) { throw "Shortcut file was not found: $ShortcutPath" }
-        $parts = Split-WmtStartupCommandLine $CommandLine
-        if ([string]::IsNullOrWhiteSpace([string]$parts.Target)) { throw "Shortcut target cannot be blank." }
-        $shell = $null
-        try {
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut($ShortcutPath)
-            $shortcut.TargetPath = [string]$parts.Target
-            $shortcut.Arguments = [string]$parts.Arguments
-            $expandedTarget = [Environment]::ExpandEnvironmentVariables(([string]$parts.Target).Trim('"'))
-            if ([System.IO.File]::Exists($expandedTarget)) {
-                $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
-                if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) { $shortcut.WorkingDirectory = $targetDir }
-            }
-            $shortcut.Save()
-        }
-        finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
-    }
-
-    function Get-WmtRegistryDefaultValue {
-        param([string]$Path)
-        try {
-            if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path)) {
-                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-                return [string]$key.GetValue("")
-            }
-        }
-        catch {}
-        return ""
-    }
-
-    function Set-WmtRegistryDefaultValue {
-        param([string]$Path, [string]$Value)
-        if ([string]::IsNullOrWhiteSpace($Path)) { return }
-        if (-not (Test-Path -LiteralPath $Path)) { throw "Registry key was not found: $Path" }
-        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-        $key.SetValue("", [string]$Value)
-    }
-
-    function Get-WmtTaskFileLocation {
-        # Scheduled tasks are stored on disk as XML definitions inside the
-        # task store: %SystemRoot%\System32\Tasks\<TaskPath><TaskName>. That
-        # per-task file (the "taskdir" location) is what Open Location should
-        # reveal - never C:\Windows root.
-        param([string]$TaskPath, [string]$TaskName)
-        $relative = (("{0}{1}" -f $TaskPath, $TaskName) -replace '/', '\').TrimStart('\')
-        if ([string]::IsNullOrWhiteSpace($relative)) { return "" }
-        return (Join-Path (Join-Path $env:SystemRoot "System32\Tasks") $relative)
-    }
 
     $content = @'
 <Grid Margin="16">
@@ -23228,7 +23414,7 @@ function Show-StartupRowDetails {
         <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
             <Button Name="btnBrowse" Content="Browse Command" MinWidth="124" Margin="0,0,8,8"/>
             <Button Name="btnOpenLocation" Content="Open Location" MinWidth="112" Margin="0,0,8,8"/>
-            <Button Name="btnOpenNative" Content="Open Native Editor" MinWidth="136" Margin="0,0,8,8"/>
+            <Button Name="btnOpenReg" Content="Open Registry" MinWidth="112" Margin="0,0,8,8"/>
             <Button Name="btnSave" Content="Save" MinWidth="94" IsDefault="True" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
             <Button Name="btnClose" Content="Close" MinWidth="94" IsCancel="True" Margin="0,0,0,8"/>
         </WrapPanel>
@@ -23260,7 +23446,7 @@ function Show-StartupRowDetails {
     $lblStatus = $editor.FindName("lblStatus")
     $btnBrowse = $editor.FindName("btnBrowse")
     $btnOpenLocation = $editor.FindName("btnOpenLocation")
-    $btnOpenNative = $editor.FindName("btnOpenNative")
+    $btnOpenReg = $editor.FindName("btnOpenReg")
     $btnSave = $editor.FindName("btnSave")
     $btnClose = $editor.FindName("btnClose")
 
@@ -23286,7 +23472,7 @@ function Show-StartupRowDetails {
     $txtValueName.Text = $valueName
     $chkEnabled.IsChecked = ((Get-StartupCellValue $row "Enabled") -ne "No")
 
-    Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $false
+    Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenReg) $false
     Set-StartupEditorVisibility @($lblTaskFile, $txtTaskFile) $false
     $btnBrowse.Visibility = [System.Windows.Visibility]::Visible
 
@@ -23328,8 +23514,9 @@ function Show-StartupRowDetails {
             # cannot be deep-linked to a specific task from the command line,
             # so the button would just open the scheduler root and mislead.
             # The main window's Scheduled Tasks row carries the scheduler
-            # button instead. btnOpenNative stays hidden (it was hidden for
-            # all tabs before the per-tab switch ran).
+            # button instead. The old per-entry native-editor button was
+            # removed entirely: services.msc belongs on the main window's
+            # Services row and no other tab ever showed this button.
             $lblHint.Text = "Task names/paths are read-only. The Task file line is editable - Open Location reveals it in the task store. Use the Task Scheduler button on the main window for the native console."
         }
         "Context Menu" {
@@ -23353,19 +23540,18 @@ function Show-StartupRowDetails {
             $txtDisplayName.Text = Get-StartupCellValue $row "DisplayName"
             $txtCommand.Text = "Service binary paths are not edited here. Use Registry Editor or sc.exe config for advanced service path changes."
             $txtCommand.IsReadOnly = $true
-            $txtLocation.Text = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+            $txtLocation.Text = (Get-WmtServiceFilePath -ServiceName $serviceName)
             $txtValueName.Text = $serviceName
             $currentStartType = Get-StartupCellValue $row "StartType"
             if (-not (@("Automatic", "Manual", "Disabled") -contains $currentStartType) -and -not [string]::IsNullOrWhiteSpace($currentStartType)) { [void]$cboStartupType.Items.Add($currentStartType) }
             $cboStartupType.SelectedItem = $currentStartType
-            Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $true
+            Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenReg) $true
             Set-StartupEditorVisibility @($lblEnabled, $chkEnabled, $btnBrowse) $false
-            $btnOpenNative.Content = "Open Services"
             $lblName.Text = "Service name"
             $lblCommand.Text = "Notes"
-            $lblLocation.Text = "Registry key"
+            $lblLocation.Text = "Binary path"
             $lblValueName.Text = "Service name"
-            $lblHint.Text = "Edit the service display name and startup type. Service name and binary path are kept read-only for safety."
+            $lblHint.Text = "Edit the service display name and startup type. Binary path and service name are read-only: Open Location reveals the binary file, Open Registry jumps to the service key. Use the Services button on the main window's Services row for the native console (it cannot focus a single service)."
         }
     }
 
@@ -23393,7 +23579,8 @@ function Show-StartupRowDetails {
                 switch ($tabName) {
                     "Windows" {
                         if ($entryType -eq "StartupFolder" -and -not [string]::IsNullOrWhiteSpace($itemPath) -and [System.IO.File]::Exists($itemPath)) { Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $itemPath) }
-                        elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Start-Process regedit.exe }
+                        elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Open-WmtRegistryKey -RegistryPath $rootRunPath }
+                        else { Start-Process regedit.exe }
                     }
                     "Scheduled Tasks" {
                         # Reveal the task's own file inside the task store (the
@@ -23432,18 +23619,31 @@ function Show-StartupRowDetails {
                             }
                         }
                     }
-                    "Context Menu" { Start-Process regedit.exe }
-                    "Services" { Start-Process services.msc }
+                    "Context Menu" { Open-WmtRegistryKey -RegistryPath $ctxPath }
+                    "Services" {
+                        # Navigate to the service's own binary (Image Path,
+                        # following the svchost ServiceDll parameter) and select
+                        # it in Explorer. If the binary cannot be resolved from
+                        # the registry, fall back to the service's registry key.
+                        $svcFile = Get-WmtServiceFilePath -ServiceName $serviceName
+                        if ([string]::IsNullOrWhiteSpace($svcFile)) {
+                            Open-WmtRegistryKey -RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                            return
+                        }
+                        Show-WmtFileInExplorer -FilePath $svcFile -MissingMessage ("Service file was not found on disk: {0}" -f $svcFile)
+                    }
                 }
             }
             catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
         }.GetNewClosure())
 
-    $btnOpenNative.Add_Click({
+    $btnOpenReg.Add_Click({
             try {
                 switch ($tabName) {
-                    "Services" { Start-Process services.msc }
-                    default { Start-Process regedit.exe }
+                    "Services" {
+                        if ([string]::IsNullOrWhiteSpace($serviceName)) { throw "Service name is unknown." }
+                        Open-WmtRegistryKey -RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                    }
                 }
             }
             catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
@@ -23907,11 +24107,13 @@ Add-GridContextMenu -TabObj $ctxTab -Buttons @($btnCtxRefresh, $btnCtxDetails, $
 
 $btnSvcRefresh = New-StartupButton $svcTab.Buttons "Refresh" "Standard"
 $btnSvcDetails = New-StartupButton $svcTab.Buttons "Details" "Standard"
+$btnSvcConsole = New-StartupButton $svcTab.Buttons "Services" "Standard"
+$btnSvcConsole.ToolTip = "Open the native Services console (services.msc). The console cannot jump straight to a service, so use its list to reach the one you want."
 $btnSvcEnable = New-StartupButton $svcTab.Buttons "Enable Auto" "Success"
 $btnSvcManual = New-StartupButton $svcTab.Buttons "Manual" "Primary"
 $btnSvcDisable = New-StartupButton $svcTab.Buttons "Disable" "Warning"
 $btnSvcDelete = New-StartupButton $svcTab.Buttons "Delete" "Danger"
-Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
+Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcConsole, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
 
 $btnWinRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Windows" $true }.GetNewClosure())
 $btnWinDetails.Add_Click({ & $fnShowStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure())
@@ -23962,6 +24164,16 @@ $btnCtxDelete.Add_Click({
 
 $btnSvcRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Services" $true }.GetNewClosure())
 $btnSvcDetails.Add_Click({ & $fnShowStartupRowDetails $svcTab "Service Details" }.GetNewClosure())
+$btnSvcConsole.Add_Click({
+        # services.msc cannot be deep-linked to a specific service from the
+        # command line, so this hands over the console itself rather than
+        # pretending to focus a service (same approach as Task Scheduler).
+        try {
+            Start-Process -FilePath "services.msc" -ErrorAction Stop
+            Write-GuiLog "[Services] Opened Windows Services console (services.msc)."
+        }
+        catch { Write-GuiLog "[Services] Could not open Services console: $($_.Exception.Message)" }
+    }.GetNewClosure())
 $btnSvcEnable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue; $row["StartType"] = "Automatic" } } }.GetNewClosure())
 $btnSvcManual.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Manual -ErrorAction SilentlyContinue; $row["StartType"] = "Manual" } } }.GetNewClosure())
 $btnSvcDisable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue; $row["StartType"] = "Disabled" } } }.GetNewClosure())
