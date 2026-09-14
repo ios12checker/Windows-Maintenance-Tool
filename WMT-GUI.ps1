@@ -4933,6 +4933,374 @@ finally {
 }
 }
 
+function Test-ChocoManifestSupportedItem {
+param([object]$Item)
+
+if (-not $Item) { return $false }
+$id = [string]$Item.Id
+$source = ([string]$Item.Source).ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($id)) { return $false }
+return ($source -in @("chocolatey", "choco"))
+}
+
+function Get-WmtChocolateyLibRoot {
+# Resolve chocolatey's install root (the folder that contains the lib folder)
+$candidates = @()
+if (-not [string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) { $candidates += $env:ChocolateyInstall }
+if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $candidates += (Join-Path $env:ProgramData "chocolatey") }
+$candidates += "C:\ProgramData\chocolatey"
+foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Container) { return $candidate }
+}
+return $null
+}
+
+function Get-ChocoManifestPath {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) { return $null }
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+$libRoot = Get-WmtChocolateyLibRoot
+if ([string]::IsNullOrWhiteSpace($libRoot)) { return $null }
+$pkgDir = Join-Path (Join-Path $libRoot "lib") $id
+if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) { return $null }
+
+# Standard layout: lib\<id>\<id>.nuspec
+$primary = Join-Path $pkgDir "$id.nuspec"
+if (Test-Path -LiteralPath $primary -PathType Leaf) { return $primary }
+
+# Side-by-side or versioned layouts keep the nuspec deeper in the package folder
+try {
+    $found = @(Get-ChildItem -LiteralPath $pkgDir -Filter "*.nuspec" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($found.Count -gt 0) { return $found[0].FullName }
+}
+catch {}
+return $null
+}
+
+function Get-ChocoCommunityPageUrl {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) { return $null }
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+try { return "https://community.chocolatey.org/packages/$([System.Uri]::EscapeDataString($id))" }
+catch { return "https://community.chocolatey.org/packages/$id" }
+}
+
+function Open-ChocoCommunityPage {
+param([object]$Item)
+
+$url = Get-ChocoCommunityPageUrl -Item $Item
+if ([string]::IsNullOrWhiteSpace($url)) {
+    [System.Windows.MessageBox]::Show(
+        "The Chocolatey community page is only available for Chocolatey packages.",
+        "Community Page Unavailable",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
+    return
+}
+
+$name = [string]$Item.Name
+if ([string]::IsNullOrWhiteSpace($name)) { $name = [string]$Item.Id }
+Write-GuiLog "Opening Chocolatey community page for $name..."
+try {
+    Start-Process $url
+}
+catch {
+    Write-GuiLog "ERROR: Could not open Chocolatey community page: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Could not open the community page.`r`n`r`n$url" -Title "Chocolatey Community Page" -Image Warning | Out-Null
+}
+}
+
+function Get-WmtNuspecSummary {
+# Builds a winget-show style summary from nuspec XML text. Children are
+# matched by LocalName because choco's nuspecs declare a default XML namespace
+# (which makes direct property access like $xml.package.metadata return null).
+param([string]$NuspecText)
+
+if ([string]::IsNullOrWhiteSpace($NuspecText)) { return $null }
+try {
+    $xml = [xml]$NuspecText
+    $meta = $null
+    if ($xml.DocumentElement) {
+        foreach ($node in $xml.DocumentElement.ChildNodes) {
+            if ($node -is [System.Xml.XmlElement] -and $node.LocalName -eq "metadata") { $meta = $node; break }
+        }
+    }
+    if ($meta) {
+        $childMap = @{}
+        foreach ($node in $meta.ChildNodes) {
+            if ($node -is [System.Xml.XmlElement]) { $childMap[$node.LocalName.ToLowerInvariant()] = $node }
+        }
+        $getProp = {
+            param([string]$Name)
+            $node = $childMap[$Name.ToLowerInvariant()]
+            if ($node) { return (([string]$node.InnerText) -replace '\r?\n', "`r`n").Trim() }
+            return ""
+        }
+        $getDeps = {
+            $parts = @()
+            try {
+                $depsNode = $childMap["dependencies"]
+                if ($depsNode) {
+                    foreach ($node in $depsNode.ChildNodes) {
+                        if ($node -is [System.Xml.XmlElement] -and $node.LocalName -eq "dependency") {
+                            $depId = [string]$node.GetAttribute("id")
+                            $depVersion = [string]$node.GetAttribute("version")
+                            if ([string]::IsNullOrWhiteSpace($depId)) { continue }
+                            if ([string]::IsNullOrWhiteSpace($depVersion)) { $parts += $depId }
+                            else { $parts += "$depId ($depVersion)" }
+                        }
+                    }
+                }
+            }
+            catch {}
+            return ($parts -join ", ")
+        }
+        $addLine = {
+            param([string]$Label, [string]$Value)
+            if (-not [string]::IsNullOrWhiteSpace($Value)) { [void]$lines.Add("$($Label): $Value") }
+        }
+
+        $lines = [System.Collections.Generic.List[string]]::new()
+        [void]$lines.Add("--- Package Metadata ---")
+        & $addLine "Title"       (& $getProp "title")
+        & $addLine "Version"     (& $getProp "version")
+        & $addLine "Authors"     (& $getProp "authors")
+        & $addLine "Owners"      (& $getProp "owners")
+        & $addLine "Project URL" (& $getProp "projectUrl")
+        & $addLine "Source URL"  (& $getProp "projectSourceUrl")
+        & $addLine "Docs URL"    (& $getProp "docsUrl")
+        & $addLine "Bug Tracker" (& $getProp "bugTrackerUrl")
+        & $addLine "License URL" (& $getProp "licenseUrl")
+        & $addLine "Icon URL"    (& $getProp "iconUrl")
+        & $addLine "Tags"        (& $getProp "tags")
+        & $addLine "Dependencies" (& $getDeps)
+
+        $summaryText = & $getProp "summary"
+        $description = & $getProp "description"
+        $releaseNotes = & $getProp "releaseNotes"
+        if (-not [string]::IsNullOrWhiteSpace($summaryText)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Summary:")
+            [void]$lines.Add($summaryText)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($description)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Description:")
+            [void]$lines.Add($description)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($releaseNotes)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Release Notes:")
+            [void]$lines.Add($releaseNotes)
+        }
+
+        if ($lines.Count -gt 1) { return [string]::Join("`r`n", $lines) }
+    }
+}
+catch { return $null }
+return $null
+}
+
+function Get-ChocoRemoteNuspec {
+# Downloads the package's nuspec from the chocolatey community repository
+# (NuGet v2 protocol) for rows that are not installed locally - e.g. search
+# results for packages that have never been downloaded. The nuspec is read
+# straight out of the downloaded .nupkg (zip) in a temp file.
+param([object]$Item)
+
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) {
+    return [PSCustomObject]@{ Success = $false; ManifestPath = $null; Raw = $null; Text = "No package id was available." }
+}
+
+$url = "https://community.chocolatey.org/api/v2/package/$([System.Uri]::EscapeDataString($id))"
+$version = ([string]$Item.Version).Trim()
+if ($version -match '^\d[\w\.\-\+]*$') { $url = "$url/$version" }
+
+$tmpFile = $null
+try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $tmpFile -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop | Out-Null
+    }
+    finally {
+        $ProgressPreference = $oldProgress
+    }
+
+    if (-not (Test-Path -LiteralPath $tmpFile -PathType Leaf)) { throw "The package download failed." }
+    if ((Get-Item -LiteralPath $tmpFile).Length -lt 64) { throw "The downloaded package is empty or invalid." }
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($tmpFile)
+    try {
+        $nuspecEntry = @($zip.Entries | Where-Object { $_.Name -like "*.nuspec" } | Select-Object -First 1)
+        if ($nuspecEntry.Count -eq 0) { throw "No .nuspec entry was found inside the downloaded package." }
+        $reader = New-Object System.IO.StreamReader($nuspecEntry[0].Open(), [System.Text.Encoding]::UTF8)
+        try { $nuspecText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $zip.Dispose() }
+
+    if ([string]::IsNullOrWhiteSpace($nuspecText)) { throw "The nuspec inside the downloaded package is empty." }
+
+    return [PSCustomObject]@{
+        Success      = $true
+        ManifestPath = "$url (fetched from the chocolatey community repository)"
+        Raw          = $nuspecText
+        Text         = $null
+    }
+}
+catch {
+    return [PSCustomObject]@{
+        Success      = $false
+        ManifestPath = $null
+        Raw          = $null
+        Text         = "Could not fetch the manifest from the chocolatey community repository.`r`n`r`nURL: $url`r`nReason: $($_.Exception.Message)"
+    }
+}
+finally {
+    if ($tmpFile) { try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch {} }
+}
+}
+
+function Get-ChocoManifestText {
+# Resolves the nuspec (the chocolatey equivalent of a winget manifest) for the
+# selected row. Installed packages are read from chocolatey's lib folder; rows
+# that were never downloaded (search results) fall back to fetching the nuspec
+# from the community repository.
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) {
+    return [PSCustomObject]@{
+        Success      = $false
+        ManifestPath = $null
+        Summary      = $null
+        Raw          = $null
+        Text         = "Chocolatey manifests are only available for Chocolatey packages."
+    }
+}
+
+$id = [string]$Item.Id
+
+# 1) Installed package -> read the nuspec chocolatey stored in its lib folder
+$path = Get-ChocoManifestPath -Item $Item
+if (-not [string]::IsNullOrWhiteSpace($path)) {
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { throw "The manifest file is empty." }
+        return [PSCustomObject]@{
+            Success      = $true
+            ManifestPath = $path
+            Summary      = (Get-WmtNuspecSummary -NuspecText $raw)
+            Raw          = $raw.TrimEnd()
+            Text         = $null
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Success      = $false
+            ManifestPath = $path
+            Summary      = $null
+            Raw          = $null
+            Text         = "Failed to read the chocolatey manifest for $id.`r`n`r`nFile: $path`r`n`r`n$($_.Exception.Message)"
+        }
+    }
+}
+
+# 2) Never downloaded (e.g. a search result) -> fetch the nuspec from the community repository
+$remote = Get-ChocoRemoteNuspec -Item $Item
+if ($remote.Success) {
+    return [PSCustomObject]@{
+        Success      = $true
+        ManifestPath = $remote.ManifestPath
+        Summary      = (Get-WmtNuspecSummary -NuspecText $remote.Raw)
+        Raw          = $remote.Raw.TrimEnd()
+        Text         = $null
+    }
+}
+
+# 3) Neither local nor remote -> explain both paths
+$libRoot = Get-WmtChocolateyLibRoot
+$libHint = if ($libRoot) { "$libRoot\lib\$id" } else { "<ChocolateyInstall>\lib\$id" }
+return [PSCustomObject]@{
+    Success      = $false
+    ManifestPath = $null
+    Summary      = $null
+    Raw          = $null
+    Text         = "No chocolatey manifest (nuspec) is available for $id.`r`n`r`nInstalled packages keep their manifest at: $libHint`r`n`r`n$($remote.Text)`r`n`r`nUse ""Open Chocolatey Community Page"" for the online package details."
+}
+}
+
+function Show-ChocoPackageManifest {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) {
+    [System.Windows.MessageBox]::Show(
+        "Chocolatey manifests are only available for Chocolatey packages.",
+        "Manifest Unavailable",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
+    return
+}
+
+$name = [string]$Item.Name
+$id = [string]$Item.Id
+if ([string]::IsNullOrWhiteSpace($name)) { $name = $id }
+
+Write-GuiLog "Loading chocolatey manifest for $name ($id)..."
+if ($lblWingetStatus) {
+    $lblWingetStatus.Text = "Loading chocolatey manifest for $name..."
+    $lblWingetStatus.Visibility = "Visible"
+}
+
+Set-WmtBusyCursor -Busy
+try {
+    $result = Get-ChocoManifestText -Item $Item
+    if (-not $result.Success) {
+        Write-GuiLog "Chocolatey manifest unavailable for $id."
+    }
+    else {
+        Write-GuiLog "Chocolatey manifest loaded for $id."
+    }
+
+    $body = $result.Text
+    if ($result.Success) {
+        $installed = [string]$Item.Version
+        $available = [string]$Item.Available
+        if ([string]::IsNullOrWhiteSpace($installed)) { $installed = "-" }
+        if ([string]::IsNullOrWhiteSpace($available)) { $available = "-" }
+        $header = "Package: $name`r`nID: $id`r`nInstalled: $installed`r`nAvailable: $available`r`nSource: chocolatey`r`nManifest: $($result.ManifestPath)`r`n"
+        $separator = ("-" * 80)
+        $parts = @("$header`r`n$separator")
+        if (-not [string]::IsNullOrWhiteSpace($result.Summary)) { $parts += $result.Summary }
+        $manifestFile = [System.IO.Path]::GetFileName($result.ManifestPath)
+        $parts += "--- Raw Manifest ($manifestFile) ---`r`n"
+        $parts += $result.Raw
+        $body = [string]::Join("`r`n`r`n", $parts)
+    }
+
+    # Clear the busy cursor BEFORE opening the dialog
+    Set-WmtBusyCursor
+    Show-TextDialog -Title "Chocolatey Manifest - $name" -Text $body
+}
+finally {
+    Set-WmtBusyCursor
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Ready"
+        $lblWingetStatus.Visibility = "Hidden"
+    }
+}
+}
+
 # --- SETTINGS MANAGER ---
 # Initialize cache variable
 $script:WmtSettingsCache = $null
@@ -30658,6 +31026,44 @@ $miManifest.Add_Click({
 })
 [void]$ctxMenu.Items.Add($miManifest)
 
+# 4b. View Chocolatey Manifest
+$miChocoManifest = New-Object System.Windows.Controls.MenuItem
+$miChocoManifest.Header = "View Chocolatey Manifest"
+$miChocoManifest.ToolTip = "Show the local chocolatey manifest (nuspec) for the selected package"
+$miChocoManifest.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -ne 1) {
+        [System.Windows.MessageBox]::Show(
+            "Select one Chocolatey package to view its manifest.",
+            "Select One Package",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+    Show-ChocoPackageManifest -Item $selected[0]
+})
+[void]$ctxMenu.Items.Add($miChocoManifest)
+
+# 4c. Open Chocolatey Community Page
+$miChocoPage = New-Object System.Windows.Controls.MenuItem
+$miChocoPage.Header = "Open Chocolatey Community Page"
+$miChocoPage.ToolTip = "Open community.chocolatey.org for the selected package"
+$miChocoPage.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -ne 1) {
+        [System.Windows.MessageBox]::Show(
+            "Select one Chocolatey package to open its community page.",
+            "Select One Package",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+    Open-ChocoCommunityPage -Item $selected[0]
+})
+[void]$ctxMenu.Items.Add($miChocoPage)
+
 # 5. Copy Row Data
 $miCopyRow = New-Object System.Windows.Controls.MenuItem
 $miCopyRow.Header = "Copy Row Data"
@@ -30743,18 +31149,29 @@ $ctxMenu.Add_Opened({
     $miUpdateAll.IsEnabled = ($btnWingetUpdateAll -and $btnWingetUpdateAll.Visibility -eq [System.Windows.Visibility]::Visible)
     $miManifest.IsEnabled = $canShowManifest
     $miCopyRow.IsEnabled = ($selected.Count -gt 0)
+    $canShowChoco = ($selected.Count -eq 1 -and (Test-ChocoManifestSupportedItem $selected[0]))
+    $miChocoManifest.IsEnabled = $canShowChoco
+    $miChocoPage.IsEnabled = $canShowChoco
     if ($canShowManifest) {
         $miManifest.ToolTip = "Show the winget manifest details for the selected package"
     }
     else {
         $miManifest.ToolTip = "Select one winget or Microsoft Store package to view its manifest"
     }
+    if ($canShowChoco) {
+        $miChocoManifest.ToolTip = "Show the local chocolatey manifest (nuspec) for the selected package"
+        $miChocoPage.ToolTip = "Open community.chocolatey.org for the selected package"
+    }
+    else {
+        $miChocoManifest.ToolTip = "Select one Chocolatey package to view its manifest"
+        $miChocoPage.ToolTip = "Select one Chocolatey package to open its community page"
+    }
 })
 
 # 8. Attach to List
 $lstWinget.ContextMenu = $ctxMenu
 
-# 9. Double-click opens store page (Steam/Epic/GOG) or app manifest
+# 9. Double-click opens store page (Steam/Epic/GOG/Chocolatey) or app manifest
 $lstWinget.Add_MouseDoubleClick({
     param($s, $e)
     try {
@@ -30770,6 +31187,7 @@ $lstWinget.Add_MouseDoubleClick({
         if ($source -eq "Steam" -or $source -eq "steam") { $url = "https://store.steampowered.com/app/$id" }
         elseif ($source -eq "legendary" -or $source -eq "Epic") { $url = "https://store.epicgames.com/p/$($id.ToLowerInvariant())" }
         elseif ($source -eq "gogdl" -or $source -eq "GOG") { $url = "https://www.gog.com/en/game/$name" }
+        elseif ($source -ieq "chocolatey" -or $source -ieq "choco") { $url = Get-ChocoCommunityPageUrl -Item $item }
         if ($url) { Start-Process $url }
         else { Show-WingetPackageManifest -Item $item }
     }
