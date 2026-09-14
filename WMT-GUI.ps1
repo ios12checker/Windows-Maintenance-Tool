@@ -30554,8 +30554,8 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
     Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
     Add-SearchIndexEntry "btnDisableBgJobs"      "Background Jobs"                 "btnTabSupport"
-    Add-SearchIndexAction "Disable Background Jobs" { Set-WmtDisableBackgroundJobs -Enabled $true; $btn = Get-Ctrl "btnDisableBgJobs"; if ($btn) { $btn.Content = "Background Jobs: Off" }; Write-GuiLog "Background jobs disabled." } "btnTabSupport"
-    Add-SearchIndexAction "Enable Background Jobs"  { Set-WmtDisableBackgroundJobs -Enabled $false; $btn = Get-Ctrl "btnDisableBgJobs"; if ($btn) { $btn.Content = "Background Jobs: On" }; Write-GuiLog "Background jobs enabled."; try { Start-WmtBackgroundJobsNow } catch {} } "btnTabSupport"
+    Add-SearchIndexAction "Disable Background Jobs" { Set-WmtDisableBackgroundJobs -Enabled $true; Update-WmtDisableBgJobsButton; Write-GuiLog "Background jobs disabled." } "btnTabSupport"
+    Add-SearchIndexAction "Enable Background Jobs"  { Set-WmtDisableBackgroundJobs -Enabled $false; Update-WmtDisableBgJobsButton; Write-GuiLog "Background jobs enabled."; try { Start-WmtBackgroundJobsNow } catch {} } "btnTabSupport"
     Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport"
     Add-SearchIndexAction "Disable Update Scans" { Set-WmtUpdateScansDisabled -Enabled $true; Update-WmtUpdateScansButton; Write-GuiLog "Update scans disabled." } "btnTabSupport"
     Add-SearchIndexAction "Enable Update Scans"  { Set-WmtUpdateScansDisabled -Enabled $false; Update-WmtUpdateScansButton; Write-GuiLog "Update scans enabled."; try { if (-not (Get-WmtDisableBackgroundJobs)) { Start-WmtUpdateAutoScanTimer } } catch {} } "btnTabSupport"
@@ -42662,14 +42662,13 @@ function Update-WmtDisableBgJobsButton {
     $btn = Get-Ctrl "btnDisableBgJobs"
     if (-not $btn) { return }
     $disabled = Get-WmtDisableBackgroundJobs
-    if ($disabled) {
-        $btn.Content = "Bg Jobs: Off"
-        $btn.ToolTip = "Background auto-refresh DISABLED. My Device info and Tweaks states will not auto-load. Click to re-enable."
-    }
-    else {
-        $btn.Content = "Bg Jobs: On"
-        $btn.ToolTip = "Background auto-refresh ENABLED. My Device info and Tweaks states load automatically. Click to disable."
-    }
+    # Blue = On / Gray = Off, matching the Start with Windows toggle beside it.
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn (-not $disabled) `
+        -OnLabel "Bg Jobs: On" `
+        -OffLabel "Bg Jobs: Off" `
+        -Description "Background auto-refresh. When enabled, My Device info and Tweaks states load automatically and boot-time jobs start on demand. When disabled, in-flight jobs finish but no new ones start."
 }
 
 Update-WmtDisableBgJobsButton
@@ -42697,20 +42696,16 @@ function Update-WmtUpdateScansButton {
     $btn = Get-Ctrl "btnDisableUpdateScans"
     if (-not $btn) { return }
     $disabled = Get-WmtUpdateScansDisabled
-    if ($disabled) {
-        $btn.Content = "Update Scans: Off"
-        $btn.ToolTip = "Update scans are DISABLED. No scans will run. Click to re-enable."
-        # Disable scan button and related update-action buttons.
-        $scanBtn = Get-Ctrl "btnWingetScan"
-        if ($scanBtn) { $scanBtn.IsEnabled = $false }
-    }
-    else {
-        $btn.Content = "Update Scans: On"
-        $btn.ToolTip = "Update scans are ENABLED. Automatic and tray-triggered scans run on schedule. Click to fully disable."
-        # Re-enable scan button.
-        $scanBtn = Get-Ctrl "btnWingetScan"
-        if ($scanBtn) { $scanBtn.IsEnabled = $true }
-    }
+    # Blue = On / Gray = Off, matching the Start with Windows toggle beside it.
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn (-not $disabled) `
+        -OnLabel "Update Scans: On" `
+        -OffLabel "Update Scans: Off" `
+        -Description "Automatic and tray-triggered update scans run on schedule when enabled. Manual scans always remain available, even when disabled."
+    # Keep the scan button and related update-action buttons in sync with the toggle state.
+    $scanBtn = Get-Ctrl "btnWingetScan"
+    if ($scanBtn) { $scanBtn.IsEnabled = (-not $disabled) }
 }
 
 Update-WmtUpdateScansButton
