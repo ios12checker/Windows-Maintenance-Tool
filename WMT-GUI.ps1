@@ -21747,27 +21747,57 @@ foreach ($line in $rawOutput) {
     if ($key -match "Original Name" -and $val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
     elseif ($key -match "Provider") { $current.Provider = $val }
     elseif ($key -match "Version") {
-        if ($val -match '(\d+(\.\d+){1,3})') {
-            $current.DisplayVer = $matches[1]
-            try { $current.Version = [Version]$matches[1] } catch {}
+        # Take the LAST dotted group, not the first — some pnputil builds print
+        # the date with dots ("02.06.2026 32.0.16.1051"), which the regex would
+        # otherwise mistake for the version.
+        $dotMatches = [regex]::Matches($val, '(\d+(\.\d+){1,3})')
+        if ($dotMatches.Count -gt 0) {
+            $verText = $dotMatches[$dotMatches.Count - 1].Groups[1].Value
+            $current.DisplayVer = $verText
+            try { $current.Version = [Version]$verText } catch {}
         }
         else { $current.DisplayVer = if ($val) { $val } else { "N/A" } }
-        if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) {
+        if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) {
             $current.DisplayDate = $matches[1]
             $current.SortDate = [DateTime]$matches[1]
         }
     }
     elseif ($key -match "Date") {
         if ($val -as [DateTime]) { $current.DisplayDate = $val; $current.SortDate = [DateTime]$val }
-        elseif ($val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) { $current.DisplayDate = $matches[1]; $current.SortDate = [DateTime]$matches[1] }
+        elseif ($val -match '(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) { $current.DisplayDate = $matches[1]; $current.SortDate = [DateTime]$matches[1] }
     }
     elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') { $current.OriginalName = $val }
 }
 if ($current) { $drivers += [PSCustomObject]$current }
 
-$toDelete = @()
-foreach ($group in @($drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
-    if ($group.Count -gt 1) { $toDelete += @($group.Group | Sort-Object SortDate, Version -Descending | Select-Object -Skip 1) }
+# Fallback: pnputil's /enum-drivers text output varies between Windows builds
+# and on some systems never yields a parseable "Driver Version" line (every
+# row would show Version "Unknown" even though the INF has one). Read the
+# DriverVer directive straight from the staged INF copy in C:\Windows\INF —
+# the same source of truth tools like Driver Store Explorer use. Format:
+#   DriverVer = MM/DD/YYYY[,a.b.c.d]
+foreach ($d in $drivers) {
+    if ($d.DisplayVer -ne "Unknown" -and $d.DisplayVer -ne "N/A") { continue }
+    if (-not $d.PublishedName) { continue }
+    $infPath = Join-Path $env:SystemRoot ("INF\" + $d.PublishedName)
+    if (-not (Test-Path -LiteralPath $infPath)) { continue }
+    try {
+        $verLine = Select-String -LiteralPath $infPath -Pattern '^\s*DriverVer\s*=\s*(.+)$' | Select-Object -First 1
+        if (-not $verLine) { continue }
+        $raw = ($verLine.Matches[0].Groups[1].Value -split ";", 2)[0].Trim()
+        $verParts = $raw -split ",", 2
+        $datePart = $verParts[0].Trim()
+        $verPart  = if ($verParts.Count -gt 1) { $verParts[1].Trim() } else { "" }
+        if ($verPart -match '(\d+(\.\d+){1,3})') {
+            $d.DisplayVer = $Matches[1]
+            try { $d.Version = [Version]$Matches[1] } catch {}
+        }
+        if ($d.DisplayDate -eq "Unknown" -and $datePart -and ($datePart -as [DateTime])) {
+            $d.DisplayDate = $datePart
+            $d.SortDate = [DateTime]$datePart
+        }
+    }
+    catch {}
 }
 
 # Protect drivers currently in use by active devices to prevent hardware breakage
@@ -21779,13 +21809,43 @@ try {
         Select-Object -ExpandProperty InfName -Unique
     )
 } catch {}
-if ($inUseInfs.Count -gt 0) {
-    $before = $toDelete.Count
-    $toDelete = @($toDelete | Where-Object { $_.PublishedName -notin $inUseInfs })
-    $skipped = $before - $toDelete.Count
-    if ($skipped -gt 0) {
-        Write-GuiLog "Skipped $skipped in-use driver package(s) that are actively installed on devices."
+
+$toDelete = @()
+$skippedInUse = 0
+foreach ($group in @($drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
+    if ($group.Count -lt 2) { continue }
+
+    # Rank the group: the in-use copy first (it must be kept), then the highest
+    # driver VERSION, then the newest driver date. NVIDIA and other vendors
+    # frequently ship newer builds carrying an OLDER driver date, so the
+    # version number must always win over the date when deciding which copy
+    # is the old one. Version-less INFs (date-only DriverVer) parse as 0.0.0.0
+    # and fall back to the date tiebreak among equals.
+    $sorted = @($group.Group | Sort-Object -Property @(
+            @{ Expression = { [int]($inUseInfs -contains $_.PublishedName) }; Descending = $true },
+            @{ Expression = 'Version';                                        Descending = $true },
+            @{ Expression = 'SortDate';                                       Descending = $true }
+        ))
+    $kept = $sorted[0]
+
+    foreach ($d in @($sorted | Select-Object -Skip 1)) {
+        # Never touch packages actively installed on devices.
+        if ($inUseInfs.Count -gt 0 -and $inUseInfs -contains $d.PublishedName) { $skippedInUse++; continue }
+        # Never remove a copy with a higher version than the kept one, even if
+        # unused — it may be staged for the next boot. Only remove copies the
+        # kept package supersedes, or exact duplicates of it.
+        if ($kept.Version -gt $d.Version) { $reason = "Older version" }
+        elseif ($kept.Version -lt $d.Version) { continue }
+        elseif ($kept.SortDate -gt $d.SortDate) { $reason = "Duplicate (older store date)" }
+        else { $reason = "Duplicate copy" }
+
+        $d | Add-Member -MemberType NoteProperty -Name "CleanupReason" -Value $reason -Force
+        $d | Add-Member -MemberType NoteProperty -Name "KeptPackage" -Value ("{0}  v{1}  {2}" -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate) -Force
+        $toDelete += $d
     }
+}
+if ($skippedInUse -gt 0) {
+    Write-GuiLog "Skipped $skippedInUse in-use driver package(s) that are actively installed on devices."
 }
 
 if (-not $toDelete -or $toDelete.Count -eq 0) {
@@ -21819,7 +21879,7 @@ $currentList = [System.Collections.Generic.List[object]]::new()
 foreach ($item in @($toDelete)) { [void]$currentList.Add($item) }
 $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
 $dg.ItemsSource = $rows
-Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date") -Widths @{ PublishedName = 120; OriginalName = "*"; Provider = 180; Version = 120; Date = 110 }
+Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date", "Status", "Kept") -Widths @{ PublishedName = 110; OriginalName = 160; Provider = 150; Version = 95; Date = 85; Status = 140; Kept = "*" }
 
 $loadGrid = {
     $rows.Clear()
@@ -21830,6 +21890,8 @@ $loadGrid = {
                 Provider      = [string]$d.Provider
                 Version       = [string]$d.DisplayVer
                 Date          = [string]$d.DisplayDate
+                Status        = [string]$d.CleanupReason
+                Kept          = [string]$d.KeptPackage
                 Source        = $d
             })
     }
