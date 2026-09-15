@@ -21717,9 +21717,16 @@ Invoke-UiCommand {
 } "Updating device metadata policy..." -ArgumentList $value, $msg
 }
 
-function Show-DriverCleanupDialog {
+# --- DRIVER STORE PARSER (shared) ---
+# Parses `pnputil /enum-drivers` into one record per third-party driver
+# package staged in the Driver Store. Shared by the Drivers page list and the
+# Clean Old Drivers dialog so both see identical data. Hardened for pnputil
+# output quirks (see the notes inline below). Returns an array of
+# [PSCustomObject] with: PublishedName, OriginalName, Provider, Class, Signer,
+# Version ([Version]), DisplayVer, SortDate, DisplayDate.
+function Get-WmtDriverStorePackages {
 $rawOutput = pnputil.exe /enum-drivers 2>&1
-$drivers = @()
+$drivers = [System.Collections.Generic.List[object]]::new()
 $current = $null
 
 foreach ($line in $rawOutput) {
@@ -21730,11 +21737,13 @@ foreach ($line in $rawOutput) {
     $key = $parts[0].Trim()
     $val = $parts[1].Trim()
     if ($val -match '^(oem\d+\.inf)$') {
-        if ($current) { $drivers += [PSCustomObject]$current }
+        if ($current) { $drivers.Add([PSCustomObject]$current) }
         $current = [ordered]@{
             PublishedName = $val
             OriginalName  = $null
             Provider      = "Unknown"
+            Class         = "Unknown"
+            Signer        = ""
             Version       = [Version]"0.0.0.0"
             DisplayVer    = "Unknown"
             SortDate      = [DateTime]::MinValue
@@ -21746,6 +21755,8 @@ foreach ($line in $rawOutput) {
     if (-not $current) { continue }
     if ($key -match "Original Name" -and $val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
     elseif ($key -match "Provider") { $current.Provider = $val }
+    elseif ($key -match "Class" -and $key -notmatch "GUID") { $current.Class = $val }
+    elseif ($key -match "Signer") { $current.Signer = $val }
     elseif ($key -match "Version") {
         # Take the LAST dotted group, not the first — some pnputil builds print
         # the date with dots ("02.06.2026 32.0.16.1051"), which the regex would
@@ -21768,7 +21779,7 @@ foreach ($line in $rawOutput) {
     }
     elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') { $current.OriginalName = $val }
 }
-if ($current) { $drivers += [PSCustomObject]$current }
+if ($current) { $drivers.Add([PSCustomObject]$current) }
 
 # Fallback: pnputil's /enum-drivers text output varies between Windows builds
 # and on some systems never yields a parseable "Driver Version" line (every
@@ -21799,6 +21810,12 @@ foreach ($d in $drivers) {
     }
     catch {}
 }
+
+return @($drivers)
+}
+
+function Show-DriverCleanupDialog {
+$drivers = Get-WmtDriverStorePackages
 
 # Protect drivers currently in use by active devices to prevent hardware breakage
 $inUseInfs = @()
@@ -21955,6 +21972,7 @@ $doRemove = {
 
         $deleted = 0
         $failed = 0
+        $removedInfs = [System.Collections.Generic.List[string]]::new()
         foreach ($item in $itemsToRemove) {
             $name = [string]$item.PublishedName
             $dialog.Title = "Removing $name..."
@@ -21972,12 +21990,12 @@ $doRemove = {
             $stdOut = $p.StandardOutput.ReadToEnd()
             $stdErr = $p.StandardError.ReadToEnd()
             $p.WaitForExit()
-            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $deleted++ }
+            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $deleted++; [void]$removedInfs.Add($name) }
             else {
                 $warnMsg = "Driver: $($item.OriginalName) ($name)`n`nError:`n$($stdOut)`n$($stdErr)`n`nForce delete?"
                 if ((Show-WmtMessageBox -Owner $dialog -Message $warnMsg -Title "Deletion Failed" -Button YesNo -Image Error) -eq [System.Windows.MessageBoxResult]::Yes) {
                     $procForce = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
-                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++; [void]$removedInfs.Add($name) } else { $failed++ }
                 }
                 else { $failed++ }
             }
@@ -21994,6 +22012,9 @@ $doRemove = {
                 }
             }
             & $loadGrid
+            # Keep the main Drivers page cache in sync without a full recheck:
+            # drop exactly the packages pnputil deleted from the cached list.
+            Remove-DriverRowsFromCache -RemovedInfs @($removedInfs)
         }
     }
     finally {
@@ -22084,6 +22105,10 @@ Invoke-UiCommand {
     Write-Output $output
     if ($code -eq 0 -or $code -eq 3010) {
         Write-Output "Drivers restored from $Path"
+        # Restore stages NEW packages into the driver store — the cached
+        # Drivers list no longer matches reality, so drop the cache and
+        # re-enumerate (a real change, unlike removals which edit in place).
+        $script:DriverCacheLoaded = $false
         Show-WmtMessageBox -Message "Drivers restored from:`n$Path" -Title "Restore Drivers" -Image Information | Out-Null
     }
     else {
@@ -22092,6 +22117,11 @@ Invoke-UiCommand {
         Show-WmtMessageBox -Message $msg -Title "Restore Drivers" -Image Error | Out-Null
     }
 } "Restoring drivers..." -ArgumentList $selectedPath
+# If a cached list was on screen while restoring, reload it now so the newly
+# staged packages appear; otherwise the next Drivers tab visit reloads.
+if (-not $script:DriverCacheLoaded -and $script:DriverPackages.Count -gt 0) {
+    Start-DriverListLoad -Force
+}
 }
 
 # --- UPDATE / REPORT TOOLS ---
@@ -25094,6 +25124,11 @@ powercfg /S SCHEME_CURRENT | Out-Null
     <SolidColorBrush x:Key="DangerText" Color="#FFF5F5"/>
     <SolidColorBrush x:Key="WarningText" Color="#0D1117"/>
     <SolidColorBrush x:Key="InfoText" Color="#F0F6FC"/>
+    <!-- Driver list status row tints (overridden per theme; see ThemePalettes) -->
+    <SolidColorBrush x:Key="DrvTintInUse" Color="#0D238636"/>
+    <SolidColorBrush x:Key="DrvTintOld" Color="#1AD29922"/>
+    <SolidColorBrush x:Key="DrvTintUnattached" Color="#1ADA3633"/>
+    <SolidColorBrush x:Key="DrvTintInactive" Color="#128B949E"/>
 
     <!-- Subtle Shadow Effects (reduced for clarity) -->
     <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
@@ -25374,6 +25409,20 @@ powercfg /S SCHEME_CURRENT | Out-Null
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Background" Value="{DynamicResource BgHover}"/>
             </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Driver list row: zebra base + status tint. Hover/selection triggers are
+         re-declared AFTER the status triggers so selecting or hovering a tinted
+         row still wins over the tint (last active trigger in a style wins). -->
+    <Style x:Key="DrvItem" TargetType="ListViewItem" BasedOn="{StaticResource FwItem}">
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding Status}" Value="In Use"><Setter Property="Background" Value="{DynamicResource DrvTintInUse}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Old"><Setter Property="Background" Value="{DynamicResource DrvTintOld}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Unattached"><Setter Property="Background" Value="{DynamicResource DrvTintUnattached}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Inactive"><Setter Property="Background" Value="{DynamicResource DrvTintInactive}"/></DataTrigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource BgHover}"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource Accent}"/></Trigger>
         </Style.Triggers>
     </Style>
 
@@ -26972,28 +27021,118 @@ powercfg /S SCHEME_CURRENT | Out-Null
             </Grid>
 
             <!-- DRIVERS PANEL -->
-            <StackPanel Name="pnlDrivers" Visibility="Collapsed">
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <StackPanel Margin="0,0,0,20">
+            <Grid Name="pnlDrivers" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Card -->
+                <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="380"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
                             <TextBlock Text="Driver Management" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            <TextBlock Name="lblDrvStatus" Text="Ready — the driver store loads when you open this page" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
+                            <TextBlock FontSize="12" Margin="0,6,0,0">
+                                <Run Text="Highlighting:  " Foreground="{DynamicResource TextMuted}"/>
+                                <Run Text="● In Use   " Foreground="{DynamicResource Success}"/>
+                                <Run Text="● Old   " Foreground="{DynamicResource Warning}"/>
+                                <Run Text="● Unattached   " Foreground="{DynamicResource Danger}"/>
+                                <Run Text="● Inactive" Foreground="{DynamicResource TextSecondary}"/>
+                            </TextBlock>
                         </StackPanel>
-                        <TextBlock Text="DRIVER TOOLS" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnDrvReport" Content="Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
-                            <Button Name="btnDrvBackup" Content="Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
-                            <Button Name="btnDrvGhost" Content="Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
-                            <Button Name="btnDrvClean" Content="Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
-                            <Button Name="btnDrvRestore" Content="Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
-                        </WrapPanel>
-                        <TextBlock Text="WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
-                            <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
-                        </WrapPanel>
-                    </StackPanel>
+                        <Border Grid.Column="1" Style="{StaticResource ModernSearchBoxStyle}" VerticalAlignment="Top">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path Grid.Column="0" Data="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z"
+                                      Fill="{DynamicResource TextMuted}" Stretch="Uniform" Height="14" Width="14"
+                                      VerticalAlignment="Center" Margin="12,0,6,0"/>
+                                <TextBox Name="txtDrvSearch" Grid.Column="1" Height="38"
+                                         VerticalContentAlignment="Center" Text="Search drivers..."
+                                         Background="Transparent" BorderThickness="0"
+                                         Padding="0,0,0,0" Margin="0"
+                                         FontSize="14"
+                                         Foreground="{DynamicResource TextSecondary}"
+                                         CaretBrush="{DynamicResource TextPrimary}"
+                                         SelectionBrush="{DynamicResource Accent}"
+                                         ToolTip="Filter by status, class, provider, driver or store file name"/>
+                                <Button Name="btnDrvClearSearch" Grid.Column="2" Content="X"
+                                        Width="28" Height="28" Margin="0,0,6,0"
+                                        VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        Visibility="Collapsed" Cursor="Hand"
+                                        ToolTip="Clear search"
+                                        Style="{StaticResource SearchClearBtnStyle}"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
                 </Border>
-            </StackPanel>
+
+                <!-- Driver List Card -->
+                <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0" Margin="0">
+                    <ListView Name="lstDrivers" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource DrvItem}"
+                              VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Status" Width="92">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Status}" FontWeight="Bold" ToolTip="{Binding StatusTooltip}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="In Use"><Setter Property="Foreground" Value="{DynamicResource Success}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Old"><Setter Property="Foreground" Value="{DynamicResource Warning}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Unattached"><Setter Property="Foreground" Value="{DynamicResource Danger}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Inactive"><Setter Property="Foreground" Value="{DynamicResource TextMuted}"/></DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Class" Width="120" DisplayMemberBinding="{Binding Class}"/>
+                                <GridViewColumn Header="Provider" Width="150" DisplayMemberBinding="{Binding Provider}"/>
+                                <GridViewColumn Header="Driver" Width="170" DisplayMemberBinding="{Binding OriginalName}"/>
+                                <GridViewColumn Header="Store File" Width="95" DisplayMemberBinding="{Binding PublishedName}"/>
+                                <GridViewColumn Header="Version" Width="115" DisplayMemberBinding="{Binding DisplayVer}"/>
+                                <GridViewColumn Header="Date" Width="90" DisplayMemberBinding="{Binding DisplayDate}"/>
+                                <GridViewColumn Header="Devices" Width="66">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DevicesText}" ToolTip="{Binding DevicesTooltip}" HorizontalAlignment="Right"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                </Border>
+
+                <!-- Actions Card (all driver tools) -->
+                <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
+                    <WrapPanel HorizontalAlignment="Left">
+                        <Button Name="btnDrvReload" Content="Reload" Style="{StaticResource AccentBtn}"/>
+                        <Button Name="btnDrvReport" Content="Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
+                        <Button Name="btnDrvBackup" Content="Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
+                        <Button Name="btnDrvGhost" Content="Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
+                        <Button Name="btnDrvClean" Content="Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
+                        <Button Name="btnDrvRestore" Content="Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
+                        <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
+                        <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
+                    </WrapPanel>
+                </Border>
+            </Grid>
 
             <!-- CLEANUP PANEL -->
             <StackPanel Name="pnlCleanup" Visibility="Collapsed">
@@ -27184,6 +27323,10 @@ dark  = @{
     WarningText   = "#0D1117"
     InfoText      = "#F0F6FC"
     LogText       = "#3FB950"
+    DrvTintInUse    = "#0D238636"
+    DrvTintOld      = "#1AD29922"
+    DrvTintUnattached = "#1ADA3633"
+    DrvTintInactive = "#128B949E"
 }
 light = @{
     BgDark        = "#F5F7FA"
@@ -27210,6 +27353,10 @@ light = @{
     WarningText   = "#FFFFFF"
     InfoText      = "#FFFFFF"
     LogText       = "#166534"
+    DrvTintInUse    = "#1A15803D"
+    DrvTintOld      = "#26B45309"
+    DrvTintUnattached = "#26B91C1C"
+    DrvTintInactive = "#1A64748B"
 }
 }
 
@@ -27589,6 +27736,7 @@ $iconDeferTimer.Add_Tick({
     Set-ButtonIcon "btnFwImport" "M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3M12,6.15L17.5,10.2V14C17.5,16.96 15.56,19.5 12,20.82C8.44,19.5 6.5,16.96 6.5,14V10.2L12,6.15M12,9L8,13H11V17H13V13H16L12,9Z" "Import" "Import firewall policy (.wfw)"
     Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2M7,9H9V13H11V9H13V13H15V9H17V15H7V9Z" "Restore Defaults" "Reset firewall to default rules"
     Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
+    Set-ButtonIcon "btnDrvReload" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Rescans the driver store and device usage" 16
     Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
     Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
     Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
@@ -29143,6 +29291,9 @@ $tabButton.Add_Click({
         $s.FontWeight = "SemiBold"
         $s.Tag = "Visible"  # Show indicator
         if ($s.Name -eq "btnTabFirewall") { Start-FirewallRuleLoad }
+        # Cached list: only the first visit enumerates the driver store;
+        # later visits keep the loaded rows (Refresh button forces a recheck).
+        if ($s.Name -eq "btnTabDrivers" -and -not $script:DriverCacheLoaded) { Start-DriverListLoad }
         if ($s.Name -eq "btnTabUpdates") {
             if ($lstWinget.Items.Count -eq 0 -and -not (Get-WmtUpdateScansDisabled)) {
                 $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
@@ -30579,6 +30730,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
 
     # 5. Drivers
+    Add-SearchIndexEntry "btnDrvReload"         "Reload Driver List"              "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvBackup"         "Export Drivers"                  "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
@@ -42269,6 +42421,1202 @@ $btnToggleDrvMeta.Add_Click({
         Update-WmtTweakToggle $btnToggleDrvMeta $currentlyDisabled "Enable Metadata" "Disable Metadata" "Toggle device metadata downloads (icons/info) from the internet."
     })
 }
+
+# --- DRIVER MANAGEMENT PAGE (list view) ---
+# Lists every third-party driver package staged in the Driver Store
+# (pnputil /enum-drivers) in the same list style as the Firewall / Updates
+# pages, and highlights rows by live status:
+#   In Use   - bound to at least one present, working device
+#   Old      - superseded duplicate copy (a newer version of the same driver
+#              is staged; exactly what "Clean Old" removes)
+#   Unattached - no device is currently attached to the package (the hardware
+#              may be switched off, disabled, disconnected, or only
+#              occasionally connected — NOT automatically safe to remove)
+#   Inactive - bound only to present devices that are disabled or reporting
+#              a problem (ConfigManagerErrorCode != 0)
+# Status detection runs in two phases: the fast pnputil parse lists packages
+# immediately, then a background runspace queries Win32_PnPSignedDriver +
+# Win32_PnPEntity (slow) and the rows re-color when it completes. It also
+# parses each package's INF for AddService entries and checks them against
+# Windows' registered/running driver services — filter and service drivers
+# (antivirus, audio effects, bus drivers) never bind to a single device, so
+# without this they would all be mislabeled "Unattached".
+# The loaded list is CACHED: re-opening the Drivers tab shows the cached rows
+# instead of re-running the whole enumeration, removals update the cache in
+# place (only rows pnputil actually deleted disappear), and the Refresh
+# button / menu item force a full recheck at any time.
+$script:DriverPackages = @()
+$script:DriverDeviceMap = @{}
+$script:DriverServiceMap = $null
+$script:DriverUsageLoaded = $false
+$script:DriverCacheLoaded = $false
+$script:DriverLoadInProgress = $false
+$script:DriverLoadRunspace = $null
+$script:DriverLoadAsyncResult = $null
+$script:DriverLoadTimer = $null
+
+$lstDrivers = Get-Ctrl "lstDrivers"
+$txtDrvSearch = Get-Ctrl "txtDrvSearch"
+$lblDrvStatus = Get-Ctrl "lblDrvStatus"
+$btnDrvReload = Get-Ctrl "btnDrvReload"
+
+function Set-DriverStatus {
+param([string]$Text, [bool]$Visible = $true)
+if (-not $lblDrvStatus) { return }
+if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "Ready" }
+$lblDrvStatus.Text = $Text
+$lblDrvStatus.Visibility = if ($Visible) { "Visible" } else { "Collapsed" }
+}
+
+function Set-DriverRowProperty {
+param($Row, [string]$Name, $Value)
+if (-not $Row -or [string]::IsNullOrWhiteSpace($Name)) { return }
+$prop = $Row.PSObject.Properties[$Name]
+if ($prop) { $prop.Value = $Value }
+else { $Row | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
+}
+
+function Test-DriverSearchIsBlank {
+param([string]$Text)
+return ([string]::IsNullOrWhiteSpace($Text) -or $Text -in @("Search Drivers...", "Search drivers..."))
+}
+
+function Test-DriverRowMatchesQuery {
+param($Row, [string]$Query)
+if (-not $Row) { return $false }
+if ([string]::IsNullOrWhiteSpace($Query)) { return $true }
+
+$fields = @(
+    $Row.Status,
+    $Row.Class,
+    $Row.Provider,
+    $Row.OriginalName,
+    $Row.PublishedName,
+    $Row.DisplayVer,
+    $Row.DisplayDate,
+    $Row.DevicesText,
+    $Row.DevicesTooltip
+)
+foreach ($field in $fields) {
+    if ($null -ne $field -and ([string]$field).IndexOf($Query, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+}
+return $false
+}
+
+function Get-DriverStatusCounts {
+$counts = @{ InUse = 0; Old = 0; Unattached = 0; Inactive = 0; Pending = 0 }
+foreach ($row in $script:DriverPackages) {
+    switch ($row.Status) {
+        "In Use"   { $counts.InUse++ }
+        "Old"      { $counts.Old++ }
+        "Unattached" { $counts.Unattached++ }
+        "Inactive" { $counts.Inactive++ }
+        default    { $counts.Pending++ }
+    }
+}
+$summary = "$($script:DriverPackages.Count) driver package(s)"
+if ($script:DriverUsageLoaded) {
+    $summary += " · $($counts.InUse) In Use · $($counts.Old) Old · $($counts.Unattached) Unattached · $($counts.Inactive) Inactive"
+}
+else {
+    $summary += " · checking device usage..."
+}
+return $summary
+}
+
+function Update-DriverStatusLabel {
+Set-DriverStatus (Get-DriverStatusCounts) -Visible $true
+}
+
+function Update-DriverListView {
+if (-not $lstDrivers) { return }
+$selectedInf = if ($lstDrivers.SelectedItem) { [string]$lstDrivers.SelectedItem.PublishedName } else { $null }
+$query = if ($txtDrvSearch) { [string]$txtDrvSearch.Text } else { "" }
+$rows = $script:DriverPackages
+
+if (-not (Test-DriverSearchIsBlank $query)) {
+    $query = $query.Trim()
+    $filtered = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in $rows) {
+        if (Test-DriverRowMatchesQuery -Row $row -Query $query) { [void]$filtered.Add($row) }
+    }
+    $rows = $filtered
+}
+
+$lstDrivers.Items.Clear()
+foreach ($row in $rows) { [void]$lstDrivers.Items.Add($row) }
+if ($script:DriverSortChain -and $script:DriverSortChain.Count -gt 0) {
+    Set-ListViewSort -ListView $lstDrivers -Chain $script:DriverSortChain
+}
+if ($selectedInf) {
+    foreach ($item in $lstDrivers.Items) {
+        if ($item.PublishedName -eq $selectedInf) {
+            $lstDrivers.SelectedItem = $item
+            break
+        }
+    }
+}
+}
+
+function Get-DriverDeviceListText {
+param([object[]]$Devices)
+$lines = foreach ($dev in $Devices) {
+    $state = if ([string]$dev.State -eq "OK") { "running" } else { ([string]$dev.State).ToLowerInvariant() }
+    $name = if ([string]::IsNullOrWhiteSpace([string]$dev.Name)) { "(unnamed device)" } else { [string]$dev.Name }
+    "$name [$state]  —  $($dev.DeviceId)"
+}
+return $lines
+}
+
+function Set-DriverStatusFlags {
+# Computes the Status column for every loaded package row. Requires the
+# device-usage map (phase 2); without it rows stay in "Checking...".
+if (-not $script:DriverUsageLoaded) { return }
+
+# Reset every row first so this pass is idempotent: the function also runs
+# after in-place cache edits (removals), where rows may still carry a status
+# from the previous pass (e.g. a former "Old" copy whose newer sibling was
+# removed must be re-derived, not stay stuck on "Old").
+foreach ($row in $script:DriverPackages) {
+    Set-DriverRowProperty -Row $row -Name "Status" -Value "Checking..."
+    Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "4"
+}
+
+# Bound = the package is referenced by at least one present device.
+$boundInfs = @{}
+foreach ($entry in @($script:DriverDeviceMap.Keys)) {
+    if ($script:DriverDeviceMap[$entry] -and @($script:DriverDeviceMap[$entry]).Count -gt 0) { $boundInfs[$entry] = $true }
+}
+
+# Old = not bound to any device, and the same original driver name has a
+# better copy staged. Ranking mirrors Clean Old Drivers: bound copy first,
+# then highest driver VERSION, then newest date (NVIDIA ships newer builds
+# with older dates, so version must win).
+foreach ($group in @($script:DriverPackages | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
+    if ($group.Count -lt 2) { continue }
+
+    $sorted = @($group.Group | Sort-Object -Property @(
+            @{ Expression = { [int]$boundInfs.ContainsKey($_.PublishedName.ToLowerInvariant()) }; Descending = $true },
+            @{ Expression = 'Version';  Descending = $true },
+            @{ Expression = 'SortDate'; Descending = $true }
+        ))
+    $kept = $sorted[0]
+
+    foreach ($d in @($sorted | Select-Object -Skip 1)) {
+        # Actively bound packages keep their In Use / Inactive status.
+        if ($boundInfs.ContainsKey($d.PublishedName.ToLowerInvariant())) { continue }
+        # A copy NEWER than the kept one is not "old" — it may be staged for
+        # the next boot, same rule the cleanup dialog follows.
+        if ($kept.Version -lt $d.Version) { continue }
+
+        Set-DriverRowProperty -Row $d -Name "Status" -Value "Old"
+        Set-DriverRowProperty -Row $d -Name "StatusSort" -Value "1"
+        Set-DriverRowProperty -Row $d -Name "StatusTooltip" -Value ("Superseded by {0}  v{1}  {2}. This copy is a leftover duplicate in the Driver Store — 'Clean Old' removes exactly these." -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate)
+    }
+}
+
+foreach ($row in $script:DriverPackages) {
+    $inf = ([string]$row.PublishedName).ToLowerInvariant()
+    $devices = @()
+    if ($script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf)) { $devices = @($script:DriverDeviceMap[$inf]) }
+
+    if ($row.Status -eq "Old") {
+        Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+        Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+        Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value "No present device uses this package."
+        continue
+    }
+
+    if ($devices.Count -gt 0) {
+        $okCount = @($devices | Where-Object { $_.State -eq "OK" }).Count
+        $names = @(Get-DriverDeviceListText -Devices $devices)
+        Set-DriverRowProperty -Row $row -Name "DevicesText" -Value ([string]$devices.Count)
+        Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value ([string]$devices.Count)
+        Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value ("Devices using this package:`n" + ($names -join "`n"))
+        if ($okCount -gt 0) {
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "In Use"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Actively used by {0} present device(s):`n{1}" -f $devices.Count, ($names -join "`n"))
+        }
+        else {
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "Inactive"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "2"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Bound to {0} present device(s), but none are running (disabled or reporting a problem):`n{1}" -f $devices.Count, ($names -join "`n"))
+        }
+    }
+    else {
+        # Not bound to any present device. Before calling it Unattached, check
+        # the services this INF installs (phase 2): filter/service drivers —
+        # antivirus, audio effects, keyboard filters, bus drivers — are never
+        # a device's function driver, so the device map can never see them.
+        $svcRows = $null
+        if ($script:DriverServiceMap -and $script:DriverServiceMap.ContainsKey($inf)) { $svcRows = @($script:DriverServiceMap[$inf]) }
+        if ($svcRows.Count -gt 0) {
+            $svcNames = (@($svcRows | ForEach-Object { [string]$_.Name }) -join ", ")
+            $runningCount = @($svcRows | Where-Object { $_.Running }).Count
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "In Use"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+            if ($runningCount -gt 0) {
+                Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("In use as a Windows driver service: {0} ({1} running). Filter/service drivers don't bind to a single device, so no device is listed — this package is NOT safe to remove." -f $svcNames, $runningCount)
+            }
+            else {
+                Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Installed as Windows driver service(s): {0} (registered, not currently running — some start on demand when the device/software is used). Removing this package can break the software that installed it." -f $svcNames)
+            }
+            Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value ("Loaded via Windows driver service(s): $svcNames — no device binding.")
+        }
+        else {
+            # "Unattached", never "Unneeded": a package with no attached device
+            # can still be required by hardware that is currently switched off
+            # or disabled (a camera that is off, an iGPU idle while the laptop
+            # runs on the dGPU, an antivirus module toggled off) or by devices
+            # that connect only occasionally (printers, USB gear).
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "Unattached"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "3"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value "No device is currently attached to this package, and none of the services it installs are registered in Windows. This does NOT mean it is safe to remove: hardware that is switched off, disabled or disconnected can still need it (a camera that is off, an iGPU idle while the laptop runs on the dGPU, antivirus features toggled off, printers/USB gear that connects occasionally). Right-click and use 'Find Devices Using This Driver' to re-check live."
+            Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value "No device is currently attached to this package."
+        }
+    }
+}
+}
+
+function Stop-DriverLoad {
+if ($script:DriverLoadTimer) {
+    try { $script:DriverLoadTimer.Stop() } catch {}
+    $script:DriverLoadTimer = $null
+}
+if ($script:DriverLoadRunspace) {
+    try { $script:DriverLoadRunspace.Stop() } catch {}
+    try { $script:DriverLoadRunspace.Dispose() } catch {}
+    $script:DriverLoadRunspace = $null
+}
+$script:DriverLoadAsyncResult = $null
+$script:DriverLoadInProgress = $false
+$script:DriverServiceMap = $null
+if ($btnDrvReload) { $btnDrvReload.IsEnabled = $true }
+}
+
+function Start-DriverListLoad {
+param([switch]$Force)
+if (-not $lstDrivers) { return }
+if ($script:DriverLoadInProgress) {
+    if (-not $Force) { return }
+    Stop-DriverLoad
+}
+$script:DriverLoadInProgress = $true
+$script:DriverUsageLoaded = $false
+$script:DriverCacheLoaded = $false
+$script:DriverServiceMap = $null
+if ($btnDrvReload) { $btnDrvReload.IsEnabled = $false }
+if ($lstDrivers) { $lstDrivers.Items.Clear() }
+Set-DriverStatus "Loading driver packages..." -Visible $true
+Write-GuiLog "[Drivers] Loading driver store packages..."
+
+# Phase 1 (fast, inline): parse pnputil /enum-drivers and list every package.
+try {
+    $parsed = Get-WmtDriverStorePackages
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($d in $parsed) {
+        $rows.Add([PSCustomObject]@{
+            PublishedName  = [string]$d.PublishedName
+            OriginalName   = if ([string]::IsNullOrWhiteSpace([string]$d.OriginalName)) { "(unknown)" } else { [string]$d.OriginalName }
+            Provider       = [string]$d.Provider
+            Class          = [string]$d.Class
+            Signer         = [string]$d.Signer
+            Version        = $d.Version
+            DisplayVer     = [string]$d.DisplayVer
+            SortDate       = $d.SortDate
+            DisplayDate    = [string]$d.DisplayDate
+            DateSort       = ([DateTime]$d.SortDate).ToString("yyyyMMdd")
+            Status         = "Checking..."
+            StatusSort     = "4"
+            StatusTooltip  = "Checking which present devices use this package..."
+            DevicesText    = "..."
+            DevicesSort    = "0"
+            DevicesTooltip = ""
+        })
+    }
+    $script:DriverPackages = @($rows)
+    $script:DriverCacheLoaded = $true
+    Update-DriverListView
+    Update-DriverStatusLabel
+    Write-GuiLog "[Drivers] Listed $($script:DriverPackages.Count) driver package(s) from the driver store (cached until Refresh)."
+}
+catch {
+    Set-DriverStatus "Driver list load failed" -Visible $true
+    Write-GuiLog "[Drivers] Failed to parse driver store packages: $($_.Exception.Message)"
+    Stop-DriverLoad
+    return
+}
+
+# Phase 2 (slow, background): which present devices use each package, plus
+# which of each package's INF services exist / run in Windows.
+$drvInfList = @($script:DriverPackages | ForEach-Object { [string]$_.PublishedName })
+$script:DriverLoadRunspace = [PowerShell]::Create().AddScript({
+    param([string[]]$infs)
+    $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; Error = "" }
+    try {
+        $entityState = @{}
+        foreach ($e in @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue)) {
+            if (-not $e.DeviceID) { continue }
+            $code = -1
+            try { $code = [int]$e.ConfigManagerErrorCode } catch {}
+            $entityState[[string]$e.DeviceID] = @{ Name = [string]$e.Name; Status = [string]$e.Status; Code = $code }
+        }
+        $map = @{}
+        foreach ($d in @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction SilentlyContinue)) {
+            $inf = ([string]$d.InfName).ToLowerInvariant()
+            if ($inf -notmatch '^oem\d+\.inf$') { continue }
+            if (-not $map.ContainsKey($inf)) { $map[$inf] = [System.Collections.Generic.List[object]]::new() }
+            $devId = [string]$d.DeviceID
+            $ent = if ($entityState.ContainsKey($devId)) { $entityState[$devId] } else { $null }
+            $state = if (-not $ent) { "Unknown" } elseif ($ent.Code -eq 0 -and $ent.Status -eq "OK") { "OK" } else { "Problem" }
+            $name = [string]$d.DeviceName
+            if ([string]::IsNullOrWhiteSpace($name) -and $ent) { $name = [string]$ent.Name }
+            [void]$map[$inf].Add([PSCustomObject]@{ DeviceId = $devId; Name = $name; State = $state })
+        }
+        # Service detection: a package can be "in use" without binding to any
+        # device (filter drivers, audio/AV drivers, bus drivers). Parse the
+        # staged INF for AddService entries and check each name against the
+        # registered driver/Win32 services and their running state.
+        $svcState = @{}
+        foreach ($s in @(Get-CimInstance -ClassName Win32_SystemDriver -ErrorAction SilentlyContinue)) {
+            if (-not $s.Name) { continue }
+            $svcState[[string]$s.Name] = [string]$s.State
+        }
+        foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue)) {
+            if (-not $s.Name) { continue }
+            $svcState[[string]$s.Name] = [string]$s.State
+        }
+        $svcInfo = @{}
+        foreach ($infName in @($infs)) {
+            if (-not $infName) { continue }
+            $infPath = Join-Path $env:SystemRoot ("INF\" + $infName)
+            if (-not (Test-Path -LiteralPath $infPath)) { continue }
+            try { $infLines = @(Get-Content -LiteralPath $infPath -ErrorAction Stop) } catch { continue }
+            $svcNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($line in $infLines) {
+                if ($line -match '(?i)^\s*AddService\s*=\s*"?([A-Za-z0-9_\.\-]+)"?\s*(,|$)') { [void]$svcNames.Add($matches[1]) }
+            }
+            if ($svcNames.Count -eq 0) { continue }
+            $present = @()
+            foreach ($svcName in $svcNames) {
+                $installed = $svcState.ContainsKey($svcName) -or (Test-Path -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $svcName))
+                if (-not $installed) { continue }
+                $isRunning = ($svcState.ContainsKey($svcName) -and $svcState[$svcName] -eq "Running")
+                $present += [PSCustomObject]@{ Name = $svcName; Running = $isRunning }
+            }
+            if ($present.Count -gt 0) { $svcInfo[[string]$infName.ToLowerInvariant()] = $present }
+        }
+        $result = [PSCustomObject]@{ Success = $true; Usage = $map; Services = $svcInfo; Error = "" }
+    }
+    catch {
+        $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; Error = $_.Exception.Message }
+    }
+    return $result
+}).AddArgument($drvInfList)
+$script:DriverLoadAsyncResult = $script:DriverLoadRunspace.BeginInvoke()
+
+$script:DriverLoadTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DriverLoadTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$script:DriverLoadTimer.Add_Tick({
+    if (-not $script:DriverLoadAsyncResult -or -not $script:DriverLoadAsyncResult.IsCompleted) { return }
+
+    $script:DriverLoadTimer.Stop()
+    try {
+        $result = $script:DriverLoadRunspace.EndInvoke($script:DriverLoadAsyncResult)
+        if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+        if ($result -and $result.Success) {
+            $script:DriverDeviceMap = $result.Usage
+            $script:DriverServiceMap = $result.Services
+            $script:DriverUsageLoaded = $true
+            Set-DriverStatusFlags
+            Update-DriverListView
+            Update-DriverStatusLabel
+            Write-GuiLog "[Drivers] Device usage loaded: $(Get-DriverStatusCounts)"
+        }
+        else {
+            $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
+            # Without the usage map the rows can stay in "Checking..." forever —
+            # move them to a muted "Unknown" state instead.
+            foreach ($row in $script:DriverPackages) {
+                if ($row.Status -eq "Checking...") {
+                    Set-DriverRowProperty -Row $row -Name "Status" -Value "Unknown"
+                    Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "5"
+                    Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value "Device usage could not be determined (Win32_PnPSignedDriver query failed). Right-click and use 'Find Devices Using This Driver' to query live."
+                }
+            }
+            Update-DriverListView
+            Set-DriverStatus "Driver packages loaded — device usage unavailable" -Visible $true
+            Write-GuiLog "[Drivers] Device usage load failed: $err"
+        }
+    }
+    catch {
+        Write-GuiLog "[Drivers] Device usage load failed: $($_.Exception.Message)"
+    }
+    finally {
+        try { $script:DriverLoadRunspace.Dispose() } catch {}
+        $script:DriverLoadRunspace = $null
+        $script:DriverLoadAsyncResult = $null
+        $script:DriverLoadTimer = $null
+        $script:DriverLoadInProgress = $false
+        if ($btnDrvReload) { $btnDrvReload.IsEnabled = $true }
+    }
+})
+$script:DriverLoadTimer.Start()
+}
+
+function Get-DriverPackageDetailsText {
+param($Row)
+if (-not $Row) { return "" }
+$inf = [string]$Row.PublishedName
+$devices = @()
+if ($script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf.ToLowerInvariant())) { $devices = @($script:DriverDeviceMap[$inf.ToLowerInvariant()]) }
+
+$lines = [System.Collections.Generic.List[string]]::new()
+[void]$lines.Add("Store File:    $inf")
+[void]$lines.Add("Driver INF:    $($Row.OriginalName)")
+[void]$lines.Add("Provider:      $($Row.Provider)")
+[void]$lines.Add("Class:         $($Row.Class)")
+[void]$lines.Add("Version:       $($Row.DisplayVer)")
+[void]$lines.Add("Driver Date:   $($Row.DisplayDate)")
+if (-not [string]::IsNullOrWhiteSpace([string]$Row.Signer)) { [void]$lines.Add("Signer:        $($Row.Signer)") }
+[void]$lines.Add("INF Path:      $env:SystemRoot\INF\$inf")
+[void]$lines.Add("Status:        $($Row.Status)")
+$detail = ([string]$Row.StatusTooltip) -replace "`r?`n", "  "
+[void]$lines.Add("Status detail: $detail")
+[void]$lines.Add("")
+if ($devices.Count -gt 0) {
+    [void]$lines.Add("Devices using this package ($($devices.Count)):")
+    foreach ($line in (Get-DriverDeviceListText -Devices $devices)) { [void]$lines.Add("  $line") }
+}
+else {
+    [void]$lines.Add("No device is currently attached to this package.")
+}
+[void]$lines.Add("")
+[void]$lines.Add("Remove (dangerous):  pnputil /delete-driver $inf /uninstall")
+return ($lines -join [Environment]::NewLine)
+}
+
+function Show-DriverPackageDetails {
+param($Row)
+if (-not $Row) { return }
+Show-TextDialog -Title "Driver Details - $($Row.PublishedName)" -Text (Get-DriverPackageDetailsText -Row $Row)
+}
+
+function Get-DriverDeviceUsageLive {
+param([string]$Inf)
+# Live single-package query. Used when the background usage map has no entry
+# for the package (still loading, or load failed).
+$devices = [System.Collections.Generic.List[object]]::new()
+try {
+    $signed = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop |
+        Where-Object { ([string]$_.InfName).ToLowerInvariant() -eq $Inf.ToLowerInvariant() })
+    foreach ($d in $signed) {
+        $state = "Unknown"
+        $entName = ""
+        try {
+            $ent = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+                Where-Object { [string]$_.DeviceID -eq [string]$d.DeviceID } |
+                Select-Object -First 1
+            if ($ent) {
+                $entName = [string]$ent.Name
+                $code = -1
+                try { $code = [int]$ent.ConfigManagerErrorCode } catch {}
+                $state = if ($code -eq 0 -and [string]$ent.Status -eq "OK") { "OK" } else { "Problem" }
+            }
+        }
+        catch {}
+        $name = [string]$d.DeviceName
+        if ([string]::IsNullOrWhiteSpace($name)) { $name = $entName }
+        [void]$devices.Add([PSCustomObject]@{ DeviceId = [string]$d.DeviceID; Name = $name; State = $state })
+    }
+}
+catch {
+    Write-GuiLog "[Drivers] Live device query failed for ${Inf}: $($_.Exception.Message)"
+}
+return @($devices)
+}
+
+function Show-DriverDevicesDialog {
+param($Row)
+if (-not $Row) { return }
+$inf = [string]$Row.PublishedName
+if ([string]::IsNullOrWhiteSpace($inf)) { return }
+
+$devices = @()
+if ($script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf.ToLowerInvariant())) {
+    $devices = @($script:DriverDeviceMap[$inf.ToLowerInvariant()])
+}
+else {
+    Set-DriverStatus "Checking devices using $inf..." -Visible $true
+    $devices = Get-DriverDeviceUsageLive -Inf $inf
+    Set-DriverStatus "" -Visible $false
+}
+
+$lines = [System.Collections.Generic.List[string]]::new()
+[void]$lines.Add("Driver package: $inf  ($($Row.Provider) — $($Row.OriginalName))")
+[void]$lines.Add("")
+if ($devices.Count -gt 0) {
+    [void]$lines.Add("$($devices.Count) present device(s) use this package:")
+    [void]$lines.Add("")
+    foreach ($line in (Get-DriverDeviceListText -Devices $devices)) { [void]$lines.Add($line) }
+}
+else {
+    [void]$lines.Add("No device is currently attached to this package.")
+    [void]$lines.Add("")
+    [void]$lines.Add("That is not proof the package is safe to remove: hardware that is switched off, disabled or disconnected can still need it — a camera that is off, an iGPU idle while the system runs on the dGPU, an antivirus module toggled off, devices that connect only occasionally (printers, USB gear, external displays). Only remove it if you are sure the device or software is gone for good.")
+}
+Show-TextDialog -Title "Devices Using $inf" -Text ($lines -join [Environment]::NewLine)
+}
+
+function Copy-DriverSelectionToClipboard {
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) {
+    Write-GuiLog "Copy skipped: no driver row selected."
+    return $false
+}
+
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.AppendLine("WMT Driver Row Data")
+[void]$sb.AppendLine("Count: $($targets.Count)")
+[void]$sb.AppendLine("Copied: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+$i = 0
+foreach ($row in $targets) {
+    $i++
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Row $i")
+    foreach ($p in @("PublishedName", "OriginalName", "Provider", "Class", "Signer", "DisplayVer", "DisplayDate", "Status")) {
+        $prop = $row.PSObject.Properties[$p]
+        if ($prop) {
+            $val = ([string]$prop.Value) -replace '\r?\n', ' '
+            [void]$sb.AppendLine("${p}: $val")
+        }
+    }
+}
+
+try {
+    [System.Windows.Clipboard]::SetText($sb.ToString())
+    Write-GuiLog "Copied $($targets.Count) driver row(s) to clipboard."
+    return $true
+}
+catch {
+    Write-GuiLog "ERROR: Could not copy driver row data: $($_.Exception.Message)"
+    return $false
+}
+}
+
+function Get-DriverRowsTableText {
+# Explorer-style copy of the selected rows: one header line plus one
+# tab-separated line per driver, columns matching the visible list order.
+# Tabs/newlines inside values are flattened so the paste always splits into
+# exactly 8 columns (Excel, Google Sheets, Notepad, tickets).
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) { return "" }
+
+$cols = @(
+    @("Status",     "Status"),
+    @("Class",      "Class"),
+    @("Provider",   "Provider"),
+    @("Driver",     "OriginalName"),
+    @("Store File", "PublishedName"),
+    @("Version",    "DisplayVer"),
+    @("Date",       "DisplayDate"),
+    @("Devices",    "DevicesText")
+)
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.AppendLine((@($cols | ForEach-Object { $_[0] }) -join "`t"))
+foreach ($row in $targets) {
+    $cells = foreach ($col in $cols) {
+        $val = ""
+        $prop = $row.PSObject.Properties[$col[1]]
+        if ($prop) { $val = [string]$prop.Value }
+        ((($val -replace '\r?\n', ' ') -replace '\t', ' ')).Trim()
+    }
+    [void]$sb.AppendLine((@($cells) -join "`t"))
+}
+return $sb.ToString()
+}
+
+function Copy-DriverRowsAsTable {
+# Ctrl+C target for lstDrivers. Retried briefly because SetText can lose a
+# race with another app holding the clipboard open (same pattern as the
+# library list copy).
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) {
+    Write-GuiLog "Copy skipped: no driver row selected."
+    return $false
+}
+$text = Get-DriverRowsTableText -Rows $targets
+if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        [System.Windows.Clipboard]::SetText($text)
+        Write-GuiLog "Copied $($targets.Count) driver row(s) as table (TSV)."
+        return $true
+    }
+    catch {
+        if ($attempt -eq 5) {
+            Write-GuiLog "ERROR: Could not copy driver rows: $($_.Exception.Message)"
+            return $false
+        }
+        Start-Sleep -Milliseconds 40
+    }
+}
+return $false
+}
+
+function Get-DriverInfSha256 {
+# SHA256 of the staged INF (C:\Windows\INF\<oemXX.inf>) backing a driver
+# list row — the exact package metadata file for this store entry. Used by
+# the VirusTotal context-menu lookup; returns $null when it cannot hash.
+param($Row)
+if (-not $Row) { return $null }
+$inf = [string]$Row.PublishedName
+if ([string]::IsNullOrWhiteSpace($inf) -or $inf -notmatch '(?i)\.inf$') { return $null }
+$infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+if (-not (Test-Path -LiteralPath $infPath)) { return $null }
+try {
+    $hash = Get-FileHash -LiteralPath $infPath -Algorithm SHA256 -ErrorAction Stop
+    return ([string]$hash.Hash).ToLowerInvariant()
+}
+catch {
+    return $null
+}
+}
+
+function Get-DriverGeminiPrompt {
+# "what is <driver>, <provider>, version <version>" — the lookup question
+# for the Gemini context-menu item, filled from the row's identity fields.
+param($Row)
+if (-not $Row) { return "" }
+$orig = ([string]$Row.OriginalName).Trim()
+if ([string]::IsNullOrWhiteSpace($orig) -or $orig -eq "(unknown)") { $orig = ([string]$Row.PublishedName).Trim() }
+$provider = ([string]$Row.Provider).Trim()
+$ver = ([string]$Row.DisplayVer).Trim()
+$prompt = "what is $orig"
+if (-not [string]::IsNullOrWhiteSpace($provider)) { $prompt = "$prompt, $provider" }
+if (-not [string]::IsNullOrWhiteSpace($ver)) { $prompt = "$prompt, version $ver" }
+return $prompt
+}
+
+function Open-DriverWebLookup {
+# Shared launcher for the driver web-lookup context-menu items: opens the
+# URL in the default browser and logs failures instead of crashing.
+param([string]$Url)
+if ([string]::IsNullOrWhiteSpace($Url)) { return }
+try {
+    Start-Process $Url
+}
+catch {
+    Write-GuiLog "ERROR: Could not open browser for '${Url}': $($_.Exception.Message)"
+}
+}
+
+function Show-DriverVirusTotalDialog {
+# Themed choice dialog for the VirusTotal lookup (replaces the plain
+# Yes/No/Cancel message box): search the VirusTotal database by the staged
+# INF's SHA256, or upload the file for a live scan. The hash is shown in a
+# selectable read-only box so it can be copied anywhere. Returns
+# "Hash", "Upload" or "Cancel" (Esc / close button = Cancel).
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)][string]$Hash
+)
+
+$content = @"
+<Grid Margin="18">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Name="lblInf" Grid.Row="0" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/>
+    <TextBlock Grid.Row="1" Text="SHA256 of the staged INF (select to copy):" Margin="0,14,0,4" Foreground="{DynamicResource TextSecondary}"/>
+    <TextBox Name="txtHash" Grid.Row="2" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+             TextWrapping="Wrap" Background="{DynamicResource BgPanel}" Padding="8,6"/>
+    <TextBlock Name="lblHint" Grid.Row="3" TextWrapping="Wrap" Margin="0,12,0,0" Foreground="{DynamicResource TextSecondary}"/>
+    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+        <Button Name="btnHash" Content="Search by Hash" MinWidth="132" Height="30" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"
+                ToolTip="Look up this exact file in the VirusTotal database. Instant — but a file VirusTotal has never seen shows 'No results'."/>
+        <Button Name="btnUpload" Content="Upload Sample" MinWidth="132" Height="30" Margin="0,0,8,0"
+                ToolTip="Upload the INF for a live scan: opens virustotal.com and an Explorer window with the file selected so you can drag it onto the page."/>
+        <Button Name="btnCancel" Content="Cancel" Width="92" Height="30" IsCancel="True"/>
+    </StackPanel>
+</Grid>
+"@
+$dialog = New-WmtWindowFromXaml -Title "VirusTotal - $Inf" -ContentXaml $content -Width 560 -Height 272 -NoResize
+$dialog.FindName("lblInf").Text = "Check $Inf on VirusTotal"
+$dialog.FindName("txtHash").Text = $Hash
+$dialog.FindName("lblHint").Text = "Search by Hash checks the VirusTotal database for this exact file. Upload Sample sends the INF for a fresh scan — the right choice when the hash has never been seen ('No results')."
+
+$state = @{ Result = "Cancel" }
+$dialog.FindName("btnHash").Add_Click({ $state.Result = "Hash"; $dialog.DialogResult = $true }.GetNewClosure())
+$dialog.FindName("btnUpload").Add_Click({ $state.Result = "Upload"; $dialog.DialogResult = $true }.GetNewClosure())
+try { $dialog.ShowDialog() | Out-Null } catch { Write-GuiLog "ERROR: VirusTotal dialog failed: $($_.Exception.Message)"; return "Cancel" }
+return $state.Result
+}
+
+function Remove-DriverRowsFromCache {
+# Drops packages that pnputil actually removed from the CACHED driver list —
+# no re-enumeration, no phase-2 recheck. Rows pnputil refused to delete keep
+# their place (and status) untouched, so the list never lies about what is
+# still staged. The Refresh button remains the way to get a fully fresh pass.
+param([string[]]$RemovedInfs)
+$goneList = @($RemovedInfs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($goneList.Count -eq 0) { return }
+if (-not $script:DriverPackages -or $script:DriverPackages.Count -eq 0) { return }
+
+$gone = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($inf in $goneList) { [void]$gone.Add([string]$inf) }
+
+$kept = [System.Collections.Generic.List[object]]::new()
+$removedCount = 0
+foreach ($row in $script:DriverPackages) {
+    if ($row.PublishedName -and $gone.Contains([string]$row.PublishedName)) { $removedCount++ }
+    else { [void]$kept.Add($row) }
+}
+if ($removedCount -eq 0) {
+    Write-GuiLog "[Drivers] No cached rows matched the removed package(s); list left unchanged."
+    return
+}
+$script:DriverPackages = @($kept)
+
+# Drop the packages from the cached device/service maps too, so tooltips,
+# details dialogs and live-status recomputation don't reference ghost rows.
+if ($script:DriverDeviceMap) {
+    foreach ($inf in $gone) { if ($script:DriverDeviceMap.ContainsKey($inf)) { $script:DriverDeviceMap.Remove($inf) } }
+}
+if ($script:DriverServiceMap) {
+    foreach ($inf in $gone) { if ($script:DriverServiceMap.ContainsKey($inf)) { $script:DriverServiceMap.Remove($inf) } }
+}
+
+# Recompute the Status column from the cached maps (pure in-memory, instant):
+# removing the kept copy of a group can un-"Old" the remaining duplicates,
+# and the counts line must match the visible rows.
+Set-DriverStatusFlags
+Update-DriverListView
+Update-DriverStatusLabel
+
+Write-GuiLog "[Drivers] Removed $removedCount package(s) from the cached list; $($script:DriverPackages.Count) remain. Use Refresh for a full recheck."
+}
+
+function Invoke-DriverPackageRemoval {
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $_ -and $_.PublishedName })
+if ($targets.Count -eq 0) { return }
+
+$inUseTargets = @($targets | Where-Object { $_.Status -eq "In Use" })
+$listText = (@($targets | ForEach-Object { "  • $($_.PublishedName)  ($($_.Provider) — $($_.OriginalName))" }) -join "`n")
+$warn = "Remove $($targets.Count) driver package(s) from the driver store?`n`n$listText`n`nThis runs 'pnputil /delete-driver <inf> /uninstall' and cannot be undone easily. Use 'Export Drivers' first if you might need these files again."
+if ($inUseTargets.Count -gt 0) {
+    $warn = "WARNING: $($inUseTargets.Count) of these package(s) are actively used by present devices. Removing them can break that hardware until its driver is reinstalled.`n`n$warn"
+}
+$choice = Show-WmtMessageBox -Message $warn -Title "Remove Driver Package(s)" -Button YesNo -Image Warning
+if ($choice -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+$failed = [System.Collections.Generic.List[object]]::new()
+$removed = [System.Collections.Generic.List[string]]::new()
+Invoke-UiCommand {
+    param($targets, $failed, $removed)
+    foreach ($row in $targets) {
+        $inf = [string]$row.PublishedName
+        Write-GuiLog "[Drivers] pnputil /delete-driver $inf /uninstall"
+        $out = pnputil.exe /delete-driver $inf /uninstall 2>&1
+        $exit = $LASTEXITCODE
+        $outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+        if ($exit -eq 0 -or $exit -eq 3010) {
+            if ($exit -eq 3010) { Write-GuiLog "[Drivers] Removed $inf (reboot required to finish the removal)." }
+            else { Write-GuiLog "[Drivers] Removed $inf." }
+            [void]$removed.Add($inf)
+        }
+        else {
+            Write-GuiLog "[Drivers] Failed to remove ${inf}: (exit $exit) $outText"
+            [void]$failed.Add([PSCustomObject]@{ Inf = $inf; ExitCode = $exit; Output = $outText })
+        }
+    }
+} "Removing $($targets.Count) driver package(s)..." -ArgumentList $targets, $failed, $removed
+
+if ($failed.Count -gt 0) {
+    $failText = (@($failed) | ForEach-Object { "$($_.Inf) (exit $($_.ExitCode)):`n$($_.Output)" }) -join "`n`n"
+    $force = Show-WmtMessageBox -Message "Failed to remove $($failed.Count) package(s):`n`n$failText`n`nForce delete? This also removes packages Windows considers in use." -Title "Force Delete Driver Packages" -Button YesNo -Image Error
+    if ($force -eq [System.Windows.MessageBoxResult]::Yes) {
+        Invoke-UiCommand {
+            param($failed, $removed)
+            foreach ($item in $failed) {
+                Write-GuiLog "[Drivers] pnputil /delete-driver $($item.Inf) /uninstall /force"
+                $out = pnputil.exe /delete-driver $item.Inf /uninstall /force 2>&1
+                $exit = $LASTEXITCODE
+                if ($exit -eq 0 -or $exit -eq 3010) {
+                    if ($exit -eq 3010) { Write-GuiLog "[Drivers] Force-removed $($item.Inf) (reboot required to finish the removal)." }
+                    else { Write-GuiLog "[Drivers] Force-removed $($item.Inf)." }
+                    [void]$removed.Add([string]$item.Inf)
+                }
+                else {
+                    $outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+                    Write-GuiLog "[Drivers] Force delete failed for $($item.Inf): (exit $exit) $outText"
+                }
+            }
+        } "Force-deleting $($failed.Count) driver package(s)..." -ArgumentList $failed, $removed
+    }
+}
+
+# Update the cached list in place — only lines pnputil removed disappear;
+# no full driver-store recheck. Refresh still forces a complete reload.
+Remove-DriverRowsFromCache -RemovedInfs @($removed)
+}
+
+# --- DRIVER LIST SORTING ---
+$script:DriverSortChain = New-Object System.Collections.ArrayList
+[void]$script:DriverSortChain.Add([PSCustomObject]@{ Property = "StatusSort"; Descending = $false })
+[void]$script:DriverSortChain.Add([PSCustomObject]@{ Property = "Provider";   Descending = $false })
+
+function Resolve-DriverSortProperty {
+param([string]$Header)
+switch ($Header) {
+    "Status"     { return "StatusSort" }
+    "Class"      { return "Class" }
+    "Provider"   { return "Provider" }
+    "Driver"     { return "OriginalName" }
+    "Store File" { return "PublishedName" }
+    "Version"    { return "VersionSort" }
+    "Date"       { return "DateSort" }
+    "Devices"    { return "DevicesSort" }
+    default      { return $Header }
+}
+}
+
+if ($lstDrivers) {
+$drvSortHandler = [System.Windows.RoutedEventHandler] {
+    param($src, $e)
+    $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+    if (-not $columnHeader -or -not $columnHeader.Column) { return }
+    $header = Get-CleanHeader $columnHeader.Column.Header
+    if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+    $propName = Resolve-DriverSortProperty $header
+    if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+    $isAscending = Set-SortChainPrimary -Chain $script:DriverSortChain -PropertyName $propName
+    Update-GridViewHeaders -ListView $lstDrivers -ActiveHeader $header -Ascending:$isAscending
+    Set-ListViewSort -ListView $lstDrivers -Chain $script:DriverSortChain
+}
+$lstDrivers.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $drvSortHandler, $true)
+
+# Prevent context menu from opening when right-clicking empty space, headers,
+# or scrollbars; instead select the row under the cursor first.
+$lstDrivers.Add_PreviewMouseRightButtonDown({
+    param($s, $e)
+    try { Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource } catch {}
+})
+$lstDrivers.Add_ContextMenuOpening({
+    param($s, $e)
+    if (@($s.SelectedItems).Count -eq 0) { $e.Handled = $true }
+})
+
+# Keyboard on the list: Ctrl+A selects every visible row, Ctrl+C copies the
+# selected row(s) as a tab-separated table (header + one line per driver).
+$lstDrivers.Add_PreviewKeyDown({
+    param($s, $e)
+    $mods = [System.Windows.Input.Keyboard]::Modifiers
+    $isCtrl = (($mods -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control)
+    if (-not $isCtrl) { return }
+    if ($e.Key -eq [System.Windows.Input.Key]::C) {
+        if (Copy-DriverRowsAsTable -Rows @($s.SelectedItems)) { $e.Handled = $true }
+    }
+    elseif ($e.Key -eq [System.Windows.Input.Key]::A) {
+        try { $s.SelectAll() } catch {}
+        $e.Handled = $true
+    }
+})
+}
+
+# --- DRIVER LIST CONTEXT MENU ---
+if ($lstDrivers) {
+$drvCtxMenu = New-Object System.Windows.Controls.ContextMenu
+Set-WmtContextMenuChrome -ContextMenu $drvCtxMenu
+
+$miDrvDetails = New-Object System.Windows.Controls.MenuItem
+$miDrvDetails.Header = "Driver Details"
+$miDrvDetails.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-DriverPackageDetails -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvDetails)
+
+$miDrvOpenInf = New-Object System.Windows.Controls.MenuItem
+$miDrvOpenInf.Header = "Open INF Location"
+$miDrvOpenInf.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $inf = [string]$sel[0].PublishedName
+    if ([string]::IsNullOrWhiteSpace($inf)) { return }
+    $infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+    if (Test-Path -LiteralPath $infPath) {
+        Start-Process explorer.exe -ArgumentList "/select,`"$infPath`""
+        Write-GuiLog "[Drivers] Opened INF location for $inf"
+    }
+    else {
+        Show-WmtMessageBox -Message "INF file not found:`n$infPath" -Title "Open INF Location" -Image Warning | Out-Null
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvOpenInf)
+
+$miDrvDevices = New-Object System.Windows.Controls.MenuItem
+$miDrvDevices.Header = "Find Devices Using This Driver"
+$miDrvDevices.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-DriverDevicesDialog -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvDevices)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvCopyName = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyName.Header = "Copy Store File Name"
+$miDrvCopyName.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -gt 0) {
+        try { [System.Windows.Clipboard]::SetText((@($sel | ForEach-Object { $_.PublishedName }) -join "`n")) } catch {}
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyName)
+
+$miDrvCopyInf = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyInf.Header = "Copy Driver INF Name"
+$miDrvCopyInf.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -gt 0) {
+        try { [System.Windows.Clipboard]::SetText((@($sel | ForEach-Object { $_.OriginalName }) -join "`n")) } catch {}
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyInf)
+
+$miDrvCopyTable = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyTable.Header = "Copy as Table (Ctrl+C)"
+$miDrvCopyTable.ToolTip = "Copy the selected row(s) as a tab-separated table (header row + one line per driver) that pastes into Excel, Google Sheets or Notepad with columns intact."
+$miDrvCopyTable.Add_Click({
+    [void](Copy-DriverRowsAsTable -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyTable)
+
+$miDrvCopyRows = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyRows.Header = "Copy Full Details"
+$miDrvCopyRows.Add_Click({
+    [void](Copy-DriverSelectionToClipboard -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyRows)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvVirusTotal = New-Object System.Windows.Controls.MenuItem
+$miDrvVirusTotal.Header = "Check on VirusTotal"
+$miDrvVirusTotal.ToolTip = "Opens a themed chooser: Search by Hash (instant database lookup by the staged INF's SHA256 — a hash VirusTotal has never seen shows 'No results') or Upload Sample (live scan — opens virustotal.com and Explorer with the INF selected for drag-and-drop). Falls back to a name search when the INF can't be hashed."
+$miDrvVirusTotal.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $row = $sel[0]
+    $inf = [string]$row.PublishedName
+    $hash = Get-DriverInfSha256 -Row $row
+    if (-not $hash) {
+        $name = ([string]$row.OriginalName).Trim()
+        if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "(unknown)") { $name = $inf }
+        Write-GuiLog "[Drivers] VirusTotal lookup for ${inf} by name '$name' (INF hash unavailable)"
+        Open-DriverWebLookup -Url ("https://www.virustotal.com/gui/search/" + [Uri]::EscapeDataString($name))
+        return
+    }
+    $vtChoice = Show-DriverVirusTotalDialog -Inf $inf -Hash $hash
+    if ($vtChoice -eq "Hash") {
+        Write-GuiLog "[Drivers] VirusTotal hash search for ${inf}: $hash"
+        Open-DriverWebLookup -Url "https://www.virustotal.com/gui/search/$hash"
+    }
+    elseif ($vtChoice -eq "Upload") {
+        Write-GuiLog "[Drivers] VirusTotal upload flow for ${inf}: opening virustotal.com upload + Explorer (drag the selected INF onto the page)"
+        Open-DriverWebLookup -Url "https://www.virustotal.com/gui/home/upload"
+        $infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+        if (Test-Path -LiteralPath $infPath) {
+            Start-Process explorer.exe -ArgumentList "/select,`"$infPath`""
+        }
+    }
+    else {
+        Write-GuiLog "[Drivers] VirusTotal lookup for ${inf} cancelled."
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvVirusTotal)
+
+$miDrvCatalog = New-Object System.Windows.Controls.MenuItem
+$miDrvCatalog.Header = "Search Microsoft Update Catalog"
+$miDrvCatalog.ToolTip = "Search catalog.update.microsoft.com for this driver's original INF name — Microsoft's safe, signed driver source. Falls back to 'Provider Class' when the INF name is unknown."
+$miDrvCatalog.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $row = $sel[0]
+    $query = ([string]$row.OriginalName).Trim()
+    if ([string]::IsNullOrWhiteSpace($query) -or $query -eq "(unknown)") {
+        $provider = ([string]$row.Provider).Trim()
+        $class = ([string]$row.Class).Trim()
+        if ($provider -and $class) { $query = "$provider $class" }
+        elseif ($provider) { $query = $provider }
+        else { $query = [string]$row.PublishedName }
+    }
+    Write-GuiLog "[Drivers] Searching Microsoft Update Catalog for '$query'"
+    Open-DriverWebLookup -Url ("https://www.catalog.update.microsoft.com/Search.aspx?q=" + [Uri]::EscapeDataString($query))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCatalog)
+
+$miDrvGemini = New-Object System.Windows.Controls.MenuItem
+$miDrvGemini.Header = "Ask Gemini About This Driver"
+$miDrvGemini.ToolTip = "Asks Google's Gemini-powered AI Mode 'what is <driver>, <provider>, version <version>' and answers immediately — Gemini itself has no URL prefill, so this goes through AI Mode (udm=50). The question is also copied to the clipboard for pasting into the Gemini app if you prefer."
+$miDrvGemini.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $prompt = Get-DriverGeminiPrompt -Row $sel[0]
+    if ([string]::IsNullOrWhiteSpace($prompt)) { return }
+    try { [System.Windows.Clipboard]::SetText($prompt) } catch {}
+    Write-GuiLog "[Drivers] Asking Gemini (Google AI Mode): '$prompt' (also copied to clipboard for pasting into gemini.google.com)"
+    Open-DriverWebLookup -Url ("https://www.google.com/search?udm=50&q=" + [Uri]::EscapeDataString($prompt))
+})
+[void]$drvCtxMenu.Items.Add($miDrvGemini)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvRemove = New-Object System.Windows.Controls.MenuItem
+$miDrvRemove.Header = "Remove Driver Package..."
+Set-WmtThemedBrush -Object $miDrvRemove -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "Danger"
+$miDrvRemove.Add_Click({
+    [void](Invoke-DriverPackageRemoval -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvRemove)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvClean = New-Object System.Windows.Controls.MenuItem
+$miDrvClean.Header = "Clean Old Drivers (DriverStore)"
+$miDrvClean.Add_Click({
+    $btn = Get-Ctrl "btnDrvClean"
+    if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+})
+[void]$drvCtxMenu.Items.Add($miDrvClean)
+
+$miDrvGhosts = New-Object System.Windows.Controls.MenuItem
+$miDrvGhosts.Header = "Remove Ghost Devices"
+$miDrvGhosts.Add_Click({
+    $btn = Get-Ctrl "btnDrvGhost"
+    if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+})
+[void]$drvCtxMenu.Items.Add($miDrvGhosts)
+
+$miDrvRefresh = New-Object System.Windows.Controls.MenuItem
+$miDrvRefresh.Header = "Refresh Driver List"
+$miDrvRefresh.Add_Click({ Start-DriverListLoad -Force })
+[void]$drvCtxMenu.Items.Add($miDrvRefresh)
+
+$drvCtxMenu.Add_Opened({
+    $sel = @($lstDrivers.SelectedItems)
+    $miDrvDetails.IsEnabled = ($sel.Count -eq 1)
+    $miDrvOpenInf.IsEnabled = ($sel.Count -eq 1)
+    $miDrvDevices.IsEnabled = ($sel.Count -eq 1)
+    $miDrvCopyName.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyInf.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyTable.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyRows.IsEnabled = ($sel.Count -ge 1)
+    $miDrvRemove.IsEnabled = ($sel.Count -ge 1)
+    $miDrvVirusTotal.IsEnabled = ($sel.Count -eq 1)
+    $miDrvCatalog.IsEnabled = ($sel.Count -eq 1)
+    $miDrvGemini.IsEnabled = ($sel.Count -eq 1)
+    if ($sel.Count -eq 1) {
+        $miDrvDetails.ToolTip = "Show full details for $($sel[0].PublishedName)"
+        $miDrvOpenInf.ToolTip = "Open C:\Windows\INF with $($sel[0].PublishedName) selected"
+        $miDrvDevices.ToolTip = "List the present devices currently using $($sel[0].PublishedName)"
+        $miDrvRemove.ToolTip = "Remove $($sel[0].PublishedName) from the driver store (pnputil /delete-driver /uninstall)"
+    }
+    else {
+        $miDrvRemove.ToolTip = "Remove the selected driver package(s) from the driver store"
+    }
+})
+
+$lstDrivers.ContextMenu = $drvCtxMenu
+
+# Double-click opens the details dialog
+$lstDrivers.Add_MouseDoubleClick({
+    param($s, $e)
+    try {
+        $sel = @($s.SelectedItems)
+        if ($sel.Count -eq 1) { Show-DriverPackageDetails -Row $sel[0] }
+    }
+    catch {}
+})
+}
+
+# --- DRIVER LIST SEARCH BOX ---
+$btnDrvClearSearch = Get-Ctrl "btnDrvClearSearch"
+$script:DrvSearchBorder = $null
+if ($txtDrvSearch) {
+$drvSearchParent = $txtDrvSearch.Parent
+if ($drvSearchParent -and $drvSearchParent.Parent -is [System.Windows.Controls.Border]) {
+    $script:DrvSearchBorder = $drvSearchParent.Parent
+}
+$txtDrvSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+$script:DrvSearchDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DrvSearchDebounceTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:DrvSearchDebounceTimer.Add_Tick({
+    try { $script:DrvSearchDebounceTimer.Stop() } catch {}
+    Update-DriverListView
+})
+$txtDrvSearch.Add_TextChanged({
+    try { $script:DrvSearchDebounceTimer.Stop() } catch {}
+    try { $script:DrvSearchDebounceTimer.Start() } catch {}
+    $hasRealText = (-not [string]::IsNullOrWhiteSpace($txtDrvSearch.Text)) -and
+                    ($txtDrvSearch.Text -notin @("Search Drivers...", "Search drivers..."))
+    if ($btnDrvClearSearch) {
+        $btnDrvClearSearch.Visibility = if ($hasRealText) { "Visible" } else { "Collapsed" }
+    }
+})
+$txtDrvSearch.Add_GotFocus({
+    $t = $txtDrvSearch
+    if ($t.Text -in @("Search Drivers...", "Search drivers...")) {
+        $t.Text = ""
+        $t.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextPrimary")
+    }
+    if ($script:DrvSearchBorder) {
+        $script:DrvSearchBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, "Accent")
+        $script:DrvSearchBorder.BorderThickness = [System.Windows.Thickness]::new(2)
+    }
+})
+$txtDrvSearch.Add_LostFocus({
+    $t = $txtDrvSearch
+    if ([string]::IsNullOrWhiteSpace($t.Text)) {
+        $t.Text = "Search drivers..."
+        $t.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+    }
+    if ($script:DrvSearchBorder) {
+        $script:DrvSearchBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, "BorderBrush")
+        $script:DrvSearchBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    }
+})
+}
+if ($btnDrvClearSearch) {
+$btnDrvClearSearch.Add_Click({
+    $txtDrvSearch.Text = "Search drivers..."
+    $txtDrvSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+    $btnDrvClearSearch.Visibility = "Collapsed"
+    Update-DriverListView
+})
+}
+
+if ($btnDrvReload) { $btnDrvReload.Add_Click({ Start-DriverListLoad -Force }) }
 
 # --- Cleanup ---
 if ($btnCleanDisk) { $btnCleanDisk.Add_Click({ Start-Process cleanmgr }) }
