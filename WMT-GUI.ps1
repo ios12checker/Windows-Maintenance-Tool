@@ -27037,13 +27037,13 @@ powercfg /S SCHEME_CURRENT | Out-Null
                         </Grid.ColumnDefinitions>
                         <StackPanel>
                             <TextBlock Text="Driver Management" Style="{StaticResource SectionHeader}" Margin="0"/>
-                            <TextBlock Name="lblDrvStatus" Text="Ready — the driver store loads when you open this page" Foreground="{DynamicResource TextSecondary}" FontSize="13"/>
-                            <TextBlock FontSize="12" Margin="0,6,0,0">
+                            <TextBlock Name="lblDrvStatus" Text="Ready — the driver store loads when you open this page" Foreground="{DynamicResource TextSecondary}" FontSize="13" TextWrapping="Wrap"/>
+                            <TextBlock FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap">
                                 <Run Text="Highlighting:  " Foreground="{DynamicResource TextMuted}"/>
                                 <Run Text="● In Use   " Foreground="{DynamicResource Success}"/>
                                 <Run Text="● Old   " Foreground="{DynamicResource Warning}"/>
                                 <Run Text="● Unattached   " Foreground="{DynamicResource Danger}"/>
-                                <Run Text="● Inactive" Foreground="{DynamicResource TextSecondary}"/>
+                                <Run Text="● Inactive (disabled in Device Manager)" Foreground="{DynamicResource TextSecondary}"/>
                             </TextBlock>
                         </StackPanel>
                         <Border Grid.Column="1" Style="{StaticResource ModernSearchBoxStyle}" VerticalAlignment="Top">
@@ -42433,7 +42433,9 @@ $btnToggleDrvMeta.Add_Click({
 #              may be switched off, disabled, disconnected, or only
 #              occasionally connected — NOT automatically safe to remove)
 #   Inactive - bound only to present devices that are disabled or reporting
-#              a problem (ConfigManagerErrorCode != 0)
+#              a problem (ConfigManagerErrorCode != 0) — the context menu's
+#              per-device "Enable device" / "Disable device" entries flip
+#              such devices in place
 # Status detection runs in two phases: the fast pnputil parse lists packages
 # immediately, then a background runspace queries Win32_PnPSignedDriver +
 # Win32_PnPEntity (slow) and the rows re-color when it completes. It also
@@ -42443,7 +42445,8 @@ $btnToggleDrvMeta.Add_Click({
 # without this they would all be mislabeled "Unattached".
 # The loaded list is CACHED: re-opening the Drivers tab shows the cached rows
 # instead of re-running the whole enumeration, removals update the cache in
-# place (only rows pnputil actually deleted disappear), and the Refresh
+# place (only rows pnputil actually deleted disappear), device enable/disable
+# toggles update the cached device state the same way, and the Refresh
 # button / menu item force a full recheck at any time.
 $script:DriverPackages = @()
 $script:DriverDeviceMap = @{}
@@ -42518,7 +42521,7 @@ foreach ($row in $script:DriverPackages) {
 }
 $summary = "$($script:DriverPackages.Count) driver package(s)"
 if ($script:DriverUsageLoaded) {
-    $summary += " · $($counts.InUse) In Use · $($counts.Old) Old · $($counts.Unattached) Unattached · $($counts.Inactive) Inactive"
+    $summary += " · $($counts.InUse) In Use · $($counts.Old) Old · $($counts.Unattached) Unattached · $($counts.Inactive) Inactive (disabled in Device Manager)"
 }
 else {
     $summary += " · checking device usage..."
@@ -42563,7 +42566,13 @@ if ($selectedInf) {
 function Get-DriverDeviceListText {
 param([object[]]$Devices)
 $lines = foreach ($dev in $Devices) {
-    $state = if ([string]$dev.State -eq "OK") { "running" } else { ([string]$dev.State).ToLowerInvariant() }
+    # ConfigManagerErrorCode 22 = the device is disabled in Device Manager —
+    # say so explicitly instead of the generic "problem".
+    $state = if ([string]$dev.State -eq "OK") { "running" } else {
+        $code = -1
+        try { $code = [int]$dev.Code } catch {}
+        if ($code -eq 22) { "disabled in Device Manager" } else { ([string]$dev.State).ToLowerInvariant() }
+    }
     $name = if ([string]::IsNullOrWhiteSpace([string]$dev.Name)) { "(unnamed device)" } else { [string]$dev.Name }
     "$name [$state]  —  $($dev.DeviceId)"
 }
@@ -42643,7 +42652,7 @@ foreach ($row in $script:DriverPackages) {
         else {
             Set-DriverRowProperty -Row $row -Name "Status" -Value "Inactive"
             Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "2"
-            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Bound to {0} present device(s), but none are running (disabled or reporting a problem):`n{1}" -f $devices.Count, ($names -join "`n"))
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Bound to {0} present device(s), but none are running (disabled in Device Manager or reporting a problem):`n{1}`n`nRight-click and use 'Enable device' to turn a disabled device back on." -f $devices.Count, ($names -join "`n"))
         }
     }
     else {
@@ -42778,7 +42787,7 @@ $script:DriverLoadRunspace = [PowerShell]::Create().AddScript({
             $state = if (-not $ent) { "Unknown" } elseif ($ent.Code -eq 0 -and $ent.Status -eq "OK") { "OK" } else { "Problem" }
             $name = [string]$d.DeviceName
             if ([string]::IsNullOrWhiteSpace($name) -and $ent) { $name = [string]$ent.Name }
-            [void]$map[$inf].Add([PSCustomObject]@{ DeviceId = $devId; Name = $name; State = $state })
+            [void]$map[$inf].Add([PSCustomObject]@{ DeviceId = $devId; Name = $name; State = $state; Code = if ($ent) { [int]$ent.Code } else { -1 } })
         }
         # Service detection: a package can be "in use" without binding to any
         # device (filter drivers, audio/AV drivers, bus drivers). Parse the
@@ -42935,7 +42944,7 @@ try {
         catch {}
         $name = [string]$d.DeviceName
         if ([string]::IsNullOrWhiteSpace($name)) { $name = $entName }
-        [void]$devices.Add([PSCustomObject]@{ DeviceId = [string]$d.DeviceID; Name = $name; State = $state })
+        [void]$devices.Add([PSCustomObject]@{ DeviceId = [string]$d.DeviceID; Name = $name; State = $state; Code = $code })
     }
 }
 catch {
@@ -43169,6 +43178,109 @@ try { $dialog.ShowDialog() | Out-Null } catch { Write-GuiLog "ERROR: VirusTotal 
 return $state.Result
 }
 
+function Invoke-DriverDevicePowerCommand {
+# Runs pnputil /enable-device or /disable-device for one present device
+# instance ID (an admin operation, same as driver removal). Returns
+# Success/ExitCode/Output so the caller can log the exact failure and treat
+# the reboot-pending exit code (3010) explicitly.
+param([Parameter(Mandatory = $true)][string]$DeviceId, [Parameter(Mandatory = $true)][bool]$Enable)
+$arg = if ($Enable) { "/enable-device" } else { "/disable-device" }
+$exit = -1
+$out = @()
+try {
+    $out = @(& pnputil.exe $arg $DeviceId 2>&1)
+    $exit = $LASTEXITCODE
+}
+catch {
+    $out = @($_.Exception.Message)
+    $exit = -1
+}
+$outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+return [PSCustomObject]@{ Success = ($exit -eq 0); ExitCode = $exit; Output = $outText }
+}
+
+function Set-DriverDeviceCachedState {
+# After pnputil accepted an enable/disable, flip that device's entry inside
+# the cached usage map and re-derive the package's status in place — the
+# same in-place cache edit pattern as Remove-DriverRowsFromCache, no recheck.
+# Returns $true when a cached entry was found and updated.
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)][string]$DeviceId,
+    [Parameter(Mandatory = $true)][ValidateSet("OK", "Problem", "Unknown")][string]$State,
+    [int]$Code = -1
+)
+if (-not $script:DriverUsageLoaded -or -not $script:DriverDeviceMap) { return $false }
+$key = $Inf.ToLowerInvariant()
+if (-not $script:DriverDeviceMap.ContainsKey($key)) { return $false }
+$entry = $null
+foreach ($d in @($script:DriverDeviceMap[$key])) {
+    if ([string]$d.DeviceId -eq $DeviceId) { $entry = $d; break }
+}
+if (-not $entry) { return $false }
+Set-DriverRowProperty -Row $entry -Name "State" -Value $State
+Set-DriverRowProperty -Row $entry -Name "Code" -Value $Code
+Set-DriverStatusFlags
+Update-DriverListView
+Update-DriverStatusLabel
+return $true
+}
+
+function Invoke-DriverDeviceToggle {
+# Context-menu action behind the per-device "Enable device" / "Disable device"
+# entries: flips one present
+# device that uses the selected driver package. A running device (State OK)
+# is disabled after confirmation; anything else (disabled / problem) is
+# enabled — pnputil enable/disable are idempotent, so a wrong guess is
+# harmless. On success the cached device state is patched so the row
+# re-colors without a full recheck.
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)]$Device
+)
+if (-not $Device -or [string]::IsNullOrWhiteSpace([string]$Device.DeviceId)) {
+    Write-GuiLog "[Drivers] Device toggle skipped: the device has no instance ID."
+    return $false
+}
+$devId = [string]$Device.DeviceId
+$name = if ([string]::IsNullOrWhiteSpace([string]$Device.Name)) { $devId } else { [string]$Device.Name }
+$disable = ([string]$Device.State -eq "OK")
+
+if ($disable) {
+    $warn = "Disable device '$name'?`n`nThe device stops working until it is re-enabled (right-click the same row and choose 'Enable device'). Its driver package will then show as 'Inactive (disabled in Device Manager)'.`n`nDevice: $devId"
+    $choice = Show-WmtMessageBox -Message $warn -Title "Disable Device" -Button YesNo -Image Warning
+    if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-GuiLog "[Drivers] Disable of '$name' cancelled."
+        return $false
+    }
+}
+
+$action = if ($disable) { "disable-device" } else { "enable-device" }
+Invoke-UiCommand {
+    param($devId, $name, $disable, $Inf)
+    $result = Invoke-DriverDevicePowerCommand -DeviceId $devId -Enable (-not $disable)
+    if ($result.ExitCode -eq 3010) {
+        Write-GuiLog "[Drivers] pnputil $(if ($disable) { '/disable-device' } else { '/enable-device' }) for '$name' needs a reboot to finish — the cached list is left unchanged; use Refresh after rebooting."
+        return
+    }
+    if (-not $result.Success) {
+        Write-GuiLog "ERROR: pnputil $(if ($disable) { '/disable-device' } else { '/enable-device' }) failed for '$name' (exit $($result.ExitCode)): $($result.Output)"
+        return
+    }
+    $newState = if ($disable) { "Problem" } else { "OK" }
+    $newCode  = if ($disable) { 22 } else { 0 }
+    $updated = Set-DriverDeviceCachedState -Inf $Inf -DeviceId $devId -State $newState -Code $newCode
+    $note = if ($updated) { " Status updated in the cached list; use Refresh for a full recheck." } else { " Use Refresh to update the driver list." }
+    if ($disable) {
+        Write-GuiLog "[Drivers] Disabled device '$name' — package ${Inf} now shows as Inactive (disabled in Device Manager).$note"
+    }
+    else {
+        Write-GuiLog "[Drivers] Enabled device '$name' — package ${Inf} is marked In Use again.$note"
+    }
+} "Toggling device '$name' ($action)..." -ArgumentList $devId, $name, $disable, $Inf
+return $true
+}
+
 function Remove-DriverRowsFromCache {
 # Drops packages that pnputil actually removed from the CACHED driver list —
 # no re-enumeration, no phase-2 recheck. Rows pnputil refused to delete keep
@@ -43382,6 +43494,14 @@ $miDrvDevices.Add_Click({
 })
 [void]$drvCtxMenu.Items.Add($miDrvDevices)
 
+# Per-device Enable/Disable entries are inserted flat into this menu on every
+# open (see Add_Opened below) — NOT as a WPF submenu, because the shared flat
+# MenuItem template has no popup part and a submenu under it silently never
+# opens. Flat items use exactly the same mechanics as every other entry in
+# this menu. This list tracks the inserted items so they can be removed again
+# on the next open.
+$script:DrvToggleMenuItems = [System.Collections.Generic.List[object]]::new()
+
 [void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
 
 $miDrvCopyName = New-Object System.Windows.Controls.MenuItem
@@ -43544,6 +43664,82 @@ $drvCtxMenu.Add_Opened({
     }
     else {
         $miDrvRemove.ToolTip = "Remove the selected driver package(s) from the driver store"
+    }
+
+    # Rebuild the per-device Enable/Disable entries for the current selection —
+    # flat items inserted right under "Find Devices Using This Driver" (NOT a
+    # WPF submenu: the shared flat MenuItem template has no popup part, so a
+    # submenu under it silently never opens — flat items are the same proven
+    # mechanics as every other entry in this menu). One entry per present
+    # device bound to the package, offering the action that changes its state
+    # (a running device -> disable, anything else -> enable; pnputil
+    # enable/disable are idempotent). The device rides in the MenuItem.Tag so
+    # the click handler needs no closure.
+    foreach ($old in $script:DrvToggleMenuItems) { [void]$drvCtxMenu.Items.Remove($old) }
+    $script:DrvToggleMenuItems.Clear()
+    if ($sel.Count -ne 1) { return }
+    $tStyle = $null
+    try { $tStyle = $drvCtxMenu.TryFindResource("WmtNoGutterMenuItemStyle") } catch {}
+    $tInf = [string]$sel[0].PublishedName
+    $tDevices = @()
+    if ($script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($tInf.ToLowerInvariant())) {
+        $tDevices = @($script:DriverDeviceMap[$tInf.ToLowerInvariant()])
+    }
+    $tIdx = $drvCtxMenu.Items.IndexOf($miDrvDevices) + 1
+    if ($tIdx -lt 1) { $tIdx = $drvCtxMenu.Items.Count }
+    if (-not $script:DriverUsageLoaded) {
+        $tItem = New-Object System.Windows.Controls.MenuItem
+        $tItem.Header = "Checking device usage..."
+        $tItem.IsEnabled = $false
+        if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+        $drvCtxMenu.Items.Insert($tIdx, $tItem)
+        $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+    }
+    elseif ($tDevices.Count -eq 0) {
+        $tItem = New-Object System.Windows.Controls.MenuItem
+        $tItem.Header = "No devices bound to this package"
+        $tItem.IsEnabled = $false
+        if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+        $drvCtxMenu.Items.Insert($tIdx, $tItem)
+        $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+    }
+    else {
+        $tShown = 0
+        foreach ($tDev in $tDevices) {
+            if ($tShown -ge 12) {
+                # Very wide packages: cap the menu and point at the full list.
+                $tItem = New-Object System.Windows.Controls.MenuItem
+                $tItem.Header = "... and $($tDevices.Count - 12) more device(s) — use 'Find Devices Using This Driver' for the full list"
+                $tItem.IsEnabled = $false
+                if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+                $drvCtxMenu.Items.Insert($tIdx, $tItem)
+                $script:DrvToggleMenuItems.Add($tItem)
+                break
+            }
+            $tDisable = ([string]$tDev.State -eq "OK")
+            $tName = if ([string]::IsNullOrWhiteSpace([string]$tDev.Name)) { [string]$tDev.DeviceId } else { [string]$tDev.Name }
+            $tCode = -1
+            try { $tCode = [int]$tDev.Code } catch {}
+            $tHeader = if ($tDisable) { "Disable device — $tName" } elseif ($tCode -eq 22) { "Enable device — $tName (disabled in Device Manager)" } else { "Enable device — $tName" }
+            $tItem = New-Object System.Windows.Controls.MenuItem
+            $tItem.Header = $tHeader
+            $tItem.ToolTip = "$(if ($tDisable) { 'Disables' } else { 'Enables' }) via pnputil $(if ($tDisable) { '/disable-device' } else { '/enable-device' }) — $([string]$tDev.DeviceId)"
+            $tItem.Tag = [PSCustomObject]@{ Inf = $tInf; Dev = $tDev }
+            if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+            $tItem.Add_Click({
+                param($cSrc, $cE)
+                try {
+                    $tag = $cSrc.Tag
+                    if ($tag) { [void](Invoke-DriverDeviceToggle -Inf ([string]$tag.Inf) -Device $tag.Dev) }
+                }
+                catch {
+                    Write-GuiLog "ERROR: device toggle failed: $($_.Exception.Message)"
+                }
+            })
+            $drvCtxMenu.Items.Insert($tIdx, $tItem)
+            $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+            $tShown++
+        }
     }
 })
 
