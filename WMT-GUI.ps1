@@ -6759,7 +6759,7 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
         param($CurrentVer, $IsExe)
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = ""; ExeDownloadUrl = "" }
+        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = ""; ExeDownloadUrl = ""; RemoteBytes = $null; ExeAssetName = ""; ExeSha256 = ""; ChecksumStatus = "None" }
 
         try {
             if ($IsExe) {
@@ -6779,6 +6779,37 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
                         $exeAsset = $req.assets | Where-Object { $_.name -match '\.exe$' } | Select-Object -First 1
                         if ($exeAsset) {
                             $jobRes.ExeDownloadUrl = $exeAsset.browser_download_url
+                            $jobRes.ExeAssetName = [string]$exeAsset.name
+
+                            # Safety: find a published SHA256 checksum asset for this EXE
+                            # (<exe>.sha256, SHA256SUMS / checksums.txt / hashes.txt)
+                            $ckAsset = $req.assets | Where-Object { $_.name -ieq ($exeAsset.name + '.sha256') } | Select-Object -First 1
+                            if (-not $ckAsset) {
+                                $ckAsset = $req.assets | Where-Object { ($_.name -match '(?i)sha256|checksum|hashes') -and ($_.name -match '(?i)\.(txt|sha256)$') } | Select-Object -First 1
+                            }
+                            if ($ckAsset) {
+                                $jobRes.ChecksumStatus = "Found"
+                                try {
+                                    $ckContent = (Invoke-WebRequest -Uri $ckAsset.browser_download_url -UseBasicParsing -TimeoutSec 10).Content
+                                    if ($ckContent -isnot [string]) { $ckContent = [System.Text.Encoding]::UTF8.GetString([byte[]]$ckContent) }
+                                    foreach ($ckLine in ($ckContent -split "\r?\n")) {
+                                        $ckT = $ckLine.Trim()
+                                        if (-not $ckT) { continue }
+                                        # "sha256sum" style: <64-hex>  <name>   /   "name: hash" style
+                                        $ckM = [regex]::Match($ckT, '^([0-9a-fA-F]{64})\s+\*?(.+)$')
+                                        if ($ckM.Success) {
+                                            $ckName = [IO.Path]::GetFileName($ckM.Groups[2].Value.Trim().Trim('*'))
+                                            if ($ckName -ieq [string]$exeAsset.name) { $jobRes.ExeSha256 = $ckM.Groups[1].Value.ToLowerInvariant(); break }
+                                        }
+                                        $ckM = [regex]::Match($ckT, '^(.+?)\s*[:=]\s*([0-9a-fA-F]{64})$')
+                                        if ($ckM.Success) {
+                                            $ckName = [IO.Path]::GetFileName($ckM.Groups[1].Value.Trim().Trim('*'))
+                                            if ($ckName -ieq [string]$exeAsset.name) { $jobRes.ExeSha256 = $ckM.Groups[2].Value.ToLowerInvariant(); break }
+                                        }
+                                    }
+                                }
+                                catch { $jobRes.ChecksumStatus = "Failed" }
+                            }
                         }
                     }
 
@@ -6800,7 +6831,18 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
 
                 # Shorter timeout for UI responsiveness
                 $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
-                $content = $req.Content
+
+                # Safety: keep the RAW download bytes so the installed file can later be
+                # verified byte-for-byte against the SHA256 of exactly what GitHub served
+                $rawBytes = $null
+                try { if ($req.RawContentStream -and $req.RawContentStream.Length -gt 0) { $rawBytes = $req.RawContentStream.ToArray() } } catch {}
+                if (-not $rawBytes -or $rawBytes.Length -lt 200) {
+                    if ($req.Content -is [byte[]]) { $rawBytes = [byte[]]$req.Content }
+                    else { $rawBytes = [System.Text.Encoding]::UTF8.GetBytes([string]$req.Content) }
+                }
+                $jobRes.RemoteBytes = $rawBytes
+
+                $content = [System.Text.Encoding]::UTF8.GetString($rawBytes)
                 $jobRes.Content = $content
                 try {
                     $lm = $req.Headers["Last-Modified"]
@@ -6809,10 +6851,10 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
                     }
                 }
                 catch {}
+                # SHA256 of the raw download - the hash the installed file must match
                 $sha = [System.Security.Cryptography.SHA256]::Create()
                 try {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content)
-                    $hashBytes = $sha.ComputeHash($bytes)
+                    $hashBytes = $sha.ComputeHash($rawBytes)
                     $jobRes.RemoteHash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
                 }
                 finally {
@@ -6886,18 +6928,27 @@ $script:UpdateTimer.Add_Tick({
                     if ($remoteVer -gt $localVer) {
                         if ($lb) {
                             $lb.AppendText(" -> Update Available!`n")
+                            if ($jobResult.RemoteHash) { $lb.AppendText("[UPDATE] Remote SHA256: $($jobResult.RemoteHash)`n") }
                             $lb.ScrollToEnd()
                         }
 
                         if ($runningAsExe) {
                             if ($lb) {
                                 $lb.AppendText("[UPDATE] Newer EXE release available. Prompting user...`n")
+                                if ($jobResult.ChecksumStatus -eq "Found" -and $jobResult.ExeSha256) { $lb.AppendText("[UPDATE] Release publishes a SHA256 checksum - the download will be verified against it.`n") }
+                                elseif ($jobResult.ChecksumStatus -eq "Found") { $lb.AppendText("[UPDATE] Note: checksum file has no entry for this EXE - hash will be logged for manual verification.`n") }
+                                elseif ($jobResult.ChecksumStatus -eq "Failed") { $lb.AppendText("[UPDATE] Note: release checksum file could not be downloaded - hash will be logged for manual verification.`n") }
                                 $lb.ScrollToEnd()
                             }
                             $window.Dispatcher.Invoke([Action] {
                                     $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to download and install the update now?"
                                     $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                                     if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                        $tempExe = $null
+                                        $currentExe = $null
+                                        $backupExe = $null
+                                        $backupCreated = $false
+                                        $updateApplied = $false
                                         try {
                                             $downloadUrl = [string]$jobResult.ExeDownloadUrl
                                             if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
@@ -6919,18 +6970,52 @@ $script:UpdateTimer.Add_Tick({
                                                 throw "Downloaded file is suspiciously small ($fileSize bytes). Update may have failed."
                                             }
 
+                                            # Safety: PE header check - the download must be a Windows executable
+                                            $fsPe = [System.IO.File]::OpenRead($tempExe)
+                                            try { $peB0 = $fsPe.ReadByte(); $peB1 = $fsPe.ReadByte() } finally { $fsPe.Close() }
+                                            if ($peB0 -ne 0x4D -or $peB1 -ne 0x5A) {
+                                                throw "Downloaded file is not a Windows executable (MZ header missing). Update aborted."
+                                            }
+
+                                            # Safety: SHA256 - log the hash and verify it against the release
+                                            # checksum when the release publishes one
+                                            $downloadHash = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                                            if ($lb) { $lb.AppendText("[UPDATE] Downloaded EXE SHA256: $downloadHash`n"); $lb.ScrollToEnd() }
+
+                                            $expectedHash = [string]$jobResult.ExeSha256
+                                            $checksumStatus = [string]$jobResult.ChecksumStatus
+                                            if ($expectedHash) {
+                                                if ($downloadHash -ne $expectedHash.ToLowerInvariant()) {
+                                                    throw "SHA256 MISMATCH! The downloaded EXE does not match the release checksum ($expectedHash). Update aborted - nothing was replaced."
+                                                }
+                                                if ($lb) { $lb.AppendText("[UPDATE] SHA256 verified against the release checksum file.`n"); $lb.ScrollToEnd() }
+                                            }
+                                            elseif ($checksumStatus -eq "None") {
+                                                if ($lb) { $lb.AppendText("[UPDATE] Note: release publishes no SHA256 checksum file - hash logged above for manual verification.`n"); $lb.ScrollToEnd() }
+                                            }
+
                                             if ($lb) { $lb.AppendText("[UPDATE] Download complete. Preparing update...`n"); $lb.ScrollToEnd() }
 
                                             # Create backup of current EXE
                                             $currentExe = [string]$script:WmtProcessPath
                                             $backupExe = "$currentExe.backup"
                                             Copy-Item -Path $currentExe -Destination $backupExe -Force
+                                            $backupCreated = $true
 
                                             if ($lb) { $lb.AppendText("[UPDATE] Backup created at: $backupExe`n"); $lb.ScrollToEnd() }
 
                                             # Replace current EXE with new one
                                             Copy-Item -Path $tempExe -Destination $currentExe -Force
+
+                                            # Safety: the installed file must hash identical to the verified download
+                                            $installedHash = (Get-FileHash -LiteralPath $currentExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                                            if ($installedHash -ne $downloadHash) {
+                                                throw "Installed EXE failed SHA256 verification (disk write did not match the download)."
+                                            }
+                                            $updateApplied = $true
+
                                             Remove-Item -Path $tempExe -Force -ErrorAction SilentlyContinue
+                                            $tempExe = $null
 
                                             if ($lb) { $lb.AppendText("[UPDATE] Update installed successfully. Restarting...`n"); $lb.ScrollToEnd() }
 
@@ -6941,6 +7026,13 @@ $script:UpdateTimer.Add_Tick({
                                             $window.Close()
                                         }
                                         catch {
+                                            # Safety net: put the previous EXE back if anything failed before/during the swap
+                                            if (-not $updateApplied -and $backupCreated) {
+                                                Copy-Item -Path $backupExe -Destination $currentExe -Force -ErrorAction SilentlyContinue
+                                                if ($lb) { $lb.AppendText("[UPDATE] Previous EXE restored from backup.`n"); $lb.ScrollToEnd() }
+                                            }
+                                            if ($tempExe -and (Test-Path $tempExe)) { Remove-Item -Path $tempExe -Force -ErrorAction SilentlyContinue }
+
                                             $errMsg = "Update failed: $($_.Exception.Message)"
                                             if ($lb) { $lb.AppendText("[UPDATE] ERROR: $errMsg`n"); $lb.ScrollToEnd() }
 
@@ -6957,10 +7049,20 @@ $script:UpdateTimer.Add_Tick({
                                 $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
 
                                 if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                    $scriptPath = $null
+                                    $backupPath = $null
+                                    $updateApplied = $false
                                     try {
                                         $remoteContent = [string]$jobResult.Content
                                         if ([string]::IsNullOrWhiteSpace($remoteContent) -or $remoteContent.Length -lt 200) {
                                             throw "Downloaded update content was empty or invalid."
+                                        }
+                                        $remoteContent = $remoteContent.TrimStart([char]0xFEFF)
+
+                                        # Safety: structural check - refuse to overwrite the running script
+                                        # with content that does not look like a WMT script
+                                        if (($remoteContent -notmatch '\$AppVersion\s*=') -and ($remoteContent -notmatch 'Windows\s+Maintenance\s+Tool')) {
+                                            throw "Downloaded update does not look like a WMT script (safety check failed)."
                                         }
 
                                         $scriptPath = $scriptPathForUpdate
@@ -6971,7 +7073,41 @@ $script:UpdateTimer.Add_Tick({
                                         $backupName = "$(Split-Path $scriptPath -Leaf).bak"
                                         $backupPath = Join-Path (Get-DataPath) $backupName
                                         Copy-Item -Path $scriptPath -Destination $backupPath -Force
-                                        Set-Content -Path $scriptPath -Value $remoteContent -Encoding UTF8 -Force
+
+                                        # Write byte-exact when the raw download is available, so the
+                                        # installed file hashes identical to what GitHub served
+                                        $wroteExactBytes = $false
+                                        try {
+                                            if ($jobResult.RemoteBytes) {
+                                                [System.IO.File]::WriteAllBytes($scriptPath, [byte[]]$jobResult.RemoteBytes)
+                                                $wroteExactBytes = $true
+                                            }
+                                        }
+                                        catch { $wroteExactBytes = $false }
+                                        if (-not $wroteExactBytes) {
+                                            Set-Content -Path $scriptPath -Value $remoteContent -Encoding UTF8 -Force
+                                        }
+
+                                        # Safety: SHA256 verification of the installed file, with automatic
+                                        # rollback to the backup when it does not match
+                                        $expectedHash = [string]$jobResult.RemoteHash
+                                        $verified = $false
+                                        if ($wroteExactBytes -and $expectedHash) {
+                                            $appliedHash = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash
+                                            $verified = ($appliedHash -eq $expectedHash)
+                                            if ($lb) { $lb.AppendText("[UPDATE] Installed SHA256: $appliedHash (expected $expectedHash)`n"); $lb.ScrollToEnd() }
+                                        }
+                                        else {
+                                            $verified = ((Test-Path $scriptPath) -and ((Get-Item $scriptPath).Length -gt 100KB))
+                                            if ($expectedHash -and $lb) { $lb.AppendText("[UPDATE] Remote SHA256: $expectedHash (byte-exact verification unavailable - size check used)`n"); $lb.ScrollToEnd() }
+                                        }
+                                        if (-not $verified) {
+                                            Copy-Item -Path $backupPath -Destination $scriptPath -Force
+                                            throw "Update failed SHA256 verification - your previous version was restored from the backup."
+                                        }
+                                        $updateApplied = $true
+
+                                        if ($lb) { $lb.AppendText("[UPDATE] Integrity verified. Update applied.`n"); $lb.ScrollToEnd() }
 
                                         [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                                         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WorkingDirectory (Split-Path -Parent $scriptPath)
@@ -6979,6 +7115,10 @@ $script:UpdateTimer.Add_Tick({
                                         $window.Close()
                                     }
                                     catch {
+                                        # Safety net: restore the previous script when the update did not apply cleanly
+                                        if (-not $updateApplied -and $backupPath -and (Test-Path $backupPath) -and $scriptPath -and (Test-Path $scriptPath)) {
+                                            Copy-Item -Path $backupPath -Destination $scriptPath -Force -ErrorAction SilentlyContinue
+                                        }
                                         $errMsg = "Auto-update failed: $($_.Exception.Message)"
                                         try { Write-GuiLog "[UPDATE] $errMsg" } catch {}
 
