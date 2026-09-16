@@ -26476,6 +26476,21 @@ powercfg /S SCHEME_CURRENT | Out-Null
                 </Border>
 
             </WrapPanel>
+
+            <!-- TWEAKS CONFIG EXPORT/IMPORT (bottom of the Tweaks page) -->
+            <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderThickness="0" Margin="10" Padding="15">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock Text="Tweaks Configuration" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                        <TextBlock Text="Export the current state of every tweak to a JSON file, or import a JSON file to apply those tweak states on this PC. Import only changes tweaks that differ from the file." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Name="btnTweaksExport" Content="Export JSON" Style="{StaticResource ActionBtn}" ToolTip="Save the current on/off state of every tweak to a JSON file you can keep or share." Margin="0,0,8,0"/>
+                        <Button Name="btnTweaksImport" Content="Import JSON" Style="{StaticResource PositiveBtn}" ToolTip="Apply tweak states from a previously exported JSON file. Tweaks already in the desired state are left untouched."/>
+                    </StackPanel>
+                </Grid>
+            </Border>
         </StackPanel>
     </ScrollViewer>
     <!-- Loading overlay OUTSIDE ScrollViewer so it covers the viewport, not scrollable content -->
@@ -27994,6 +28009,33 @@ if ($script:TweakMetaData -and $script:TweakMetaData.ContainsKey($ButtonName)) {
 return $null
 }
 
+# Some tweaks are exposed twice - once on the Tweaks page and once as a
+# shortcut on the My Device page (the shortcut just re-raises the Tweaks page
+# button's Click). They share one underlying flip, so both members of a pair
+# must always show and record the same state; otherwise exports can contain
+# contradictory entries and importing would click both members and flip the
+# tweak straight back to its previous state.
+$script:TweakToggleSiblingNames = @{
+"btnToggleHags"                = "btnMyDeviceHagsToggle"
+"btnToggleMemCompress"         = "btnMyDeviceMemCompressToggle"
+"btnToggleHibernate"           = "btnMyDeviceHibernateToggle"
+"btnMyDeviceHagsToggle"        = "btnToggleHags"
+"btnMyDeviceMemCompressToggle" = "btnToggleMemCompress"
+"btnMyDeviceHibernateToggle"   = "btnToggleHibernate"
+}
+# The My Device side of each pair. These buttons are pure delegates of their
+# Tweaks-page twin (clicking one re-raises the twin's Click), so the import
+# planner resolves their file entries to the canonical button. Keeping this
+# list directional is what makes the resolution unambiguous - the sibling map
+# above is bidirectional and must not be used to decide which side is the
+# mirror.
+$script:TweakToggleMirrorNames = @(
+    "btnMyDeviceHagsToggle",
+    "btnMyDeviceMemCompressToggle",
+    "btnMyDeviceHibernateToggle"
+)
+$script:TweakToggleSyncing = $false
+
 function Update-WmtTweakToggle {
 param(
     $Button,
@@ -28004,6 +28046,21 @@ param(
     [string]$RestartHint = ""
 )
 if (-not $Button) { return }
+# Record the latest known state of every toggle button so the Tweaks page
+# Export/Import can serialize the full configuration to JSON and restore it
+# later. Update-WmtTweakToggle is the single choke point through which every
+# toggle state (initial load + every click) is applied to the UI.
+try {
+    if ($Button.Name) {
+        if (-not $script:TweakCurrentStates) { $script:TweakCurrentStates = [ordered]@{} }
+        $script:TweakCurrentStates[$Button.Name] = @{
+            On       = [bool]$IsOn
+            OnLabel  = [string]$OnLabel
+            OffLabel = [string]$OffLabel
+        }
+    }
+}
+catch { }
 # Auto-lookup metadata from central table if not explicitly provided
 if ([string]::IsNullOrWhiteSpace($Description) -and [string]::IsNullOrWhiteSpace($RestartHint)) {
     $btnName = $Button.Name
@@ -28037,6 +28094,26 @@ try {
 }
 catch {
     # Fail silently - don't let one button break the rest
+}
+
+# Keep the paired twin button (the same tweak on the Tweaks page and the My
+# Device page) in sync - recorded state, text, color and tooltip. The guard
+# flag prevents infinite recursion: the twin's own update skips re-syncing.
+if (-not $script:TweakToggleSyncing) {
+    $siblingName = $null
+    try { if ($Button.Name) { $siblingName = $script:TweakToggleSiblingNames[[string]$Button.Name] } } catch { }
+    if ($siblingName -and $siblingName -ne [string]$Button.Name) {
+        $siblingButton = Get-Ctrl $siblingName
+        if ($siblingButton) {
+            $script:TweakToggleSyncing = $true
+            try {
+                Update-WmtTweakToggle -Button $siblingButton -IsOn $IsOn -OnLabel $OnLabel -OffLabel $OffLabel -Description $Description -RestartHint $RestartHint
+            }
+            finally {
+                $script:TweakToggleSyncing = $false
+            }
+        }
+    }
 }
 }
 
@@ -28125,6 +28202,324 @@ catch {
     # Fail silently
 }
 }
+
+# --- Tweaks configuration Export / Import (JSON) -------------------------------
+# Export: serializes the latest known on/off state of every tweak toggle
+#         (recorded by Update-WmtTweakToggle in $script:TweakCurrentStates)
+#         to a versioned JSON file the user picks.
+# Import: reads such a file and APPLIES the states by raising the Click event
+#         of each toggle whose current state differs from the file. Click
+#         handlers are flip-based (read live system state -> apply opposite),
+#         so this reuses the exact same, battle-tested apply logic as manual
+#         clicking - including per-tweak cache invalidation, logging and
+#         admin handling. My Device toggle entries are resolved to their main
+#         Tweaks-page twin (redundant when the file lists both members), and
+#         toggles whose state is recorded lazily (Support page) or inside
+#         conditional blocks of the background load (Power User section) are
+#         refreshed before planning so they import correctly. Buttons for
+#         tweaks missing from the file, unknown to this build, or
+#         unsupported/disabled on this system are skipped and reported by name.
+# The payload builder and the import planner are separate pure functions so
+# the harness can exercise them without WPF dialogs.
+
+function New-WmtTweaksExportPayload {
+# Pure: builds the versioned export payload from the recorded toggle states.
+# Returns $null when no states have been recorded yet.
+if (-not $script:TweakCurrentStates -or $script:TweakCurrentStates.Count -eq 0) { return $null }
+
+$tweaks = [ordered]@{}
+foreach ($name in @($script:TweakCurrentStates.Keys)) {
+    $e = $script:TweakCurrentStates[$name]
+    if (-not $e) { continue }
+    $on = [bool]$e.On
+    $tweaks[$name] = [ordered]@{
+        on    = $on
+        label = $(if ($on) { [string]$e.OnLabel } else { [string]$e.OffLabel })
+    }
+}
+
+return [ordered]@{
+    type     = "wmt-tweaks"
+    version  = 1
+    exported = (Get-Date).ToString("o")
+    count    = $tweaks.Count
+    tweaks   = $tweaks
+}
+}
+
+function Format-WmtNameList {
+# Compact name list for dialogs: up to $Max names, one per line, then a
+# "... and N more" summary line when the list is longer.
+param(
+    [System.Collections.Generic.List[string]]$Names,
+    [int]$Max = 8
+)
+if (-not $Names -or $Names.Count -eq 0) { return "" }
+$shown = @($Names | Select-Object -First $Max)
+$out = ($shown -join "`n")
+if ($Names.Count -gt $Max) { $out += "`n... and $($Names.Count - $Max) more" }
+return $out
+}
+
+function Update-WmtTweakStatesForImport {
+# Ensures every toggle referenced by an import file has a recorded state
+# before the import plan is computed. Some toggles are recorded lazily or
+# only inside conditional sections of the background state load (Support page
+# buttons, the Power User section), so a fully supported toggle can
+# legitimately have no recorded state yet - the planner would then wrongly
+# report it as "unknown or unsupported". Only toggles that are actually
+# missing get refreshed; everything else is left untouched.
+param([string[]]$Names)
+
+if (-not $Names -or $Names.Count -eq 0) { return }
+foreach ($name in $Names) {
+    try {
+        if ($script:TweakCurrentStates -and $script:TweakCurrentStates.Contains($name)) { continue }
+        switch ($name) {
+            "btnStartWithWindows" {
+                # Re-reads the scheduled task and records via Update-WmtTweakToggle
+                Update-WmtStartWithWindowsButton
+            }
+            "btnLaunchMinimized" {
+                # Re-reads settings.json and records via Update-WmtTweakToggle
+                Update-WmtLaunchMinimizedButton
+            }
+            "btnPowerUserShowDevices" {
+                # Keep in sync with the Power User section of the background
+                # tweak-state load (same registry source, labels and check).
+                $btn = Get-Ctrl $name
+                if ($btn) {
+                    $v = (ConvertTo-Int (Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\DeviceManager" "ShowHiddenDevices" 0) 0)
+                    Update-WmtTweakToggle $btn ($v -eq 1) "Hide Devices" "Show Hidden Devices"
+                }
+            }
+            "btnPowerUserSigDriver" {
+                $btn = Get-Ctrl $name
+                if ($btn) {
+                    $v = (ConvertTo-Int (Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceManager" "AllowNonSignedDrivers" 0) 0)
+                    Update-WmtTweakToggle $btn ($v -eq 1) "Test Mode Off" "Test Mode On"
+                }
+            }
+        }
+    }
+    catch {
+        # A failed refresh must never block the import; the planner reports
+        # the entry as skipped (by name) instead.
+    }
+}
+}
+
+function Get-WmtTweaksImportPlan {
+# Pure: filters a parsed export file down to the changes that should be
+# applied on this system. Returns Pending/AlreadyOk/Skipped/RedundantPairs
+# plus SkippedNames (why each entry was skipped); Pending entries carry the
+# button to click. Uses Get-Ctrl so real button lookup works in production
+# and can be stubbed in the harness.
+param($Data)
+
+$plan = [PSCustomObject]@{
+    Pending        = [System.Collections.Generic.List[object]]::new()
+    AlreadyOk      = 0
+    Skipped        = 0
+    RedundantPairs = 0
+    SkippedNames   = [System.Collections.Generic.List[string]]::new()
+}
+if (-not $Data -or -not $Data.PSObject.Properties["tweaks"]) { return $plan }
+
+# First pass: index entries by name so My Device mirror entries can be
+# resolved against their main Tweaks-page twin.
+$entryByName = @{}
+foreach ($prop in @($Data.tweaks.PSObject.Properties)) {
+    $n = [string]$prop.Name
+    if (-not $entryByName.ContainsKey($n)) { $entryByName[$n] = $prop.Value }
+}
+
+foreach ($prop in @($Data.tweaks.PSObject.Properties)) {
+    $name = [string]$prop.Name
+    $entry = $prop.Value
+    if (-not $entry -or -not $entry.PSObject.Properties["on"]) { $plan.Skipped++; $plan.SkippedNames.Add("$name (malformed entry)"); continue }
+    $desired = $false
+    try { $desired = [bool]$entry.on } catch { $plan.Skipped++; $plan.SkippedNames.Add("$name (unreadable on/off value)"); continue }
+
+    # My Device toggle buttons are delegated mirrors of their Tweaks-page twin
+    # (clicking one re-raises the twin's Click), so a pair must be applied
+    # exactly once. Only the mirror side resolves: when the file also lists
+    # the main toggle, the mirror entry is redundant; when it does not, the
+    # mirror's value drives the twin. The main Tweaks-page entry is always
+    # planned as itself.
+    $planName = $name
+    try {
+        if ($script:TweakToggleMirrorNames -and $script:TweakToggleMirrorNames -contains $name) {
+            $twin = $null
+            try { $twin = [string]$script:TweakToggleSiblingNames[$name] } catch { }
+            if ($twin -and $twin -ne $name) {
+                if ($entryByName.ContainsKey($twin)) { $plan.RedundantPairs++; continue }
+                $planName = $twin
+            }
+        }
+    }
+    catch { }
+
+    if (-not $script:TweakCurrentStates -or -not $script:TweakCurrentStates.Contains($planName)) { $plan.Skipped++; $plan.SkippedNames.Add("$name (state not loaded on this system)"); continue }
+    $btn = Get-Ctrl $planName
+    if (-not $btn) { $plan.Skipped++; $plan.SkippedNames.Add("$name (button not found)"); continue }
+    if ($btn.IsEnabled -ne $true) { $plan.Skipped++; $plan.SkippedNames.Add("$name (disabled on this system)"); continue }
+
+    $current = $false
+    try { $current = [bool]$script:TweakCurrentStates[$planName].On } catch {}
+    if ($current -eq $desired) { $plan.AlreadyOk++; continue }
+    [void]$plan.Pending.Add([PSCustomObject]@{ Name = $planName; Desired = $desired; Button = $btn })
+}
+return $plan
+}
+
+function Export-WmtTweaksConfiguration {
+try {
+    $payload = New-WmtTweaksExportPayload
+    if (-not $payload) {
+        Show-WmtMessageBox -Message "No tweak states have been loaded yet. Open the Tweaks tab, wait for the states to finish loading, then export again." -Title "Export Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $dlg = [Microsoft.Win32.SaveFileDialog]::new()
+    $dlg.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*"
+    $dlg.FileName = "WMT-Tweaks-$(Get-Date -Format 'yyyy-MM-dd').json"
+    $dlg.Title = "Export Tweaks Configuration"
+    if ($dlg.ShowDialog() -ne $true) { return }
+
+    $json = $payload | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($dlg.FileName, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+    Write-GuiLog "Exported $($payload.count) tweak states to $($dlg.FileName)"
+    Show-WmtMessageBox -Message "Exported $($payload.count) tweak states to:`n$($dlg.FileName)" -Title "Export Tweaks" -Image Information | Out-Null
+}
+catch {
+    Write-GuiLog "Tweaks export failed: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Export failed:`n$($_.Exception.Message)" -Title "Export Tweaks" -Image Error | Out-Null
+}
+}
+
+function Import-WmtTweaksConfiguration {
+try {
+    if (-not $script:TweakCurrentStates -or $script:TweakCurrentStates.Count -eq 0) {
+        Show-WmtMessageBox -Message "No tweak states have been loaded yet. Open the Tweaks tab, wait for the states to finish loading, then import again." -Title "Import Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+    $dlg.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*"
+    $dlg.Title = "Import Tweaks Configuration"
+    if ($dlg.ShowDialog() -ne $true) { return }
+
+    $raw = [System.IO.File]::ReadAllText($dlg.FileName)
+    $data = $null
+    try { $data = $raw | ConvertFrom-Json } catch {}
+    if (-not $data -or -not $data.PSObject.Properties["tweaks"]) {
+        Show-WmtMessageBox -Message "This file is not a WMT tweaks export (the 'tweaks' section is missing). Please pick a file created by 'Export JSON'." -Title "Import Tweaks" -Image Error | Out-Null
+        return
+    }
+    if ($data.PSObject.Properties["type"] -and [string]$data.type -ne "wmt-tweaks") {
+        Show-WmtMessageBox -Message "This file has type '$([string]$data.type)', not 'wmt-tweaks'. Please pick a file created by 'Export JSON'." -Title "Import Tweaks" -Image Error | Out-Null
+        return
+    }
+
+    # Some toggles record their state lazily (Support page buttons) or inside
+    # conditional blocks of the background state load (Power User section).
+    # Refresh the ones this file references BEFORE planning, otherwise
+    # supported toggles would be misclassified as "unknown or unsupported".
+    try {
+        $fileNames = @($data.tweaks.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        Update-WmtTweakStatesForImport -Names $fileNames
+    }
+    catch { }
+
+    $plan = Get-WmtTweaksImportPlan -Data $data
+    foreach ($skippedName in $plan.SkippedNames) {
+        Write-GuiLog "Tweaks import: skipped $($skippedName)"
+    }
+
+    if ($plan.Pending.Count -eq 0) {
+        $msg = "Nothing to apply - all $($plan.AlreadyOk) known tweak(s) in the file already match the current state."
+        if ($plan.RedundantPairs -gt 0) { $msg += "`n`n$($plan.RedundantPairs) paired My Device entr$(if ($plan.RedundantPairs -eq 1) { 'y' } else { 'ies' }) handled through the main Tweaks toggle(s)." }
+        if ($plan.Skipped -gt 0) { $msg += "`n`nSkipped $($plan.Skipped) entr$(if ($plan.Skipped -eq 1) { 'y' } else { 'ies' }):`n$(Format-WmtNameList -Names $plan.SkippedNames)" }
+        Show-WmtMessageBox -Message $msg -Title "Import Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $notes = ""
+    if ($plan.RedundantPairs -gt 0) { $notes += "`n$($plan.RedundantPairs) paired My Device entr$(if ($plan.RedundantPairs -eq 1) { 'y' } else { 'ies' }) will be handled through the main Tweaks toggle(s)." }
+    if ($plan.Skipped -gt 0) { $notes += "`n$($plan.Skipped) unsupported entr$(if ($plan.Skipped -eq 1) { 'y' } else { 'ies' }) will be skipped: $(($plan.SkippedNames | Select-Object -First 4) -join ', ')$(if ($plan.Skipped -gt 4) { '...' })" }
+    $confirm = Show-WmtMessageBox -Message "Apply $($plan.Pending.Count) tweak change(s) from this file?`n`nTweaks already in the desired state are left untouched.$notes`n`nExplorer will be restarted afterwards so shell tweaks take effect; a few tweaks additionally need a sign-out." -Title "Import Tweaks" -Button ([System.Windows.MessageBoxButton]::YesNo) -Image Warning
+    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    $applied = 0; $failed = 0; $converged = 0
+    Set-WmtBusyCursor -Busy
+    try {
+        foreach ($item in $plan.Pending) {
+            try {
+                # Re-check before clicking: an earlier toggle in this batch can
+                # already have brought this button to the desired state (the
+                # Tweaks page and My Device buttons for the same setting share
+                # one flip). Without this, clicking the second pair member
+                # would flip the tweak straight back to its previous state.
+                $nowOn = $false
+                try { $nowOn = [bool]$script:TweakCurrentStates[$item.Name].On } catch { }
+                if ($nowOn -eq $item.Desired) {
+                    $converged++
+                    Write-GuiLog "Tweaks import: $($item.Name) already $(if ($item.Desired) { 'ON' } else { 'OFF' }) after an earlier toggle; skipped."
+                    continue
+                }
+                Write-GuiLog "Tweaks import: switching $($item.Name) to $(if ($item.Desired) { 'ON' } else { 'OFF' })..."
+                $item.Button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                $applied++
+            }
+            catch {
+                $failed++
+                Write-GuiLog "Tweaks import: $($item.Name) failed: $($_.Exception.Message)"
+            }
+        }
+    }
+    finally {
+        Set-WmtBusyCursor
+    }
+
+    # Shell tweaks (taskbar layout, context menu, File Explorer options, ...)
+    # only become visible once Explorer reloads. Restart it automatically so
+    # the desktop matches the freshly applied buttons. Harmless for non-shell
+    # tweaks; uses the same sequence as the "Restart Explorer" button.
+    $explorerRestarted = $false
+    if ($applied -gt 0) {
+        try {
+            Write-GuiLog "Tweaks import: restarting Explorer so shell tweaks take effect immediately..."
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+            Start-Process explorer
+            $explorerRestarted = $true
+            Write-GuiLog "Explorer restarted."
+        }
+        catch {
+            Write-GuiLog "Tweaks import: Explorer restart failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-GuiLog "Tweaks import finished: $applied applied, $failed failed, $($plan.AlreadyOk) already correct, $converged converged, $($plan.RedundantPairs) paired-redundant, $($plan.Skipped) skipped."
+    $summary = "Import finished.`n`nApplied: $applied$(if ($failed -gt 0) { "`nFailed: $failed" })`nAlready correct: $($plan.AlreadyOk)$(if ($converged -gt 0) { "`nConverged (paired toggle already switched): $converged" })$(if ($plan.RedundantPairs -gt 0) { "`nPaired My Device entries handled via main toggle: $($plan.RedundantPairs)" })$(if ($plan.Skipped -gt 0) { "`nSkipped (unsupported/disabled on this system): $($plan.Skipped)" })$(if ($explorerRestarted) { "`n`nExplorer was restarted so shell tweaks take effect immediately." })"
+    if ($plan.Skipped -gt 0) { $summary += "`n$(Format-WmtNameList -Names $plan.SkippedNames -Max 6)" }
+    $summaryImage = [System.Windows.MessageBoxImage]::Information
+    if ($failed -gt 0) { $summaryImage = [System.Windows.MessageBoxImage]::Warning }
+    Show-WmtMessageBox -Message $summary -Title "Import Tweaks" -Image $summaryImage | Out-Null
+}
+catch {
+    Set-WmtBusyCursor
+    Write-GuiLog "Tweaks import failed: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Import failed:`n$($_.Exception.Message)" -Title "Import Tweaks" -Image Error | Out-Null
+}
+}
+
+$btnTweaksExport = Get-Ctrl "btnTweaksExport"
+if ($btnTweaksExport) { $btnTweaksExport.Add_Click({ Export-WmtTweaksConfiguration }.GetNewClosure()) }
+$btnTweaksImport = Get-Ctrl "btnTweaksImport"
+if ($btnTweaksImport) { $btnTweaksImport.Add_Click({ Import-WmtTweaksConfiguration }.GetNewClosure()) }
 
 function Get-WmtRegistryKeyValuesCached {
 param([string]$Path)
