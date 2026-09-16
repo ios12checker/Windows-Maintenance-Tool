@@ -13030,7 +13030,22 @@ $registryRows = @(
             ""
         }
         $confidenceRank = if ($confidenceText -match "(?i)^high") { 3 } elseif ($confidenceText -match "(?i)^medium") { 2 } else { 0 }
-        $autoSelected = (Test-WmtRegistryFindingAutoSelected -Item $item) -or ($confidenceRank -ge 2)
+        # An explicit SafeToFix verdict from the scanner is authoritative. When the
+        # scanner marks a finding "not safe to fix automatically" (e.g. User MRU Cache,
+        # protected ActiveX registrations, IFEO / LSA / EventLog DLL findings), it must
+        # never be auto-checked - not even when its confidence reads Medium/High.
+        # (Historically the confidence boost below overrode SafeToFix=$false, so
+        # protected rows - including ones hidden from the default view - arrived
+        # pre-checked and btnFix, which iterates the FULL $registryRows list, then
+        # attempted deletions on them and logged batches of failures. Also, MRU cache
+        # findings rebuilt themselves after every cleanup and should stay review-only.)
+        # The confidence boost now only applies to findings WITHOUT a SafeToFix property.
+        $autoSelected = if ($item -and $item.PSObject.Properties["SafeToFix"]) {
+            [bool]$item.SafeToFix
+        }
+        else {
+            (Test-WmtRegistryFindingAutoSelected -Item $item) -or ($confidenceRank -ge 2)
+        }
         $fixAction = if ($item.Type -eq "ReviewOnly") { "Review" } elseif ($item.Type -eq "Key") { "Delete key" } elseif ($item.Type -eq "SetValue") { "Update value" } else { "Delete value" }
         $risk = if ($item.PSObject.Properties["Risk"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Risk)) {
             [string]$item.Risk
