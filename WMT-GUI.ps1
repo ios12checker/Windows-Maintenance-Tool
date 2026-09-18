@@ -9,7 +9,7 @@
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6.5"
+$AppVersion = "6.6"
 $ErrorActionPreference = "SilentlyContinue"
 $script:WmtDebug = [bool](Get-WmtSetting -Name "DebugMode" -Default $false -ErrorAction SilentlyContinue)
 # Preserve UTF-8 for web content, alt codes, and Unicode symbols.
@@ -195,6 +195,20 @@ if ($script:LogBox) {
         $script:LogBox.ScrollToEnd()
     }
 }
+}
+
+function Remove-WmtGuiLogMessage {
+param([string]$Message)
+if (-not $script:LogBox -or [string]::IsNullOrWhiteSpace($Message)) { return }
+
+try {
+    $lines = @($script:LogBox.Text -split "\r?\n" | Where-Object {
+        $_ -and $_ -notmatch ('^\[[^\]]+\]\s*' + [regex]::Escape($Message) + '\s*$')
+    })
+    $script:LogBox.Text = if ($lines.Count -gt 0) { ($lines -join "`n") + "`n" } else { "" }
+    $script:LogBox.ScrollToEnd()
+}
+catch {}
 }
 
 function ConvertTo-WmtVersion {
@@ -1957,7 +1971,11 @@ return $pool
 
 function Get-WmtBackgroundRunspacePool {
 if (-not $script:WmtBackgroundPool) {
-    Initialize-WmtBackgroundRunspacePool
+    # Initialize RETURNS the pool object; discard it so this function emits
+    # exactly one object. The leaked return used to hand the first caller
+    # TWO pool objects (an array), which then tripped the old pool-health
+    # checks with reports like "state: Opened Opened" for a healthy pool.
+    $null = Initialize-WmtBackgroundRunspacePool
 }
 return $script:WmtBackgroundPool
 }
@@ -1978,24 +1996,42 @@ if ($script:WmtBackgroundPool) {
 # Falls back to standalone if the pool is unavailable or closed.
 function New-WmtPooledPowerShell {
 try {
-    $pool = Get-WmtBackgroundRunspacePool
+    $pool = $null
+    try { $pool = Get-WmtBackgroundRunspacePool } catch { $pool = $null }
     if (-not $pool) { return [PowerShell]::Create() }
-    # Check if pool is still open — if it was disposed/closed, fall back to standalone
-    if ($pool.IsDisposed -or ($pool.RunspacePoolStateInfo -and $pool.RunspacePoolStateInfo.State -ne 'Opened')) {
-        try { Write-GuiLog "[RunspacePool] Pool is no longer open (state: $($pool.RunspacePoolStateInfo.State)). Falling back to standalone runspace." } catch {}
-        return [PowerShell]::Create()
+
+    # Guard the stored value itself: anything that is not exactly one
+    # RunspacePool (a stray collection, for instance) makes every health
+    # guess below misfire - that is what once printed "state: Opened
+    # Opened" for a perfectly healthy pool and bounced every worker to a
+    # standalone runspace. Reset and rebuild instead of guessing.
+    if ($pool -isnot [System.Management.Automation.Runspaces.RunspacePool]) {
+        try {
+            foreach ($item in @($pool)) {
+                if ($item -is [System.Management.Automation.Runspaces.RunspacePool]) { $item.Dispose() }
+            }
+        } catch {}
+        $script:WmtBackgroundPool = $null
+        try { $pool = Get-WmtBackgroundRunspacePool } catch { $pool = $null }
+        if (-not $pool) { return [PowerShell]::Create() }
     }
+
     $ps = [PowerShell]::Create()
     try {
+        # Assigning the pool is itself the authoritative health check: a
+        # closed, broken or disposed pool raises right here, so no
+        # state-name string comparison is left to guess with.
         $ps.RunspacePool = $pool
+        return $ps
     }
     catch {
-        # Pool may have been closed between the check above and the assignment
-        try { Write-GuiLog "[RunspacePool] Failed to assign pool to PowerShell: $($_.Exception.Message). Using standalone." } catch {}
-        $ps.Dispose()
+        try { Write-GuiLog "[RunspacePool] Pool rejected a worker ($($_.Exception.Message)); a fresh pool will be built for the next job." } catch {}
+        try { $pool.Close() } catch {}
+        try { $pool.Dispose() } catch {}
+        $script:WmtBackgroundPool = $null
+        try { $ps.Dispose() } catch {}
         return [PowerShell]::Create()
     }
-    return $ps
 }
 catch {
     return [PowerShell]::Create()
@@ -2026,6 +2062,10 @@ $script:MyDeviceSectionJobs[$Name] = [pscustomobject]@{
 function Update-MyDeviceStats {
 param([switch]$ForceRefresh, [switch]$Preload)
 $script:MyDeviceStatsStarted = $true
+# Remember whether this load ran with background jobs disabled: the section
+# collector timer only starts when jobs are enabled, so a disabled-mode load
+# leaves "scanning is disabled" placeholders on screen (queue never drains).
+$script:MyDeviceStatsLastDisabled = [bool](Get-WmtDisableBackgroundJobs)
 $script:StatsStartedAt = Get-Date
 $script:MyDeviceStatsPreloadMode = [bool]$Preload
 $script:MyDeviceStatsMaxConcurrent = 4
@@ -2399,6 +2439,82 @@ try {
     <Setter Property="Background" Value="{DynamicResource BgDark}"/>
     <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
     <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
+    <Setter Property="BorderThickness" Value="1"/>
+    <Setter Property="Padding" Value="10,0,8,0"/>
+    <Setter Property="VerticalContentAlignment" Value="Center"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <!-- The default Aero ComboBox template paints the closed selection box
+         with its own static white brushes and ignores the Background/Border
+         setters, leaving a light box in the dark theme. This template themes
+         the closed box and hosts the themed dropdown surface itself; items
+         inside are themed by the implicit ComboBoxItem style below. Hover
+         only changes the border so combos with explicit light colors keep
+         their readable background. -->
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="{x:Type ComboBox}">
+                <Grid x:Name="templateRoot" SnapsToDevicePixels="True">
+                    <Border x:Name="Bd" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="4">
+                        <Grid>
+                            <ContentPresenter Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" Margin="{TemplateBinding Padding}" HorizontalAlignment="Left" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" IsHitTestVisible="False"/>
+                            <Path x:Name="Arrow" Data="M 0 0 L 4 4 L 8 0" Stroke="{TemplateBinding Foreground}" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,1,9,0" IsHitTestVisible="False"/>
+                        </Grid>
+                    </Border>
+                    <ToggleButton x:Name="toggleButton" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" Focusable="False" ClickMode="Press"/>
+                    <Popup x:Name="PART_Popup" AllowsTransparency="True" Focusable="False" IsOpen="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}" Placement="Bottom" PopupAnimation="Fade">
+                        <Border x:Name="DropDownBorder" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="4" Margin="0,2,0,0" Padding="0,4" MinWidth="{Binding ActualWidth, ElementName=templateRoot}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                            </ScrollViewer>
+                        </Border>
+                    </Popup>
+                </Grid>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource TextSecondary}"/>
+                    </Trigger>
+                    <Trigger Property="IsDropDownOpen" Value="True">
+                        <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                        <Setter TargetName="Arrow" Property="LayoutTransform">
+                            <Setter.Value>
+                                <RotateTransform Angle="180"/>
+                            </Setter.Value>
+                        </Setter>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                        <Setter Property="Opacity" Value="0.55"/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
+</Style>
+
+<!-- The default ComboBoxItem template paints SystemColors.Window (white) and
+     generated items inherit the combo's light foreground - light-on-white,
+     unreadable. Give items an opaque themed surface and a BgHover highlight. -->
+<Style TargetType="{x:Type ComboBoxItem}">
+    <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
+    <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
+    <Setter Property="Padding" Value="9,5"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template">
+        <Setter.Value>
+            <ControlTemplate TargetType="{x:Type ComboBoxItem}">
+                <Border x:Name="Bd" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                    <ContentPresenter/>
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property="IsHighlighted" Value="True">
+                        <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
+                    </Trigger>
+                    <Trigger Property="IsEnabled" Value="False">
+                        <Setter Property="Opacity" Value="0.55"/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>
+        </Setter.Value>
+    </Setter>
 </Style>
 
 <Style TargetType="{x:Type CheckBox}">
@@ -3014,6 +3130,33 @@ foreach ($column in $Columns) {
 }
 }
 
+# --- SCHEDULED TASKS ENGINE (native Task Scheduler COM API) ---
+# Every scheduled-task view and toggle in this tool goes through the Task
+# Scheduler's own COM interface (Schedule.Service) - the same API schtasks.exe
+# uses. The ScheduledTasks module cmdlets wrap a CIM layer that fails wholesale
+# on some Windows 10 machines ("Value cannot be null. Parameter name: key"),
+# which used to blank the task lists and fail every telemetry toggle even
+# though the Task Scheduler service itself was healthy. The COM API does
+# exact-path lookups in milliseconds and never depends on WMI/CIM health.
+function New-WmtTaskSchedulerService {
+if ($script:WmtTaskService) {
+    # Re-validate a cached connection (the service may have been stopped or
+    # its RCW released since the last call); fall through to a fresh connect.
+    try { [void]$script:WmtTaskService.GetFolder("\"); return $script:WmtTaskService } catch { $script:WmtTaskService = $null }
+}
+
+try {
+    $service = New-Object -ComObject "Schedule.Service"
+    $service.Connect()
+    $script:WmtTaskService = $service
+    return $service
+}
+catch {
+    $script:WmtTaskService = $null
+    return $null
+}
+}
+
 function ConvertTo-WmtScheduledTaskIdentity {
 param(
     [string]$FullName = "",
@@ -3046,64 +3189,311 @@ $full = if ($TaskPath -eq "\") { "\$TaskName" } else { "$TaskPath$TaskName" }
 }
 }
 
-function Get-WmtScheduledTaskByIdentity {
+function ConvertFrom-WmtRegisteredTask {
 param(
-    [string]$FullName = "",
-    [string]$TaskName = "",
-    [string]$TaskPath = ""
+    $Task,
+    [string]$FallbackTaskName = "",
+    [string]$FallbackTaskPath = "\"
 )
 
-$id = ConvertTo-WmtScheduledTaskIdentity -FullName $FullName -TaskName $TaskName -TaskPath $TaskPath
-if ([string]::IsNullOrWhiteSpace($id.TaskName)) { return $null }
+# Property reads on a registered task can throw for tasks with damaged XML or
+# locked-down principals, so every read is guarded and the identity falls back
+# to caller-supplied values when the object will not cooperate.
+$taskName = ([string]$FallbackTaskName).Trim()
+try { $taskName = ([string]$Task.Name).Trim() } catch {}
 
-try {
-    return Get-ScheduledTask -TaskName $id.TaskName -TaskPath $id.TaskPath -ErrorAction Stop | Select-Object -First 1
+$taskPath = ""
+try { $taskPath = ([string]$Task.Path).Trim() } catch {}
+
+$id = if (-not [string]::IsNullOrWhiteSpace($taskPath)) {
+    ConvertTo-WmtScheduledTaskIdentity -FullName $taskPath
 }
-catch {
+else {
+    ConvertTo-WmtScheduledTaskIdentity -TaskName $taskName -TaskPath $FallbackTaskPath
+}
+
+$state = "Unknown"
+try {
+    switch ([int]$Task.State) {
+        0 { $state = "Unknown" }
+        1 { $state = "Disabled" }
+        2 { $state = "Queued" }
+        3 { $state = "Ready" }
+        4 { $state = "Running" }
+        default { $state = "Unknown" }
+    }
+}
+catch {}
+
+$enabled = ($state -ne "Disabled")
+try { $enabled = [bool]$Task.Enabled } catch {}
+
+$author = ""
+try { $author = [string]$Task.Definition.RegistrationInfo.Author } catch {}
+$description = ""
+try { $description = [string]$Task.Definition.RegistrationInfo.Description } catch {}
+
+[PSCustomObject]@{
+    TaskName    = [string]$id.TaskName
+    TaskPath    = [string]$id.TaskPath
+    State       = $state
+    Enabled     = $enabled
+    Author      = $author
+    Description = $description
+    FullName    = [string]$id.FullName
+}
+}
+
+function Get-WmtAllRegisteredTasks {
+param([Parameter(Mandatory = $true)]$Service)
+
+# Iterative walk of the task folder tree. GetTasks(1) also lists hidden tasks
+# (matching what the module cmdlets returned); a folder that refuses
+# enumeration is skipped instead of aborting the whole listing.
+$tasks = [System.Collections.ArrayList]::new()
+$stack = [System.Collections.Generic.Stack[object]]::new()
+try { $stack.Push($Service.GetFolder("\")) } catch { return @($tasks) }
+while ($stack.Count -gt 0) {
+    $folder = $stack.Pop()
     try {
-        return Get-ScheduledTask -ErrorAction Stop | Where-Object { $_.TaskName -eq $id.TaskName -and $_.TaskPath -eq $id.TaskPath } | Select-Object -First 1
+        foreach ($task in @($folder.GetTasks(1))) { [void]$tasks.Add($task) }
+    }
+    catch {}
+    try {
+        foreach ($subFolder in @($folder.GetFolders(0))) { $stack.Push($subFolder) }
     }
     catch {}
 }
-return $null
+return @($tasks)
 }
 
 function Get-WmtScheduledTaskRows {
 param(
     [string[]]$FullPaths = @(),
-    [string[]]$TaskPaths = @()
+    [string[]]$TaskPaths = @(),
+    [string[]]$TelemetryFolders = @()
 )
 
-$tasks = @()
-if ($FullPaths -and $FullPaths.Count -gt 0) {
-    foreach ($fullPath in $FullPaths) {
-        $task = Get-WmtScheduledTaskByIdentity -FullName $fullPath
-        if ($task) { $tasks += $task }
+$raw = @()
+$service = New-WmtTaskSchedulerService
+
+if (-not $service) {
+    # No Task Scheduler connection: keep explicit rows for every requested
+    # task so the grid always shows what was asked for (and why it failed).
+    foreach ($fullPath in @($FullPaths)) {
+        $id = ConvertTo-WmtScheduledTaskIdentity -FullName $fullPath
+        if ([string]::IsNullOrWhiteSpace($id.TaskName)) { continue }
+        $raw += [PSCustomObject]@{
+            TaskName    = [string]$id.TaskName
+            TaskPath    = [string]$id.TaskPath
+            State       = "ReadError"
+            Enabled     = $false
+            Author      = ""
+            Description = "Task Scheduler service is unavailable."
+            FullName    = [string]$id.FullName
+        }
+    }
+    if (@($FullPaths).Count -eq 0) {
+        $raw += [PSCustomObject]@{
+            TaskName    = "Task Scheduler unavailable"
+            TaskPath    = ""
+            State       = "ReadError"
+            Enabled     = $false
+            Author      = ""
+            Description = "Could not connect to the Task Scheduler COM service. Run WMT elevated and verify the Task Scheduler service is running."
+            FullName    = ""
+        }
+    }
+}
+elseif ($TelemetryFolders -and $TelemetryFolders.Count -gt 0) {
+    # Live "invoke the Task Scheduler" enumeration: walk every telemetry
+    # folder and list ALL tasks the scheduler actually has there (GetTasks(1)
+    # includes hidden tasks) instead of assuming a fixed name list - Windows
+    # builds vary; machines are missing some of the canonical nine while
+    # carrying extra CEIP/Appraiser/Siuf sub-tasks no fixed list knows.
+    # Folders that do not exist on this install raise 0x80070002 and are
+    # simply skipped (no tasks registered there). The Office folder mixes
+    # telemetry agents with unrelated servicing tasks, so its tasks are
+    # name-filtered at read time.
+    $seen = @{}
+    foreach ($folderPath in @($TelemetryFolders)) {
+        try {
+            # GetFolder takes the path WITHOUT a trailing backslash.
+            $folder = $service.GetFolder(([string]$folderPath).TrimEnd("\"))
+            $isOffice = (([string]$folderPath).TrimEnd("\") -eq "\Microsoft\Office")
+            foreach ($task in @($folder.GetTasks(1))) {
+                if ($isOffice) {
+                    $officeName = ""
+                    try { $officeName = [string]$task.Name } catch {}
+                    if ($officeName -notmatch "(?i)telemetry|apphealth|crash|consent") { continue }
+                }
+                $row = ConvertFrom-WmtRegisteredTask -Task $task
+                $key = ([string]$row.FullName).ToLowerInvariant()
+                if ([string]::IsNullOrWhiteSpace($key) -or $seen.ContainsKey($key)) { continue }
+                $seen[$key] = $true
+                $raw += $row
+            }
+        }
+        catch {}
+    }
+    # Merge the canonical button paths (deduped against the walk: tasks the
+    # walk already returned are listed from their live folder state; only the
+    # ones this machine is missing are new here, as explicit NotFound /
+    # ReadError rows so the grid always explains what the buttons target).
+    foreach ($fullPath in @($FullPaths)) {
+        $id = ConvertTo-WmtScheduledTaskIdentity -FullName $fullPath
+        if ([string]::IsNullOrWhiteSpace($id.TaskName)) { continue }
+        $key = ([string]$id.FullName).ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { continue }
+        $seen[$key] = $true
+        try {
+            $canonicalFolder = ([string]$id.TaskPath).TrimEnd("\")
+            if ([string]::IsNullOrWhiteSpace($canonicalFolder)) { $canonicalFolder = "\" }
+            $folder = $service.GetFolder($canonicalFolder)
+            $task = $folder.GetTask([string]$id.TaskName)
+            if ($task) {
+                $raw += ConvertFrom-WmtRegisteredTask -Task $task -FallbackTaskName $id.TaskName -FallbackTaskPath $id.TaskPath
+            }
+            else {
+                $raw += [PSCustomObject]@{
+                    TaskName    = [string]$id.TaskName
+                    TaskPath    = [string]$id.TaskPath
+                    State       = "NotFound"
+                    Enabled     = $false
+                    Author      = ""
+                    Description = "Task is not registered on this system."
+                    FullName    = [string]$id.FullName
+                }
+            }
+        }
+        catch {
+            $hr = 0
+            try { $hr = $_.Exception.HResult } catch {}
+            $message = [string]$_.Exception.Message
+            $notFound = ($hr -eq -2147024894 -or $message -match '(?i)(cannot find|not found|does not exist|0x80070002)')
+            $raw += [PSCustomObject]@{
+                TaskName    = [string]$id.TaskName
+                TaskPath    = [string]$id.TaskPath
+                State       = if ($notFound) { "NotFound" } else { "ReadError" }
+                Enabled     = $false
+                Author      = ""
+                Description = if ($notFound) { "Task is not registered on this system." } else { $message }
+                FullName    = [string]$id.FullName
+            }
+        }
+    }
+    # Sort by folder then name so related tasks read as a block.
+    $raw = @($raw | Sort-Object TaskPath, TaskName)
+}
+elseif ($FullPaths -and $FullPaths.Count -gt 0) {
+    foreach ($fullPath in @($FullPaths)) {
+        $id = ConvertTo-WmtScheduledTaskIdentity -FullName $fullPath
+        if ([string]::IsNullOrWhiteSpace($id.TaskName)) { continue }
+        try {
+            # Exact-path COM lookup: no wildcard layer, no full-store scan.
+            # ITaskService has no GetTask member - tasks are opened through
+            # their folder (the same two-step the device-health probe uses).
+            # A missing folder raises 0x80070002, classified as NotFound below.
+            # GetFolder's documented path format carries NO trailing backslash
+            # ("Do not use a backslash following the last folder name in the
+            # path" - ITaskService::GetFolder), while the identity's TaskPath
+            # keeps one for display; strip it before every folder open.
+            $folderPath = ([string]$id.TaskPath).TrimEnd("\")
+            if ([string]::IsNullOrWhiteSpace($folderPath)) { $folderPath = "\" }
+            $folder = $service.GetFolder($folderPath)
+            $task = $folder.GetTask([string]$id.TaskName)
+            if ($task) {
+                $raw += ConvertFrom-WmtRegisteredTask -Task $task -FallbackTaskName $id.TaskName -FallbackTaskPath $id.TaskPath
+            }
+            else {
+                $raw += [PSCustomObject]@{
+                    TaskName    = [string]$id.TaskName
+                    TaskPath    = [string]$id.TaskPath
+                    State       = "NotFound"
+                    Enabled     = $false
+                    Author      = ""
+                    Description = "Task is not registered on this system."
+                    FullName    = [string]$id.FullName
+                }
+            }
+        }
+        catch {
+            # Missing or unreadable tasks stay visible as explicit rows instead
+            # of silently vanishing; the classification matches the task probe
+            # used by the device-health scan (HRESULT 0x80070002 family or a
+            # not-found message means absent, anything else is a read error).
+            $hr = 0
+            try { $hr = $_.Exception.HResult } catch {}
+            $message = [string]$_.Exception.Message
+            $notFound = ($hr -eq -2147024894 -or $message -match '(?i)(cannot find|not found|does not exist|0x80070002)')
+            $raw += [PSCustomObject]@{
+                TaskName    = [string]$id.TaskName
+                TaskPath    = [string]$id.TaskPath
+                State       = if ($notFound) { "NotFound" } else { "ReadError" }
+                Enabled     = $false
+                Author      = ""
+                Description = if ($notFound) { "Task is not registered on this system." } else { $message }
+                FullName    = [string]$id.FullName
+            }
+        }
     }
 }
 else {
     try {
-        $tasks = @(Get-ScheduledTask -ErrorAction Stop)
+        $comTasks = @(Get-WmtAllRegisteredTasks -Service $service)
         if ($TaskPaths -and $TaskPaths.Count -gt 0) {
             $normalizedPaths = @($TaskPaths | ForEach-Object { (ConvertTo-WmtScheduledTaskIdentity -TaskPath $_ -TaskName "_").TaskPath })
-            $tasks = @($tasks | Where-Object { $_.TaskPath -in $normalizedPaths })
+            $comTasks = @($comTasks | Where-Object {
+                    $taskPath = ""
+                    try { $taskPath = ([string]$_.Path).Trim() } catch {}
+                    if ([string]::IsNullOrWhiteSpace($taskPath)) { $false }
+                    else {
+                        $taskId = ConvertTo-WmtScheduledTaskIdentity -FullName $taskPath
+                        $taskId.TaskPath -in $normalizedPaths
+                    }
+                })
+        }
+        foreach ($task in @($comTasks)) {
+            $raw += ConvertFrom-WmtRegisteredTask -Task $task
+        }
+        if ($comTasks.Count -eq 0 -and @($TaskPaths).Count -eq 0) {
+            $raw += [PSCustomObject]@{
+                TaskName    = "No scheduled tasks returned"
+                TaskPath    = ""
+                State       = "ReadError"
+                Enabled     = $false
+                Author      = ""
+                Description = "Task Scheduler returned no tasks. Check COM access, permissions, and the Task Scheduler service."
+                FullName    = ""
+            }
         }
     }
     catch {
-        $tasks = @()
+        $raw = @()
     }
 }
 
-foreach ($task in @($tasks)) {
-    $id = ConvertTo-WmtScheduledTaskIdentity -TaskName $task.TaskName -TaskPath $task.TaskPath
+# Project the raw rows into the display shape the grids expect (Enabled as
+# Yes/No), keeping placeholder rows explicit so telemetry tasks stay listed
+# even when they are missing or unreadable.
+foreach ($task in @($raw)) {
+    $state = [string]$task.State
+    $enabledText = "-"
+    if ($state -ne "NotFound" -and $state -ne "ReadError") {
+        if ($task.Enabled -is [bool]) {
+            $enabledText = if ($task.Enabled) { "Yes" } else { "No" }
+        }
+        elseif ($state -eq "Disabled") { $enabledText = "No" }
+        else { $enabledText = "Yes" }
+    }
     [PSCustomObject]@{
-        TaskName    = [string]$id.TaskName
-        TaskPath    = [string]$id.TaskPath
-        State       = [string]$task.State
-        Enabled     = if ([string]$task.State -eq "Disabled") { "No" } else { "Yes" }
+        TaskName    = [string]$task.TaskName
+        TaskPath    = [string]$task.TaskPath
+        State       = $state
+        Enabled     = $enabledText
         Author      = [string]$task.Author
         Description = [string]$task.Description
-        FullName    = [string]$id.FullName
+        FullName    = [string]$task.FullName
     }
 }
 }
@@ -3117,14 +3507,42 @@ param(
 )
 
 $id = ConvertTo-WmtScheduledTaskIdentity -FullName $FullName -TaskName $TaskName -TaskPath $TaskPath
+if ([string]::IsNullOrWhiteSpace($id.TaskName)) {
+    return [PSCustomObject]@{ Success = $false; Task = $id.FullName; Message = "Task name is missing." }
+}
+
 try {
-    $task = Get-WmtScheduledTaskByIdentity -TaskName $id.TaskName -TaskPath $id.TaskPath
-    if (-not $task) { throw "Task not found: $($id.FullName)" }
+    $service = New-WmtTaskSchedulerService
+    if (-not $service) { throw "The Task Scheduler service is unavailable." }
+
+    $task = $null
+    $openError = ""
+    # ITaskService has no GetTask member: open the task's folder, then fetch
+    # the task by name (the same two-step the device-health probe uses).
+    try {
+        # Same contract as the row lookup: GetFolder must not receive a
+        # trailing backslash, so strip the display-form TaskPath here too.
+        $folderPath = ([string]$id.TaskPath).TrimEnd("\")
+        if ([string]::IsNullOrWhiteSpace($folderPath)) { $folderPath = "\" }
+        $folder = $service.GetFolder($folderPath)
+        $task = $folder.GetTask([string]$id.TaskName)
+    } catch { $openError = [string]$_.Exception.Message }
+    if (-not $task) {
+        if (-not [string]::IsNullOrWhiteSpace($openError)) { throw "Could not open task $($id.FullName): $openError" }
+        throw "Task not found: $($id.FullName)"
+    }
 
     switch ($Action) {
-        "Enable" { Enable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null }
-        "Disable" { Disable-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null }
-        "Delete" { Unregister-ScheduledTask -InputObject $task -Confirm:$false -ErrorAction Stop | Out-Null }
+        # Flipping IRegisteredTask.Enabled persists immediately - the same
+        # switch the schtasks /Change command flips - without any CIM layer.
+        "Enable" { $task.Enabled = $true }
+        "Disable" { $task.Enabled = $false }
+        "Delete" {
+            $folderPath = ([string]$id.TaskPath).TrimEnd("\")
+            if ([string]::IsNullOrWhiteSpace($folderPath)) { $folderPath = "\" }
+            $folder = $service.GetFolder($folderPath)
+            $folder.DeleteTask([string]$id.TaskName, 0)
+        }
     }
 
     [PSCustomObject]@{ Success = $true; Task = $id.FullName; Message = "$Action succeeded." }
@@ -3138,8 +3556,25 @@ function Show-WmtScheduledTasksDialog {
 param(
     [string]$Title = "Scheduled Tasks",
     [string[]]$FullPaths = @(),
-    [string[]]$TaskPaths = @()
+    [string[]]$TaskPaths = @(),
+    [string[]]$TelemetryFolders = @()
 )
+
+# Guard for the one caller contract this dialog has: show the live state
+# of the exact tasks the two telemetry buttons toggle. The View Tasks
+# button already passes that list ($script:TelemetryTasks, nine paths);
+# if a future caller or a scope surprise ever reaches the dialog with no
+# paths at all, fall back to the canonical telemetry list so the grid can
+# never open empty.
+if (@($FullPaths).Count -eq 0 -and @($TaskPaths).Count -eq 0 -and $script:TelemetryTasks) {
+    $FullPaths = @($script:TelemetryTasks)
+}
+if (@($TelemetryFolders).Count -eq 0 -and $script:WmtTelemetryTaskFolders) {
+    # No folders passed: default to the live all-telemetry enumeration.
+    $TelemetryFolders = @($script:WmtTelemetryTaskFolders)
+}
+$enumerateNote = if (@($TelemetryFolders).Count -gt 0) { " + live enumeration of $(@($TelemetryFolders).Count) telemetry folder(s)" } else { "" }
+Write-GuiLog "[Scheduled Tasks] Dialog '$Title' opened with $(@($FullPaths).Count) path(s)$enumerateNote."
 
 $content = @'
 <Grid Margin="16">
@@ -3151,6 +3586,7 @@ $content = @'
     <DataGrid Name="dgTasks" IsReadOnly="True" SelectionMode="Extended" CanUserAddRows="False" CanUserDeleteRows="False" AlternationCount="2"/>
     <TextBlock Name="lblStatus" Grid.Row="1" Foreground="{DynamicResource TextSecondary}" Margin="0,10,0,0"/>
     <WrapPanel Grid.Row="2" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <Button Name="btnOpenScheduler" Content="Open Task Scheduler" MinWidth="128" Background="{DynamicResource BgElevated}" Foreground="{DynamicResource TextPrimary}" Margin="0,0,8,8"/>
         <Button Name="btnRefresh" Content="Refresh" MinWidth="92" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}" Margin="0,0,8,8"/>
         <Button Name="btnEnable" Content="Enable" MinWidth="92" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
         <Button Name="btnDisable" Content="Disable" MinWidth="92" Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}" Margin="0,0,8,8"/>
@@ -3161,42 +3597,325 @@ $content = @'
 $dialog = New-WmtWindowFromXaml -Title $Title -ContentXaml $content -Width 960 -Height 560 -MinWidth 760 -MinHeight 420
 $dg = $dialog.FindName("dgTasks")
 $lblStatus = $dialog.FindName("lblStatus")
+$btnOpenScheduler = $dialog.FindName("btnOpenScheduler")
 $btnRefresh = $dialog.FindName("btnRefresh")
 $btnEnable = $dialog.FindName("btnEnable")
 $btnDisable = $dialog.FindName("btnDisable")
 $btnClose = $dialog.FindName("btnClose")
 
-$state = @{ Table = $null }
-$load = {
-    $rows = @(Get-WmtScheduledTaskRows -FullPaths $FullPaths -TaskPaths $TaskPaths)
-    $table = New-WmtDataTable -Columns @("TaskName", "TaskPath", "State", "Enabled", "Author", "Description", "FullName") -Rows $rows
-    $state.Table = $table
-    $dg.ItemsSource = $table.DefaultView
-    Set-WmtDataGridColumns -DataGrid $dg -Columns @("TaskName", "TaskPath", "State", "Enabled", "Author", "Description", "FullName") -Widths @{ TaskName = "*"; TaskPath = 260; State = 100; Enabled = 80; Author = 180; Description = "2*" } -Hidden @("FullName")
-    $lblStatus.Text = if ($table.Rows.Count -gt 0) { "$($table.Rows.Count) task(s)" } else { "No scheduled tasks found. Try running WMT as administrator." }
-}.GetNewClosure()
+# Two reads of the same exact paths: the direct synchronous one first
+# (milliseconds), and - only if it comes back empty or throws - the
+# background transport (Start-WmtScheduledTaskViewQuery), which re-reads
+# the paths through the pooled-runspace mechanism the Disable/Restore
+# telemetry buttons use: the one scheduled-task transport that is
+# field-proven on every machine this tool has been reported from. Every
+# failure mode lands somewhere visible: missing or unreadable tasks
+# become explicit rows (NotFound / ReadError), and a total read failure
+# goes to the status line instead of an eternal spinner.
+Set-WmtDataGridColumns -DataGrid $dg -Columns @("TaskName", "TaskPath", "State", "Enabled", "Author", "Description", "FullName") -Widths @{ TaskName = "*"; TaskPath = 260; State = 100; Enabled = 80; Author = 180; Description = "2*" } -Hidden @("FullName")
 
-$invokeSelected = {
+$load = {
+    try {
+        Set-WmtBusyCursor -Busy
+        $lblStatus.Text = "Loading tasks..."
+        $rows = @(Get-WmtScheduledTaskRows -FullPaths $FullPaths -TaskPaths $TaskPaths -TelemetryFolders $TelemetryFolders)
+        $dg.ItemsSource = @($rows)
+        Write-GuiLog "[Scheduled Tasks] View loaded $($rows.Count) row(s)."
+        if ($rows.Count -gt 0) {
+            $lblStatus.Text = "$($rows.Count) task(s)"
+        }
+        else {
+            # A zero-row direct read should be impossible (every requested
+            # path yields at least a NotFound/ReadError row); treat it as
+            # a failed read and retry through the background transport.
+            $lblStatus.Text = "Direct read returned nothing - querying in background..."
+            Start-WmtScheduledTaskViewQuery -FullPaths @($FullPaths) -TelemetryFolders @($TelemetryFolders) -DataGrid $dg -StatusBlock $lblStatus
+        }
+    }
+    catch {
+        # The direct UI-thread read threw: retry through the transport the
+        # Disable/Restore buttons use before declaring failure.
+        Write-GuiLog "[Scheduled Tasks] Direct read failed, retrying in background: $($_.Exception.Message)"
+        try {
+            $lblStatus.Text = "Retrying in background: $($_.Exception.Message)"
+            Start-WmtScheduledTaskViewQuery -FullPaths @($FullPaths) -TelemetryFolders @($TelemetryFolders) -DataGrid $dg -StatusBlock $lblStatus
+        }
+        catch {
+            Write-GuiLog "[Scheduled Tasks] Load failed: $($_.Exception.Message)"
+            $lblStatus.Text = "Failed to load tasks: $($_.Exception.Message)"
+        }
+    }
+    finally {
+        Set-WmtBusyCursor
+    }
+}.GetNewClosure()
+$apply = {
     param([string]$Action)
     $selected = @(Get-WmtDataGridSelectedRows -DataGrid $dg)
     if ($selected.Count -eq 0) { return }
     $failures = @()
-    foreach ($row in $selected) {
-        $result = Invoke-WmtScheduledTaskAction -Action $Action -TaskName ([string]$row["TaskName"]) -TaskPath ([string]$row["TaskPath"])
-        if (-not $result.Success) { $failures += "$($result.Task): $($result.Message)" }
+    try {
+        Set-WmtBusyCursor -Busy
+        foreach ($row in $selected) {
+            $result = Invoke-WmtScheduledTaskAction -Action $Action -TaskName ([string]$row.TaskName) -TaskPath ([string]$row.TaskPath)
+            if ($result.Success) {
+                Write-GuiLog "[Scheduled Tasks] $($Action)d: $($result.Task)"
+            }
+            else {
+                $failures += "$($result.Task): $($result.Message)"
+            }
+        }
     }
+    finally {
+        Set-WmtBusyCursor
+    }
+    # Flip the task, then re-read everything from Task Scheduler: flipping
+    # IRegisteredTask.Enabled is exactly what schtasks /Change does, but the
+    # grid should show what the scheduler reports now, not what we asked it
+    # to do.
     & $load
     if ($failures.Count -gt 0) {
         Show-WmtMessageBox -Owner $dialog -Message ($failures -join "`r`n") -Title "Scheduled Tasks" -Image Warning | Out-Null
     }
 }.GetNewClosure()
 
+$btnOpenScheduler.Add_Click({
+    # The dialog lists everything itself, but one click also hands over the
+    # real Task Scheduler (taskschd.msc) for anyone who wants the native
+    # view. The console cannot be deep-linked to a specific task from the
+    # command line - taskschd.msc's only documented switches are the remote
+    # /s /u /p, and it ignores anything else - so it always opens on the
+    # root view and the user navigates to the task from there.
+    try {
+        Start-Process -FilePath "taskschd.msc" -ErrorAction Stop
+        Write-GuiLog "[Scheduled Tasks] Opened Windows Task Scheduler (taskschd.msc)."
+    }
+    catch {
+        Write-GuiLog "[Scheduled Tasks] Could not open Task Scheduler: $($_.Exception.Message)"
+        Show-WmtMessageBox -Owner $dialog -Message "Could not open Task Scheduler: $($_.Exception.Message)" -Title "Scheduled Tasks" -Image Warning | Out-Null
+    }
+}.GetNewClosure())
 $btnRefresh.Add_Click({ & $load }.GetNewClosure())
-$btnEnable.Add_Click({ & $invokeSelected "Enable" }.GetNewClosure())
-$btnDisable.Add_Click({ & $invokeSelected "Disable" }.GetNewClosure())
+$btnEnable.Add_Click({ & $apply "Enable" }.GetNewClosure())
+$btnDisable.Add_Click({ & $apply "Disable" }.GetNewClosure())
 $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
-$dialog.Add_ContentRendered({ & $load }.GetNewClosure())
+# Bind one dispatcher turn after the window has been realized. WPF DataGrid
+# can throw while measuring DataView rows during the initial layout pass.
+$dialog.Add_ContentRendered({
+    $dialog.Dispatcher.BeginInvoke(
+        [Action] { & $load },
+        [System.Windows.Threading.DispatcherPriority]::Background
+    ) | Out-Null
+}.GetNewClosure())
 $dialog.ShowDialog() | Out-Null
+}
+
+function Start-WmtScheduledTaskBatchAction {
+param(
+    [Parameter(Mandatory = $true)][ValidateSet("Enable", "Disable")][string]$Action,
+    [Parameter(Mandatory = $true)][string[]]$FullPaths,
+    [Parameter(Mandatory = $true)][string]$StartMessage,
+    [Parameter(Mandatory = $true)][string]$DoneMessage
+)
+
+# Enable/Disable for a batch of tasks (telemetry toggles) runs in a background
+# runspace through the COM engine (exact-path lookups, no CIM layer) and
+# streams its results back through a collector timer.
+if ($script:WmtTaskBatchAsync) {
+    Write-GuiLog "[Scheduled Tasks] A task action is already in progress."
+    return
+}
+
+# The background runspace cannot see this script's scope, so the helper
+# functions are handed over as text. ${function:X} yields the body only (no
+# "function NAME" wrapper), so each definition is re-wrapped here; reading the
+# live definitions keeps the copies in sync automatically.
+$taskHelpers = @(
+    "function ConvertTo-WmtScheduledTaskIdentity {",
+    ${function:ConvertTo-WmtScheduledTaskIdentity},
+    "}",
+    "function New-WmtTaskSchedulerService {",
+    ${function:New-WmtTaskSchedulerService},
+    "}",
+    "function Invoke-WmtScheduledTaskAction {",
+    ${function:Invoke-WmtScheduledTaskAction},
+    "}"
+) -join "`r`n"
+
+Write-GuiLog $StartMessage
+Set-WmtBusyCursor -Busy
+
+try {
+    $ps = New-WmtPooledPowerShell
+    [void]$ps.AddScript({
+        param($Helpers, [string]$Action, $Tasks)
+        # Dot-source the helper definitions into this runspace.
+        if ($Helpers) { . ([scriptblock]::Create($Helpers)) }
+        foreach ($task in @($Tasks)) {
+            $result = Invoke-WmtScheduledTaskAction -Action $Action -FullName $task
+            if ($result.Success) {
+                Write-Output "LOG:$($Action)d: $($result.Task)"
+            }
+            else {
+                Write-Output "LOG:Failed to $($Action.ToLower()) $($result.Task): $($result.Message)"
+            }
+        }
+    }).AddArgument($taskHelpers).AddArgument($Action).AddArgument($FullPaths)
+    $script:WmtTaskBatchPs = $ps
+    $script:WmtTaskBatchAsync = $ps.BeginInvoke()
+}
+catch {
+    Write-GuiLog "[Scheduled Tasks] Failed to start task action: $($_.Exception.Message)"
+    try { if ($script:WmtTaskBatchPs) { $script:WmtTaskBatchPs.Dispose() } } catch {}
+    $script:WmtTaskBatchPs = $null
+    $script:WmtTaskBatchAsync = $null
+    Set-WmtBusyCursor
+    return
+}
+
+$script:WmtTaskBatchTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:WmtTaskBatchTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:WmtTaskBatchTimer.Add_Tick({
+        if (-not $script:WmtTaskBatchTimer -or -not $script:WmtTaskBatchAsync) { return }
+        if (-not $script:WmtTaskBatchAsync.IsCompleted) { return }
+        $script:WmtTaskBatchTimer.Stop()
+        try {
+            $results = @($script:WmtTaskBatchPs.EndInvoke($script:WmtTaskBatchAsync))
+            $doneMessage = $script:WmtTaskBatchDoneMessage
+            foreach ($line in $results) {
+                if ($line -is [string] -and $line.StartsWith("LOG:")) { Write-GuiLog $line.Substring(4) }
+            }
+            Write-GuiLog $doneMessage
+        }
+        catch {
+            Write-GuiLog "[Scheduled Tasks] Task action failed: $($_.Exception.Message)"
+        }
+        finally {
+            try { if ($script:WmtTaskBatchPs) { $script:WmtTaskBatchPs.Dispose() } } catch {}
+            $script:WmtTaskBatchPs = $null
+            $script:WmtTaskBatchAsync = $null
+            $script:WmtTaskBatchDoneMessage = $null
+            try { if ($script:WmtTaskBatchTimer) { $script:WmtTaskBatchTimer.Stop() } } catch {}
+            $script:WmtTaskBatchTimer = $null
+            Set-WmtBusyCursor
+        }
+    })
+$script:WmtTaskBatchDoneMessage = $DoneMessage
+$script:WmtTaskBatchTimer.Start()
+}
+
+function Start-WmtScheduledTaskViewQuery {
+param(
+    [string[]]$FullPaths = @(),
+    [string[]]$TelemetryFolders = @(),
+    $DataGrid,
+    $StatusBlock
+)
+
+# Background fallback for the View Tasks dialog. The synchronous UI-thread
+# read normally answers in milliseconds, but if it ever returns zero rows or
+# throws, this query re-reads the same exact paths through the SAME transport
+# the Disable/Restore telemetry buttons use (pooled runspace, helper functions
+# handed over as text, 250ms collector timer): the scheduled-task path that is
+# field-proven on machines where the UI-thread read has never been confirmed.
+# Each row comes back as one compact JSON string, so no live object crosses
+# the runspace boundary.
+if (@($FullPaths).Count -eq 0 -and @($TelemetryFolders).Count -eq 0) { return }
+if (-not $DataGrid) { return }
+if ($script:WmtTaskViewAsync) { return }
+
+$taskHelpers = @(
+    "function ConvertTo-WmtScheduledTaskIdentity {",
+    ${function:ConvertTo-WmtScheduledTaskIdentity},
+    "}",
+    "function New-WmtTaskSchedulerService {",
+    ${function:New-WmtTaskSchedulerService},
+    "}",
+    "function ConvertFrom-WmtRegisteredTask {",
+    ${function:ConvertFrom-WmtRegisteredTask},
+    "}",
+    "function Get-WmtAllRegisteredTasks {",
+    ${function:Get-WmtAllRegisteredTasks},
+    "}",
+    "function Get-WmtScheduledTaskRows {",
+    ${function:Get-WmtScheduledTaskRows},
+    "}"
+) -join "`r`n"
+
+$script:WmtTaskViewGrid = $DataGrid
+$script:WmtTaskViewStatus = $StatusBlock
+
+Write-GuiLog "[Scheduled Tasks] Background view query started for $(@($FullPaths).Count) path(s), $(@($TelemetryFolders).Count) telemetry folder(s)."
+
+try {
+    $ps = New-WmtPooledPowerShell
+    [void]$ps.AddScript({
+        param($Helpers, $Tasks, $Folders)
+        # Dot-source the helper definitions into this runspace.
+        if ($Helpers) { . ([scriptblock]::Create($Helpers)) }
+        try {
+            $rows = @(Get-WmtScheduledTaskRows -FullPaths $Tasks -TelemetryFolders $Folders)
+            foreach ($row in @($rows)) {
+                Write-Output ("ROW:" + ($row | ConvertTo-Json -Compress))
+            }
+        }
+        catch {
+            Write-Output ("ERR:" + [string]$_.Exception.Message)
+        }
+    }).AddArgument($taskHelpers).AddArgument($FullPaths).AddArgument($TelemetryFolders)
+    $script:WmtTaskViewPs = $ps
+    $script:WmtTaskViewAsync = $ps.BeginInvoke()
+}
+catch {
+    Write-GuiLog "[Scheduled Tasks] Failed to start background view query: $($_.Exception.Message)"
+    try { if ($script:WmtTaskViewPs) { $script:WmtTaskViewPs.Dispose() } } catch {}
+    $script:WmtTaskViewPs = $null
+    $script:WmtTaskViewAsync = $null
+    $script:WmtTaskViewGrid = $null
+    $script:WmtTaskViewStatus = $null
+    return
+}
+
+$script:WmtTaskViewTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:WmtTaskViewTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:WmtTaskViewTimer.Add_Tick({
+        if (-not $script:WmtTaskViewTimer -or -not $script:WmtTaskViewAsync) { return }
+        if (-not $script:WmtTaskViewAsync.IsCompleted) { return }
+        $script:WmtTaskViewTimer.Stop()
+        try {
+            $results = @($script:WmtTaskViewPs.EndInvoke($script:WmtTaskViewAsync))
+            $rowObjects = @()
+            foreach ($line in $results) {
+                if ($line -isnot [string]) { continue }
+                if ($line.StartsWith("ROW:")) {
+                    try { $rowObjects += ($line.Substring(4) | ConvertFrom-Json) } catch {}
+                }
+                elseif ($line.StartsWith("ERR:")) {
+                    Write-GuiLog "[Scheduled Tasks] Background view query failed: $($line.Substring(4))"
+                }
+            }
+            $dg = $script:WmtTaskViewGrid
+            $lbl = $script:WmtTaskViewStatus
+            if ($dg) { $dg.ItemsSource = @($rowObjects) }
+            if ($lbl) {
+                $lbl.Text = if ($rowObjects.Count -gt 0) { "$($rowObjects.Count) task(s) (background)" } else { "No scheduled tasks found. Try running WMT as administrator." }
+            }
+            Write-GuiLog "[Scheduled Tasks] View loaded $($rowObjects.Count) row(s) via background query."
+        }
+        catch {
+            Write-GuiLog "[Scheduled Tasks] Background view result failed: $($_.Exception.Message)"
+        }
+        finally {
+            try { if ($script:WmtTaskViewPs) { $script:WmtTaskViewPs.Dispose() } } catch {}
+            $script:WmtTaskViewPs = $null
+            $script:WmtTaskViewAsync = $null
+            $script:WmtTaskViewGrid = $null
+            $script:WmtTaskViewStatus = $null
+            try { if ($script:WmtTaskViewTimer) { $script:WmtTaskViewTimer.Stop() } } catch {}
+            $script:WmtTaskViewTimer = $null
+        }
+    })
+$script:WmtTaskViewTimer.Start()
 }
 
 function Get-WmtThemeHex {
@@ -4033,6 +4752,59 @@ catch {
 }
 }
 
+function Copy-WmtLibrarySelectedRowsToClipboard {
+param([System.Windows.Controls.ListView]$ListView = $lstLibrary)
+
+# Ctrl+C support for the Your Library list: copies the selected row(s) as
+# tab-separated lines (Source, Name, ID, Installed, Latest, IsUe) that
+# paste cleanly into any editor or spreadsheet - the trailing IsUe column
+# (True/False on Epic rows) makes the UE/Fab tagging verifiable straight
+# from a paste. Falls back to the focused row
+# when nothing is selected. Set-Clipboard can lose a race with another
+# app holding the clipboard open, so the write is retried briefly.
+if (-not $ListView) { return $false }
+$selectedRows = @($ListView.SelectedItems | Where-Object { $null -ne $_ })
+if ($selectedRows.Count -eq 0 -and $ListView.SelectedItem) { $selectedRows = @($ListView.SelectedItem) }
+if ($selectedRows.Count -eq 0) {
+    Write-GuiLog "Copy skipped: no library row selected."
+    return $false
+}
+
+$columns = @("Source", "Name", "Id", "Version", "Available", "IsUe")
+$lines = [System.Collections.Generic.List[string]]::new()
+foreach ($row in $selectedRows) {
+    $cells = @()
+    foreach ($column in $columns) {
+        $value = ""
+        try {
+            $property = $row.PSObject.Properties[$column]
+            if ($property) { $value = [string]$property.Value }
+        }
+        catch {}
+        $cells += (($value -replace '\r?\n', ' ').Trim())
+    }
+    [void]$lines.Add(($cells -join "`t"))
+}
+if ($lines.Count -eq 0) { return $false }
+$text = [string]::Join([Environment]::NewLine, $lines)
+
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        [System.Windows.Clipboard]::SetText($text)
+        Write-GuiLog "Copied $($lines.Count) library line(s) to clipboard."
+        return $true
+    }
+    catch {
+        if ($attempt -eq 5) {
+            Write-GuiLog "ERROR: Could not copy library lines: $($_.Exception.Message)"
+            return $false
+        }
+        Start-Sleep -Milliseconds 40
+    }
+}
+return $false
+}
+
 function ConvertTo-WmtProcessArgument {
 param([string]$Value)
 
@@ -4161,6 +4933,374 @@ finally {
 }
 }
 
+function Test-ChocoManifestSupportedItem {
+param([object]$Item)
+
+if (-not $Item) { return $false }
+$id = [string]$Item.Id
+$source = ([string]$Item.Source).ToLowerInvariant()
+if ([string]::IsNullOrWhiteSpace($id)) { return $false }
+return ($source -in @("chocolatey", "choco"))
+}
+
+function Get-WmtChocolateyLibRoot {
+# Resolve chocolatey's install root (the folder that contains the lib folder)
+$candidates = @()
+if (-not [string]::IsNullOrWhiteSpace($env:ChocolateyInstall)) { $candidates += $env:ChocolateyInstall }
+if (-not [string]::IsNullOrWhiteSpace($env:ProgramData)) { $candidates += (Join-Path $env:ProgramData "chocolatey") }
+$candidates += "C:\ProgramData\chocolatey"
+foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate -PathType Container) { return $candidate }
+}
+return $null
+}
+
+function Get-ChocoManifestPath {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) { return $null }
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+$libRoot = Get-WmtChocolateyLibRoot
+if ([string]::IsNullOrWhiteSpace($libRoot)) { return $null }
+$pkgDir = Join-Path (Join-Path $libRoot "lib") $id
+if (-not (Test-Path -LiteralPath $pkgDir -PathType Container)) { return $null }
+
+# Standard layout: lib\<id>\<id>.nuspec
+$primary = Join-Path $pkgDir "$id.nuspec"
+if (Test-Path -LiteralPath $primary -PathType Leaf) { return $primary }
+
+# Side-by-side or versioned layouts keep the nuspec deeper in the package folder
+try {
+    $found = @(Get-ChildItem -LiteralPath $pkgDir -Filter "*.nuspec" -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if ($found.Count -gt 0) { return $found[0].FullName }
+}
+catch {}
+return $null
+}
+
+function Get-ChocoCommunityPageUrl {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) { return $null }
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+try { return "https://community.chocolatey.org/packages/$([System.Uri]::EscapeDataString($id))" }
+catch { return "https://community.chocolatey.org/packages/$id" }
+}
+
+function Open-ChocoCommunityPage {
+param([object]$Item)
+
+$url = Get-ChocoCommunityPageUrl -Item $Item
+if ([string]::IsNullOrWhiteSpace($url)) {
+    [System.Windows.MessageBox]::Show(
+        "The Chocolatey community page is only available for Chocolatey packages.",
+        "Community Page Unavailable",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
+    return
+}
+
+$name = [string]$Item.Name
+if ([string]::IsNullOrWhiteSpace($name)) { $name = [string]$Item.Id }
+Write-GuiLog "Opening Chocolatey community page for $name..."
+try {
+    Start-Process $url
+}
+catch {
+    Write-GuiLog "ERROR: Could not open Chocolatey community page: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Could not open the community page.`r`n`r`n$url" -Title "Chocolatey Community Page" -Image Warning | Out-Null
+}
+}
+
+function Get-WmtNuspecSummary {
+# Builds a winget-show style summary from nuspec XML text. Children are
+# matched by LocalName because choco's nuspecs declare a default XML namespace
+# (which makes direct property access like $xml.package.metadata return null).
+param([string]$NuspecText)
+
+if ([string]::IsNullOrWhiteSpace($NuspecText)) { return $null }
+try {
+    $xml = [xml]$NuspecText
+    $meta = $null
+    if ($xml.DocumentElement) {
+        foreach ($node in $xml.DocumentElement.ChildNodes) {
+            if ($node -is [System.Xml.XmlElement] -and $node.LocalName -eq "metadata") { $meta = $node; break }
+        }
+    }
+    if ($meta) {
+        $childMap = @{}
+        foreach ($node in $meta.ChildNodes) {
+            if ($node -is [System.Xml.XmlElement]) { $childMap[$node.LocalName.ToLowerInvariant()] = $node }
+        }
+        $getProp = {
+            param([string]$Name)
+            $node = $childMap[$Name.ToLowerInvariant()]
+            if ($node) { return (([string]$node.InnerText) -replace '\r?\n', "`r`n").Trim() }
+            return ""
+        }
+        $getDeps = {
+            $parts = @()
+            try {
+                $depsNode = $childMap["dependencies"]
+                if ($depsNode) {
+                    foreach ($node in $depsNode.ChildNodes) {
+                        if ($node -is [System.Xml.XmlElement] -and $node.LocalName -eq "dependency") {
+                            $depId = [string]$node.GetAttribute("id")
+                            $depVersion = [string]$node.GetAttribute("version")
+                            if ([string]::IsNullOrWhiteSpace($depId)) { continue }
+                            if ([string]::IsNullOrWhiteSpace($depVersion)) { $parts += $depId }
+                            else { $parts += "$depId ($depVersion)" }
+                        }
+                    }
+                }
+            }
+            catch {}
+            return ($parts -join ", ")
+        }
+        $addLine = {
+            param([string]$Label, [string]$Value)
+            if (-not [string]::IsNullOrWhiteSpace($Value)) { [void]$lines.Add("$($Label): $Value") }
+        }
+
+        $lines = [System.Collections.Generic.List[string]]::new()
+        [void]$lines.Add("--- Package Metadata ---")
+        & $addLine "Title"       (& $getProp "title")
+        & $addLine "Version"     (& $getProp "version")
+        & $addLine "Authors"     (& $getProp "authors")
+        & $addLine "Owners"      (& $getProp "owners")
+        & $addLine "Project URL" (& $getProp "projectUrl")
+        & $addLine "Source URL"  (& $getProp "projectSourceUrl")
+        & $addLine "Docs URL"    (& $getProp "docsUrl")
+        & $addLine "Bug Tracker" (& $getProp "bugTrackerUrl")
+        & $addLine "License URL" (& $getProp "licenseUrl")
+        & $addLine "Icon URL"    (& $getProp "iconUrl")
+        & $addLine "Tags"        (& $getProp "tags")
+        & $addLine "Dependencies" (& $getDeps)
+
+        $summaryText = & $getProp "summary"
+        $description = & $getProp "description"
+        $releaseNotes = & $getProp "releaseNotes"
+        if (-not [string]::IsNullOrWhiteSpace($summaryText)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Summary:")
+            [void]$lines.Add($summaryText)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($description)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Description:")
+            [void]$lines.Add($description)
+        }
+        if (-not [string]::IsNullOrWhiteSpace($releaseNotes)) {
+            [void]$lines.Add("")
+            [void]$lines.Add("Release Notes:")
+            [void]$lines.Add($releaseNotes)
+        }
+
+        if ($lines.Count -gt 1) { return [string]::Join("`r`n", $lines) }
+    }
+}
+catch { return $null }
+return $null
+}
+
+function Get-ChocoRemoteNuspec {
+# Downloads the package's nuspec from the chocolatey community repository
+# (NuGet v2 protocol) for rows that are not installed locally - e.g. search
+# results for packages that have never been downloaded. The nuspec is read
+# straight out of the downloaded .nupkg (zip) in a temp file.
+param([object]$Item)
+
+$id = ([string]$Item.Id).Trim()
+if ([string]::IsNullOrWhiteSpace($id)) {
+    return [PSCustomObject]@{ Success = $false; ManifestPath = $null; Raw = $null; Text = "No package id was available." }
+}
+
+$url = "https://community.chocolatey.org/api/v2/package/$([System.Uri]::EscapeDataString($id))"
+$version = ([string]$Item.Version).Trim()
+if ($version -match '^\d[\w\.\-\+]*$') { $url = "$url/$version" }
+
+$tmpFile = $null
+try {
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+    $oldProgress = $ProgressPreference
+    $ProgressPreference = 'SilentlyContinue'
+    try {
+        Invoke-WebRequest -Uri $url -OutFile $tmpFile -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop | Out-Null
+    }
+    finally {
+        $ProgressPreference = $oldProgress
+    }
+
+    if (-not (Test-Path -LiteralPath $tmpFile -PathType Leaf)) { throw "The package download failed." }
+    if ((Get-Item -LiteralPath $tmpFile).Length -lt 64) { throw "The downloaded package is empty or invalid." }
+
+    Add-Type -AssemblyName System.IO.Compression -ErrorAction SilentlyContinue
+    Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($tmpFile)
+    try {
+        $nuspecEntry = @($zip.Entries | Where-Object { $_.Name -like "*.nuspec" } | Select-Object -First 1)
+        if ($nuspecEntry.Count -eq 0) { throw "No .nuspec entry was found inside the downloaded package." }
+        $reader = New-Object System.IO.StreamReader($nuspecEntry[0].Open(), [System.Text.Encoding]::UTF8)
+        try { $nuspecText = $reader.ReadToEnd() } finally { $reader.Dispose() }
+    }
+    finally { $zip.Dispose() }
+
+    if ([string]::IsNullOrWhiteSpace($nuspecText)) { throw "The nuspec inside the downloaded package is empty." }
+
+    return [PSCustomObject]@{
+        Success      = $true
+        ManifestPath = "$url (fetched from the chocolatey community repository)"
+        Raw          = $nuspecText
+        Text         = $null
+    }
+}
+catch {
+    return [PSCustomObject]@{
+        Success      = $false
+        ManifestPath = $null
+        Raw          = $null
+        Text         = "Could not fetch the manifest from the chocolatey community repository.`r`n`r`nURL: $url`r`nReason: $($_.Exception.Message)"
+    }
+}
+finally {
+    if ($tmpFile) { try { Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue } catch {} }
+}
+}
+
+function Get-ChocoManifestText {
+# Resolves the nuspec (the chocolatey equivalent of a winget manifest) for the
+# selected row. Installed packages are read from chocolatey's lib folder; rows
+# that were never downloaded (search results) fall back to fetching the nuspec
+# from the community repository.
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) {
+    return [PSCustomObject]@{
+        Success      = $false
+        ManifestPath = $null
+        Summary      = $null
+        Raw          = $null
+        Text         = "Chocolatey manifests are only available for Chocolatey packages."
+    }
+}
+
+$id = [string]$Item.Id
+
+# 1) Installed package -> read the nuspec chocolatey stored in its lib folder
+$path = Get-ChocoManifestPath -Item $Item
+if (-not [string]::IsNullOrWhiteSpace($path)) {
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+        if ([string]::IsNullOrWhiteSpace($raw)) { throw "The manifest file is empty." }
+        return [PSCustomObject]@{
+            Success      = $true
+            ManifestPath = $path
+            Summary      = (Get-WmtNuspecSummary -NuspecText $raw)
+            Raw          = $raw.TrimEnd()
+            Text         = $null
+        }
+    }
+    catch {
+        return [PSCustomObject]@{
+            Success      = $false
+            ManifestPath = $path
+            Summary      = $null
+            Raw          = $null
+            Text         = "Failed to read the chocolatey manifest for $id.`r`n`r`nFile: $path`r`n`r`n$($_.Exception.Message)"
+        }
+    }
+}
+
+# 2) Never downloaded (e.g. a search result) -> fetch the nuspec from the community repository
+$remote = Get-ChocoRemoteNuspec -Item $Item
+if ($remote.Success) {
+    return [PSCustomObject]@{
+        Success      = $true
+        ManifestPath = $remote.ManifestPath
+        Summary      = (Get-WmtNuspecSummary -NuspecText $remote.Raw)
+        Raw          = $remote.Raw.TrimEnd()
+        Text         = $null
+    }
+}
+
+# 3) Neither local nor remote -> explain both paths
+$libRoot = Get-WmtChocolateyLibRoot
+$libHint = if ($libRoot) { "$libRoot\lib\$id" } else { "<ChocolateyInstall>\lib\$id" }
+return [PSCustomObject]@{
+    Success      = $false
+    ManifestPath = $null
+    Summary      = $null
+    Raw          = $null
+    Text         = "No chocolatey manifest (nuspec) is available for $id.`r`n`r`nInstalled packages keep their manifest at: $libHint`r`n`r`n$($remote.Text)`r`n`r`nUse ""Open Chocolatey Community Page"" for the online package details."
+}
+}
+
+function Show-ChocoPackageManifest {
+param([object]$Item)
+
+if (-not (Test-ChocoManifestSupportedItem $Item)) {
+    [System.Windows.MessageBox]::Show(
+        "Chocolatey manifests are only available for Chocolatey packages.",
+        "Manifest Unavailable",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
+    return
+}
+
+$name = [string]$Item.Name
+$id = [string]$Item.Id
+if ([string]::IsNullOrWhiteSpace($name)) { $name = $id }
+
+Write-GuiLog "Loading chocolatey manifest for $name ($id)..."
+if ($lblWingetStatus) {
+    $lblWingetStatus.Text = "Loading chocolatey manifest for $name..."
+    $lblWingetStatus.Visibility = "Visible"
+}
+
+Set-WmtBusyCursor -Busy
+try {
+    $result = Get-ChocoManifestText -Item $Item
+    if (-not $result.Success) {
+        Write-GuiLog "Chocolatey manifest unavailable for $id."
+    }
+    else {
+        Write-GuiLog "Chocolatey manifest loaded for $id."
+    }
+
+    $body = $result.Text
+    if ($result.Success) {
+        $installed = [string]$Item.Version
+        $available = [string]$Item.Available
+        if ([string]::IsNullOrWhiteSpace($installed)) { $installed = "-" }
+        if ([string]::IsNullOrWhiteSpace($available)) { $available = "-" }
+        $header = "Package: $name`r`nID: $id`r`nInstalled: $installed`r`nAvailable: $available`r`nSource: chocolatey`r`nManifest: $($result.ManifestPath)`r`n"
+        $separator = ("-" * 80)
+        $parts = @("$header`r`n$separator")
+        if (-not [string]::IsNullOrWhiteSpace($result.Summary)) { $parts += $result.Summary }
+        $manifestFile = [System.IO.Path]::GetFileName($result.ManifestPath)
+        $parts += "--- Raw Manifest ($manifestFile) ---`r`n"
+        $parts += $result.Raw
+        $body = [string]::Join("`r`n`r`n", $parts)
+    }
+
+    # Clear the busy cursor BEFORE opening the dialog
+    Set-WmtBusyCursor
+    Show-TextDialog -Title "Chocolatey Manifest - $name" -Text $body
+}
+finally {
+    Set-WmtBusyCursor
+    if ($lblWingetStatus) {
+        $lblWingetStatus.Text = "Ready"
+        $lblWingetStatus.Visibility = "Hidden"
+    }
+}
+}
+
 # --- SETTINGS MANAGER ---
 # Initialize cache variable
 $script:WmtSettingsCache = $null
@@ -4186,6 +5326,8 @@ try {
         ReduceRamInTray            = [bool](Get-WmtReduceRamInTray -Settings $Settings)
         DisableBackgroundJobs      = [bool](Get-WmtDisableBackgroundJobs -Settings $Settings)
         UpdateScansDisabled         = [bool](Get-WmtUpdateScansDisabled -Settings $Settings)
+        LaunchMinimized             = [bool]$Settings.LaunchMinimized
+        HideLegendaryUeAssets       = [bool](Get-WmtHideLegendaryUeAssets -Settings $Settings)
         SavedUpdateAutoScanMinutes  = (ConvertTo-Int (Get-WmtSavedUpdateAutoScanMinutes -Settings $Settings) 0)
         LoadWinapp2                = [bool]$Settings.LoadWinapp2
         LoadWinapp3                = [bool]$Settings.LoadWinapp3
@@ -4237,6 +5379,8 @@ $defaults = @{
     ReduceRamInTray            = $true
     DisableBackgroundJobs      = $false
     UpdateScansDisabled         = $false
+    LaunchMinimized             = $false
+    HideLegendaryUeAssets      = $true
     SavedUpdateAutoScanMinutes = 0
     LoadWinapp2                = $false 
     LoadWinapp3                = $false
@@ -4288,6 +5432,8 @@ if (Test-Path $path) {
         if ($json.PSObject.Properties["ReduceRamInTray"]) { $defaults.ReduceRamInTray = [bool]$json.ReduceRamInTray }
         if ($json.PSObject.Properties["DisableBackgroundJobs"]) { $defaults.DisableBackgroundJobs = [bool]$json.DisableBackgroundJobs }
         if ($json.PSObject.Properties["UpdateScansDisabled"]) { $defaults.UpdateScansDisabled = [bool]$json.UpdateScansDisabled }
+        if ($json.PSObject.Properties["LaunchMinimized"]) { $defaults.LaunchMinimized = [bool]$json.LaunchMinimized }
+        if ($json.PSObject.Properties["HideLegendaryUeAssets"]) { $defaults.HideLegendaryUeAssets = [bool]$json.HideLegendaryUeAssets }
         if ($json.PSObject.Properties["SavedUpdateAutoScanMinutes"]) {
             try { $defaults.SavedUpdateAutoScanMinutes = [int]$json.SavedUpdateAutoScanMinutes } catch { $defaults.SavedUpdateAutoScanMinutes = 0 }
             if ($defaults.SavedUpdateAutoScanMinutes -lt 0) { $defaults.SavedUpdateAutoScanMinutes = 0 }
@@ -4640,6 +5786,64 @@ catch {}
 return $false
 }
 
+function Get-WmtHideLegendaryUeAssets {
+param($Settings)
+
+if (-not $Settings) { $Settings = Get-WmtSettings }
+
+try {
+    if ($Settings -is [System.Collections.IDictionary] -and $Settings.Contains("HideLegendaryUeAssets")) {
+        return [bool]$Settings["HideLegendaryUeAssets"]
+    }
+    if ($Settings.PSObject.Properties["HideLegendaryUeAssets"]) {
+        return [bool]$Settings.HideLegendaryUeAssets
+    }
+}
+catch {}
+
+return $true
+}
+
+# --- Unreal Engine / Fab asset visibility (Your Library) ---
+# One live flag shared by every handler context: plain scriptblock handlers,
+# GetNewClosure handlers (library search debounce) and functions called from
+# them all resolve $global: the same way, so the filter never depends on
+# which scope a population path runs in.
+try { $global:WmtHideUeAssets = [bool](Get-WmtHideLegendaryUeAssets) } catch { $global:WmtHideUeAssets = $true }
+
+function Set-WmtFabAssetsButtonLabel {
+    if (-not $btnToggleFabAssets) { return }
+    $label = "Fab Assets: " + $(if ($global:WmtHideUeAssets) { "Hidden" } else { "Shown" })
+    if ($btnToggleFabAssets.Content -is [System.Windows.Controls.StackPanel]) {
+        foreach ($child in @($btnToggleFabAssets.Content.Children)) {
+            if ($child -is [System.Windows.Controls.TextBlock]) { $child.Text = $label }
+        }
+    }
+    else { $btnToggleFabAssets.Content = $label }
+}
+try { Set-WmtFabAssetsButtonLabel } catch {}
+
+function Test-WmtFabAssetHidden {
+param($Item)
+
+# Shared guard for every Your Library population path (list view, search,
+# scan collector, toggle re-apply). Returns $true only when UE/Fab assets
+# are hidden AND the row is tagged as UE. Reclassify Epic rows here as well
+# so older library caches are filtered without requiring a cache rebuild.
+if (-not $global:WmtHideUeAssets) { return $false }
+if (-not $Item) { return $false }
+$isUe = $false
+if ($Item.PSObject.Properties["IsUe"]) { $isUe = [bool]$Item.IsUe }
+if (-not $isUe -and ([string]$Item.Source).Trim() -match "(?i)^(epic|legendary)$") {
+    $title = [string]$Item.Name
+    $id = [string]$Item.Id
+    $isUe = ($id -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or
+        $id -match '(?i)(?:^|_)(?:5\.\d+)$' -or
+        $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b')
+}
+return $isUe
+}
+
 function Get-WmtSavedUpdateAutoScanMinutes {
 param($Settings)
 
@@ -4725,8 +5929,10 @@ else {
             $settings.PSObject.Properties.Remove("SavedUpdateAutoScanMinutes")
         }
     }
+    # The timer restart is deliberately left to the UI layer (toggle handler /
+    # search action), which also enforces the Background Jobs gate. Starting it
+    # here as well made the "Update auto scan ..." line appear twice in the log.
     Save-WmtSettings -Settings $settings
-    Start-WmtUpdateAutoScanTimer -ResetNextRun
     return
 }
 
@@ -5553,7 +6759,7 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
         param($CurrentVer, $IsExe)
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = ""; ExeDownloadUrl = "" }
+        $jobRes = @{ Status = "Failed"; RemoteVersion = "0.0"; RemoteHash = ""; RemoteLastModifiedUtc = ""; Content = ""; Error = ""; ExeDownloadUrl = ""; RemoteBytes = $null; ExeAssetName = ""; ExeSha256 = ""; ChecksumStatus = "None" }
 
         try {
             if ($IsExe) {
@@ -5573,6 +6779,37 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
                         $exeAsset = $req.assets | Where-Object { $_.name -match '\.exe$' } | Select-Object -First 1
                         if ($exeAsset) {
                             $jobRes.ExeDownloadUrl = $exeAsset.browser_download_url
+                            $jobRes.ExeAssetName = [string]$exeAsset.name
+
+                            # Safety: find a published SHA256 checksum asset for this EXE
+                            # (<exe>.sha256, SHA256SUMS / checksums.txt / hashes.txt)
+                            $ckAsset = $req.assets | Where-Object { $_.name -ieq ($exeAsset.name + '.sha256') } | Select-Object -First 1
+                            if (-not $ckAsset) {
+                                $ckAsset = $req.assets | Where-Object { ($_.name -match '(?i)sha256|checksum|hashes') -and ($_.name -match '(?i)\.(txt|sha256)$') } | Select-Object -First 1
+                            }
+                            if ($ckAsset) {
+                                $jobRes.ChecksumStatus = "Found"
+                                try {
+                                    $ckContent = (Invoke-WebRequest -Uri $ckAsset.browser_download_url -UseBasicParsing -TimeoutSec 10).Content
+                                    if ($ckContent -isnot [string]) { $ckContent = [System.Text.Encoding]::UTF8.GetString([byte[]]$ckContent) }
+                                    foreach ($ckLine in ($ckContent -split "\r?\n")) {
+                                        $ckT = $ckLine.Trim()
+                                        if (-not $ckT) { continue }
+                                        # "sha256sum" style: <64-hex>  <name>   /   "name: hash" style
+                                        $ckM = [regex]::Match($ckT, '^([0-9a-fA-F]{64})\s+\*?(.+)$')
+                                        if ($ckM.Success) {
+                                            $ckName = [IO.Path]::GetFileName($ckM.Groups[2].Value.Trim().Trim('*'))
+                                            if ($ckName -ieq [string]$exeAsset.name) { $jobRes.ExeSha256 = $ckM.Groups[1].Value.ToLowerInvariant(); break }
+                                        }
+                                        $ckM = [regex]::Match($ckT, '^(.+?)\s*[:=]\s*([0-9a-fA-F]{64})$')
+                                        if ($ckM.Success) {
+                                            $ckName = [IO.Path]::GetFileName($ckM.Groups[1].Value.Trim().Trim('*'))
+                                            if ($ckName -ieq [string]$exeAsset.name) { $jobRes.ExeSha256 = $ckM.Groups[2].Value.ToLowerInvariant(); break }
+                                        }
+                                    }
+                                }
+                                catch { $jobRes.ChecksumStatus = "Failed" }
+                            }
                         }
                     }
 
@@ -5594,7 +6831,18 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
 
                 # Shorter timeout for UI responsiveness
                 $req = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 10
-                $content = $req.Content
+
+                # Safety: keep the RAW download bytes so the installed file can later be
+                # verified byte-for-byte against the SHA256 of exactly what GitHub served
+                $rawBytes = $null
+                try { if ($req.RawContentStream -and $req.RawContentStream.Length -gt 0) { $rawBytes = $req.RawContentStream.ToArray() } } catch {}
+                if (-not $rawBytes -or $rawBytes.Length -lt 200) {
+                    if ($req.Content -is [byte[]]) { $rawBytes = [byte[]]$req.Content }
+                    else { $rawBytes = [System.Text.Encoding]::UTF8.GetBytes([string]$req.Content) }
+                }
+                $jobRes.RemoteBytes = $rawBytes
+
+                $content = [System.Text.Encoding]::UTF8.GetString($rawBytes)
                 $jobRes.Content = $content
                 try {
                     $lm = $req.Headers["Last-Modified"]
@@ -5603,10 +6851,10 @@ $script:UpdateRunspace = [PowerShell]::Create().AddScript({
                     }
                 }
                 catch {}
+                # SHA256 of the raw download - the hash the installed file must match
                 $sha = [System.Security.Cryptography.SHA256]::Create()
                 try {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$content)
-                    $hashBytes = $sha.ComputeHash($bytes)
+                    $hashBytes = $sha.ComputeHash($rawBytes)
                     $jobRes.RemoteHash = ([System.BitConverter]::ToString($hashBytes)).Replace("-", "")
                 }
                 finally {
@@ -5680,18 +6928,27 @@ $script:UpdateTimer.Add_Tick({
                     if ($remoteVer -gt $localVer) {
                         if ($lb) {
                             $lb.AppendText(" -> Update Available!`n")
+                            if ($jobResult.RemoteHash) { $lb.AppendText("[UPDATE] Remote SHA256: $($jobResult.RemoteHash)`n") }
                             $lb.ScrollToEnd()
                         }
 
                         if ($runningAsExe) {
                             if ($lb) {
                                 $lb.AppendText("[UPDATE] Newer EXE release available. Prompting user...`n")
+                                if ($jobResult.ChecksumStatus -eq "Found" -and $jobResult.ExeSha256) { $lb.AppendText("[UPDATE] Release publishes a SHA256 checksum - the download will be verified against it.`n") }
+                                elseif ($jobResult.ChecksumStatus -eq "Found") { $lb.AppendText("[UPDATE] Note: checksum file has no entry for this EXE - hash will be logged for manual verification.`n") }
+                                elseif ($jobResult.ChecksumStatus -eq "Failed") { $lb.AppendText("[UPDATE] Note: release checksum file could not be downloaded - hash will be logged for manual verification.`n") }
                                 $lb.ScrollToEnd()
                             }
                             $window.Dispatcher.Invoke([Action] {
                                     $msg = "A new version is available!`n`nLocal Version:  v$localVerText`nRemote Version: v$remoteVerText`n`nDo you want to download and install the update now?"
                                     $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
                                     if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                        $tempExe = $null
+                                        $currentExe = $null
+                                        $backupExe = $null
+                                        $backupCreated = $false
+                                        $updateApplied = $false
                                         try {
                                             $downloadUrl = [string]$jobResult.ExeDownloadUrl
                                             if ([string]::IsNullOrWhiteSpace($downloadUrl)) {
@@ -5713,18 +6970,52 @@ $script:UpdateTimer.Add_Tick({
                                                 throw "Downloaded file is suspiciously small ($fileSize bytes). Update may have failed."
                                             }
 
+                                            # Safety: PE header check - the download must be a Windows executable
+                                            $fsPe = [System.IO.File]::OpenRead($tempExe)
+                                            try { $peB0 = $fsPe.ReadByte(); $peB1 = $fsPe.ReadByte() } finally { $fsPe.Close() }
+                                            if ($peB0 -ne 0x4D -or $peB1 -ne 0x5A) {
+                                                throw "Downloaded file is not a Windows executable (MZ header missing). Update aborted."
+                                            }
+
+                                            # Safety: SHA256 - log the hash and verify it against the release
+                                            # checksum when the release publishes one
+                                            $downloadHash = (Get-FileHash -LiteralPath $tempExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                                            if ($lb) { $lb.AppendText("[UPDATE] Downloaded EXE SHA256: $downloadHash`n"); $lb.ScrollToEnd() }
+
+                                            $expectedHash = [string]$jobResult.ExeSha256
+                                            $checksumStatus = [string]$jobResult.ChecksumStatus
+                                            if ($expectedHash) {
+                                                if ($downloadHash -ne $expectedHash.ToLowerInvariant()) {
+                                                    throw "SHA256 MISMATCH! The downloaded EXE does not match the release checksum ($expectedHash). Update aborted - nothing was replaced."
+                                                }
+                                                if ($lb) { $lb.AppendText("[UPDATE] SHA256 verified against the release checksum file.`n"); $lb.ScrollToEnd() }
+                                            }
+                                            elseif ($checksumStatus -eq "None") {
+                                                if ($lb) { $lb.AppendText("[UPDATE] Note: release publishes no SHA256 checksum file - hash logged above for manual verification.`n"); $lb.ScrollToEnd() }
+                                            }
+
                                             if ($lb) { $lb.AppendText("[UPDATE] Download complete. Preparing update...`n"); $lb.ScrollToEnd() }
 
                                             # Create backup of current EXE
                                             $currentExe = [string]$script:WmtProcessPath
                                             $backupExe = "$currentExe.backup"
                                             Copy-Item -Path $currentExe -Destination $backupExe -Force
+                                            $backupCreated = $true
 
                                             if ($lb) { $lb.AppendText("[UPDATE] Backup created at: $backupExe`n"); $lb.ScrollToEnd() }
 
                                             # Replace current EXE with new one
                                             Copy-Item -Path $tempExe -Destination $currentExe -Force
+
+                                            # Safety: the installed file must hash identical to the verified download
+                                            $installedHash = (Get-FileHash -LiteralPath $currentExe -Algorithm SHA256).Hash.ToLowerInvariant()
+                                            if ($installedHash -ne $downloadHash) {
+                                                throw "Installed EXE failed SHA256 verification (disk write did not match the download)."
+                                            }
+                                            $updateApplied = $true
+
                                             Remove-Item -Path $tempExe -Force -ErrorAction SilentlyContinue
+                                            $tempExe = $null
 
                                             if ($lb) { $lb.AppendText("[UPDATE] Update installed successfully. Restarting...`n"); $lb.ScrollToEnd() }
 
@@ -5735,6 +7026,13 @@ $script:UpdateTimer.Add_Tick({
                                             $window.Close()
                                         }
                                         catch {
+                                            # Safety net: put the previous EXE back if anything failed before/during the swap
+                                            if (-not $updateApplied -and $backupCreated) {
+                                                Copy-Item -Path $backupExe -Destination $currentExe -Force -ErrorAction SilentlyContinue
+                                                if ($lb) { $lb.AppendText("[UPDATE] Previous EXE restored from backup.`n"); $lb.ScrollToEnd() }
+                                            }
+                                            if ($tempExe -and (Test-Path $tempExe)) { Remove-Item -Path $tempExe -Force -ErrorAction SilentlyContinue }
+
                                             $errMsg = "Update failed: $($_.Exception.Message)"
                                             if ($lb) { $lb.AppendText("[UPDATE] ERROR: $errMsg`n"); $lb.ScrollToEnd() }
 
@@ -5751,10 +7049,20 @@ $script:UpdateTimer.Add_Tick({
                                 $mbRes = [System.Windows.MessageBox]::Show($msg, "Update Available", [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Information)
 
                                 if ($mbRes -eq [System.Windows.MessageBoxResult]::Yes) {
+                                    $scriptPath = $null
+                                    $backupPath = $null
+                                    $updateApplied = $false
                                     try {
                                         $remoteContent = [string]$jobResult.Content
                                         if ([string]::IsNullOrWhiteSpace($remoteContent) -or $remoteContent.Length -lt 200) {
                                             throw "Downloaded update content was empty or invalid."
+                                        }
+                                        $remoteContent = $remoteContent.TrimStart([char]0xFEFF)
+
+                                        # Safety: structural check - refuse to overwrite the running script
+                                        # with content that does not look like a WMT script
+                                        if (($remoteContent -notmatch '\$AppVersion\s*=') -and ($remoteContent -notmatch 'Windows\s+Maintenance\s+Tool')) {
+                                            throw "Downloaded update does not look like a WMT script (safety check failed)."
                                         }
 
                                         $scriptPath = $scriptPathForUpdate
@@ -5765,7 +7073,41 @@ $script:UpdateTimer.Add_Tick({
                                         $backupName = "$(Split-Path $scriptPath -Leaf).bak"
                                         $backupPath = Join-Path (Get-DataPath) $backupName
                                         Copy-Item -Path $scriptPath -Destination $backupPath -Force
-                                        Set-Content -Path $scriptPath -Value $remoteContent -Encoding UTF8 -Force
+
+                                        # Write byte-exact when the raw download is available, so the
+                                        # installed file hashes identical to what GitHub served
+                                        $wroteExactBytes = $false
+                                        try {
+                                            if ($jobResult.RemoteBytes) {
+                                                [System.IO.File]::WriteAllBytes($scriptPath, [byte[]]$jobResult.RemoteBytes)
+                                                $wroteExactBytes = $true
+                                            }
+                                        }
+                                        catch { $wroteExactBytes = $false }
+                                        if (-not $wroteExactBytes) {
+                                            Set-Content -Path $scriptPath -Value $remoteContent -Encoding UTF8 -Force
+                                        }
+
+                                        # Safety: SHA256 verification of the installed file, with automatic
+                                        # rollback to the backup when it does not match
+                                        $expectedHash = [string]$jobResult.RemoteHash
+                                        $verified = $false
+                                        if ($wroteExactBytes -and $expectedHash) {
+                                            $appliedHash = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash
+                                            $verified = ($appliedHash -eq $expectedHash)
+                                            if ($lb) { $lb.AppendText("[UPDATE] Installed SHA256: $appliedHash (expected $expectedHash)`n"); $lb.ScrollToEnd() }
+                                        }
+                                        else {
+                                            $verified = ((Test-Path $scriptPath) -and ((Get-Item $scriptPath).Length -gt 100KB))
+                                            if ($expectedHash -and $lb) { $lb.AppendText("[UPDATE] Remote SHA256: $expectedHash (byte-exact verification unavailable - size check used)`n"); $lb.ScrollToEnd() }
+                                        }
+                                        if (-not $verified) {
+                                            Copy-Item -Path $backupPath -Destination $scriptPath -Force
+                                            throw "Update failed SHA256 verification - your previous version was restored from the backup."
+                                        }
+                                        $updateApplied = $true
+
+                                        if ($lb) { $lb.AppendText("[UPDATE] Integrity verified. Update applied.`n"); $lb.ScrollToEnd() }
 
                                         [System.Windows.MessageBox]::Show("Update complete! Restarting...", "Updated", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
                                         Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" -WorkingDirectory (Split-Path -Parent $scriptPath)
@@ -5773,6 +7115,10 @@ $script:UpdateTimer.Add_Tick({
                                         $window.Close()
                                     }
                                     catch {
+                                        # Safety net: restore the previous script when the update did not apply cleanly
+                                        if (-not $updateApplied -and $backupPath -and (Test-Path $backupPath) -and $scriptPath -and (Test-Path $scriptPath)) {
+                                            Copy-Item -Path $backupPath -Destination $scriptPath -Force -ErrorAction SilentlyContinue
+                                        }
                                         $errMsg = "Auto-update failed: $($_.Exception.Message)"
                                         try { Write-GuiLog "[UPDATE] $errMsg" } catch {}
 
@@ -11817,7 +13163,29 @@ $lblStatus.Text = "Scan complete. Scanning..."
 
 $registryRows = @(
     foreach ($item in $ScanResults) {
-        $autoSelected = Test-WmtRegistryFindingAutoSelected -Item $item
+        $confidenceText = if ($item.PSObject.Properties["Confidence"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Confidence)) {
+            [string]$item.Confidence
+        }
+        else {
+            ""
+        }
+        $confidenceRank = if ($confidenceText -match "(?i)^high") { 3 } elseif ($confidenceText -match "(?i)^medium") { 2 } else { 0 }
+        # An explicit SafeToFix verdict from the scanner is authoritative. When the
+        # scanner marks a finding "not safe to fix automatically" (e.g. User MRU Cache,
+        # protected ActiveX registrations, IFEO / LSA / EventLog DLL findings), it must
+        # never be auto-checked - not even when its confidence reads Medium/High.
+        # (Historically the confidence boost below overrode SafeToFix=$false, so
+        # protected rows - including ones hidden from the default view - arrived
+        # pre-checked and btnFix, which iterates the FULL $registryRows list, then
+        # attempted deletions on them and logged batches of failures. Also, MRU cache
+        # findings rebuilt themselves after every cleanup and should stay review-only.)
+        # The confidence boost now only applies to findings WITHOUT a SafeToFix property.
+        $autoSelected = if ($item -and $item.PSObject.Properties["SafeToFix"]) {
+            [bool]$item.SafeToFix
+        }
+        else {
+            (Test-WmtRegistryFindingAutoSelected -Item $item) -or ($confidenceRank -ge 2)
+        }
         $fixAction = if ($item.Type -eq "ReviewOnly") { "Review" } elseif ($item.Type -eq "Key") { "Delete key" } elseif ($item.Type -eq "SetValue") { "Update value" } else { "Delete value" }
         $risk = if ($item.PSObject.Properties["Risk"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Risk)) {
             [string]$item.Risk
@@ -11831,8 +13199,8 @@ $registryRows = @(
         else {
             "Low"
         }
-        $confidence = if ($item.PSObject.Properties["Confidence"] -and -not [string]::IsNullOrWhiteSpace([string]$item.Confidence)) {
-            [string]$item.Confidence
+        $confidence = if (-not [string]::IsNullOrWhiteSpace($confidenceText)) {
+            $confidenceText
         }
         elseif ($autoSelected) {
             "High"
@@ -12682,6 +14050,12 @@ foreach ($candidate in $candidates) {
     if ($seen.Add($candidate)) { [void]$paths.Add($candidate) }
 }
 
+# Keep only the first usable reg.exe (System32 on 64-bit PowerShell, Sysnative
+# from a 32-bit host). One reg.exe serves /reg:32 and /reg:64 views, so trying
+# every candidate multiplied every query/delete/verify into 3-4 process spawns
+# and made deep registry cleans dramatically slower.
+if ($paths.Count -gt 1) { $paths.RemoveRange(1, $paths.Count - 1) }
+
 return @($paths)
 }
 
@@ -13055,20 +14429,10 @@ try {
     if ($existingTargets.Count -eq 0 -and $existingRegExeTargets.Count -eq 0) { return $true }
     & $AddAttempt "existing-provider/native=$($existingTargets.Count) existing-regexe=$($existingRegExeTargets.Count)"
 
-    foreach ($target in $existingTargets) {
-        if ($target.Kind -eq "Provider") { & $UnlockProviderPath ([string]$target.Path) }
-    }
-    if ($allowNativeAclUnlock) {
-        foreach ($target in $existingTargets) {
-            if ($target.Kind -eq "Native") {
-                try {
-                    $aclChanged = Grant-WmtRegistryKeyFullControlNative -Hive $target.Hive -View $target.View -SubPath $target.SubPath
-                    & $AddAttempt "acl-native=$($target.Label):$($target.SubPath) changed=$aclChanged"
-                }
-                catch { & $AddAttempt "acl-native-exception=$($target.Label):$($target.SubPath) error=$($_.Exception.Message)" }
-            }
-        }
-    }
+    # ACL unlock is deferred to the retry paths below. Rewriting ACLs before the
+    # first delete attempt (recursively for provider paths) made every cleanup
+    # item several times slower and was unnecessary for keys that delete fine;
+    # protected keys are still unlocked on the delete/retry paths below.
 
     foreach ($target in $existingTargets) {
         if (-not (& $TestTargetExists $target)) { continue }
@@ -13119,7 +14483,12 @@ try {
         }
         catch { & $AddAttempt "delete-regexe-exception=$($regTarget.RegPath) error=$($_.Exception.Message)" }
     }
-    if ($allowNativeAclUnlock) {
+    # Only use the .reg import deletion fallback when a target still exists after
+    # the direct attempts. It used to run for every CLSID-style item and added a
+    # reg.exe import (per candidate path) to every single cleanup item.
+    $preFallbackTargets = @($deleteTargets | Where-Object { & $TestTargetExists $_ })
+    $preFallbackRegTargets = @($regExeTargets | Where-Object { Test-WmtRegExeKeyExists -RegPath $_.RegPath -View $_.View })
+    if ($allowNativeAclUnlock -and ($preFallbackTargets.Count -gt 0 -or $preFallbackRegTargets.Count -gt 0)) {
         try {
             $importResult = Invoke-WmtRegExeDeleteImportFallback -RegTargets $regExeTargets
             & $AddAttempt "delete-reg-import-fallback result=$importResult"
@@ -13209,7 +14578,8 @@ catch {}
 function Start-WmtRegistryCleanupBackground {
 param(
     [object[]]$Items,
-    [string]$BackupDirectory
+    [string]$BackupDirectory,
+    [switch]$CreateRestorePoint
 )
 
 if ($script:WmtRegistryCleanupActive) {
@@ -13325,6 +14695,7 @@ try {
     $runspace.SessionStateProxy.SetVariable("CleanupSync", $cleanupSync)
     $runspace.SessionStateProxy.SetVariable("CleanupItems", $selectedItems)
     $runspace.SessionStateProxy.SetVariable("CleanupBackupDirectory", $BackupDirectory)
+    $runspace.SessionStateProxy.SetVariable("CleanupRestorePoint", [bool]$CreateRestorePoint)
 
     $workerScript = {
         Import-Module Microsoft.PowerShell.Management
@@ -13337,6 +14708,17 @@ try {
         }
 
         try {
+            if ($CleanupRestorePoint) {
+                $CleanupSync.Status = "Creating system restore point (this can take a minute)..."
+                Add-WmtCleanupWorkerLog "Creating system restore point before cleanup..."
+                try {
+                    Checkpoint-Computer -Description "WMT DeepClean" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
+                    Add-WmtCleanupWorkerLog "Restore Point created."
+                }
+                catch {
+                    Add-WmtCleanupWorkerLog "Restore Point failed (Disabled?). Continuing..."
+                }
+            }
             $itemsToClean = @($CleanupItems | Where-Object { $null -ne $_ -and -not [string]::IsNullOrWhiteSpace([string]$_.RegPath) })
             if (-not (Test-Path -LiteralPath $CleanupBackupDirectory -PathType Container -ErrorAction SilentlyContinue)) {
                 New-Item -Path $CleanupBackupDirectory -ItemType Directory -Force | Out-Null
@@ -18613,12 +19995,12 @@ if ($Action -eq "DeepClean") {
                 # --- SAFETY PROMPT ---
                 $res = Show-SafetyDialog -Count $toDelete.Count
                 if ($res -eq "Cancel") { return }
-                if ($res -eq "Yes") {
-                    Invoke-UiCommand { try { Checkpoint-Computer -Description "WMT DeepClean" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop; "Restore Point created." } catch { "Restore Point failed (Disabled?). Continuing..." } } "Creating Restore Point..."
-                }
+                # The restore point is now created inside the background cleanup
+                # worker: running Checkpoint-Computer on the UI thread (via
+                # Invoke-UiCommand) froze the entire main window for its duration.
 
                 # --- EXECUTE FIX (Background Runspace) ---
-                Start-WmtRegistryCleanupBackground -Items $toDelete -BackupDirectory $bkDir
+                Start-WmtRegistryCleanupBackground -Items $toDelete -BackupDirectory $bkDir -CreateRestorePoint:($res -eq "Yes")
             }
         }.GetNewClosure())
 
@@ -20490,9 +21872,16 @@ Invoke-UiCommand {
 } "Updating device metadata policy..." -ArgumentList $value, $msg
 }
 
-function Show-DriverCleanupDialog {
+# --- DRIVER STORE PARSER (shared) ---
+# Parses `pnputil /enum-drivers` into one record per third-party driver
+# package staged in the Driver Store. Shared by the Drivers page list and the
+# Clean Old Drivers dialog so both see identical data. Hardened for pnputil
+# output quirks (see the notes inline below). Returns an array of
+# [PSCustomObject] with: PublishedName, OriginalName, Provider, Class, Signer,
+# Version ([Version]), DisplayVer, SortDate, DisplayDate.
+function Get-WmtDriverStorePackages {
 $rawOutput = pnputil.exe /enum-drivers 2>&1
-$drivers = @()
+$drivers = [System.Collections.Generic.List[object]]::new()
 $current = $null
 
 foreach ($line in $rawOutput) {
@@ -20503,11 +21892,13 @@ foreach ($line in $rawOutput) {
     $key = $parts[0].Trim()
     $val = $parts[1].Trim()
     if ($val -match '^(oem\d+\.inf)$') {
-        if ($current) { $drivers += [PSCustomObject]$current }
+        if ($current) { $drivers.Add([PSCustomObject]$current) }
         $current = [ordered]@{
             PublishedName = $val
             OriginalName  = $null
             Provider      = "Unknown"
+            Class         = "Unknown"
+            Signer        = ""
             Version       = [Version]"0.0.0.0"
             DisplayVer    = "Unknown"
             SortDate      = [DateTime]::MinValue
@@ -20519,29 +21910,67 @@ foreach ($line in $rawOutput) {
     if (-not $current) { continue }
     if ($key -match "Original Name" -and $val -notmatch '^oem\d+\.inf$') { $current.OriginalName = $val }
     elseif ($key -match "Provider") { $current.Provider = $val }
+    elseif ($key -match "Class" -and $key -notmatch "GUID") { $current.Class = $val }
+    elseif ($key -match "Signer") { $current.Signer = $val }
     elseif ($key -match "Version") {
-        if ($val -match '(\d+(\.\d+){1,3})') {
-            $current.DisplayVer = $matches[1]
-            try { $current.Version = [Version]$matches[1] } catch {}
+        # Take the LAST dotted group, not the first — some pnputil builds print
+        # the date with dots ("02.06.2026 32.0.16.1051"), which the regex would
+        # otherwise mistake for the version.
+        $dotMatches = [regex]::Matches($val, '(\d+(\.\d+){1,3})')
+        if ($dotMatches.Count -gt 0) {
+            $verText = $dotMatches[$dotMatches.Count - 1].Groups[1].Value
+            $current.DisplayVer = $verText
+            try { $current.Version = [Version]$verText } catch {}
         }
         else { $current.DisplayVer = if ($val) { $val } else { "N/A" } }
-        if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) {
+        if ($current.DisplayDate -eq "Unknown" -and $val -match '(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) {
             $current.DisplayDate = $matches[1]
             $current.SortDate = [DateTime]$matches[1]
         }
     }
     elseif ($key -match "Date") {
         if ($val -as [DateTime]) { $current.DisplayDate = $val; $current.SortDate = [DateTime]$val }
-        elseif ($val -match '(\d{2}[/\-]\d{2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) { $current.DisplayDate = $matches[1]; $current.SortDate = [DateTime]$matches[1] }
+        elseif ($val -match '(\d{1,2}[/\-]\d{1,2}[/\-]\d{4})' -and ($matches[1] -as [DateTime])) { $current.DisplayDate = $matches[1]; $current.SortDate = [DateTime]$matches[1] }
     }
     elseif ($null -eq $current.OriginalName -and $val -match '\.inf$') { $current.OriginalName = $val }
 }
-if ($current) { $drivers += [PSCustomObject]$current }
+if ($current) { $drivers.Add([PSCustomObject]$current) }
 
-$toDelete = @()
-foreach ($group in @($drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
-    if ($group.Count -gt 1) { $toDelete += @($group.Group | Sort-Object SortDate, Version -Descending | Select-Object -Skip 1) }
+# Fallback: pnputil's /enum-drivers text output varies between Windows builds
+# and on some systems never yields a parseable "Driver Version" line (every
+# row would show Version "Unknown" even though the INF has one). Read the
+# DriverVer directive straight from the staged INF copy in C:\Windows\INF —
+# the same source of truth tools like Driver Store Explorer use. Format:
+#   DriverVer = MM/DD/YYYY[,a.b.c.d]
+foreach ($d in $drivers) {
+    if ($d.DisplayVer -ne "Unknown" -and $d.DisplayVer -ne "N/A") { continue }
+    if (-not $d.PublishedName) { continue }
+    $infPath = Join-Path $env:SystemRoot ("INF\" + $d.PublishedName)
+    if (-not (Test-Path -LiteralPath $infPath)) { continue }
+    try {
+        $verLine = Select-String -LiteralPath $infPath -Pattern '^\s*DriverVer\s*=\s*(.+)$' | Select-Object -First 1
+        if (-not $verLine) { continue }
+        $raw = ($verLine.Matches[0].Groups[1].Value -split ";", 2)[0].Trim()
+        $verParts = $raw -split ",", 2
+        $datePart = $verParts[0].Trim()
+        $verPart  = if ($verParts.Count -gt 1) { $verParts[1].Trim() } else { "" }
+        if ($verPart -match '(\d+(\.\d+){1,3})') {
+            $d.DisplayVer = $Matches[1]
+            try { $d.Version = [Version]$Matches[1] } catch {}
+        }
+        if ($d.DisplayDate -eq "Unknown" -and $datePart -and ($datePart -as [DateTime])) {
+            $d.DisplayDate = $datePart
+            $d.SortDate = [DateTime]$datePart
+        }
+    }
+    catch {}
 }
+
+return @($drivers)
+}
+
+function Show-DriverCleanupDialog {
+$drivers = Get-WmtDriverStorePackages
 
 # Protect drivers currently in use by active devices to prevent hardware breakage
 $inUseInfs = @()
@@ -20552,13 +21981,43 @@ try {
         Select-Object -ExpandProperty InfName -Unique
     )
 } catch {}
-if ($inUseInfs.Count -gt 0) {
-    $before = $toDelete.Count
-    $toDelete = @($toDelete | Where-Object { $_.PublishedName -notin $inUseInfs })
-    $skipped = $before - $toDelete.Count
-    if ($skipped -gt 0) {
-        Write-GuiLog "Skipped $skipped in-use driver package(s) that are actively installed on devices."
+
+$toDelete = @()
+$skippedInUse = 0
+foreach ($group in @($drivers | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
+    if ($group.Count -lt 2) { continue }
+
+    # Rank the group: the in-use copy first (it must be kept), then the highest
+    # driver VERSION, then the newest driver date. NVIDIA and other vendors
+    # frequently ship newer builds carrying an OLDER driver date, so the
+    # version number must always win over the date when deciding which copy
+    # is the old one. Version-less INFs (date-only DriverVer) parse as 0.0.0.0
+    # and fall back to the date tiebreak among equals.
+    $sorted = @($group.Group | Sort-Object -Property @(
+            @{ Expression = { [int]($inUseInfs -contains $_.PublishedName) }; Descending = $true },
+            @{ Expression = 'Version';                                        Descending = $true },
+            @{ Expression = 'SortDate';                                       Descending = $true }
+        ))
+    $kept = $sorted[0]
+
+    foreach ($d in @($sorted | Select-Object -Skip 1)) {
+        # Never touch packages actively installed on devices.
+        if ($inUseInfs.Count -gt 0 -and $inUseInfs -contains $d.PublishedName) { $skippedInUse++; continue }
+        # Never remove a copy with a higher version than the kept one, even if
+        # unused — it may be staged for the next boot. Only remove copies the
+        # kept package supersedes, or exact duplicates of it.
+        if ($kept.Version -gt $d.Version) { $reason = "Older version" }
+        elseif ($kept.Version -lt $d.Version) { continue }
+        elseif ($kept.SortDate -gt $d.SortDate) { $reason = "Duplicate (older store date)" }
+        else { $reason = "Duplicate copy" }
+
+        $d | Add-Member -MemberType NoteProperty -Name "CleanupReason" -Value $reason -Force
+        $d | Add-Member -MemberType NoteProperty -Name "KeptPackage" -Value ("{0}  v{1}  {2}" -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate) -Force
+        $toDelete += $d
     }
+}
+if ($skippedInUse -gt 0) {
+    Write-GuiLog "Skipped $skippedInUse in-use driver package(s) that are actively installed on devices."
 }
 
 if (-not $toDelete -or $toDelete.Count -eq 0) {
@@ -20592,7 +22051,7 @@ $currentList = [System.Collections.Generic.List[object]]::new()
 foreach ($item in @($toDelete)) { [void]$currentList.Add($item) }
 $rows = [System.Collections.ObjectModel.ObservableCollection[object]]::new()
 $dg.ItemsSource = $rows
-Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date") -Widths @{ PublishedName = 120; OriginalName = "*"; Provider = 180; Version = 120; Date = 110 }
+Set-WmtDataGridColumns -DataGrid $dg -Columns @("PublishedName", "OriginalName", "Provider", "Version", "Date", "Status", "Kept") -Widths @{ PublishedName = 110; OriginalName = 160; Provider = 150; Version = 95; Date = 85; Status = 140; Kept = "*" }
 
 $loadGrid = {
     $rows.Clear()
@@ -20603,6 +22062,8 @@ $loadGrid = {
                 Provider      = [string]$d.Provider
                 Version       = [string]$d.DisplayVer
                 Date          = [string]$d.DisplayDate
+                Status        = [string]$d.CleanupReason
+                Kept          = [string]$d.KeptPackage
                 Source        = $d
             })
     }
@@ -20666,6 +22127,7 @@ $doRemove = {
 
         $deleted = 0
         $failed = 0
+        $removedInfs = [System.Collections.Generic.List[string]]::new()
         foreach ($item in $itemsToRemove) {
             $name = [string]$item.PublishedName
             $dialog.Title = "Removing $name..."
@@ -20683,12 +22145,12 @@ $doRemove = {
             $stdOut = $p.StandardOutput.ReadToEnd()
             $stdErr = $p.StandardError.ReadToEnd()
             $p.WaitForExit()
-            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $deleted++ }
+            if ($p.ExitCode -eq 0 -or $p.ExitCode -eq 3010) { $deleted++; [void]$removedInfs.Add($name) }
             else {
                 $warnMsg = "Driver: $($item.OriginalName) ($name)`n`nError:`n$($stdOut)`n$($stdErr)`n`nForce delete?"
                 if ((Show-WmtMessageBox -Owner $dialog -Message $warnMsg -Title "Deletion Failed" -Button YesNo -Image Error) -eq [System.Windows.MessageBoxResult]::Yes) {
                     $procForce = Start-Process pnputil.exe -ArgumentList "/delete-driver $name /uninstall /force" -NoNewWindow -Wait -PassThru
-                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++ } else { $failed++ }
+                    if ($procForce.ExitCode -eq 0 -or $procForce.ExitCode -eq 3010) { $deleted++; [void]$removedInfs.Add($name) } else { $failed++ }
                 }
                 else { $failed++ }
             }
@@ -20705,6 +22167,9 @@ $doRemove = {
                 }
             }
             & $loadGrid
+            # Keep the main Drivers page cache in sync without a full recheck:
+            # drop exactly the packages pnputil deleted from the cached list.
+            Remove-DriverRowsFromCache -RemovedInfs @($removedInfs)
         }
     }
     finally {
@@ -20795,6 +22260,10 @@ Invoke-UiCommand {
     Write-Output $output
     if ($code -eq 0 -or $code -eq 3010) {
         Write-Output "Drivers restored from $Path"
+        # Restore stages NEW packages into the driver store — the cached
+        # Drivers list no longer matches reality, so drop the cache and
+        # re-enumerate (a real change, unlike removals which edit in place).
+        $script:DriverCacheLoaded = $false
         Show-WmtMessageBox -Message "Drivers restored from:`n$Path" -Title "Restore Drivers" -Image Information | Out-Null
     }
     else {
@@ -20803,6 +22272,11 @@ Invoke-UiCommand {
         Show-WmtMessageBox -Message $msg -Title "Restore Drivers" -Image Error | Out-Null
     }
 } "Restoring drivers..." -ArgumentList $selectedPath
+# If a cached list was on screen while restoring, reload it now so the newly
+# staged packages appear; otherwise the next Drivers tab visit reloads.
+if (-not $script:DriverCacheLoaded -and $script:DriverPackages.Count -gt 0) {
+    Start-DriverListLoad -Force
+}
 }
 
 # --- UPDATE / REPORT TOOLS ---
@@ -22219,6 +23693,264 @@ function Update-StartupTabFilter {
     $TabObj.CountLabel.Text = "$($TabObj.Meta.View.Count) shown / $($TabObj.Meta.Table.Rows.Count) total"
 }
 
+# --- Startup Manager shared helpers (GLOBAL scope) ---
+# These helpers are defined in the GLOBAL scope ON PURPOSE. The dialog's
+# event handlers are bound with GetNewClosure(), and Show-StartupRowDetails
+# itself is invoked through a closure-bound function reference
+# (${function:...}.GetNewClosure()); global functions are the terminal of
+# every command-lookup chain (dynamic-module closures, script scopes, any
+# runspace), so they resolve from every handler and every invocation path.
+# Nested functions inside the dialog function are NOT reachable from
+# GetNewClosure() handlers ("is not recognized as a cmdlet" on click).
+
+function global:Get-StartupCellValue {
+    param($Row, [string]$Name)
+    try {
+        if ($Row -is [System.Data.DataRow]) {
+            if ($Row.Table.Columns.Contains($Name)) { return [string]$Row[$Name] }
+        }
+        elseif ($Row -is [System.Data.DataRowView]) {
+            if ($Row.Row.Table.Columns.Contains($Name)) { return [string]$Row.Row[$Name] }
+        }
+        elseif ($Row -is [System.Collections.IDictionary]) {
+            if ($Row.Contains($Name)) { return [string]$Row[$Name] }
+        }
+        else {
+            $prop = $Row.PSObject.Properties[$Name]
+            if ($prop) { return [string]$prop.Value }
+        }
+    }
+    catch {}
+    return ""
+}
+
+function global:Set-StartupCellValue {
+    param($Row, [string]$Name, [string]$Value)
+    try {
+        if ($Row -is [System.Data.DataRow]) {
+            if ($Row.Table.Columns.Contains($Name)) { $Row[$Name] = $Value }
+        }
+        elseif ($Row -is [System.Data.DataRowView]) {
+            if ($Row.Row.Table.Columns.Contains($Name)) { $Row.Row[$Name] = $Value }
+        }
+        elseif ($Row -is [System.Collections.IDictionary]) {
+            $Row[$Name] = $Value
+        }
+        else {
+            $prop = $Row.PSObject.Properties[$Name]
+            if ($prop) { $prop.Value = $Value }
+        }
+    }
+    catch {}
+}
+
+function global:Set-StartupEditorVisibility {
+    param([object[]]$Controls, [bool]$Visible)
+    $visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
+    foreach ($control in @($Controls)) {
+        try { if ($control) { $control.Visibility = $visibility } } catch {}
+    }
+}
+
+function global:Split-WmtStartupCommandLine {
+    param([string]$CommandLine)
+    $cmd = ([string]$CommandLine).Trim()
+    if ([string]::IsNullOrWhiteSpace($cmd)) { return [PSCustomObject]@{ Target = ""; Arguments = "" } }
+    if ($cmd.StartsWith('"')) {
+        $closingQuote = $cmd.IndexOf('"', 1)
+        if ($closingQuote -gt 1) {
+            return [PSCustomObject]@{
+                Target    = $cmd.Substring(1, $closingQuote - 1)
+                Arguments = $cmd.Substring($closingQuote + 1).Trim()
+            }
+        }
+    }
+    $exeMatch = [regex]::Match($cmd, '^(?<target>.+?\.exe)(?<args>\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    if ($exeMatch.Success) {
+        return [PSCustomObject]@{
+            Target    = $exeMatch.Groups['target'].Value.Trim()
+            Arguments = $exeMatch.Groups['args'].Value.Trim()
+        }
+    }
+    $firstSpace = $cmd.IndexOf(' ')
+    if ($firstSpace -gt 0) {
+        return [PSCustomObject]@{
+            Target    = $cmd.Substring(0, $firstSpace).Trim()
+            Arguments = $cmd.Substring($firstSpace + 1).Trim()
+        }
+    }
+    return [PSCustomObject]@{ Target = $cmd; Arguments = "" }
+}
+
+function global:Get-WmtShortcutCommandLine {
+    param([string]$ShortcutPath)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -or -not [System.IO.File]::Exists($ShortcutPath)) { return "" }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $target = [string]$shortcut.TargetPath
+        $arguments = [string]$shortcut.Arguments
+        if ([string]::IsNullOrWhiteSpace($target)) { return "" }
+        if ($target -match '\s') { $target = '"{0}"' -f $target }
+        return (($target, $arguments) -join " ").Trim()
+    }
+    catch { return "" }
+    finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+}
+
+function global:Set-WmtShortcutCommandLine {
+    param([string]$ShortcutPath, [string]$CommandLine)
+    if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) { return }
+    if (-not [System.IO.File]::Exists($ShortcutPath)) { throw "Shortcut file was not found: $ShortcutPath" }
+    $parts = Split-WmtStartupCommandLine $CommandLine
+    if ([string]::IsNullOrWhiteSpace([string]$parts.Target)) { throw "Shortcut target cannot be blank." }
+    $shell = $null
+    try {
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($ShortcutPath)
+        $shortcut.TargetPath = [string]$parts.Target
+        $shortcut.Arguments = [string]$parts.Arguments
+        $expandedTarget = [Environment]::ExpandEnvironmentVariables(([string]$parts.Target).Trim('"'))
+        if ([System.IO.File]::Exists($expandedTarget)) {
+            $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
+            if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) { $shortcut.WorkingDirectory = $targetDir }
+        }
+        $shortcut.Save()
+    }
+    finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
+}
+
+function global:Get-WmtRegistryDefaultValue {
+    param([string]$Path)
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path)) {
+            $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+            return [string]$key.GetValue("")
+        }
+    }
+    catch {}
+    return ""
+}
+
+function global:Set-WmtRegistryDefaultValue {
+    param([string]$Path, [string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return }
+    if (-not (Test-Path -LiteralPath $Path)) { throw "Registry key was not found: $Path" }
+    $key = Get-Item -LiteralPath $Path -ErrorAction Stop
+    $key.SetValue("", [string]$Value)
+}
+
+function global:Get-WmtTaskFileLocation {
+    # Scheduled tasks are stored on disk as XML definitions inside the
+    # task store: %SystemRoot%\System32\Tasks\<TaskPath><TaskName>. That
+    # per-task file (the "taskdir" location) is what Open Location should
+    # reveal - never C:\Windows root.
+    param([string]$TaskPath, [string]$TaskName)
+    $relative = (("{0}{1}" -f $TaskPath, $TaskName) -replace '/', '\').TrimStart('\')
+    if ([string]::IsNullOrWhiteSpace($relative)) { return "" }
+    return (Join-Path (Join-Path $env:SystemRoot "System32\Tasks") $relative)
+}
+
+function global:Get-WmtServiceFilePath {
+    # Resolves a service's on-disk binary from its HKLM registry entry:
+    # ImagePath is expanded (env vars, \SystemRoot and \??\ boot-path
+    # notation), the executable token is split off the arguments, and
+    # svchost services are followed into their ServiceDll parameter so
+    # the location points at the actual payload, not the generic host.
+    param([string]$ServiceName)
+    if ([string]::IsNullOrWhiteSpace($ServiceName)) { return "" }
+    $svcKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    $imagePath = ""
+    try { $imagePath = [string](Get-ItemProperty -LiteralPath $svcKey -ErrorAction Stop).ImagePath } catch { return "" }
+    $imagePath = [Environment]::ExpandEnvironmentVariables(([string]$imagePath).Trim())
+    if ([string]::IsNullOrWhiteSpace($imagePath)) { return "" }
+    if ($imagePath.StartsWith("\SystemRoot", [System.StringComparison]::OrdinalIgnoreCase)) { $imagePath = $env:SystemRoot + $imagePath.Substring("\SystemRoot".Length) }
+    if ($imagePath.StartsWith("\??\", [System.StringComparison]::OrdinalIgnoreCase)) { $imagePath = $imagePath.Substring(4) }
+    if ($imagePath.StartsWith('"')) {
+        $end = $imagePath.IndexOf('"', 1)
+        if ($end -gt 1) { $imagePath = $imagePath.Substring(1, $end - 1) } else { $imagePath = $imagePath.Trim('"') }
+    }
+    else {
+        $space = $imagePath.IndexOf(' ')
+        if ($space -gt 0) { $imagePath = $imagePath.Substring(0, $space) }
+    }
+    $imagePath = ([string]$imagePath).Trim()
+    if ([string]::IsNullOrWhiteSpace($imagePath)) { return "" }
+    if (-not [System.IO.Path]::IsPathRooted($imagePath)) { $imagePath = Join-Path $env:SystemRoot $imagePath }
+    if ($imagePath -imatch 'svchost\.exe$') {
+        try {
+            $dll = [string](Get-ItemProperty -LiteralPath "$svcKey\Parameters" -Name ServiceDll -ErrorAction Stop).ServiceDll
+            $dll = [Environment]::ExpandEnvironmentVariables(([string]$dll).Trim())
+            if (-not [string]::IsNullOrWhiteSpace($dll)) {
+                if ($dll.StartsWith('"')) {
+                    $end = $dll.IndexOf('"', 1)
+                    if ($end -gt 1) { $dll = $dll.Substring(1, $end - 1) }
+                }
+                $dll = ([string]$dll).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($dll)) {
+                    if (-not [System.IO.Path]::IsPathRooted($dll)) { $dll = Join-Path (Join-Path $env:SystemRoot "System32") $dll }
+                    return $dll
+                }
+            }
+        } catch {}
+    }
+    return $imagePath
+}
+
+function global:Show-WmtFileInExplorer {
+    # Selects the file in Explorer; if it is gone, walks up to the nearest
+    # existing folder so the user still lands somewhere useful (the climb
+    # stops at the drive root, never surfacing an error dialog).
+    param([string]$FilePath, [string]$MissingMessage)
+    if ([System.IO.File]::Exists($FilePath)) {
+        Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $FilePath)
+        return
+    }
+    $folder = Split-Path $FilePath -Parent
+    while (-not [string]::IsNullOrEmpty($folder) -and -not [System.IO.Directory]::Exists($folder)) {
+        $parent = Split-Path $folder -Parent
+        if ([string]::IsNullOrEmpty($parent) -or $parent -ieq $folder) { $folder = ""; break }
+        $folder = $parent
+    }
+    if (-not [string]::IsNullOrEmpty($folder) -and [System.IO.Directory]::Exists($folder)) {
+        Start-Process explorer.exe -ArgumentList ("`"{0}`"" -f $folder)
+        return
+    }
+    throw $MissingMessage
+}
+
+function global:Open-WmtRegistryKey {
+    # Regedit reopens its last key on launch (the technique RegJump uses):
+    # point HKCU's Regedit LastKey at the target, then start regedit. The
+    # PowerShell-style path (HKLM:\...) is converted to regedit's native
+    # "Computer\HKEY_..." form; failures fall back to a plain regedit.
+    param([string]$RegistryPath)
+    $psPath = ([string]$RegistryPath).Trim()
+    $rootMap = @{
+        "HKLM" = "HKEY_LOCAL_MACHINE"
+        "HKCU" = "HKEY_CURRENT_USER"
+        "HKCR" = "HKEY_CLASSES_ROOT"
+        "HKU"  = "HKEY_USERS"
+        "HKCC" = "HKEY_CURRENT_CONFIG"
+    }
+    $rootName = ""
+    $rest = $psPath
+    if ($psPath -match '^(HKLM|HKCU|HKCR|HKU|HKCC)(:|\\|$)') {
+        $rootName = $Matches[1]
+        $rest = $psPath.Substring($rootName.Length).TrimStart(':', '\')
+    }
+    if (-not [string]::IsNullOrEmpty($rootName)) {
+        $fullKey = ("Computer\{0}\{1}" -f $rootMap[$rootName], $rest).TrimEnd('\')
+        try {
+            $applet = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Applets\Regedit"
+            if (-not (Test-Path -LiteralPath $applet)) { New-Item -Path $applet -Force -ErrorAction Stop | Out-Null }
+            Set-ItemProperty -LiteralPath $applet -Name "LastKey" -Value $fullKey -Type String -ErrorAction Stop
+        } catch {}
+    }
+    Start-Process regedit.exe
+}
+
 function Show-StartupRowDetails {
     param($TabObj, [string]$Title)
 
@@ -22231,143 +23963,6 @@ function Show-StartupRowDetails {
     $row = $selectedRows | Select-Object -First 1
     $tabName = [string]$TabObj.Header
 
-    function Get-StartupCellValue {
-        param($Row, [string]$Name)
-        try {
-            if ($Row -is [System.Data.DataRow]) {
-                if ($Row.Table.Columns.Contains($Name)) { return [string]$Row[$Name] }
-            }
-            elseif ($Row -is [System.Data.DataRowView]) {
-                if ($Row.Row.Table.Columns.Contains($Name)) { return [string]$Row.Row[$Name] }
-            }
-            elseif ($Row -is [System.Collections.IDictionary]) {
-                if ($Row.Contains($Name)) { return [string]$Row[$Name] }
-            }
-            else {
-                $prop = $Row.PSObject.Properties[$Name]
-                if ($prop) { return [string]$prop.Value }
-            }
-        }
-        catch {}
-        return ""
-    }
-
-    function Set-StartupCellValue {
-        param($Row, [string]$Name, [string]$Value)
-        try {
-            if ($Row -is [System.Data.DataRow]) {
-                if ($Row.Table.Columns.Contains($Name)) { $Row[$Name] = $Value }
-            }
-            elseif ($Row -is [System.Data.DataRowView]) {
-                if ($Row.Row.Table.Columns.Contains($Name)) { $Row.Row[$Name] = $Value }
-            }
-            elseif ($Row -is [System.Collections.IDictionary]) {
-                $Row[$Name] = $Value
-            }
-            else {
-                $prop = $Row.PSObject.Properties[$Name]
-                if ($prop) { $prop.Value = $Value }
-            }
-        }
-        catch {}
-    }
-
-    function Set-StartupEditorVisibility {
-        param([object[]]$Controls, [bool]$Visible)
-        $visibility = if ($Visible) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed }
-        foreach ($control in @($Controls)) {
-            try { if ($control) { $control.Visibility = $visibility } } catch {}
-        }
-    }
-
-    function Split-WmtStartupCommandLine {
-        param([string]$CommandLine)
-        $cmd = ([string]$CommandLine).Trim()
-        if ([string]::IsNullOrWhiteSpace($cmd)) { return [PSCustomObject]@{ Target = ""; Arguments = "" } }
-        if ($cmd.StartsWith('"')) {
-            $closingQuote = $cmd.IndexOf('"', 1)
-            if ($closingQuote -gt 1) {
-                return [PSCustomObject]@{
-                    Target    = $cmd.Substring(1, $closingQuote - 1)
-                    Arguments = $cmd.Substring($closingQuote + 1).Trim()
-                }
-            }
-        }
-        $exeMatch = [regex]::Match($cmd, '^(?<target>.+?\.exe)(?<args>\s+.*)?$', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
-        if ($exeMatch.Success) {
-            return [PSCustomObject]@{
-                Target    = $exeMatch.Groups['target'].Value.Trim()
-                Arguments = $exeMatch.Groups['args'].Value.Trim()
-            }
-        }
-        $firstSpace = $cmd.IndexOf(' ')
-        if ($firstSpace -gt 0) {
-            return [PSCustomObject]@{
-                Target    = $cmd.Substring(0, $firstSpace).Trim()
-                Arguments = $cmd.Substring($firstSpace + 1).Trim()
-            }
-        }
-        return [PSCustomObject]@{ Target = $cmd; Arguments = "" }
-    }
-
-    function Get-WmtShortcutCommandLine {
-        param([string]$ShortcutPath)
-        if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase) -or -not [System.IO.File]::Exists($ShortcutPath)) { return "" }
-        $shell = $null
-        try {
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut($ShortcutPath)
-            $target = [string]$shortcut.TargetPath
-            $arguments = [string]$shortcut.Arguments
-            if ([string]::IsNullOrWhiteSpace($target)) { return "" }
-            if ($target -match '\s') { $target = '"{0}"' -f $target }
-            return (($target, $arguments) -join " ").Trim()
-        }
-        catch { return "" }
-        finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
-    }
-
-    function Set-WmtShortcutCommandLine {
-        param([string]$ShortcutPath, [string]$CommandLine)
-        if ([string]::IsNullOrWhiteSpace($ShortcutPath) -or -not $ShortcutPath.EndsWith(".lnk", [System.StringComparison]::OrdinalIgnoreCase)) { return }
-        if (-not [System.IO.File]::Exists($ShortcutPath)) { throw "Shortcut file was not found: $ShortcutPath" }
-        $parts = Split-WmtStartupCommandLine $CommandLine
-        if ([string]::IsNullOrWhiteSpace([string]$parts.Target)) { throw "Shortcut target cannot be blank." }
-        $shell = $null
-        try {
-            $shell = New-Object -ComObject WScript.Shell
-            $shortcut = $shell.CreateShortcut($ShortcutPath)
-            $shortcut.TargetPath = [string]$parts.Target
-            $shortcut.Arguments = [string]$parts.Arguments
-            $expandedTarget = [Environment]::ExpandEnvironmentVariables(([string]$parts.Target).Trim('"'))
-            if ([System.IO.File]::Exists($expandedTarget)) {
-                $targetDir = [System.IO.Path]::GetDirectoryName($expandedTarget)
-                if (-not [string]::IsNullOrWhiteSpace($targetDir) -and [System.IO.Directory]::Exists($targetDir)) { $shortcut.WorkingDirectory = $targetDir }
-            }
-            $shortcut.Save()
-        }
-        finally { try { if ($shell) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($shell) } } catch {} }
-    }
-
-    function Get-WmtRegistryDefaultValue {
-        param([string]$Path)
-        try {
-            if (-not [string]::IsNullOrWhiteSpace($Path) -and (Test-Path -LiteralPath $Path)) {
-                $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-                return [string]$key.GetValue("")
-            }
-        }
-        catch {}
-        return ""
-    }
-
-    function Set-WmtRegistryDefaultValue {
-        param([string]$Path, [string]$Value)
-        if ([string]::IsNullOrWhiteSpace($Path)) { return }
-        if (-not (Test-Path -LiteralPath $Path)) { throw "Registry key was not found: $Path" }
-        $key = Get-Item -LiteralPath $Path -ErrorAction Stop
-        $key.SetValue("", [string]$Value)
-    }
 
     $content = @'
 <Grid Margin="16">
@@ -22389,6 +23984,7 @@ function Show-StartupRowDetails {
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
                 <RowDefinition Height="Auto"/>
@@ -22418,6 +24014,9 @@ function Show-StartupRowDetails {
 
             <TextBlock Name="lblEnabled" Grid.Row="6" Grid.Column="0" Text="Enabled" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
             <CheckBox Name="chkEnabled" Grid.Row="6" Grid.Column="1" Margin="0,0,0,10" VerticalAlignment="Center" Content="Enabled" Foreground="{DynamicResource TextPrimary}"/>
+
+            <TextBlock Name="lblTaskFile" Grid.Row="7" Grid.Column="0" Text="Task file" Margin="0,0,12,10" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}"/>
+            <TextBox Name="txtTaskFile" Grid.Row="7" Grid.Column="1" Height="34" Margin="0,0,0,10" VerticalContentAlignment="Center"/>
         </Grid>
     </ScrollViewer>
 
@@ -22430,7 +24029,7 @@ function Show-StartupRowDetails {
         <WrapPanel Grid.Column="1" HorizontalAlignment="Right">
             <Button Name="btnBrowse" Content="Browse Command" MinWidth="124" Margin="0,0,8,8"/>
             <Button Name="btnOpenLocation" Content="Open Location" MinWidth="112" Margin="0,0,8,8"/>
-            <Button Name="btnOpenNative" Content="Open Native Editor" MinWidth="136" Margin="0,0,8,8"/>
+            <Button Name="btnOpenReg" Content="Open Registry" MinWidth="112" Margin="0,0,8,8"/>
             <Button Name="btnSave" Content="Save" MinWidth="94" IsDefault="True" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,8"/>
             <Button Name="btnClose" Content="Close" MinWidth="94" IsCancel="True" Margin="0,0,0,8"/>
         </WrapPanel>
@@ -22457,10 +24056,12 @@ function Show-StartupRowDetails {
     $cboStartupType = $editor.FindName("cboStartupType")
     $lblEnabled = $editor.FindName("lblEnabled")
     $chkEnabled = $editor.FindName("chkEnabled")
+    $lblTaskFile = $editor.FindName("lblTaskFile")
+    $txtTaskFile = $editor.FindName("txtTaskFile")
     $lblStatus = $editor.FindName("lblStatus")
     $btnBrowse = $editor.FindName("btnBrowse")
     $btnOpenLocation = $editor.FindName("btnOpenLocation")
-    $btnOpenNative = $editor.FindName("btnOpenNative")
+    $btnOpenReg = $editor.FindName("btnOpenReg")
     $btnSave = $editor.FindName("btnSave")
     $btnClose = $editor.FindName("btnClose")
 
@@ -22486,7 +24087,8 @@ function Show-StartupRowDetails {
     $txtValueName.Text = $valueName
     $chkEnabled.IsChecked = ((Get-StartupCellValue $row "Enabled") -ne "No")
 
-    Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $false
+    Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenReg) $false
+    Set-StartupEditorVisibility @($lblTaskFile, $txtTaskFile) $false
     $btnBrowse.Visibility = [System.Windows.Visibility]::Visible
 
     switch ($tabName) {
@@ -22516,10 +24118,21 @@ function Show-StartupRowDetails {
             $lblCommand.Text = "Notes"
             $lblLocation.Text = "Task path"
             $lblValueName.Text = "Task identity"
-            Set-StartupEditorVisibility @($btnBrowse, $btnOpenNative) $true
+            # The task's on-disk definition (its own "taskdir" file under the
+            # task store, not C:\Windows) is exposed as an editable line so the
+            # Open Location button reveals exactly what the user points it at.
+            $txtTaskFile.Text = (Get-WmtTaskFileLocation -TaskPath $taskPath -TaskName $taskName)
+            Set-StartupEditorVisibility @($btnBrowse) $true
+            Set-StartupEditorVisibility @($lblTaskFile, $txtTaskFile) $true
             $btnBrowse.Visibility = [System.Windows.Visibility]::Collapsed
-            $btnOpenNative.Content = "Open Task Scheduler"
-            $lblHint.Text = "Task names/paths are read-only here. Use Save to enable or disable, or open Task Scheduler for advanced edits."
+            # No per-task "Open Task Scheduler" button here: taskschd.msc
+            # cannot be deep-linked to a specific task from the command line,
+            # so the button would just open the scheduler root and mislead.
+            # The main window's Scheduled Tasks row carries the scheduler
+            # button instead. The old per-entry native-editor button was
+            # removed entirely: services.msc belongs on the main window's
+            # Services row and no other tab ever showed this button.
+            $lblHint.Text = "Task names/paths are read-only. The Task file line is editable - Open Location reveals it in the task store. Use the Task Scheduler button on the main window for the native console."
         }
         "Context Menu" {
             $display = Get-WmtRegistryDefaultValue $ctxPath
@@ -22542,19 +24155,18 @@ function Show-StartupRowDetails {
             $txtDisplayName.Text = Get-StartupCellValue $row "DisplayName"
             $txtCommand.Text = "Service binary paths are not edited here. Use Registry Editor or sc.exe config for advanced service path changes."
             $txtCommand.IsReadOnly = $true
-            $txtLocation.Text = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+            $txtLocation.Text = (Get-WmtServiceFilePath -ServiceName $serviceName)
             $txtValueName.Text = $serviceName
             $currentStartType = Get-StartupCellValue $row "StartType"
             if (-not (@("Automatic", "Manual", "Disabled") -contains $currentStartType) -and -not [string]::IsNullOrWhiteSpace($currentStartType)) { [void]$cboStartupType.Items.Add($currentStartType) }
             $cboStartupType.SelectedItem = $currentStartType
-            Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenNative) $true
+            Set-StartupEditorVisibility @($lblDisplayName, $txtDisplayName, $lblStartupType, $cboStartupType, $btnOpenReg) $true
             Set-StartupEditorVisibility @($lblEnabled, $chkEnabled, $btnBrowse) $false
-            $btnOpenNative.Content = "Open Services"
             $lblName.Text = "Service name"
             $lblCommand.Text = "Notes"
-            $lblLocation.Text = "Registry key"
+            $lblLocation.Text = "Binary path"
             $lblValueName.Text = "Service name"
-            $lblHint.Text = "Edit the service display name and startup type. Service name and binary path are kept read-only for safety."
+            $lblHint.Text = "Edit the service display name and startup type. Binary path and service name are read-only: Open Location reveals the binary file, Open Registry jumps to the service key. Use the Services button on the main window's Services row for the native console (it cannot focus a single service)."
         }
     }
 
@@ -22582,22 +24194,71 @@ function Show-StartupRowDetails {
                 switch ($tabName) {
                     "Windows" {
                         if ($entryType -eq "StartupFolder" -and -not [string]::IsNullOrWhiteSpace($itemPath) -and [System.IO.File]::Exists($itemPath)) { Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $itemPath) }
-                        elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Start-Process regedit.exe }
+                        elseif (-not [string]::IsNullOrWhiteSpace($rootRunPath)) { Open-WmtRegistryKey -RegistryPath $rootRunPath }
+                        else { Start-Process regedit.exe }
                     }
-                    "Scheduled Tasks" { Start-Process taskschd.msc }
-                    "Context Menu" { Start-Process regedit.exe }
-                    "Services" { Start-Process services.msc }
+                    "Scheduled Tasks" {
+                        # Reveal the task's own file inside the task store (the
+                        # taskdir), selecting it in Explorer - never dump the
+                        # user at C:\Windows root. The editable Task file line
+                        # drives this, so it can be repointed before opening.
+                        $taskFileLine = ([string]$txtTaskFile.Text).Trim()
+                        if ([string]::IsNullOrWhiteSpace($taskFileLine)) { $taskFileLine = Get-WmtTaskFileLocation -TaskPath $taskPath -TaskName $taskName }
+                        if ([string]::IsNullOrWhiteSpace($taskFileLine)) { throw "Task file location is unknown." }
+                        $taskFileLine = [Environment]::ExpandEnvironmentVariables($taskFileLine)
+                        # Scheduler-style values ("\Microsoft\Windows\Foo") and
+                        # bare relative paths resolve into the task store; only
+                        # drive-lettered or UNC paths are used verbatim.
+                        if (-not ($taskFileLine -match '^([A-Za-z]:|\\\\)')) {
+                            $taskFileLine = Join-Path (Join-Path $env:SystemRoot "System32\Tasks") ($taskFileLine.TrimStart('\', '/'))
+                        }
+                        if ([System.IO.File]::Exists($taskFileLine)) {
+                            Start-Process explorer.exe -ArgumentList ("/select,`"{0}`"" -f $taskFileLine)
+                        }
+                        else {
+                            # Missing file: walk up to the nearest existing
+                            # folder. The task store root always exists, so the
+                            # climb stops inside System32\Tasks instead of
+                            # surfacing C:\Windows root.
+                            $folder = Split-Path $taskFileLine -Parent
+                            while (-not [string]::IsNullOrEmpty($folder) -and -not [System.IO.Directory]::Exists($folder)) {
+                                $parent = Split-Path $folder -Parent
+                                if ([string]::IsNullOrEmpty($parent) -or $parent -ieq $folder) { $folder = ""; break }
+                                $folder = $parent
+                            }
+                            if (-not [string]::IsNullOrEmpty($folder) -and [System.IO.Directory]::Exists($folder)) {
+                                Start-Process explorer.exe -ArgumentList ("`"{0}`"" -f $folder)
+                            }
+                            else {
+                                throw "Task file was not found on disk: $taskFileLine"
+                            }
+                        }
+                    }
+                    "Context Menu" { Open-WmtRegistryKey -RegistryPath $ctxPath }
+                    "Services" {
+                        # Navigate to the service's own binary (Image Path,
+                        # following the svchost ServiceDll parameter) and select
+                        # it in Explorer. If the binary cannot be resolved from
+                        # the registry, fall back to the service's registry key.
+                        $svcFile = Get-WmtServiceFilePath -ServiceName $serviceName
+                        if ([string]::IsNullOrWhiteSpace($svcFile)) {
+                            Open-WmtRegistryKey -RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                            return
+                        }
+                        Show-WmtFileInExplorer -FilePath $svcFile -MissingMessage ("Service file was not found on disk: {0}" -f $svcFile)
+                    }
                 }
             }
             catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
         }.GetNewClosure())
 
-    $btnOpenNative.Add_Click({
+    $btnOpenReg.Add_Click({
             try {
                 switch ($tabName) {
-                    "Scheduled Tasks" { Start-Process taskschd.msc }
-                    "Services" { Start-Process services.msc }
-                    default { Start-Process regedit.exe }
+                    "Services" {
+                        if ([string]::IsNullOrWhiteSpace($serviceName)) { throw "Service name is unknown." }
+                        Open-WmtRegistryKey -RegistryPath "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
+                    }
                 }
             }
             catch { $lblStatus.Text = "Open failed: $($_.Exception.Message)" }
@@ -22660,14 +24321,12 @@ function Show-StartupRowDetails {
                     }
                     "Scheduled Tasks" {
                         if ([string]::IsNullOrWhiteSpace($taskName)) { throw "Task name is missing." }
-                        if ([bool]$chkEnabled.IsChecked) {
-                            Enable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop | Out-Null
-                            Set-StartupCellValue $row "State" "Ready"
-                        }
-                        else {
-                            Disable-ScheduledTask -TaskName $taskName -TaskPath $taskPath -ErrorAction Stop | Out-Null
-                            Set-StartupCellValue $row "State" "Disabled"
-                        }
+                        # COM engine route: the module cmdlets fail wholesale on
+                        # broken CIM task stores, this path survives them.
+                        $taskAction = if ([bool]$chkEnabled.IsChecked) { "Enable" } else { "Disable" }
+                        $taskResult = Invoke-WmtScheduledTaskAction -Action $taskAction -TaskName $taskName -TaskPath $taskPath
+                        if (-not $taskResult.Success) { throw $taskResult.Message }
+                        Set-StartupCellValue $row "State" $(if ($taskAction -eq "Enable") { "Ready" } else { "Disabled" })
                     }
                     "Context Menu" {
                         if ([string]::IsNullOrWhiteSpace($ctxPath)) { throw "Registry key is missing." }
@@ -22851,7 +24510,9 @@ function Invoke-StartupWindowsLoad {
 }
 
 function Invoke-StartupTasksLoad {
-    $tasks = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Select-Object TaskName, TaskPath, State)
+    # COM engine instead of the module cmdlets: it survives broken CIM task
+    # stores and answers in milliseconds even on slow machines.
+    $tasks = @(Get-WmtScheduledTaskRows | Select-Object TaskName, TaskPath, State)
     $table = [System.Data.DataTable]::new()
     foreach ($name in @("TaskName", "Path", "State")) { [void]$table.Columns.Add($name) }
     foreach ($task in @($tasks)) {
@@ -23045,10 +24706,12 @@ Add-GridContextMenu -TabObj $winTab -Buttons @($btnWinRefresh, $btnWinDetails, $
 
 $btnTaskRefresh = New-StartupButton $taskTab.Buttons "Refresh" "Standard"
 $btnTaskDetails = New-StartupButton $taskTab.Buttons "Details" "Standard"
+$btnTaskScheduler = New-StartupButton $taskTab.Buttons "Task Scheduler" "Standard"
+$btnTaskScheduler.ToolTip = "Open the native Task Scheduler console (taskschd.msc). The console cannot jump straight to a task, so use its search/navigation to reach the one you want."
 $btnTaskEnable = New-StartupButton $taskTab.Buttons "Enable" "Success"
 $btnTaskDisable = New-StartupButton $taskTab.Buttons "Disable" "Warning"
 $btnTaskDelete = New-StartupButton $taskTab.Buttons "Delete" "Danger"
-Add-GridContextMenu -TabObj $taskTab -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
+Add-GridContextMenu -TabObj $taskTab -Buttons @($btnTaskRefresh, $btnTaskDetails, $btnTaskScheduler, $btnTaskEnable, $btnTaskDisable, $btnTaskDelete)
 
 $btnCtxRefresh = New-StartupButton $ctxTab.Buttons "Refresh" "Standard"
 $btnCtxDetails = New-StartupButton $ctxTab.Buttons "Details" "Standard"
@@ -23059,11 +24722,13 @@ Add-GridContextMenu -TabObj $ctxTab -Buttons @($btnCtxRefresh, $btnCtxDetails, $
 
 $btnSvcRefresh = New-StartupButton $svcTab.Buttons "Refresh" "Standard"
 $btnSvcDetails = New-StartupButton $svcTab.Buttons "Details" "Standard"
+$btnSvcConsole = New-StartupButton $svcTab.Buttons "Services" "Standard"
+$btnSvcConsole.ToolTip = "Open the native Services console (services.msc). The console cannot jump straight to a service, so use its list to reach the one you want."
 $btnSvcEnable = New-StartupButton $svcTab.Buttons "Enable Auto" "Success"
 $btnSvcManual = New-StartupButton $svcTab.Buttons "Manual" "Primary"
 $btnSvcDisable = New-StartupButton $svcTab.Buttons "Disable" "Warning"
 $btnSvcDelete = New-StartupButton $svcTab.Buttons "Delete" "Danger"
-Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
+Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcConsole, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
 
 $btnWinRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Windows" $true }.GetNewClosure())
 $btnWinDetails.Add_Click({ & $fnShowStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure())
@@ -23085,6 +24750,17 @@ $btnWinDelete.Add_Click({
 
 $btnTaskRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Scheduled Tasks" $true }.GetNewClosure())
 $btnTaskDetails.Add_Click({ & $fnShowStartupRowDetails $taskTab "Task Details" }.GetNewClosure())
+$btnTaskScheduler.Add_Click({
+        # taskschd.msc cannot be deep-linked to a specific task from the
+        # command line (its only documented switches are the remote /s /u /p),
+        # so this hands over the console itself rather than pretending to
+        # focus a task.
+        try {
+            Start-Process -FilePath "taskschd.msc" -ErrorAction Stop
+            Write-GuiLog "[Scheduled Tasks] Opened Windows Task Scheduler (taskschd.msc)."
+        }
+        catch { Write-GuiLog "[Scheduled Tasks] Could not open Task Scheduler: $($_.Exception.Message)" }
+    }.GetNewClosure())
 $btnTaskEnable.Add_Click({ & $fnInvokeStartupTaskSelection Enable }.GetNewClosure())
 $btnTaskDisable.Add_Click({ & $fnInvokeStartupTaskSelection Disable }.GetNewClosure())
 $btnTaskDelete.Add_Click({ & $fnInvokeStartupTaskSelection Delete }.GetNewClosure())
@@ -23103,6 +24779,16 @@ $btnCtxDelete.Add_Click({
 
 $btnSvcRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Services" $true }.GetNewClosure())
 $btnSvcDetails.Add_Click({ & $fnShowStartupRowDetails $svcTab "Service Details" }.GetNewClosure())
+$btnSvcConsole.Add_Click({
+        # services.msc cannot be deep-linked to a specific service from the
+        # command line, so this hands over the console itself rather than
+        # pretending to focus a service (same approach as Task Scheduler).
+        try {
+            Start-Process -FilePath "services.msc" -ErrorAction Stop
+            Write-GuiLog "[Services] Opened Windows Services console (services.msc)."
+        }
+        catch { Write-GuiLog "[Services] Could not open Services console: $($_.Exception.Message)" }
+    }.GetNewClosure())
 $btnSvcEnable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Automatic -ErrorAction SilentlyContinue; $row["StartType"] = "Automatic" } } }.GetNewClosure())
 $btnSvcManual.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Manual -ErrorAction SilentlyContinue; $row["StartType"] = "Manual" } } }.GetNewClosure())
 $btnSvcDisable.Add_Click({ foreach ($row in Get-WmtDataGridSelectedRows $svcTab.Grid) { $name = [string]$row["Name"]; if ($name) { Set-Service -Name $name -StartupType Disabled -ErrorAction SilentlyContinue; $row["StartType"] = "Disabled" } } }.GetNewClosure())
@@ -23593,6 +25279,11 @@ powercfg /S SCHEME_CURRENT | Out-Null
     <SolidColorBrush x:Key="DangerText" Color="#FFF5F5"/>
     <SolidColorBrush x:Key="WarningText" Color="#0D1117"/>
     <SolidColorBrush x:Key="InfoText" Color="#F0F6FC"/>
+    <!-- Driver list status row tints (overridden per theme; see ThemePalettes) -->
+    <SolidColorBrush x:Key="DrvTintInUse" Color="#0D238636"/>
+    <SolidColorBrush x:Key="DrvTintOld" Color="#1AD29922"/>
+    <SolidColorBrush x:Key="DrvTintUnattached" Color="#1ADA3633"/>
+    <SolidColorBrush x:Key="DrvTintInactive" Color="#128B949E"/>
 
     <!-- Subtle Shadow Effects (reduced for clarity) -->
     <DropShadowEffect x:Key="CardShadow" ShadowDepth="1" BlurRadius="4" Opacity="0.15" Color="#000000"/>
@@ -23873,6 +25564,20 @@ powercfg /S SCHEME_CURRENT | Out-Null
             <Trigger Property="IsMouseOver" Value="True">
                 <Setter Property="Background" Value="{DynamicResource BgHover}"/>
             </Trigger>
+        </Style.Triggers>
+    </Style>
+
+    <!-- Driver list row: zebra base + status tint. Hover/selection triggers are
+         re-declared AFTER the status triggers so selecting or hovering a tinted
+         row still wins over the tint (last active trigger in a style wins). -->
+    <Style x:Key="DrvItem" TargetType="ListViewItem" BasedOn="{StaticResource FwItem}">
+        <Style.Triggers>
+            <DataTrigger Binding="{Binding Status}" Value="In Use"><Setter Property="Background" Value="{DynamicResource DrvTintInUse}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Old"><Setter Property="Background" Value="{DynamicResource DrvTintOld}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Unattached"><Setter Property="Background" Value="{DynamicResource DrvTintUnattached}"/></DataTrigger>
+            <DataTrigger Binding="{Binding Status}" Value="Inactive"><Setter Property="Background" Value="{DynamicResource DrvTintInactive}"/></DataTrigger>
+            <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="{DynamicResource BgHover}"/></Trigger>
+            <Trigger Property="IsSelected" Value="True"><Setter Property="Background" Value="{DynamicResource Accent}"/></Trigger>
         </Style.Triggers>
     </Style>
 
@@ -24191,7 +25896,7 @@ powercfg /S SCHEME_CURRENT | Out-Null
                 <!-- Library List (initially hidden) -->
                 <Border Name="brdLibraryList" Grid.Row="2" Style="{StaticResource CardStyle}" Padding="0" Visibility="Collapsed">
                     <DockPanel>
-                        <Border DockPanel.Dock="Top" Style="{StaticResource ModernSearchBoxStyle}" Margin="8,8,8,0">
+                        <Border DockPanel.Dock="Top" Style="{StaticResource ModernSearchBoxStyle}" Margin="8,8,8,8">
                             <Grid>
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="Auto"/>
@@ -24220,7 +25925,7 @@ powercfg /S SCHEME_CURRENT | Out-Null
                             </Grid>
                         </Border>
                         <ListView Name="lstLibrary" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0"
-                                  SelectionMode="Single" ItemContainerStyle="{StaticResource FwItem}"
+                                  SelectionMode="Extended" ItemContainerStyle="{StaticResource FwItem}"
                                   VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
                             <ListView.ContextMenu>
                                 <ContextMenu Name="ctxLibrary">
@@ -24232,6 +25937,7 @@ powercfg /S SCHEME_CURRENT | Out-Null
                                     <MenuItem Name="miLibGoToDir" Header="Go to install directory" ToolTip="Open the folder where the game is installed"/>
                                     <MenuItem Name="miLibStorePage" Header="Open store page" ToolTip="Open the game's store page in your browser"/>
                                     <MenuItem Name="miLibCopyId" Header="Copy ID" ToolTip="Copy the game ID to clipboard"/>
+                                    <MenuItem Name="miLibCopyRows" Header="Copy Row Data" ToolTip="Copy the selected row(s) as tab-separated text, including the IsUe (Unreal Engine / Fab) tag"/>
                                 </ContextMenu>
                             </ListView.ContextMenu>
                             <ListView.View>
@@ -24258,6 +25964,7 @@ powercfg /S SCHEME_CURRENT | Out-Null
                         <StackPanel Grid.Column="0" Orientation="Horizontal" HorizontalAlignment="Left">
                             <Button Name="btnBackToCatalog" Content="Back to Catalog" Style="{StaticResource ActionBtn}" ToolTip="Return to the software catalog" Visibility="Collapsed"/>
                             <Button Name="btnLibraryRefresh" Content="Refresh Library" Style="{StaticResource ActionBtn}" ToolTip="Re-scan Steam manifests and refresh Legendary/GOGDL caches" Visibility="Collapsed"/>
+                            <Button Name="btnToggleFabAssets" Content="Fab Assets: Hidden" Style="{StaticResource ActionBtn}" ToolTip="Show or hide Unreal Engine / Fab marketplace assets in Your Library. They are still scanned for updates either way." Visibility="Collapsed"/>
                             <TextBlock Name="lblLibraryStatus" Text="" VerticalAlignment="Center" Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" Margin="12,0,0,0"/>
                         </StackPanel>
                         <!-- Catalog actions (always visible) -->
@@ -24924,6 +26631,21 @@ powercfg /S SCHEME_CURRENT | Out-Null
                 </Border>
 
             </WrapPanel>
+
+            <!-- TWEAKS CONFIG EXPORT/IMPORT (bottom of the Tweaks page) -->
+            <Border Background="{DynamicResource BgPanel}" CornerRadius="8" BorderThickness="0" Margin="10" Padding="15">
+                <Grid>
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" VerticalAlignment="Center" Margin="0,0,12,0">
+                        <TextBlock Text="Tweaks Configuration" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
+                        <TextBlock Text="Export the current state of every tweak to a JSON file, or import a JSON file to apply those tweak states on this PC. Import only changes tweaks that differ from the file." FontSize="11" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Name="btnTweaksExport" Content="Export JSON" Style="{StaticResource ActionBtn}" ToolTip="Save the current on/off state of every tweak to a JSON file you can keep or share." Margin="0,0,8,0"/>
+                        <Button Name="btnTweaksImport" Content="Import JSON" Style="{StaticResource PositiveBtn}" ToolTip="Apply tweak states from a previously exported JSON file. Tweaks already in the desired state are left untouched."/>
+                    </StackPanel>
+                </Grid>
+            </Border>
         </StackPanel>
     </ScrollViewer>
     <!-- Loading overlay OUTSIDE ScrollViewer so it covers the viewport, not scrollable content -->
@@ -25469,28 +27191,118 @@ powercfg /S SCHEME_CURRENT | Out-Null
             </Grid>
 
             <!-- DRIVERS PANEL -->
-            <StackPanel Name="pnlDrivers" Visibility="Collapsed">
-                <Border Style="{StaticResource CardStyle}">
-                    <StackPanel>
-                        <StackPanel Margin="0,0,0,20">
+            <Grid Name="pnlDrivers" Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- Header Card -->
+                <Border Grid.Row="0" Style="{StaticResource CardStyle}" Margin="0,0,0,12">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="380"/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
                             <TextBlock Text="Driver Management" Style="{StaticResource SectionHeader}" Margin="0"/>
+                            <TextBlock Name="lblDrvStatus" Text="Ready — the driver store loads when you open this page" Foreground="{DynamicResource TextSecondary}" FontSize="13" TextWrapping="Wrap"/>
+                            <TextBlock FontSize="12" Margin="0,6,0,0" TextWrapping="Wrap">
+                                <Run Text="Highlighting:  " Foreground="{DynamicResource TextMuted}"/>
+                                <Run Text="● In Use   " Foreground="{DynamicResource Success}"/>
+                                <Run Text="● Old   " Foreground="{DynamicResource Warning}"/>
+                                <Run Text="● Unattached   " Foreground="{DynamicResource Danger}"/>
+                                <Run Text="● Inactive (disabled in Device Manager)" Foreground="{DynamicResource TextSecondary}"/>
+                            </TextBlock>
                         </StackPanel>
-                        <TextBlock Text="DRIVER TOOLS" Style="{StaticResource SubHeader}"/>
-                        <WrapPanel>
-                            <Button Name="btnDrvReport" Content="Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
-                            <Button Name="btnDrvBackup" Content="Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
-                            <Button Name="btnDrvGhost" Content="Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
-                            <Button Name="btnDrvClean" Content="Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
-                            <Button Name="btnDrvRestore" Content="Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
-                        </WrapPanel>
-                        <TextBlock Text="WINDOWS UPDATE SETTINGS" Style="{StaticResource SubHeader}" Margin="0,16,0,8"/>
-                        <WrapPanel>
-                            <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
-                            <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
-                        </WrapPanel>
-                    </StackPanel>
+                        <Border Grid.Column="1" Style="{StaticResource ModernSearchBoxStyle}" VerticalAlignment="Top">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <Path Grid.Column="0" Data="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z"
+                                      Fill="{DynamicResource TextMuted}" Stretch="Uniform" Height="14" Width="14"
+                                      VerticalAlignment="Center" Margin="12,0,6,0"/>
+                                <TextBox Name="txtDrvSearch" Grid.Column="1" Height="38"
+                                         VerticalContentAlignment="Center" Text="Search drivers..."
+                                         Background="Transparent" BorderThickness="0"
+                                         Padding="0,0,0,0" Margin="0"
+                                         FontSize="14"
+                                         Foreground="{DynamicResource TextSecondary}"
+                                         CaretBrush="{DynamicResource TextPrimary}"
+                                         SelectionBrush="{DynamicResource Accent}"
+                                         ToolTip="Filter by status, class, provider, driver or store file name"/>
+                                <Button Name="btnDrvClearSearch" Grid.Column="2" Content="X"
+                                        Width="28" Height="28" Margin="0,0,6,0"
+                                        VerticalAlignment="Center" HorizontalAlignment="Center"
+                                        Visibility="Collapsed" Cursor="Hand"
+                                        ToolTip="Clear search"
+                                        Style="{StaticResource SearchClearBtnStyle}"/>
+                            </Grid>
+                        </Border>
+                    </Grid>
                 </Border>
-            </StackPanel>
+
+                <!-- Driver List Card -->
+                <Border Grid.Row="1" Style="{StaticResource CardStyle}" Padding="0" Margin="0">
+                    <ListView Name="lstDrivers" Background="Transparent" Foreground="{DynamicResource TextPrimary}" BorderThickness="0" SelectionMode="Extended" AlternationCount="2" ItemContainerStyle="{StaticResource DrvItem}"
+                              VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Status" Width="92">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding Status}" FontWeight="Bold" ToolTip="{Binding StatusTooltip}">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding Status}" Value="In Use"><Setter Property="Foreground" Value="{DynamicResource Success}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Old"><Setter Property="Foreground" Value="{DynamicResource Warning}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Unattached"><Setter Property="Foreground" Value="{DynamicResource Danger}"/></DataTrigger>
+                                                            <DataTrigger Binding="{Binding Status}" Value="Inactive"><Setter Property="Foreground" Value="{DynamicResource TextMuted}"/></DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Header="Class" Width="120" DisplayMemberBinding="{Binding Class}"/>
+                                <GridViewColumn Header="Provider" Width="150" DisplayMemberBinding="{Binding Provider}"/>
+                                <GridViewColumn Header="Driver" Width="170" DisplayMemberBinding="{Binding OriginalName}"/>
+                                <GridViewColumn Header="Store File" Width="95" DisplayMemberBinding="{Binding PublishedName}"/>
+                                <GridViewColumn Header="Version" Width="115" DisplayMemberBinding="{Binding DisplayVer}"/>
+                                <GridViewColumn Header="Date" Width="90" DisplayMemberBinding="{Binding DisplayDate}"/>
+                                <GridViewColumn Header="Devices" Width="66">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <TextBlock Text="{Binding DevicesText}" ToolTip="{Binding DevicesTooltip}" HorizontalAlignment="Right"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                </Border>
+
+                <!-- Actions Card (all driver tools) -->
+                <Border Grid.Row="2" Style="{StaticResource CardStyle}" Margin="0,12,0,0">
+                    <WrapPanel HorizontalAlignment="Left">
+                        <Button Name="btnDrvReload" Content="Reload" Style="{StaticResource AccentBtn}"/>
+                        <Button Name="btnDrvReport" Content="Generate Report" Style="{StaticResource ActionBtn}" ToolTip="Create detailed driver list"/>
+                        <Button Name="btnDrvBackup" Content="Export Drivers" Style="{StaticResource ActionBtn}" ToolTip="Backup all drivers to folder"/>
+                        <Button Name="btnDrvGhost" Content="Remove Ghosts" Style="{StaticResource WarningBtn}" ToolTip="Remove disconnected devices"/>
+                        <Button Name="btnDrvClean" Content="Clean Old" Style="{StaticResource WarningBtn}" ToolTip="Remove old driver versions"/>
+                        <Button Name="btnDrvRestore" Content="Restore" Style="{StaticResource ActionBtn}" ToolTip="Restore from backup"/>
+                        <Button Name="btnToggleDrvUpdates" Content="Disable Auto-Drivers" Style="{StaticResource ActionBtn}" ToolTip="Toggle automatic driver updates via Windows Update."/>
+                        <Button Name="btnToggleDrvMeta" Content="Disable Metadata" Style="{StaticResource ActionBtn}" ToolTip="Toggle device metadata downloads from the internet. Blue = metadata disabled. Gray = metadata enabled (default)."/>
+                    </WrapPanel>
+                </Border>
+            </Grid>
 
             <!-- CLEANUP PANEL -->
             <StackPanel Name="pnlCleanup" Visibility="Collapsed">
@@ -25580,7 +27392,8 @@ powercfg /S SCHEME_CURRENT | Out-Null
                             <TextBlock Text="Windows Maintenance Tool v$AppVersion" FontSize="14" Foreground="{DynamicResource TextSecondary}" FontWeight="SemiBold"/>
                         </StackPanel>
                         <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top">
-                            <Button Name="btnStartWithWindows" Content="Start with Windows" Style="{StaticResource ActionBtn}" Height="32" MinWidth="140" Margin="0,0,8,0" ToolTip="Launch WMT automatically when Windows starts"/>
+                            <Button Name="btnStartWithWindows" Content="Start with Windows: Off" Style="{StaticResource ActionBtn}" Height="32" MinWidth="170" Margin="0,0,8,0" ToolTip="WMT does not launch at logon (no startup task, or task state: Disabled). Click to set the state to On."/>
+                            <Button Name="btnLaunchMinimized" Content="Launch Minimized: Off" Style="{StaticResource ActionBtn}" Height="32" MinWidth="160" Margin="0,0,8,0" ToolTip="WMT starts with a visible window. Click to start hidden in the system tray instead."/>
                             <Button Name="btnDisableBgJobs" Content="Bg Jobs: On" Style="{StaticResource ActionBtn}" Height="32" MinWidth="130" Margin="0,0,8,0" ToolTip="Background auto-refresh ENABLED. My Device info and Tweaks states load automatically. Click to disable."/>
                             <Button Name="btnDisableUpdateScans" Content="Update Scans: On" Style="{StaticResource ActionBtn}" Height="32" MinWidth="150" Margin="0,0,8,0" ToolTip="Disable all automatic and tray-triggered update scans. Manual scans will still work. Click to toggle."/>
                             <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" ToolTip="Switch between dark and light theme"/>
@@ -25680,6 +27493,10 @@ dark  = @{
     WarningText   = "#0D1117"
     InfoText      = "#F0F6FC"
     LogText       = "#3FB950"
+    DrvTintInUse    = "#0D238636"
+    DrvTintOld      = "#1AD29922"
+    DrvTintUnattached = "#1ADA3633"
+    DrvTintInactive = "#128B949E"
 }
 light = @{
     BgDark        = "#F5F7FA"
@@ -25706,6 +27523,10 @@ light = @{
     WarningText   = "#FFFFFF"
     InfoText      = "#FFFFFF"
     LogText       = "#166534"
+    DrvTintInUse    = "#1A15803D"
+    DrvTintOld      = "#26B45309"
+    DrvTintUnattached = "#26B91C1C"
+    DrvTintInactive = "#1A64748B"
 }
 }
 
@@ -26085,6 +27906,7 @@ $iconDeferTimer.Add_Tick({
     Set-ButtonIcon "btnFwImport" "M12,3L4.5,8V14C4.5,17.93 7.36,21.43 12,23C16.64,21.43 19.5,17.93 19.5,14V8L12,3M12,6.15L17.5,10.2V14C17.5,16.96 15.56,19.5 12,20.82C8.44,19.5 6.5,16.96 6.5,14V10.2L12,6.15M12,9L8,13H11V17H13V13H16L12,9Z" "Import" "Import firewall policy (.wfw)"
     Set-ButtonIcon "btnFwDefaults" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2M7,9H9V13H11V9H13V13H15V9H17V15H7V9Z" "Restore Defaults" "Reset firewall to default rules"
     Set-ButtonIcon "btnFwPurge" "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z" "Delete All" "Delete all firewall rules"
+    Set-ButtonIcon "btnDrvReload" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Reload" "Rescans the driver store and device usage" 16
     Set-ButtonIcon "btnDrvReport" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Generate Driver Report" "Saves a list of all installed drivers to the data folder"
     Set-ButtonIcon "btnDrvGhost" "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4M11,16.5L18,9.5L16.59,8.09L11,13.67L7.91,10.59L6.5,12L11,16.5Z" "Remove Ghost Devices" "Removes disconnected (ghost) PnP devices"
     Set-ButtonIcon "btnDrvBackup" "M13,9H18.5L13,3.5V9M6,2H14L20,8V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V4C4,2.89 4.89,2 6,2M15,18V16H6V18H15M18,14V12H6V14H18Z" "Export Drivers" "Exports all drivers to the data folder"
@@ -26111,6 +27933,8 @@ $iconDeferTimer.Add_Tick({
     Set-ButtonIcon "btnBackToUpdates" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Updates" "Return to the package updates view" 16
     Set-ButtonIcon "btnBackToCatalog" "M20,11H7.83L13.42,5.41L12,4L4,12L12,20L13.41,18.59L7.83,13H20V11Z" "Back to Catalog" "Return to the software catalog" 16
     Set-ButtonIcon "btnLibraryRefresh" "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z" "Refresh Library" "Re-scan Steam manifests and refresh Legendary/GOGDL caches" 16
+    Set-ButtonIcon "btnToggleFabAssets" "M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5Z" "Fab Assets: Hidden" "Show or hide Unreal Engine / Fab marketplace assets in Your Library. They are still scanned for updates either way." 16
+    try { Set-WmtFabAssetsButtonLabel } catch {}
     $iconDeferTimer = $null
 })
 $iconDeferTimer.Start()
@@ -26340,6 +28164,33 @@ if ($script:TweakMetaData -and $script:TweakMetaData.ContainsKey($ButtonName)) {
 return $null
 }
 
+# Some tweaks are exposed twice - once on the Tweaks page and once as a
+# shortcut on the My Device page (the shortcut just re-raises the Tweaks page
+# button's Click). They share one underlying flip, so both members of a pair
+# must always show and record the same state; otherwise exports can contain
+# contradictory entries and importing would click both members and flip the
+# tweak straight back to its previous state.
+$script:TweakToggleSiblingNames = @{
+"btnToggleHags"                = "btnMyDeviceHagsToggle"
+"btnToggleMemCompress"         = "btnMyDeviceMemCompressToggle"
+"btnToggleHibernate"           = "btnMyDeviceHibernateToggle"
+"btnMyDeviceHagsToggle"        = "btnToggleHags"
+"btnMyDeviceMemCompressToggle" = "btnToggleMemCompress"
+"btnMyDeviceHibernateToggle"   = "btnToggleHibernate"
+}
+# The My Device side of each pair. These buttons are pure delegates of their
+# Tweaks-page twin (clicking one re-raises the twin's Click), so the import
+# planner resolves their file entries to the canonical button. Keeping this
+# list directional is what makes the resolution unambiguous - the sibling map
+# above is bidirectional and must not be used to decide which side is the
+# mirror.
+$script:TweakToggleMirrorNames = @(
+    "btnMyDeviceHagsToggle",
+    "btnMyDeviceMemCompressToggle",
+    "btnMyDeviceHibernateToggle"
+)
+$script:TweakToggleSyncing = $false
+
 function Update-WmtTweakToggle {
 param(
     $Button,
@@ -26350,6 +28201,21 @@ param(
     [string]$RestartHint = ""
 )
 if (-not $Button) { return }
+# Record the latest known state of every toggle button so the Tweaks page
+# Export/Import can serialize the full configuration to JSON and restore it
+# later. Update-WmtTweakToggle is the single choke point through which every
+# toggle state (initial load + every click) is applied to the UI.
+try {
+    if ($Button.Name) {
+        if (-not $script:TweakCurrentStates) { $script:TweakCurrentStates = [ordered]@{} }
+        $script:TweakCurrentStates[$Button.Name] = @{
+            On       = [bool]$IsOn
+            OnLabel  = [string]$OnLabel
+            OffLabel = [string]$OffLabel
+        }
+    }
+}
+catch { }
 # Auto-lookup metadata from central table if not explicitly provided
 if ([string]::IsNullOrWhiteSpace($Description) -and [string]::IsNullOrWhiteSpace($RestartHint)) {
     $btnName = $Button.Name
@@ -26383,6 +28249,26 @@ try {
 }
 catch {
     # Fail silently - don't let one button break the rest
+}
+
+# Keep the paired twin button (the same tweak on the Tweaks page and the My
+# Device page) in sync - recorded state, text, color and tooltip. The guard
+# flag prevents infinite recursion: the twin's own update skips re-syncing.
+if (-not $script:TweakToggleSyncing) {
+    $siblingName = $null
+    try { if ($Button.Name) { $siblingName = $script:TweakToggleSiblingNames[[string]$Button.Name] } } catch { }
+    if ($siblingName -and $siblingName -ne [string]$Button.Name) {
+        $siblingButton = Get-Ctrl $siblingName
+        if ($siblingButton) {
+            $script:TweakToggleSyncing = $true
+            try {
+                Update-WmtTweakToggle -Button $siblingButton -IsOn $IsOn -OnLabel $OnLabel -OffLabel $OffLabel -Description $Description -RestartHint $RestartHint
+            }
+            finally {
+                $script:TweakToggleSyncing = $false
+            }
+        }
+    }
 }
 }
 
@@ -26471,6 +28357,324 @@ catch {
     # Fail silently
 }
 }
+
+# --- Tweaks configuration Export / Import (JSON) -------------------------------
+# Export: serializes the latest known on/off state of every tweak toggle
+#         (recorded by Update-WmtTweakToggle in $script:TweakCurrentStates)
+#         to a versioned JSON file the user picks.
+# Import: reads such a file and APPLIES the states by raising the Click event
+#         of each toggle whose current state differs from the file. Click
+#         handlers are flip-based (read live system state -> apply opposite),
+#         so this reuses the exact same, battle-tested apply logic as manual
+#         clicking - including per-tweak cache invalidation, logging and
+#         admin handling. My Device toggle entries are resolved to their main
+#         Tweaks-page twin (redundant when the file lists both members), and
+#         toggles whose state is recorded lazily (Support page) or inside
+#         conditional blocks of the background load (Power User section) are
+#         refreshed before planning so they import correctly. Buttons for
+#         tweaks missing from the file, unknown to this build, or
+#         unsupported/disabled on this system are skipped and reported by name.
+# The payload builder and the import planner are separate pure functions so
+# the harness can exercise them without WPF dialogs.
+
+function New-WmtTweaksExportPayload {
+# Pure: builds the versioned export payload from the recorded toggle states.
+# Returns $null when no states have been recorded yet.
+if (-not $script:TweakCurrentStates -or $script:TweakCurrentStates.Count -eq 0) { return $null }
+
+$tweaks = [ordered]@{}
+foreach ($name in @($script:TweakCurrentStates.Keys)) {
+    $e = $script:TweakCurrentStates[$name]
+    if (-not $e) { continue }
+    $on = [bool]$e.On
+    $tweaks[$name] = [ordered]@{
+        on    = $on
+        label = $(if ($on) { [string]$e.OnLabel } else { [string]$e.OffLabel })
+    }
+}
+
+return [ordered]@{
+    type     = "wmt-tweaks"
+    version  = 1
+    exported = (Get-Date).ToString("o")
+    count    = $tweaks.Count
+    tweaks   = $tweaks
+}
+}
+
+function Format-WmtNameList {
+# Compact name list for dialogs: up to $Max names, one per line, then a
+# "... and N more" summary line when the list is longer.
+param(
+    [System.Collections.Generic.List[string]]$Names,
+    [int]$Max = 8
+)
+if (-not $Names -or $Names.Count -eq 0) { return "" }
+$shown = @($Names | Select-Object -First $Max)
+$out = ($shown -join "`n")
+if ($Names.Count -gt $Max) { $out += "`n... and $($Names.Count - $Max) more" }
+return $out
+}
+
+function Update-WmtTweakStatesForImport {
+# Ensures every toggle referenced by an import file has a recorded state
+# before the import plan is computed. Some toggles are recorded lazily or
+# only inside conditional sections of the background state load (Support page
+# buttons, the Power User section), so a fully supported toggle can
+# legitimately have no recorded state yet - the planner would then wrongly
+# report it as "unknown or unsupported". Only toggles that are actually
+# missing get refreshed; everything else is left untouched.
+param([string[]]$Names)
+
+if (-not $Names -or $Names.Count -eq 0) { return }
+foreach ($name in $Names) {
+    try {
+        if ($script:TweakCurrentStates -and $script:TweakCurrentStates.Contains($name)) { continue }
+        switch ($name) {
+            "btnStartWithWindows" {
+                # Re-reads the scheduled task and records via Update-WmtTweakToggle
+                Update-WmtStartWithWindowsButton
+            }
+            "btnLaunchMinimized" {
+                # Re-reads settings.json and records via Update-WmtTweakToggle
+                Update-WmtLaunchMinimizedButton
+            }
+            "btnPowerUserShowDevices" {
+                # Keep in sync with the Power User section of the background
+                # tweak-state load (same registry source, labels and check).
+                $btn = Get-Ctrl $name
+                if ($btn) {
+                    $v = (ConvertTo-Int (Get-WmtRegValue "HKCU:\Software\Microsoft\Windows\CurrentVersion\DeviceManager" "ShowHiddenDevices" 0) 0)
+                    Update-WmtTweakToggle $btn ($v -eq 1) "Hide Devices" "Show Hidden Devices"
+                }
+            }
+            "btnPowerUserSigDriver" {
+                $btn = Get-Ctrl $name
+                if ($btn) {
+                    $v = (ConvertTo-Int (Get-WmtRegValue "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceManager" "AllowNonSignedDrivers" 0) 0)
+                    Update-WmtTweakToggle $btn ($v -eq 1) "Test Mode Off" "Test Mode On"
+                }
+            }
+        }
+    }
+    catch {
+        # A failed refresh must never block the import; the planner reports
+        # the entry as skipped (by name) instead.
+    }
+}
+}
+
+function Get-WmtTweaksImportPlan {
+# Pure: filters a parsed export file down to the changes that should be
+# applied on this system. Returns Pending/AlreadyOk/Skipped/RedundantPairs
+# plus SkippedNames (why each entry was skipped); Pending entries carry the
+# button to click. Uses Get-Ctrl so real button lookup works in production
+# and can be stubbed in the harness.
+param($Data)
+
+$plan = [PSCustomObject]@{
+    Pending        = [System.Collections.Generic.List[object]]::new()
+    AlreadyOk      = 0
+    Skipped        = 0
+    RedundantPairs = 0
+    SkippedNames   = [System.Collections.Generic.List[string]]::new()
+}
+if (-not $Data -or -not $Data.PSObject.Properties["tweaks"]) { return $plan }
+
+# First pass: index entries by name so My Device mirror entries can be
+# resolved against their main Tweaks-page twin.
+$entryByName = @{}
+foreach ($prop in @($Data.tweaks.PSObject.Properties)) {
+    $n = [string]$prop.Name
+    if (-not $entryByName.ContainsKey($n)) { $entryByName[$n] = $prop.Value }
+}
+
+foreach ($prop in @($Data.tweaks.PSObject.Properties)) {
+    $name = [string]$prop.Name
+    $entry = $prop.Value
+    if (-not $entry -or -not $entry.PSObject.Properties["on"]) { $plan.Skipped++; $plan.SkippedNames.Add("$name (malformed entry)"); continue }
+    $desired = $false
+    try { $desired = [bool]$entry.on } catch { $plan.Skipped++; $plan.SkippedNames.Add("$name (unreadable on/off value)"); continue }
+
+    # My Device toggle buttons are delegated mirrors of their Tweaks-page twin
+    # (clicking one re-raises the twin's Click), so a pair must be applied
+    # exactly once. Only the mirror side resolves: when the file also lists
+    # the main toggle, the mirror entry is redundant; when it does not, the
+    # mirror's value drives the twin. The main Tweaks-page entry is always
+    # planned as itself.
+    $planName = $name
+    try {
+        if ($script:TweakToggleMirrorNames -and $script:TweakToggleMirrorNames -contains $name) {
+            $twin = $null
+            try { $twin = [string]$script:TweakToggleSiblingNames[$name] } catch { }
+            if ($twin -and $twin -ne $name) {
+                if ($entryByName.ContainsKey($twin)) { $plan.RedundantPairs++; continue }
+                $planName = $twin
+            }
+        }
+    }
+    catch { }
+
+    if (-not $script:TweakCurrentStates -or -not $script:TweakCurrentStates.Contains($planName)) { $plan.Skipped++; $plan.SkippedNames.Add("$name (state not loaded on this system)"); continue }
+    $btn = Get-Ctrl $planName
+    if (-not $btn) { $plan.Skipped++; $plan.SkippedNames.Add("$name (button not found)"); continue }
+    if ($btn.IsEnabled -ne $true) { $plan.Skipped++; $plan.SkippedNames.Add("$name (disabled on this system)"); continue }
+
+    $current = $false
+    try { $current = [bool]$script:TweakCurrentStates[$planName].On } catch {}
+    if ($current -eq $desired) { $plan.AlreadyOk++; continue }
+    [void]$plan.Pending.Add([PSCustomObject]@{ Name = $planName; Desired = $desired; Button = $btn })
+}
+return $plan
+}
+
+function Export-WmtTweaksConfiguration {
+try {
+    $payload = New-WmtTweaksExportPayload
+    if (-not $payload) {
+        Show-WmtMessageBox -Message "No tweak states have been loaded yet. Open the Tweaks tab, wait for the states to finish loading, then export again." -Title "Export Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $dlg = [Microsoft.Win32.SaveFileDialog]::new()
+    $dlg.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*"
+    $dlg.FileName = "WMT-Tweaks-$(Get-Date -Format 'yyyy-MM-dd').json"
+    $dlg.Title = "Export Tweaks Configuration"
+    if ($dlg.ShowDialog() -ne $true) { return }
+
+    $json = $payload | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($dlg.FileName, $json, (New-Object System.Text.UTF8Encoding($false)))
+
+    Write-GuiLog "Exported $($payload.count) tweak states to $($dlg.FileName)"
+    Show-WmtMessageBox -Message "Exported $($payload.count) tweak states to:`n$($dlg.FileName)" -Title "Export Tweaks" -Image Information | Out-Null
+}
+catch {
+    Write-GuiLog "Tweaks export failed: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Export failed:`n$($_.Exception.Message)" -Title "Export Tweaks" -Image Error | Out-Null
+}
+}
+
+function Import-WmtTweaksConfiguration {
+try {
+    if (-not $script:TweakCurrentStates -or $script:TweakCurrentStates.Count -eq 0) {
+        Show-WmtMessageBox -Message "No tweak states have been loaded yet. Open the Tweaks tab, wait for the states to finish loading, then import again." -Title "Import Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $dlg = [Microsoft.Win32.OpenFileDialog]::new()
+    $dlg.Filter = "JSON Files (*.json)|*.json|All Files (*.*)|*.*"
+    $dlg.Title = "Import Tweaks Configuration"
+    if ($dlg.ShowDialog() -ne $true) { return }
+
+    $raw = [System.IO.File]::ReadAllText($dlg.FileName)
+    $data = $null
+    try { $data = $raw | ConvertFrom-Json } catch {}
+    if (-not $data -or -not $data.PSObject.Properties["tweaks"]) {
+        Show-WmtMessageBox -Message "This file is not a WMT tweaks export (the 'tweaks' section is missing). Please pick a file created by 'Export JSON'." -Title "Import Tweaks" -Image Error | Out-Null
+        return
+    }
+    if ($data.PSObject.Properties["type"] -and [string]$data.type -ne "wmt-tweaks") {
+        Show-WmtMessageBox -Message "This file has type '$([string]$data.type)', not 'wmt-tweaks'. Please pick a file created by 'Export JSON'." -Title "Import Tweaks" -Image Error | Out-Null
+        return
+    }
+
+    # Some toggles record their state lazily (Support page buttons) or inside
+    # conditional blocks of the background state load (Power User section).
+    # Refresh the ones this file references BEFORE planning, otherwise
+    # supported toggles would be misclassified as "unknown or unsupported".
+    try {
+        $fileNames = @($data.tweaks.PSObject.Properties | ForEach-Object { [string]$_.Name })
+        Update-WmtTweakStatesForImport -Names $fileNames
+    }
+    catch { }
+
+    $plan = Get-WmtTweaksImportPlan -Data $data
+    foreach ($skippedName in $plan.SkippedNames) {
+        Write-GuiLog "Tweaks import: skipped $($skippedName)"
+    }
+
+    if ($plan.Pending.Count -eq 0) {
+        $msg = "Nothing to apply - all $($plan.AlreadyOk) known tweak(s) in the file already match the current state."
+        if ($plan.RedundantPairs -gt 0) { $msg += "`n`n$($plan.RedundantPairs) paired My Device entr$(if ($plan.RedundantPairs -eq 1) { 'y' } else { 'ies' }) handled through the main Tweaks toggle(s)." }
+        if ($plan.Skipped -gt 0) { $msg += "`n`nSkipped $($plan.Skipped) entr$(if ($plan.Skipped -eq 1) { 'y' } else { 'ies' }):`n$(Format-WmtNameList -Names $plan.SkippedNames)" }
+        Show-WmtMessageBox -Message $msg -Title "Import Tweaks" -Image Information | Out-Null
+        return
+    }
+
+    $notes = ""
+    if ($plan.RedundantPairs -gt 0) { $notes += "`n$($plan.RedundantPairs) paired My Device entr$(if ($plan.RedundantPairs -eq 1) { 'y' } else { 'ies' }) will be handled through the main Tweaks toggle(s)." }
+    if ($plan.Skipped -gt 0) { $notes += "`n$($plan.Skipped) unsupported entr$(if ($plan.Skipped -eq 1) { 'y' } else { 'ies' }) will be skipped: $(($plan.SkippedNames | Select-Object -First 4) -join ', ')$(if ($plan.Skipped -gt 4) { '...' })" }
+    $confirm = Show-WmtMessageBox -Message "Apply $($plan.Pending.Count) tweak change(s) from this file?`n`nTweaks already in the desired state are left untouched.$notes`n`nExplorer will be restarted afterwards so shell tweaks take effect; a few tweaks additionally need a sign-out." -Title "Import Tweaks" -Button ([System.Windows.MessageBoxButton]::YesNo) -Image Warning
+    if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    $applied = 0; $failed = 0; $converged = 0
+    Set-WmtBusyCursor -Busy
+    try {
+        foreach ($item in $plan.Pending) {
+            try {
+                # Re-check before clicking: an earlier toggle in this batch can
+                # already have brought this button to the desired state (the
+                # Tweaks page and My Device buttons for the same setting share
+                # one flip). Without this, clicking the second pair member
+                # would flip the tweak straight back to its previous state.
+                $nowOn = $false
+                try { $nowOn = [bool]$script:TweakCurrentStates[$item.Name].On } catch { }
+                if ($nowOn -eq $item.Desired) {
+                    $converged++
+                    Write-GuiLog "Tweaks import: $($item.Name) already $(if ($item.Desired) { 'ON' } else { 'OFF' }) after an earlier toggle; skipped."
+                    continue
+                }
+                Write-GuiLog "Tweaks import: switching $($item.Name) to $(if ($item.Desired) { 'ON' } else { 'OFF' })..."
+                $item.Button.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                $applied++
+            }
+            catch {
+                $failed++
+                Write-GuiLog "Tweaks import: $($item.Name) failed: $($_.Exception.Message)"
+            }
+        }
+    }
+    finally {
+        Set-WmtBusyCursor
+    }
+
+    # Shell tweaks (taskbar layout, context menu, File Explorer options, ...)
+    # only become visible once Explorer reloads. Restart it automatically so
+    # the desktop matches the freshly applied buttons. Harmless for non-shell
+    # tweaks; uses the same sequence as the "Restart Explorer" button.
+    $explorerRestarted = $false
+    if ($applied -gt 0) {
+        try {
+            Write-GuiLog "Tweaks import: restarting Explorer so shell tweaks take effect immediately..."
+            Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Milliseconds 500
+            Start-Process explorer
+            $explorerRestarted = $true
+            Write-GuiLog "Explorer restarted."
+        }
+        catch {
+            Write-GuiLog "Tweaks import: Explorer restart failed: $($_.Exception.Message)"
+        }
+    }
+
+    Write-GuiLog "Tweaks import finished: $applied applied, $failed failed, $($plan.AlreadyOk) already correct, $converged converged, $($plan.RedundantPairs) paired-redundant, $($plan.Skipped) skipped."
+    $summary = "Import finished.`n`nApplied: $applied$(if ($failed -gt 0) { "`nFailed: $failed" })`nAlready correct: $($plan.AlreadyOk)$(if ($converged -gt 0) { "`nConverged (paired toggle already switched): $converged" })$(if ($plan.RedundantPairs -gt 0) { "`nPaired My Device entries handled via main toggle: $($plan.RedundantPairs)" })$(if ($plan.Skipped -gt 0) { "`nSkipped (unsupported/disabled on this system): $($plan.Skipped)" })$(if ($explorerRestarted) { "`n`nExplorer was restarted so shell tweaks take effect immediately." })"
+    if ($plan.Skipped -gt 0) { $summary += "`n$(Format-WmtNameList -Names $plan.SkippedNames -Max 6)" }
+    $summaryImage = [System.Windows.MessageBoxImage]::Information
+    if ($failed -gt 0) { $summaryImage = [System.Windows.MessageBoxImage]::Warning }
+    Show-WmtMessageBox -Message $summary -Title "Import Tweaks" -Image $summaryImage | Out-Null
+}
+catch {
+    Set-WmtBusyCursor
+    Write-GuiLog "Tweaks import failed: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Import failed:`n$($_.Exception.Message)" -Title "Import Tweaks" -Image Error | Out-Null
+}
+}
+
+$btnTweaksExport = Get-Ctrl "btnTweaksExport"
+if ($btnTweaksExport) { $btnTweaksExport.Add_Click({ Export-WmtTweaksConfiguration }.GetNewClosure()) }
+$btnTweaksImport = Get-Ctrl "btnTweaksImport"
+if ($btnTweaksImport) { $btnTweaksImport.Add_Click({ Import-WmtTweaksConfiguration }.GetNewClosure()) }
 
 function Get-WmtRegistryKeyValuesCached {
 param([string]$Path)
@@ -26614,10 +28818,6 @@ try {
     if ($script:TweakButtonStatesCache -and $script:TweakButtonStatesCache.Count -gt 0) {
         $regCache = $script:TweakButtonStatesCache
     }
-    $pathCheckCache = @{}
-    if ($script:TweakButtonStatesPathChecks -and $script:TweakButtonStatesPathChecks.Count -gt 0) {
-        $pathCheckCache = $script:TweakButtonStatesPathChecks
-    }
 
     # Load pre-fetched non-registry data (services, fsutil, powercfg, etc.)
     # so the UI thread makes ZERO blocking calls — everything is cached.
@@ -26645,15 +28845,6 @@ try {
         $item = $regCache[$Path]
         if ($item -and $item.PSObject.Properties[$Name]) { return $item.$Name }
         return $Default
-    }.GetNewClosure()
-
-    $getPathExists = {
-        param([string]$Path)
-        if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
-        if ($pathCheckCache.ContainsKey($Path)) { return $pathCheckCache[$Path] }
-        $exists = Get-WmtTweakPathExistsCached -Path $Path -Default $false
-        $pathCheckCache[$Path] = $exists
-        return $exists
     }.GetNewClosure()
 
     $setButtonEnabled = {
@@ -26747,12 +28938,12 @@ try {
     $classicContext = Get-WmtRegistryPathExists "HKCU:\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32"
     $btnToggleCtxMenu = Get-Ctrl "btnToggleCtxMenu"
     Update-WmtTweakToggle $btnToggleCtxMenu $classicContext "Classic Right-Click" "Modern Right-Click"
-    $takeOwnInstalled = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\shell\WMT_TakeOwnership"
+    $takeOwnInstalled = Get-WmtRegistryPathExists "HKCR:\Directory\shell\WMT_TakeOwnership"
     $btnToggleTakeOwnership = Get-Ctrl "btnToggleTakeOwnership"
-    Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Add Take Ownership" "Remove Take Ownership"
-    $psHereInstalled = Get-WmtRegistryPathExists "HKCU:\Software\Classes\Directory\Background\shell\WMT_OpenPowerShell"
+    Update-WmtTweakToggle $btnToggleTakeOwnership $takeOwnInstalled "Remove Take Ownership" "Add Take Ownership"
+    $psHereInstalled = Get-WmtRegistryPathExists "HKCR:\Directory\Background\shell\WMT_OpenPowerShell"
     $btnTogglePsHere = Get-Ctrl "btnTogglePsHere"
-    Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Add PowerShell Here" "Remove PowerShell Here"
+    Update-WmtTweakToggle $btnTogglePsHere $psHereInstalled "Remove PowerShell Here" "Add PowerShell Here"
 
     # --- NEW TOGGLE STATE DETECTION ---
     $polAI = "HKCU:\Software\Policies\Microsoft\Windows\WindowsAI"
@@ -27529,6 +29720,7 @@ $lstCatalog = Get-Ctrl "lstCatalog"
 $lstLibrary = Get-Ctrl "lstLibrary"
 $txtLibrarySearch = Get-Ctrl "txtLibrarySearch"
 $btnLibraryClearSearch = Get-Ctrl "btnLibraryClearSearch"
+$btnToggleFabAssets = Get-Ctrl "btnToggleFabAssets"
 $brdCatalogList = Get-Ctrl "brdCatalogList"
 $brdLibraryList = Get-Ctrl "brdLibraryList"
 $pnlCatalogActions = Get-Ctrl "pnlCatalogActions"
@@ -27542,6 +29734,7 @@ $miLibRepair = Get-Ctrl "miLibRepair"
 $miLibGoToDir = Get-Ctrl "miLibGoToDir"
 $miLibStorePage = Get-Ctrl "miLibStorePage"
 $miLibCopyId = Get-Ctrl "miLibCopyId"
+$miLibCopyRows = Get-Ctrl "miLibCopyRows"
 if ($lstLibrary -and $ctxLibrary) { $lstLibrary.ContextMenu = $ctxLibrary }
 $btnBackToCatalog = Get-Ctrl "btnBackToCatalog"
 $btnLibraryRefresh = Get-Ctrl "btnLibraryRefresh"
@@ -27565,6 +29758,7 @@ $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
 $btnToggleTheme = Get-Ctrl "btnToggleTheme"
 $btnStartWithWindows = Get-Ctrl "btnStartWithWindows"
+$btnLaunchMinimized = Get-Ctrl "btnLaunchMinimized"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
 $btnDonateIos12 = Get-Ctrl "btnDonateIos12"
 $btnDonate = Get-Ctrl "btnDonate"
@@ -27618,6 +29812,7 @@ function Reset-WmtLibraryToCatalog {
         if ($brdCatalogList) { $brdCatalogList.Visibility = "Visible" }
         if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Collapsed" }
         if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Collapsed" }
+        if ($btnToggleFabAssets) { $btnToggleFabAssets.Visibility = "Collapsed" }
         if ($lblLibraryStatus) { $lblLibraryStatus.Text = "" }
         if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style]) }
     }
@@ -27646,10 +29841,18 @@ $tabButton.Add_Click({
         $s.FontWeight = "SemiBold"
         $s.Tag = "Visible"  # Show indicator
         if ($s.Name -eq "btnTabFirewall") { Start-FirewallRuleLoad }
+        # Cached list: only the first visit enumerates the driver store;
+        # later visits keep the loaded rows (Refresh button forces a recheck).
+        if ($s.Name -eq "btnTabDrivers" -and -not $script:DriverCacheLoaded) { Start-DriverListLoad }
         if ($s.Name -eq "btnTabUpdates") {
             if ($lstWinget.Items.Count -eq 0 -and -not (Get-WmtUpdateScansDisabled)) {
                 $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
             }
+        }
+        if ($s.Name -eq "btnTabSupport") {
+            # Re-check the real Task Scheduler state whenever the Support tab
+            # is shown so the Start with Windows button always reflects off/on.
+            try { Update-WmtStartWithWindowsButton } catch {}
         }
         if ($s.Name -eq "btnTabMyDevice") {
             Update-MyDeviceResponsiveLayout
@@ -27686,11 +29889,29 @@ $tabButton.Add_Click({
             elseif (-not $script:TweakStatesReady) {
                 # Background jobs disabled — do a one-time synchronous load with error fallback
                 Set-TweakStatesLoadingOverlay -Visible $true
+                                # Explicitly set the initial state of the two loads
+                                $script:OptionalFeaturesReady = $false
+                $script:TweakStatesReady = $false
+                                # Allows the UI to render the overlay before the heavy work begins
+                                $window.Dispatcher.Invoke(
+                    [System.Action]{},
+                    [System.Windows.Threading.DispatcherPriority]::Render
+                )
+                $optionalFeaturesLoaded = $false
+                $tweakStatesLoaded = $false
                 try {
                     $sw = [System.Diagnostics.Stopwatch]::StartNew()
+                    Update-OptionalFeaturesSynchronously                                        
+                    $optionalFeaturesLoaded = $true                                     
+                                        $script:OptionalFeaturesReady = $true
+                    # Update the overlay immediately after the first load
+                    Sync-WmtTweakOverlayHide                                    
                     Update-TweakButtonStates
+                    $tweakStatesLoaded = $true
+                    $script:TweakStatesReady = $true                                    
+                                        # Update the overlay immediately after the second load
+                    Sync-WmtTweakOverlayHide
                     $sw.Stop()
-                    $script:TweakStatesReady = $true
                     if ($sw.ElapsedMilliseconds -gt 3000) {
                         try { Write-GuiLog "[Tweak States] Synchronous load completed slowly ($($sw.ElapsedMilliseconds)ms). Consider enabling background jobs in Settings." } catch {}
                     }
@@ -27698,11 +29919,14 @@ $tabButton.Add_Click({
                 catch {
                     $errMsg = $_.Exception.Message
                     try { Write-GuiLog "[Tweak States] ERROR: Failed to load tweak states: $errMsg" } catch {}
-                    $script:TweakStatesReady = $true
                     # Show error on overlay briefly before hiding
                     Show-TweakStatesLoadError -Message "Failed to load tweak states. Toggle buttons may show incorrect states. Click Retry or switch tabs and back. Error: $errMsg"
                 }
-                Sync-WmtTweakOverlayHide
+                finally {
+                    $script:OptionalFeaturesReady = $optionalFeaturesLoaded
+                    $script:TweakStatesReady = $tweakStatesLoaded
+                    Sync-WmtTweakOverlayHide
+                }
             }
         }
     })
@@ -29056,6 +31280,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnFwPurge"           "Delete All Firewall Rules"       "btnTabFirewall"
 
     # 5. Drivers
+    Add-SearchIndexEntry "btnDrvReload"         "Reload Driver List"              "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvReport"         "Generate Driver Report"          "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvBackup"         "Export Drivers"                  "btnTabDrivers"
     Add-SearchIndexEntry "btnDrvGhost"          "Remove Ghost Devices"            "btnTabDrivers"
@@ -29093,12 +31318,17 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
     Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
     Add-SearchIndexEntry "btnDisableBgJobs"      "Background Jobs"                 "btnTabSupport"
-    Add-SearchIndexAction "Disable Background Jobs" { Set-WmtDisableBackgroundJobs -Enabled $true; $btn = Get-Ctrl "btnDisableBgJobs"; if ($btn) { $btn.Content = "Background Jobs: Off" }; Write-GuiLog "Background jobs disabled." } "btnTabSupport"
-    Add-SearchIndexAction "Enable Background Jobs"  { Set-WmtDisableBackgroundJobs -Enabled $false; $btn = Get-Ctrl "btnDisableBgJobs"; if ($btn) { $btn.Content = "Background Jobs: On" }; Write-GuiLog "Background jobs enabled." } "btnTabSupport"
+    Add-SearchIndexAction "Disable Background Jobs" { Set-WmtDisableBackgroundJobs -Enabled $true; Update-WmtDisableBgJobsButton; Write-GuiLog "Background jobs disabled." } "btnTabSupport"
+    Add-SearchIndexAction "Enable Background Jobs"  { Set-WmtDisableBackgroundJobs -Enabled $false; Update-WmtDisableBgJobsButton; Write-GuiLog "Background jobs enabled."; try { Start-WmtBackgroundJobsNow } catch {} } "btnTabSupport"
     Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport"
     Add-SearchIndexAction "Disable Update Scans" { Set-WmtUpdateScansDisabled -Enabled $true; Update-WmtUpdateScansButton; Write-GuiLog "Update scans disabled." } "btnTabSupport"
-    Add-SearchIndexAction "Enable Update Scans"  { Set-WmtUpdateScansDisabled -Enabled $false; Update-WmtUpdateScansButton; Write-GuiLog "Update scans enabled." } "btnTabSupport"
+    Add-SearchIndexAction "Enable Update Scans"  { Set-WmtUpdateScansDisabled -Enabled $false; Update-WmtUpdateScansButton; Write-GuiLog "Update scans enabled."; try { if (-not (Get-WmtDisableBackgroundJobs)) { Start-WmtUpdateAutoScanTimer } } catch {} } "btnTabSupport"
     Add-SearchIndexEntry "btnStartWithWindows" "Start with Windows"              "btnTabSupport"
+    Add-SearchIndexAction "Enable Start with Windows"  { Set-WmtStartWithWindows -Enabled $true;  Update-WmtStartWithWindowsButton; Write-GuiLog "Start with Windows enabled." } "btnTabSupport"
+    Add-SearchIndexAction "Disable Start with Windows" { Set-WmtStartWithWindows -Enabled $false; Update-WmtStartWithWindowsButton; Write-GuiLog "Start with Windows disabled." } "btnTabSupport"
+    Add-SearchIndexEntry "btnLaunchMinimized" "Launch Minimized" "btnTabSupport"
+    Add-SearchIndexAction "Enable Launch Minimized"  { Set-WmtLaunchMinimized -Enabled $true;  Update-WmtLaunchMinimizedButton; Write-GuiLog "Launch Minimized enabled. WMT will start hidden in the system tray." } "btnTabSupport"
+    Add-SearchIndexAction "Disable Launch Minimized" { Set-WmtLaunchMinimized -Enabled $false; Update-WmtLaunchMinimizedButton; Write-GuiLog "Launch Minimized disabled. WMT will start with a visible window." } "btnTabSupport"
     Add-SearchIndexAction "Light Mode" { Set-WmtThemePreference -Theme "light" } "btnTabSupport"
     Add-SearchIndexAction "Dark Mode" { Set-WmtThemePreference -Theme "dark" }  "btnTabSupport"
 
@@ -29129,11 +31359,13 @@ $searchIndexDeferTimer.Add_Tick({
         if ($brdLibraryList) { $brdLibraryList.Visibility = "Visible" }
         if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Visible" }
         if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Visible" }
+        if ($btnToggleFabAssets) { $btnToggleFabAssets.Visibility = "Visible" }
         if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) }
         # Display pre-loaded results if available.
         if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0 -and $lstLibrary) {
             $lstLibrary.Items.Clear()
             foreach ($item in $script:WmtLibraryScanResults) {
+                if (Test-WmtFabAssetHidden $item) { continue }
                 [void]$lstLibrary.Items.Add($item)
             }
             if ($lblLibraryStatus) { $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library." }
@@ -29388,8 +31620,13 @@ $lstWinget.Add_PreviewMouseRightButtonDown({
         Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource
     })
 
+# Suppress the menu only when no row is selected (rows are selected by the
+# PreviewMouseRightButtonDown handler above). The sender/event args must come
+# from param(); the previous version referenced undefined variables and threw
+# an exception on every right-click, which aborted the menu open.
 $lstWinget.Add_ContextMenuOpening({
-    if ($s.SelectedItems.Count -eq 0) { $_.Handled = $true }
+    param($s, $e)
+    if (@($s.SelectedItems).Count -eq 0) { $e.Handled = $true }
 })
 
 $lstWinget.Add_PreviewKeyDown({
@@ -29553,6 +31790,44 @@ $miManifest.Add_Click({
 })
 [void]$ctxMenu.Items.Add($miManifest)
 
+# 4b. View Chocolatey Manifest
+$miChocoManifest = New-Object System.Windows.Controls.MenuItem
+$miChocoManifest.Header = "View Chocolatey Manifest"
+$miChocoManifest.ToolTip = "Show the local chocolatey manifest (nuspec) for the selected package"
+$miChocoManifest.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -ne 1) {
+        [System.Windows.MessageBox]::Show(
+            "Select one Chocolatey package to view its manifest.",
+            "Select One Package",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+    Show-ChocoPackageManifest -Item $selected[0]
+})
+[void]$ctxMenu.Items.Add($miChocoManifest)
+
+# 4c. Open Chocolatey Community Page
+$miChocoPage = New-Object System.Windows.Controls.MenuItem
+$miChocoPage.Header = "Open Chocolatey Community Page"
+$miChocoPage.ToolTip = "Open community.chocolatey.org for the selected package"
+$miChocoPage.Add_Click({
+    $selected = @($lstWinget.SelectedItems)
+    if ($selected.Count -ne 1) {
+        [System.Windows.MessageBox]::Show(
+            "Select one Chocolatey package to open its community page.",
+            "Select One Package",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+        return
+    }
+    Open-ChocoCommunityPage -Item $selected[0]
+})
+[void]$ctxMenu.Items.Add($miChocoPage)
+
 # 5. Copy Row Data
 $miCopyRow = New-Object System.Windows.Controls.MenuItem
 $miCopyRow.Header = "Copy Row Data"
@@ -29638,18 +31913,29 @@ $ctxMenu.Add_Opened({
     $miUpdateAll.IsEnabled = ($btnWingetUpdateAll -and $btnWingetUpdateAll.Visibility -eq [System.Windows.Visibility]::Visible)
     $miManifest.IsEnabled = $canShowManifest
     $miCopyRow.IsEnabled = ($selected.Count -gt 0)
+    $canShowChoco = ($selected.Count -eq 1 -and (Test-ChocoManifestSupportedItem $selected[0]))
+    $miChocoManifest.IsEnabled = $canShowChoco
+    $miChocoPage.IsEnabled = $canShowChoco
     if ($canShowManifest) {
         $miManifest.ToolTip = "Show the winget manifest details for the selected package"
     }
     else {
         $miManifest.ToolTip = "Select one winget or Microsoft Store package to view its manifest"
     }
+    if ($canShowChoco) {
+        $miChocoManifest.ToolTip = "Show the local chocolatey manifest (nuspec) for the selected package"
+        $miChocoPage.ToolTip = "Open community.chocolatey.org for the selected package"
+    }
+    else {
+        $miChocoManifest.ToolTip = "Select one Chocolatey package to view its manifest"
+        $miChocoPage.ToolTip = "Select one Chocolatey package to open its community page"
+    }
 })
 
 # 8. Attach to List
 $lstWinget.ContextMenu = $ctxMenu
 
-# 9. Double-click opens store page (Steam/Epic/GOG) or app manifest
+# 9. Double-click opens store page (Steam/Epic/GOG/Chocolatey) or app manifest
 $lstWinget.Add_MouseDoubleClick({
     param($s, $e)
     try {
@@ -29665,6 +31951,7 @@ $lstWinget.Add_MouseDoubleClick({
         if ($source -eq "Steam" -or $source -eq "steam") { $url = "https://store.steampowered.com/app/$id" }
         elseif ($source -eq "legendary" -or $source -eq "Epic") { $url = "https://store.epicgames.com/p/$($id.ToLowerInvariant())" }
         elseif ($source -eq "gogdl" -or $source -eq "GOG") { $url = "https://www.gog.com/en/game/$name" }
+        elseif ($source -ieq "chocolatey" -or $source -ieq "choco") { $url = Get-ChocoCommunityPageUrl -Item $item }
         if ($url) { Start-Process $url }
         else { Show-WingetPackageManifest -Item $item }
     }
@@ -33173,7 +35460,15 @@ try {
     # Try JSON output first (much more reliable than text parsing).
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $exe
-    $psi.Arguments = "list --json"
+    # --api-timeout 30 (a global, pre-subcommand option): the same patience for
+    # slow Epic routes as the update scan; failed fetches keep the old cache.
+    # --include-ue only while UE/Fab assets are actually shown: with the
+    # default "Fab Assets: Hidden" legendary itself omits every
+    # namespace-'ue' item, so no UE/Fab row can reach the cache even if
+    # a tag heuristic fails (this is upstream v6.6's default behavior).
+    $ueFlag = ""
+    try { if (-not (Get-WmtHideLegendaryUeAssets)) { $ueFlag = " --include-ue" } } catch {}
+    $psi.Arguments = "--api-timeout 30 list --json$ueFlag"
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
@@ -33207,6 +35502,30 @@ try {
                         try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
                         if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
                     }
+                    # Tag UE/Fab assets (namespace 'ue', legendary's own skip
+                    # marker). 'namespace' is not a top-level JSON key (it is a
+                    # Python property there); it lives in asset_infos (per
+                    # platform) and in the EGS metadata blob.
+                    $legIsUe = $false
+                    try {
+                        if ($game.PSObject.Properties["asset_infos"] -and $game.asset_infos) {
+                            foreach ($aiProp in @($game.asset_infos.PSObject.Properties)) {
+                                # Object form: read .namespace directly. String form:
+                                # legendary serializes GameAsset objects via str() (json
+                                # default=str), so the value arrives as a Python repr - match
+                                # the namespace field inside that text instead.
+                                if ($aiProp.Value -is [string]) {
+                                    if ($aiProp.Value -match "(?i)namespace\s*=\s*'ue'") { $legIsUe = $true; break }
+                                }
+                                elseif (([string]$aiProp.Value.namespace) -eq 'ue') { $legIsUe = $true; break }
+                            }
+                        }
+                    } catch {}
+                    if (-not $legIsUe) {
+                        try {
+                            if ($game.PSObject.Properties["metadata"] -and $game.metadata -and $game.metadata.PSObject.Properties["namespace"] -and ([string]$game.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                        } catch {}
+                    }
                     $result.Add([PSCustomObject]@{
                             Provider         = "legendary"
                             Title            = $title
@@ -33216,6 +35535,7 @@ try {
                             IsInstalled      = $isInstalled
                             Source           = "legendary"
                             Kind             = "Library"
+                            IsUe             = $legIsUe
                         })
                 }
                 if ($result.Count -gt 0) { $parsed = $true }
@@ -33227,15 +35547,69 @@ try {
     }
 
     # Attempt 2: Text parsing fallback.
-    # Format:  * Game Title (App name: app_name, Version: version)
-    #          * Game Title (App name: app_name, Version: version, Installed: ...)
+    # Format:  * Game Title (App name: app_name | Version: version)
+    # Legendary separates the fields with a pipe, not a comma (all
+    # releases since 2020); the pattern accepts both so the app name
+    # never swallows the " | Version: ..." tail.
     if (-not $parsed) {
-        $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+        # The text output carries no UE/Fab marker, so tag each row from
+        # legendary's own side data (assets.json namespace set plus the
+        # per-game metadata files) and the name heuristics - the same chain
+        # the JSON path and the library scan worker use.
+        $ueAppNames = @{}
+        $ueAssetsFiles = @()
+        try { if ($env:LEGENDARY_CONFIG_PATH) { $ueAssetsFiles += (Join-Path $env:LEGENDARY_CONFIG_PATH "assets.json") } } catch {}
+        try { if ($env:XDG_CONFIG_HOME) { $ueAssetsFiles += (Join-Path $env:XDG_CONFIG_HOME "legendary\assets.json") } } catch {}
+        try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".config\legendary\assets.json") } } catch {}
+        try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".legendary\assets.json") } } catch {}
+        try { if ($env:APPDATA) { $ueAssetsFiles += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\assets.json") } } catch {}
+        foreach ($ueAssetsFile in $ueAssetsFiles) {
+            if (-not (Test-Path -LiteralPath $ueAssetsFile -PathType Leaf)) { continue }
+            try {
+                $assetsJson = [System.IO.File]::ReadAllText($ueAssetsFile) | ConvertFrom-Json -ErrorAction Stop
+                foreach ($platformProp in @($assetsJson.PSObject.Properties)) {
+                    $uePlatformAssets = @()
+                    if ($platformProp.Value -is [System.Collections.IEnumerable] -and $platformProp.Value -isnot [string] -and $platformProp.Value -isnot [System.Management.Automation.PSCustomObject]) {
+                        $uePlatformAssets = @($platformProp.Value)
+                    }
+                    elseif ($platformProp.Value -and $platformProp.Value.PSObject) {
+                        $uePlatformAssets = @($platformProp.Value.PSObject.Properties | ForEach-Object { $_.Value })
+                    }
+                    foreach ($asset in @($uePlatformAssets)) {
+                        if (([string]$asset.namespace) -eq 'ue') {
+                            $ueKey = ([string]$asset.app_name).Trim().ToLowerInvariant()
+                            if ($ueKey) { $ueAppNames[$ueKey] = $true }
+                        }
+                    }
+                }
+            }
+            catch {}
+        }
+        $ueMetaRoots = @()
+        try { if ($env:LEGENDARY_CONFIG_PATH) { $ueMetaRoots += (Join-Path $env:LEGENDARY_CONFIG_PATH "metadata") } } catch {}
+        try { if ($env:XDG_CONFIG_HOME) { $ueMetaRoots += (Join-Path $env:XDG_CONFIG_HOME "legendary\metadata") } } catch {}
+        try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".config\legendary\metadata") } } catch {}
+        try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".legendary\metadata") } } catch {}
+        try { if ($env:APPDATA) { $ueMetaRoots += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\metadata") } } catch {}
+        $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,|)]+?)\s*(?:[,|]\s*Version\s*:\s*(?<version>[^,|)]+?))?\s*(?:[,|]\s*[^)]*)?\)'
         foreach ($match in $regex.Matches($stdout)) {
             $title = $match.Groups["title"].Value.Trim()
             $app = $match.Groups["app"].Value.Trim()
             $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
             if ([string]::IsNullOrWhiteSpace($title)) { continue }
+            $legIsUe = ($ueAppNames.ContainsKey($app.ToLowerInvariant()) -or $app -match '^UE[_-]?\d' -or $title -match '^\s*(Unreal Engine|UE[_-]?\d)' -or $app -match '^[0-9a-fA-F]{32}$' -or $app -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or $app -match '(?i)(?:^|_)(?:5\.\d+)$' -or $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b')
+            if (-not $legIsUe -and $ueMetaRoots.Count -gt 0) {
+                foreach ($ueMetaRoot in $ueMetaRoots) {
+                    $ueMetaCandidate = Join-Path $ueMetaRoot "$app.json"
+                    if (-not (Test-Path -LiteralPath $ueMetaCandidate -PathType Leaf)) { continue }
+                    try {
+                        $ueMetaJson = [System.IO.File]::ReadAllText($ueMetaCandidate) | ConvertFrom-Json -ErrorAction Stop
+                        if ($ueMetaJson -and $ueMetaJson.metadata -and $ueMetaJson.metadata.PSObject.Properties["namespace"] -and ([string]$ueMetaJson.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                    }
+                    catch {}
+                    break
+                }
+            }
             $result.Add([PSCustomObject]@{
                     Provider = "legendary"
                     Title    = $title
@@ -33243,6 +35617,7 @@ try {
                     Version  = $ver
                     Source   = "legendary"
                     Kind     = "Library"
+                    IsUe     = $legIsUe
                 })
         }
     }
@@ -33258,9 +35633,13 @@ catch {
 $script:WmtLegendaryLibraryCache = $result.ToArray()
 
 # Write to cache file for use by the search runspace.
+# Guard: never wipe an existing cache with an empty result (e.g. legendary
+# failed mid-scan on a network outage) — keep the last good list instead.
 try {
     $cacheFile = Join-Path (Get-DataPath) "legendary_library.json"
-    $script:WmtLegendaryLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    if ($result.Count -gt 0 -or -not (Test-Path -LiteralPath $cacheFile -PathType Leaf)) {
+        $script:WmtLegendaryLibraryCache | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $cacheFile -Force -Encoding UTF8
+    }
 }
 catch {
     Write-GuiLog "Failed to write Legendary library cache: $($_.Exception.Message)"
@@ -34468,33 +36847,53 @@ if (-not (Test-Path -LiteralPath $legendaryDir)) {
 $firstInstall = -not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)
 $downloadUrl = $fallbackUrl
 $releaseName = "latest"
+$releaseResolved = $false
+for ($releaseAttempt = 1; $releaseAttempt -le 3 -and -not $releaseResolved; $releaseAttempt++) {
 try {
-Write-Host "Checking latest Legendary release..."
-$release = Invoke-RestMethod -Uri $latestApi -Headers $headers -UseBasicParsing -ErrorAction Stop
+Write-Host "Checking latest Legendary release... (attempt $releaseAttempt of 3)"
+$release = Invoke-RestMethod -Uri $latestApi -Headers $headers -UseBasicParsing -TimeoutSec 30 -ErrorAction Stop
 if ($release -and $release.tag_name) { $releaseName = [string]$release.tag_name }
 $asset = @($release.assets | Where-Object { ([string]$_.name) -ieq "legendary.exe" } | Select-Object -First 1)
 if ($asset -and $asset.browser_download_url) {
     $downloadUrl = [string]$asset.browser_download_url
 }
+$releaseResolved = $true
 }
 catch {
-Write-Warning "Could not query GitHub latest release API: $($_.Exception.Message)"
+Write-Warning "Could not query GitHub latest release API (attempt $releaseAttempt of 3): $($_.Exception.Message)"
+if ($releaseAttempt -lt 3) { Start-Sleep -Seconds (5 * $releaseAttempt) }
+}
+}
+if (-not $releaseResolved) {
 Write-Host "Falling back to GitHub's latest/download redirect."
 }
 
 $tmpPath = Join-Path $legendaryDir ("legendary.exe.{0}.download" -f ([Guid]::NewGuid().ToString("N")))
+$downloaded = $false
 try {
-Write-Host "Downloading Legendary $releaseName..."
-Write-Host $downloadUrl
-Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -OutFile $tmpPath -ErrorAction Stop
+for ($downloadAttempt = 1; $downloadAttempt -le 3 -and -not $downloaded; $downloadAttempt++) {
+    Write-Host "Downloading Legendary $releaseName... (attempt $downloadAttempt of 3)"
+    Write-Host $downloadUrl
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -Headers $headers -UseBasicParsing -OutFile $tmpPath -TimeoutSec 180 -ErrorAction Stop
 
-$download = Get-Item -LiteralPath $tmpPath -ErrorAction Stop
-if ($download.Length -lt 1MB) {
-    throw "Downloaded file is unexpectedly small ($($download.Length) bytes)."
+        $download = Get-Item -LiteralPath $tmpPath -ErrorAction Stop
+        if ($download.Length -lt 1MB) {
+            throw "Downloaded file is unexpectedly small ($($download.Length) bytes)."
+        }
+
+        Move-Item -LiteralPath $tmpPath -Destination $legendaryExe -Force
+        try { Unblock-File -LiteralPath $legendaryExe -ErrorAction SilentlyContinue } catch {}
+        $downloaded = $true
+    }
+    catch {
+        Write-Warning "Legendary download failed (attempt $downloadAttempt of 3): $($_.Exception.Message)"
+        if (Test-Path -LiteralPath $tmpPath) {
+            Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+        }
+        if ($downloadAttempt -lt 3) { Start-Sleep -Seconds (5 * $downloadAttempt) }
+    }
 }
-
-Move-Item -LiteralPath $tmpPath -Destination $legendaryExe -Force
-try { Unblock-File -LiteralPath $legendaryExe -ErrorAction SilentlyContinue } catch {}
 }
 finally {
 if (Test-Path -LiteralPath $tmpPath) {
@@ -34502,11 +36901,21 @@ if (Test-Path -LiteralPath $tmpPath) {
 }
 }
 
+if (-not $downloaded -and $firstInstall) {
+throw "Legendary could not be downloaded after 3 attempts. Check the network connection and run the repair again."
+}
+
 if (-not (Test-Path -LiteralPath $legendaryExe -PathType Leaf)) {
 throw "Legendary executable was not saved to $legendaryExe."
 }
 
+if ($downloaded) {
 Write-Host "Legendary saved to:"
+}
+else {
+Write-Warning "Download failed - keeping the existing Legendary executable."
+Write-Host "Legendary kept at:"
+}
 Write-Host $legendaryExe
 & $legendaryExe --version
 
@@ -35686,11 +38095,24 @@ param([switch]$ResetNextRun)
 
 $minutes = Get-WmtUpdateAutoScanMinutes
 
+$updateScansDisabled = Get-WmtUpdateScansDisabled
+if ($updateScansDisabled) {
+    $disabledMessagePattern = '(?m)^\[[^\]]+\]\s*' + [regex]::Escape("Update auto scan is disabled.") + '\s*$'
+    if (-not $script:LogBox -or $script:LogBox.Text -notmatch $disabledMessagePattern) {
+        Write-GuiLog "Update auto scan is disabled."
+    }
+}
+else {
+    # Re-enabling background jobs or update scans can revisit this path with a
+    # zero-minute interval. Remove the old disabled status instead of retaining
+    # a stale final line in the activity log.
+    Remove-WmtGuiLogMessage -Message "Update auto scan is disabled."
+}
+
 # DispatcherTimer is not IDisposable. Stop it and detach the Tick handler instead.
 Stop-WmtUpdateAutoScanTimer
 
 if ($minutes -le 0) {
-    Write-GuiLog "Update auto scan is disabled."
     return
 }
 
@@ -35736,6 +38158,7 @@ $script:WmtPeriodicMemoryTrimTimer.Add_Tick({
         if ($script:ScanTimer -and $script:ScanTimer.IsEnabled) { $scanBusy = $true }
         if ($script:WmtLibraryScanTimer -and $script:WmtLibraryScanTimer.IsEnabled) { $scanBusy = $true }
         if ($script:WmtLibraryCacheRunspace) { $scanBusy = $true }
+        if ($script:WmtRegistryCleanupActive -or ($script:WmtRegistryCleanupTimer -and $script:WmtRegistryCleanupTimer.IsEnabled)) { $scanBusy = $true }
         if (-not $scanBusy) {
             # Release parsed cleaner rules (re-parsed on next cleaner use)
             if ($script:CleanerMlRulesMemoryCache) { $script:CleanerMlRulesMemoryCache = $null }
@@ -37235,7 +39658,11 @@ $btnWingetScan.Add_Click({
 
                     $pInfo = New-Object System.Diagnostics.ProcessStartInfo
                     $pInfo.FileName = $legendaryCommand
-                    $pInfo.Arguments = "list-installed --check-updates --csv --show-dirs"
+                    # --api-timeout is a global (pre-subcommand) option; 30s instead of
+                    # legendary's 10s default gives slow-but-alive Epic routes time to
+                    # answer. Builds older than 0.20.27 reject it, which the retry loop
+                    # below detects and retries without the flag.
+                    $pInfo.Arguments = "--api-timeout 30 list-installed --check-updates --csv --show-dirs"
                     $pInfo.RedirectStandardOutput = $true
                     $pInfo.RedirectStandardError = $true
                     $pInfo.UseShellExecute = $false
@@ -37243,29 +39670,116 @@ $btnWingetScan.Add_Click({
                     $pInfo.StandardOutputEncoding = [System.Text.UTF8Encoding]::new($false)
                     $pInfo.StandardErrorEncoding = [System.Text.UTF8Encoding]::new($false)
 
-                    $p = [System.Diagnostics.Process]::Start($pInfo)
-                    $outTask = $p.StandardOutput.ReadToEndAsync()
-                    $errTask = $p.StandardError.ReadToEndAsync()
-                    if (-not $p.WaitForExit(90000)) {
-                        Write-Output "LOG:Legendary scan timed out after 90 seconds."
-                        try { $p.Kill() } catch {}
-                        try { [void]$p.WaitForExit(2000) } catch {}
-                        return
+                    # Epic endpoints intermittently fail with transient read timeouts
+                    # (legendary's HTTP client defaults to a 10s read timeout; raised to
+                    # 30s above). Retry once on network-class failures; if Epic stays
+                    # unreachable, fall back to legendary's local database below so the
+                    # installed Epic games still load.
+                    $out = ""
+                    $err = ""
+                    $exitCode = 0
+                    $maxAttempts = 2
+                    $attempt = 0
+                    $networkFailure = $false
+                    $timedOut = $false
+                    $apiTimeoutStripped = $false
+                    $offlineMode = $false
+                    while ($true) {
+                        $attempt++
+                        $p = [System.Diagnostics.Process]::Start($pInfo)
+                        $outTask = $p.StandardOutput.ReadToEndAsync()
+                        $errTask = $p.StandardError.ReadToEndAsync()
+                        if (-not $p.WaitForExit(90000)) {
+                            Write-Output "LOG:Legendary scan timed out after 90 seconds."
+                            try { $p.Kill() } catch {}
+                            try { [void]$p.WaitForExit(2000) } catch {}
+                            $timedOut = $true
+                            break
+                        }
+
+                        $out = $outTask.GetAwaiter().GetResult()
+                        $err = $errTask.GetAwaiter().GetResult()
+                        $exitCode = $p.ExitCode
+
+                        # Success = clean exit with a CSV payload
+                        if ($exitCode -eq 0 -and -not [string]::IsNullOrWhiteSpace($out)) { break }
+
+                        # A legendary build older than 0.20.27 rejects --api-timeout
+                        # (argparse exit code 2); retry the same attempt without it.
+                        if (-not $apiTimeoutStripped -and $exitCode -eq 2 -and (([string]$err) -match '(?i)unrecognized arguments[^\r\n]*--api-timeout')) {
+                            $apiTimeoutStripped = $true
+                            $pInfo.Arguments = "list-installed --check-updates --csv --show-dirs"
+                            $attempt--
+                            continue
+                        }
+
+                        $networkFailure = (([string]$err) -match '(?i)ReadTimeout|Read timed out|socket\.timeout|ConnectTimeout|ConnectionError|Connection reset|Connection aborted|NewConnectionError|MaxRetryError|HTTPSConnectionPool|getaddrinfo failed|Temporary failure in name resolution|timed out')
+                        if ($networkFailure -and $attempt -lt $maxAttempts) {
+                            Write-Output "LOG:Legendary could not reach Epic servers (network timeout, attempt $attempt of $maxAttempts). Retrying in 3 seconds..."
+                            Start-Sleep -Seconds 3
+                            continue
+                        }
+                        break
                     }
 
-                    $out = $outTask.GetAwaiter().GetResult()
-                    $err = $errTask.GetAwaiter().GetResult()
-                    if ($p.ExitCode -ne 0) {
-                        Write-Output "LOG:Legendary scan exited with code $($p.ExitCode)."
+                    if ($exitCode -ne 0) {
+                        Write-Output "LOG:Legendary scan exited with code $exitCode."
                         if (-not [string]::IsNullOrWhiteSpace($err)) {
-                            foreach ($errLine in ($err -split "`r?`n")) {
-                                if (-not [string]::IsNullOrWhiteSpace($errLine)) { Write-Output "LOG:Legendary: $errLine" }
+                            # Python tracebacks are dozens of stack frames; keep the GUI
+                            # log readable by showing the first few and the last lines.
+                            $errLines = @(($err -split "`r?`n") | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+                            for ($i = 0; $i -lt $errLines.Count; $i++) {
+                                if ($i -lt 4 -or $i -ge ($errLines.Count - 2)) {
+                                    Write-Output "LOG:Legendary: $($errLines[$i])"
+                                }
+                            }
+                            if ($errLines.Count -gt 6) {
+                                Write-Output "LOG:Legendary: ... ($($errLines.Count - 6) additional stderr lines suppressed)"
                             }
                         }
                     }
 
+                    # OFFLINE FALLBACK: when Epic is unreachable, list-installed WITHOUT
+                    # --check-updates reads the local install database plus the
+                    # last-synced asset versions (legendary's assets.json) with no
+                    # network access - the Epic games still load, with update info
+                    # from the last successful Epic sync.
+                    if ([string]::IsNullOrWhiteSpace($out) -and ($networkFailure -or $timedOut)) {
+                        Write-Output "LOG:Legendary could not reach Epic servers - loading installed Epic games from the local database (offline)..."
+                        try {
+                            $pInfo.Arguments = ([string]$pInfo.Arguments).Replace(" --check-updates", "")
+                            $p = [System.Diagnostics.Process]::Start($pInfo)
+                            $outTask = $p.StandardOutput.ReadToEndAsync()
+                            $errTask = $p.StandardError.ReadToEndAsync()
+                            if ($p.WaitForExit(60000)) {
+                                $out = $outTask.GetAwaiter().GetResult()
+                                $exitCode = $p.ExitCode
+                            }
+                            else {
+                                try { $p.Kill() } catch {}
+                                try { [void]$p.WaitForExit(2000) } catch {}
+                            }
+                        }
+                        catch {
+                            Write-Output "LOG:Legendary offline fallback failed: $($_.Exception.Message)"
+                        }
+                        if (-not [string]::IsNullOrWhiteSpace($out)) {
+                            $offlineMode = $true
+                        }
+                        else {
+                            Write-Output "LOG:Legendary offline fallback returned no data (no Epic games cached locally yet)."
+                        }
+                    }
+
                     if ([string]::IsNullOrWhiteSpace($out)) {
-                        if (-not [string]::IsNullOrWhiteSpace($err)) { Write-Output "LOG:Legendary returned no CSV output. Run 'legendary auth' if Epic login is not configured." }
+                        if (-not [string]::IsNullOrWhiteSpace($err)) {
+                            if (([string]$err) -match '(?i)ReadTimeout|Read timed out|socket\.timeout|ConnectTimeout|ConnectionError|Connection reset|Connection aborted|NewConnectionError|MaxRetryError|HTTPSConnectionPool|getaddrinfo failed|Temporary failure in name resolution|timed out') {
+                                Write-Output "LOG:Legendary could not reach Epic servers (network timeout). Check the connection and run the scan again."
+                            }
+                            else {
+                                Write-Output "LOG:Legendary returned no CSV output. Run 'legendary auth' if Epic login is not configured."
+                            }
+                        }
                         return
                     }
 
@@ -37313,11 +39827,12 @@ $btnWingetScan.Add_Click({
                         }
                     }
 
+                    $offlineTag = if ($offlineMode) { " (offline - last synced Epic data)" } else { "" }
                     if ($pendingCount -eq 0) {
-                        Write-Output "LOG:Legendary scan found $installedCount installed Epic game(s), with no pending updates."
+                        Write-Output "LOG:Legendary scan$($offlineTag) found $installedCount installed Epic game(s), with no pending updates."
                     }
                     else {
-                        Write-Output "LOG:Legendary scan found $pendingCount pending Epic game update(s)."
+                        Write-Output "LOG:Legendary scan$($offlineTag) found $pendingCount pending Epic game update(s)."
                     }
                 }
                 catch {
@@ -38710,7 +41225,19 @@ $script:InvokeWingetSearch = {
                         if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
                             $psi = New-Object System.Diagnostics.ProcessStartInfo
                             $psi.FileName = $LegendaryExe
-                            $psi.Arguments = "list --json"
+                            # --include-ue only while UE/Fab assets are shown;
+                            # this runspace cannot call the settings helper,
+                            # so read the persisted flag from settings.json.
+                            $ueFlag = ""
+                            try {
+                                $wmtUeSettingsFile = Join-Path (Split-Path -Parent $LegCacheFile) "settings.json"
+                                if (Test-Path -LiteralPath $wmtUeSettingsFile -PathType Leaf) {
+                                    $wmtUeSettingsJson = [System.IO.File]::ReadAllText($wmtUeSettingsFile) | ConvertFrom-Json -ErrorAction Stop
+                                    if ($wmtUeSettingsJson.PSObject.Properties["HideLegendaryUeAssets"] -and -not [bool]$wmtUeSettingsJson.HideLegendaryUeAssets) { $ueFlag = " --include-ue" }
+                                }
+                            }
+                            catch {}
+                            $psi.Arguments = "--api-timeout 30 list --json$ueFlag"
                             $psi.RedirectStandardOutput = $true
                             $psi.RedirectStandardError = $true
                             $psi.UseShellExecute = $false
@@ -38737,7 +41264,29 @@ $script:InvokeWingetSearch = {
                                                 try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
                                                 if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
                                             }
-                                            $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = [string]$game.app_name; Version = $latestVer; InstalledVersion = $installedVer; IsInstalled = $isInstalled; Source = "legendary"; Kind = "Library" })
+                                            # Tag UE/Fab assets from the JSON namespace data
+                                            # (asset_infos per platform, or the metadata blob).
+                                            $legIsUe = $false
+                                            try {
+                                                if ($game.PSObject.Properties["asset_infos"] -and $game.asset_infos) {
+                                                    foreach ($aiProp in @($game.asset_infos.PSObject.Properties)) {
+                                                        # Object form: read .namespace directly. String form:
+                                                        # legendary serializes GameAsset objects via str() (json
+                                                        # default=str), so the value arrives as a Python repr - match
+                                                        # the namespace field inside that text instead.
+                                                        if ($aiProp.Value -is [string]) {
+                                                            if ($aiProp.Value -match "(?i)namespace\s*=\s*'ue'") { $legIsUe = $true; break }
+                                                        }
+                                                        elseif (([string]$aiProp.Value.namespace) -eq 'ue') { $legIsUe = $true; break }
+                                                    }
+                                                }
+                                            } catch {}
+                                            if (-not $legIsUe) {
+                                                try {
+                                                    if ($game.PSObject.Properties["metadata"] -and $game.metadata -and $game.metadata.PSObject.Properties["namespace"] -and ([string]$game.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                                                } catch {}
+                                            }
+                                            $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = [string]$game.app_name; Version = $latestVer; InstalledVersion = $installedVer; IsInstalled = $isInstalled; Source = "legendary"; Kind = "Library"; IsUe = $legIsUe })
                                         }
                                         if ($result.Count -gt 0) { $parsed = $true }
                                     }
@@ -38745,16 +41294,85 @@ $script:InvokeWingetSearch = {
                                 catch {}
                             }
                             if (-not $parsed) {
-                                $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                                # The text output carries no UE/Fab marker; tag each row
+                                # from legendary's own side data (assets.json namespace
+                                # set plus per-game metadata files) and the name
+                                # heuristics - the same chain every other cache writer
+                                # and the library scan worker use, so no row from this
+                                # path can reach the library cache without an IsUe tag.
+                                $ueAppNames = @{}
+                                $ueAssetsFiles = @()
+                                try { if ($env:LEGENDARY_CONFIG_PATH) { $ueAssetsFiles += (Join-Path $env:LEGENDARY_CONFIG_PATH "assets.json") } } catch {}
+                                try { if ($env:XDG_CONFIG_HOME) { $ueAssetsFiles += (Join-Path $env:XDG_CONFIG_HOME "legendary\assets.json") } } catch {}
+                                try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".config\legendary\assets.json") } } catch {}
+                                try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".legendary\assets.json") } } catch {}
+                                try { if ($env:APPDATA) { $ueAssetsFiles += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\assets.json") } } catch {}
+                                foreach ($ueAssetsFile in $ueAssetsFiles) {
+                                    if (-not (Test-Path -LiteralPath $ueAssetsFile -PathType Leaf)) { continue }
+                                    try {
+                                        $assetsJson = [System.IO.File]::ReadAllText($ueAssetsFile) | ConvertFrom-Json -ErrorAction Stop
+                                        foreach ($platformProp in @($assetsJson.PSObject.Properties)) {
+                                            $uePlatformAssets = @()
+                                            if ($platformProp.Value -is [System.Collections.IEnumerable] -and $platformProp.Value -isnot [string] -and $platformProp.Value -isnot [System.Management.Automation.PSCustomObject]) {
+                                                $uePlatformAssets = @($platformProp.Value)
+                                            }
+                                            elseif ($platformProp.Value -and $platformProp.Value.PSObject) {
+                                                $uePlatformAssets = @($platformProp.Value.PSObject.Properties | ForEach-Object { $_.Value })
+                                            }
+                                            foreach ($asset in @($uePlatformAssets)) {
+                                                if (([string]$asset.namespace) -eq 'ue') {
+                                                    $ueKey = ([string]$asset.app_name).Trim().ToLowerInvariant()
+                                                    if ($ueKey) { $ueAppNames[$ueKey] = $true }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    catch {}
+                                }
+                                $ueMetaRoots = @()
+                                try { if ($env:LEGENDARY_CONFIG_PATH) { $ueMetaRoots += (Join-Path $env:LEGENDARY_CONFIG_PATH "metadata") } } catch {}
+                                try { if ($env:XDG_CONFIG_HOME) { $ueMetaRoots += (Join-Path $env:XDG_CONFIG_HOME "legendary\metadata") } } catch {}
+                                try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".config\legendary\metadata") } } catch {}
+                                try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".legendary\metadata") } } catch {}
+                                try { if ($env:APPDATA) { $ueMetaRoots += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\metadata") } } catch {}
+                                $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,|)]+?)\s*(?:[,|]\s*Version\s*:\s*(?<version>[^,|)]+?))?\s*(?:[,|]\s*[^)]*)?\)'
                                 foreach ($match in $regex.Matches($stdout)) {
                                     $title = $match.Groups["title"].Value.Trim()
                                     if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                    $app = $match.Groups["app"].Value.Trim()
                                     $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
-                                    $result.Add([PSCustomObject]@{ Provider = "legendary"; Title = $title; Id = $match.Groups["app"].Value.Trim(); Version = $ver; Source = "legendary"; Kind = "Library" })
+                                    $legIsUe = ($ueAppNames.ContainsKey($app.ToLowerInvariant()) -or $app -match '^UE[_-]?\d' -or $title -match '^\s*(Unreal Engine|UE[_-]?\d)' -or $app -match '^[0-9a-fA-F]{32}$' -or $app -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or $app -match '(?i)(?:^|_)(?:5\.\d+)$' -or $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b')
+                                    if (-not $legIsUe -and $ueMetaRoots.Count -gt 0) {
+                                        foreach ($ueMetaRoot in $ueMetaRoots) {
+                                            $ueMetaCandidate = Join-Path $ueMetaRoot "$app.json"
+                                            if (-not (Test-Path -LiteralPath $ueMetaCandidate -PathType Leaf)) { continue }
+                                            try {
+                                                $ueMetaJson = [System.IO.File]::ReadAllText($ueMetaCandidate) | ConvertFrom-Json -ErrorAction Stop
+                                                if ($ueMetaJson -and $ueMetaJson.metadata -and $ueMetaJson.metadata.PSObject.Properties["namespace"] -and ([string]$ueMetaJson.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                                            }
+                                            catch {}
+                                            break
+                                        }
+                                    }
+                                    $result.Add([PSCustomObject]@{
+                                            Provider = "legendary"
+                                            Title    = $title
+                                            Id       = $app
+                                            Version  = $ver
+                                            Source   = "legendary"
+                                            Kind     = "Library"
+                                            IsUe     = $legIsUe
+                                        })
                                 }
                             }
                         }
-                        $result.ToArray() | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                        # Guard: never overwrite the cache with an empty result
+                        # (failed fetch racing the boot builder) - keep the last
+                        # good list, mirroring the other cache writers.
+                        $arrLeg = $result.ToArray()
+                        if ($arrLeg.Count -gt 0 -or -not (Test-Path -LiteralPath $LegCacheFile -PathType Leaf)) {
+                            $arrLeg | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                        }
                     }
                     catch {}
                 }
@@ -39183,6 +41801,66 @@ $script:InvokeWingetSearch = {
             Write-Output "PROVIDER_START:legendary"
             $script:provCount = 0
             Log "Searching Legendary library..."
+            # Respect the "Hide Unreal Engine / Fab assets" library toggle. This
+            # runspace cannot see script scope, so read it from settings.json
+            # (stored next to the Legendary library cache file).
+            $hideUe = $true
+            try {
+                if ($LegendaryCacheFile) {
+                    $wmtSettingsFile = Join-Path (Split-Path -Parent $LegendaryCacheFile) "settings.json"
+                    if (Test-Path -LiteralPath $wmtSettingsFile -PathType Leaf) {
+                        $wmtSettingsJson = [System.IO.File]::ReadAllText($wmtSettingsFile) | ConvertFrom-Json -ErrorAction Stop
+                        if ($wmtSettingsJson.PSObject.Properties["HideLegendaryUeAssets"]) { $hideUe = [bool]$wmtSettingsJson.HideLegendaryUeAssets }
+                    }
+                }
+            }
+            catch {}
+            # Legendary marks UE/Fab content with namespace 'ue' in its own assets.json.
+            # Use it as the authoritative filter (Fab app_names are arbitrary, e.g. "PlatformFunctionsPlugin_5.4").
+            $ueAppNames = @{}
+            # Legendary's config home (every release since ~2021, Windows included)
+            # is %USERPROFILE%\.config\legendary, overridable via LEGENDARY_CONFIG_PATH
+            # or XDG_CONFIG_HOME. Older builds used %USERPROFILE%\.legendary, and
+            # Heroic keeps its own copy. Probe every candidate; missing files are
+            # skipped and all hits are merged below.
+            $ueAssetsFiles = @()
+            try { if ($env:LEGENDARY_CONFIG_PATH) { $ueAssetsFiles += (Join-Path $env:LEGENDARY_CONFIG_PATH "assets.json") } } catch {}
+            try { if ($env:XDG_CONFIG_HOME) { $ueAssetsFiles += (Join-Path $env:XDG_CONFIG_HOME "legendary\assets.json") } } catch {}
+            try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".config\legendary\assets.json") } } catch {}
+            try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".legendary\assets.json") } } catch {}
+            try { if ($env:APPDATA) { $ueAssetsFiles += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\assets.json") } } catch {}
+            foreach ($ueAssetsFile in $ueAssetsFiles) {
+                if (-not (Test-Path -LiteralPath $ueAssetsFile -PathType Leaf)) { continue }
+                try {
+                    $assetsJson = [System.IO.File]::ReadAllText($ueAssetsFile) | ConvertFrom-Json -ErrorAction Stop
+                    foreach ($platformProp in @($assetsJson.PSObject.Properties)) {
+                        # Platform value can be an array of assets (legendary) or a map of
+                        # app_name -> asset (heroic-style assets.json). Handle both.
+                        $uePlatformAssets = @()
+                        if ($platformProp.Value -is [System.Collections.IEnumerable] -and $platformProp.Value -isnot [string] -and $platformProp.Value -isnot [System.Management.Automation.PSCustomObject]) {
+                            $uePlatformAssets = @($platformProp.Value)
+                        }
+                        elseif ($platformProp.Value -and $platformProp.Value.PSObject) {
+                            $uePlatformAssets = @($platformProp.Value.PSObject.Properties | ForEach-Object { $_.Value })
+                        }
+                        foreach ($asset in @($uePlatformAssets)) {
+                            if (([string]$asset.namespace) -eq 'ue') {
+                                $ueKey = ([string]$asset.app_name).Trim().ToLowerInvariant()
+                                if ($ueKey) { $ueAppNames[$ueKey] = $true }
+                            }
+                        }
+                    }
+                }
+                catch {}
+            }
+            # Per-game metadata files (metadata/<app_name>.json) are the most
+            # durable UE tag source; see the library scan worker.
+            $ueMetaRoots = @()
+            try { if ($env:LEGENDARY_CONFIG_PATH) { $ueMetaRoots += (Join-Path $env:LEGENDARY_CONFIG_PATH "metadata") } } catch {}
+            try { if ($env:XDG_CONFIG_HOME) { $ueMetaRoots += (Join-Path $env:XDG_CONFIG_HOME "legendary\metadata") } } catch {}
+            try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".config\legendary\metadata") } } catch {}
+            try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".legendary\metadata") } } catch {}
+            try { if ($env:APPDATA) { $ueMetaRoots += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\metadata") } } catch {}
             try {
                 if ($LegendaryCacheFile -and (Test-Path -LiteralPath $LegendaryCacheFile -PathType Leaf)) {
                     $cacheText = [System.IO.File]::ReadAllText($LegendaryCacheFile)
@@ -39192,6 +41870,25 @@ $script:InvokeWingetSearch = {
                         foreach ($game in @($library)) {
                             $title = [string]$game.Title
                             if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                            $legId = ([string]$game.Id).Trim()
+                            # Same OR chain as the library scan: cached IsUe tag first,
+                            # assets.json namespace set and name patterns as fallbacks.
+                            $legIsUe = $false
+                            try { if ($game.PSObject.Properties["IsUe"]) { $legIsUe = [bool]$game.IsUe } } catch {}
+                            if (-not $legIsUe) { $legIsUe = ($ueAppNames.ContainsKey($legId.ToLowerInvariant()) -or $legId -match '^UE[_-]?\d' -or $title -match '^\s*Unreal Engine\b' -or $legId -match '^[0-9a-fA-F]{32}$' -or $legId -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or $legId -match '(?i)(?:^|_)(?:5\.\d+)$' -or $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b') }
+                            if (-not $legIsUe -and $ueMetaRoots.Count -gt 0) {
+                                foreach ($ueMetaRoot in $ueMetaRoots) {
+                                    $ueMetaCandidate = Join-Path $ueMetaRoot "$legId.json"
+                                    if (-not (Test-Path -LiteralPath $ueMetaCandidate -PathType Leaf)) { continue }
+                                    try {
+                                        $ueMetaJson = [System.IO.File]::ReadAllText($ueMetaCandidate) | ConvertFrom-Json -ErrorAction Stop
+                                        if ($ueMetaJson -and $ueMetaJson.metadata -and $ueMetaJson.metadata.PSObject.Properties["namespace"] -and ([string]$ueMetaJson.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                                    }
+                                    catch {}
+                                    break
+                                }
+                            }
+                            if ($hideUe -and $legIsUe) { continue }
                             if ([string]::IsNullOrWhiteSpace($needle) -or $title.ToLowerInvariant().Contains($needle)) {
                                 # Show installed version in Version column, latest in Available.
                                 $isInst = $false
@@ -39707,10 +42404,12 @@ $mniCopyAll.Add_Click({
 # Attach to the ListView
 # Prevent context menu from opening when right-clicking empty space, headers, or scrollbars
 $lstFw.Add_PreviewMouseRightButtonDown({
-    try { Set-WmtListViewRightClickSelection -ListView $lstFw -OriginalSource $_.OriginalSource } catch {}
+    param($s, $e)
+    try { Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource } catch {}
 })
 $lstFw.Add_ContextMenuOpening({
-    if ($lstFw.SelectedItems.Count -eq 0) { $_.Handled = $true }
+    param($s, $e)
+    if (@($s.SelectedItems).Count -eq 0) { $e.Handled = $true }
 })
 
 # Attach to the ListView
@@ -39892,6 +42591,9 @@ if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
 if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
 
 $name = [string]$Rule.Name
+# The periodic memory trim releases this cache; re-create it on demand instead
+# of calling ContainsKey on $null (threw on every rule click / list rebuild).
+if (-not $script:FirewallDetailCache) { $script:FirewallDetailCache = @{} }
 if ($script:FirewallDetailCache.ContainsKey($name)) {
     Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
     if ($lstFw) { $lstFw.Items.Refresh() }
@@ -39955,6 +42657,7 @@ $script:FirewallDetailTimer.Add_Tick({
 
             $target = @($script:AllFw | Where-Object { $_.Name -eq $job.Name } | Select-Object -First 1)
             if ($result -and $result.Success) {
+                if (-not $script:FirewallDetailCache) { $script:FirewallDetailCache = @{} }
                 $script:FirewallDetailCache[$result.Name] = $result
                 if ($target.Count -gt 0) { Set-FirewallRuleDetails -Rule $target[0] -Details $result }
             }
@@ -39993,6 +42696,9 @@ if (-not $Rule -or [string]::IsNullOrWhiteSpace([string]$Rule.Name)) { return }
 if ($Rule.PSObject.Properties["DetailsLoaded"] -and $Rule.DetailsLoaded) { return }
 
 $name = [string]$Rule.Name
+# Self-heal after the memory trim nulls the cache (this is the selection-changed
+# entry point, so a throw here surfaced as "Exception while setting SelectedItem").
+if (-not $script:FirewallDetailCache) { $script:FirewallDetailCache = @{} }
 if ($script:FirewallDetailCache.ContainsKey($name)) {
     Set-FirewallRuleDetails -Rule $Rule -Details $script:FirewallDetailCache[$name]
     if ($lstFw) { $lstFw.Items.Refresh() }
@@ -40266,6 +42972,1398 @@ $btnToggleDrvMeta.Add_Click({
     })
 }
 
+# --- DRIVER MANAGEMENT PAGE (list view) ---
+# Lists every third-party driver package staged in the Driver Store
+# (pnputil /enum-drivers) in the same list style as the Firewall / Updates
+# pages, and highlights rows by live status:
+#   In Use   - bound to at least one present, working device
+#   Old      - superseded duplicate copy (a newer version of the same driver
+#              is staged; exactly what "Clean Old" removes)
+#   Unattached - no device is currently attached to the package (the hardware
+#              may be switched off, disabled, disconnected, or only
+#              occasionally connected — NOT automatically safe to remove)
+#   Inactive - bound only to present devices that are disabled or reporting
+#              a problem (ConfigManagerErrorCode != 0) — the context menu's
+#              per-device "Enable device" / "Disable device" entries flip
+#              such devices in place
+# Status detection runs in two phases: the fast pnputil parse lists packages
+# immediately, then a background runspace queries Win32_PnPSignedDriver +
+# Win32_PnPEntity (slow) and the rows re-color when it completes. It also
+# parses each package's INF for AddService entries and checks them against
+# Windows' registered/running driver services — filter and service drivers
+# (antivirus, audio effects, bus drivers) never bind to a single device, so
+# without this they would all be mislabeled "Unattached".
+# The loaded list is CACHED: re-opening the Drivers tab shows the cached rows
+# instead of re-running the whole enumeration, removals update the cache in
+# place (only rows pnputil actually deleted disappear), device enable/disable
+# toggles update the cached device state the same way, and the Refresh
+# button / menu item force a full recheck at any time.
+$script:DriverPackages = @()
+$script:DriverDeviceMap = @{}
+$script:DriverServiceMap = $null
+$script:DriverUsageLoaded = $false
+$script:DriverCacheLoaded = $false
+$script:DriverLoadInProgress = $false
+$script:DriverLoadRunspace = $null
+$script:DriverLoadAsyncResult = $null
+$script:DriverLoadTimer = $null
+
+$lstDrivers = Get-Ctrl "lstDrivers"
+$txtDrvSearch = Get-Ctrl "txtDrvSearch"
+$lblDrvStatus = Get-Ctrl "lblDrvStatus"
+$btnDrvReload = Get-Ctrl "btnDrvReload"
+
+function Set-DriverStatus {
+param([string]$Text, [bool]$Visible = $true)
+if (-not $lblDrvStatus) { return }
+if ([string]::IsNullOrWhiteSpace($Text)) { $Text = "Ready" }
+$lblDrvStatus.Text = $Text
+$lblDrvStatus.Visibility = if ($Visible) { "Visible" } else { "Collapsed" }
+}
+
+function Set-DriverRowProperty {
+param($Row, [string]$Name, $Value)
+if (-not $Row -or [string]::IsNullOrWhiteSpace($Name)) { return }
+$prop = $Row.PSObject.Properties[$Name]
+if ($prop) { $prop.Value = $Value }
+else { $Row | Add-Member -NotePropertyName $Name -NotePropertyValue $Value -Force }
+}
+
+function Test-DriverSearchIsBlank {
+param([string]$Text)
+return ([string]::IsNullOrWhiteSpace($Text) -or $Text -in @("Search Drivers...", "Search drivers..."))
+}
+
+function Test-DriverRowMatchesQuery {
+param($Row, [string]$Query)
+if (-not $Row) { return $false }
+if ([string]::IsNullOrWhiteSpace($Query)) { return $true }
+
+$fields = @(
+    $Row.Status,
+    $Row.Class,
+    $Row.Provider,
+    $Row.OriginalName,
+    $Row.PublishedName,
+    $Row.DisplayVer,
+    $Row.DisplayDate,
+    $Row.DevicesText,
+    $Row.DevicesTooltip
+)
+foreach ($field in $fields) {
+    if ($null -ne $field -and ([string]$field).IndexOf($Query, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        return $true
+    }
+}
+return $false
+}
+
+function Get-DriverStatusCounts {
+$counts = @{ InUse = 0; Old = 0; Unattached = 0; Inactive = 0; Pending = 0 }
+foreach ($row in $script:DriverPackages) {
+    switch ($row.Status) {
+        "In Use"   { $counts.InUse++ }
+        "Old"      { $counts.Old++ }
+        "Unattached" { $counts.Unattached++ }
+        "Inactive" { $counts.Inactive++ }
+        default    { $counts.Pending++ }
+    }
+}
+$summary = "$($script:DriverPackages.Count) driver package(s)"
+if ($script:DriverUsageLoaded) {
+    $summary += " · $($counts.InUse) In Use · $($counts.Old) Old · $($counts.Unattached) Unattached · $($counts.Inactive) Inactive (disabled in Device Manager)"
+}
+else {
+    $summary += " · checking device usage..."
+}
+return $summary
+}
+
+function Update-DriverStatusLabel {
+Set-DriverStatus (Get-DriverStatusCounts) -Visible $true
+}
+
+function Update-DriverListView {
+if (-not $lstDrivers) { return }
+$selectedInf = if ($lstDrivers.SelectedItem) { [string]$lstDrivers.SelectedItem.PublishedName } else { $null }
+$query = if ($txtDrvSearch) { [string]$txtDrvSearch.Text } else { "" }
+$rows = $script:DriverPackages
+
+if (-not (Test-DriverSearchIsBlank $query)) {
+    $query = $query.Trim()
+    $filtered = [System.Collections.Generic.List[object]]::new()
+    foreach ($row in $rows) {
+        if (Test-DriverRowMatchesQuery -Row $row -Query $query) { [void]$filtered.Add($row) }
+    }
+    $rows = $filtered
+}
+
+$lstDrivers.Items.Clear()
+foreach ($row in $rows) { [void]$lstDrivers.Items.Add($row) }
+if ($script:DriverSortChain -and $script:DriverSortChain.Count -gt 0) {
+    Set-ListViewSort -ListView $lstDrivers -Chain $script:DriverSortChain
+}
+if ($selectedInf) {
+    foreach ($item in $lstDrivers.Items) {
+        if ($item.PublishedName -eq $selectedInf) {
+            $lstDrivers.SelectedItem = $item
+            break
+        }
+    }
+}
+}
+
+function Get-DriverDeviceListText {
+param([object[]]$Devices)
+$lines = foreach ($dev in $Devices) {
+    # ConfigManagerErrorCode 22 = the device is disabled in Device Manager —
+    # say so explicitly instead of the generic "problem".
+    $state = if ([string]$dev.State -eq "OK") { "running" } else {
+        $code = -1
+        try { $code = [int]$dev.Code } catch {}
+        if ($code -eq 22) { "disabled in Device Manager" } else { ([string]$dev.State).ToLowerInvariant() }
+    }
+    $name = if ([string]::IsNullOrWhiteSpace([string]$dev.Name)) { "(unnamed device)" } else { [string]$dev.Name }
+    "$name [$state]  —  $($dev.DeviceId)"
+}
+return $lines
+}
+
+function Set-DriverStatusFlags {
+# Computes the Status column for every loaded package row. Requires the
+# device-usage map (phase 2); without it rows stay in "Checking...".
+if (-not $script:DriverUsageLoaded) { return }
+
+# Reset every row first so this pass is idempotent: the function also runs
+# after in-place cache edits (removals), where rows may still carry a status
+# from the previous pass (e.g. a former "Old" copy whose newer sibling was
+# removed must be re-derived, not stay stuck on "Old").
+foreach ($row in $script:DriverPackages) {
+    Set-DriverRowProperty -Row $row -Name "Status" -Value "Checking..."
+    Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "4"
+}
+
+# Bound = the package is referenced by at least one present device.
+$boundInfs = @{}
+foreach ($entry in @($script:DriverDeviceMap.Keys)) {
+    if ($script:DriverDeviceMap[$entry] -and @($script:DriverDeviceMap[$entry]).Count -gt 0) { $boundInfs[$entry] = $true }
+}
+
+# Old = not bound to any device, and the same original driver name has a
+# better copy staged. Ranking mirrors Clean Old Drivers: bound copy first,
+# then highest driver VERSION, then newest date (NVIDIA ships newer builds
+# with older dates, so version must win).
+foreach ($group in @($script:DriverPackages | Where-Object { $_.OriginalName } | Group-Object OriginalName)) {
+    if ($group.Count -lt 2) { continue }
+
+    $sorted = @($group.Group | Sort-Object -Property @(
+            @{ Expression = { [int]$boundInfs.ContainsKey($_.PublishedName.ToLowerInvariant()) }; Descending = $true },
+            @{ Expression = 'Version';  Descending = $true },
+            @{ Expression = 'SortDate'; Descending = $true }
+        ))
+    $kept = $sorted[0]
+
+    foreach ($d in @($sorted | Select-Object -Skip 1)) {
+        # Actively bound packages keep their In Use / Inactive status.
+        if ($boundInfs.ContainsKey($d.PublishedName.ToLowerInvariant())) { continue }
+        # A copy NEWER than the kept one is not "old" — it may be staged for
+        # the next boot, same rule the cleanup dialog follows.
+        if ($kept.Version -lt $d.Version) { continue }
+
+        Set-DriverRowProperty -Row $d -Name "Status" -Value "Old"
+        Set-DriverRowProperty -Row $d -Name "StatusSort" -Value "1"
+        Set-DriverRowProperty -Row $d -Name "StatusTooltip" -Value ("Superseded by {0}  v{1}  {2}. This copy is a leftover duplicate in the Driver Store — 'Clean Old' removes exactly these." -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate)
+    }
+}
+
+foreach ($row in $script:DriverPackages) {
+    $inf = ([string]$row.PublishedName).ToLowerInvariant()
+    $devices = @()
+    if ($script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf)) { $devices = @($script:DriverDeviceMap[$inf]) }
+
+    if ($row.Status -eq "Old") {
+        Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+        Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+        Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value "No present device uses this package."
+        continue
+    }
+
+    if ($devices.Count -gt 0) {
+        $okCount = @($devices | Where-Object { $_.State -eq "OK" }).Count
+        $names = @(Get-DriverDeviceListText -Devices $devices)
+        Set-DriverRowProperty -Row $row -Name "DevicesText" -Value ([string]$devices.Count)
+        Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value ([string]$devices.Count)
+        Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value ("Devices using this package:`n" + ($names -join "`n"))
+        if ($okCount -gt 0) {
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "In Use"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Actively used by {0} present device(s):`n{1}" -f $devices.Count, ($names -join "`n"))
+        }
+        else {
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "Inactive"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "2"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Bound to {0} present device(s), but none are running (disabled in Device Manager or reporting a problem):`n{1}`n`nRight-click and use 'Enable device' to turn a disabled device back on." -f $devices.Count, ($names -join "`n"))
+        }
+    }
+    else {
+        # Not bound to any present device. Before calling it Unattached, check
+        # the services this INF installs (phase 2): filter/service drivers —
+        # antivirus, audio effects, keyboard filters, bus drivers — are never
+        # a device's function driver, so the device map can never see them.
+        $svcRows = $null
+        if ($script:DriverServiceMap -and $script:DriverServiceMap.ContainsKey($inf)) { $svcRows = @($script:DriverServiceMap[$inf]) }
+        if ($svcRows.Count -gt 0) {
+            $svcNames = (@($svcRows | ForEach-Object { [string]$_.Name }) -join ", ")
+            $runningCount = @($svcRows | Where-Object { $_.Running }).Count
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "In Use"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+            if ($runningCount -gt 0) {
+                Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("In use as a Windows driver service: {0} ({1} running). Filter/service drivers don't bind to a single device, so no device is listed — this package is NOT safe to remove." -f $svcNames, $runningCount)
+            }
+            else {
+                Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value ("Installed as Windows driver service(s): {0} (registered, not currently running — some start on demand when the device/software is used). Removing this package can break the software that installed it." -f $svcNames)
+            }
+            Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value ("Loaded via Windows driver service(s): $svcNames — no device binding.")
+        }
+        else {
+            # "Unattached", never "Unneeded": a package with no attached device
+            # can still be required by hardware that is currently switched off
+            # or disabled (a camera that is off, an iGPU idle while the laptop
+            # runs on the dGPU, an antivirus module toggled off) or by devices
+            # that connect only occasionally (printers, USB gear).
+            Set-DriverRowProperty -Row $row -Name "Status" -Value "Unattached"
+            Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "3"
+            Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value "No device is currently attached to this package, and none of the services it installs are registered in Windows. This does NOT mean it is safe to remove: hardware that is switched off, disabled or disconnected can still need it (a camera that is off, an iGPU idle while the laptop runs on the dGPU, antivirus features toggled off, printers/USB gear that connects occasionally). Right-click and use 'Find Devices Using This Driver' to re-check live."
+            Set-DriverRowProperty -Row $row -Name "DevicesText" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesSort" -Value "0"
+            Set-DriverRowProperty -Row $row -Name "DevicesTooltip" -Value "No device is currently attached to this package."
+        }
+    }
+}
+}
+
+function Stop-DriverLoad {
+if ($script:DriverLoadTimer) {
+    try { $script:DriverLoadTimer.Stop() } catch {}
+    $script:DriverLoadTimer = $null
+}
+if ($script:DriverLoadRunspace) {
+    try { $script:DriverLoadRunspace.Stop() } catch {}
+    try { $script:DriverLoadRunspace.Dispose() } catch {}
+    $script:DriverLoadRunspace = $null
+}
+$script:DriverLoadAsyncResult = $null
+$script:DriverLoadInProgress = $false
+$script:DriverServiceMap = $null
+if ($btnDrvReload) { $btnDrvReload.IsEnabled = $true }
+}
+
+function Start-DriverListLoad {
+param([switch]$Force)
+if (-not $lstDrivers) { return }
+if ($script:DriverLoadInProgress) {
+    if (-not $Force) { return }
+    Stop-DriverLoad
+}
+$script:DriverLoadInProgress = $true
+$script:DriverUsageLoaded = $false
+$script:DriverCacheLoaded = $false
+$script:DriverServiceMap = $null
+if ($btnDrvReload) { $btnDrvReload.IsEnabled = $false }
+if ($lstDrivers) { $lstDrivers.Items.Clear() }
+Set-DriverStatus "Loading driver packages..." -Visible $true
+Write-GuiLog "[Drivers] Loading driver store packages..."
+
+# Phase 1 (fast, inline): parse pnputil /enum-drivers and list every package.
+try {
+    $parsed = Get-WmtDriverStorePackages
+    $rows = [System.Collections.Generic.List[object]]::new()
+    foreach ($d in $parsed) {
+        $rows.Add([PSCustomObject]@{
+            PublishedName  = [string]$d.PublishedName
+            OriginalName   = if ([string]::IsNullOrWhiteSpace([string]$d.OriginalName)) { "(unknown)" } else { [string]$d.OriginalName }
+            Provider       = [string]$d.Provider
+            Class          = [string]$d.Class
+            Signer         = [string]$d.Signer
+            Version        = $d.Version
+            DisplayVer     = [string]$d.DisplayVer
+            SortDate       = $d.SortDate
+            DisplayDate    = [string]$d.DisplayDate
+            DateSort       = ([DateTime]$d.SortDate).ToString("yyyyMMdd")
+            Status         = "Checking..."
+            StatusSort     = "4"
+            StatusTooltip  = "Checking which present devices use this package..."
+            DevicesText    = "..."
+            DevicesSort    = "0"
+            DevicesTooltip = ""
+        })
+    }
+    $script:DriverPackages = @($rows)
+    $script:DriverCacheLoaded = $true
+    Update-DriverListView
+    Update-DriverStatusLabel
+    Write-GuiLog "[Drivers] Listed $($script:DriverPackages.Count) driver package(s) from the driver store (cached until Refresh)."
+}
+catch {
+    Set-DriverStatus "Driver list load failed" -Visible $true
+    Write-GuiLog "[Drivers] Failed to parse driver store packages: $($_.Exception.Message)"
+    Stop-DriverLoad
+    return
+}
+
+# Phase 2 (slow, background): which present devices use each package, plus
+# which of each package's INF services exist / run in Windows.
+$drvInfList = @($script:DriverPackages | ForEach-Object { [string]$_.PublishedName })
+$script:DriverLoadRunspace = [PowerShell]::Create().AddScript({
+    param([string[]]$infs)
+    $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; Error = "" }
+    try {
+        $entityState = @{}
+        foreach ($e in @(Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction SilentlyContinue)) {
+            if (-not $e.DeviceID) { continue }
+            $code = -1
+            try { $code = [int]$e.ConfigManagerErrorCode } catch {}
+            $entityState[[string]$e.DeviceID] = @{ Name = [string]$e.Name; Status = [string]$e.Status; Code = $code }
+        }
+        $map = @{}
+        foreach ($d in @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction SilentlyContinue)) {
+            $inf = ([string]$d.InfName).ToLowerInvariant()
+            if ($inf -notmatch '^oem\d+\.inf$') { continue }
+            if (-not $map.ContainsKey($inf)) { $map[$inf] = [System.Collections.Generic.List[object]]::new() }
+            $devId = [string]$d.DeviceID
+            $ent = if ($entityState.ContainsKey($devId)) { $entityState[$devId] } else { $null }
+            $state = if (-not $ent) { "Unknown" } elseif ($ent.Code -eq 0 -and $ent.Status -eq "OK") { "OK" } else { "Problem" }
+            $name = [string]$d.DeviceName
+            if ([string]::IsNullOrWhiteSpace($name) -and $ent) { $name = [string]$ent.Name }
+            [void]$map[$inf].Add([PSCustomObject]@{ DeviceId = $devId; Name = $name; State = $state; Code = if ($ent) { [int]$ent.Code } else { -1 } })
+        }
+        # Service detection: a package can be "in use" without binding to any
+        # device (filter drivers, audio/AV drivers, bus drivers). Parse the
+        # staged INF for AddService entries and check each name against the
+        # registered driver/Win32 services and their running state.
+        $svcState = @{}
+        foreach ($s in @(Get-CimInstance -ClassName Win32_SystemDriver -ErrorAction SilentlyContinue)) {
+            if (-not $s.Name) { continue }
+            $svcState[[string]$s.Name] = [string]$s.State
+        }
+        foreach ($s in @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue)) {
+            if (-not $s.Name) { continue }
+            $svcState[[string]$s.Name] = [string]$s.State
+        }
+        $svcInfo = @{}
+        foreach ($infName in @($infs)) {
+            if (-not $infName) { continue }
+            $infPath = Join-Path $env:SystemRoot ("INF\" + $infName)
+            if (-not (Test-Path -LiteralPath $infPath)) { continue }
+            try { $infLines = @(Get-Content -LiteralPath $infPath -ErrorAction Stop) } catch { continue }
+            $svcNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+            foreach ($line in $infLines) {
+                if ($line -match '(?i)^\s*AddService\s*=\s*"?([A-Za-z0-9_\.\-]+)"?\s*(,|$)') { [void]$svcNames.Add($matches[1]) }
+            }
+            if ($svcNames.Count -eq 0) { continue }
+            $present = @()
+            foreach ($svcName in $svcNames) {
+                $installed = $svcState.ContainsKey($svcName) -or (Test-Path -LiteralPath ("HKLM:\SYSTEM\CurrentControlSet\Services\" + $svcName))
+                if (-not $installed) { continue }
+                $isRunning = ($svcState.ContainsKey($svcName) -and $svcState[$svcName] -eq "Running")
+                $present += [PSCustomObject]@{ Name = $svcName; Running = $isRunning }
+            }
+            if ($present.Count -gt 0) { $svcInfo[[string]$infName.ToLowerInvariant()] = $present }
+        }
+        $result = [PSCustomObject]@{ Success = $true; Usage = $map; Services = $svcInfo; Error = "" }
+    }
+    catch {
+        $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; Error = $_.Exception.Message }
+    }
+    return $result
+}).AddArgument($drvInfList)
+$script:DriverLoadAsyncResult = $script:DriverLoadRunspace.BeginInvoke()
+
+$script:DriverLoadTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DriverLoadTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$script:DriverLoadTimer.Add_Tick({
+    if (-not $script:DriverLoadAsyncResult -or -not $script:DriverLoadAsyncResult.IsCompleted) { return }
+
+    $script:DriverLoadTimer.Stop()
+    try {
+        $result = $script:DriverLoadRunspace.EndInvoke($script:DriverLoadAsyncResult)
+        if ($result -and $result.Count -eq 1) { $result = $result[0] }
+
+        if ($result -and $result.Success) {
+            $script:DriverDeviceMap = $result.Usage
+            $script:DriverServiceMap = $result.Services
+            $script:DriverUsageLoaded = $true
+            Set-DriverStatusFlags
+            Update-DriverListView
+            Update-DriverStatusLabel
+            Write-GuiLog "[Drivers] Device usage loaded: $(Get-DriverStatusCounts)"
+        }
+        else {
+            $err = if ($result -and $result.Error) { $result.Error } else { "Unknown error" }
+            # Without the usage map the rows can stay in "Checking..." forever —
+            # move them to a muted "Unknown" state instead.
+            foreach ($row in $script:DriverPackages) {
+                if ($row.Status -eq "Checking...") {
+                    Set-DriverRowProperty -Row $row -Name "Status" -Value "Unknown"
+                    Set-DriverRowProperty -Row $row -Name "StatusSort" -Value "5"
+                    Set-DriverRowProperty -Row $row -Name "StatusTooltip" -Value "Device usage could not be determined (Win32_PnPSignedDriver query failed). Right-click and use 'Find Devices Using This Driver' to query live."
+                }
+            }
+            Update-DriverListView
+            Set-DriverStatus "Driver packages loaded — device usage unavailable" -Visible $true
+            Write-GuiLog "[Drivers] Device usage load failed: $err"
+        }
+    }
+    catch {
+        Write-GuiLog "[Drivers] Device usage load failed: $($_.Exception.Message)"
+    }
+    finally {
+        try { $script:DriverLoadRunspace.Dispose() } catch {}
+        $script:DriverLoadRunspace = $null
+        $script:DriverLoadAsyncResult = $null
+        $script:DriverLoadTimer = $null
+        $script:DriverLoadInProgress = $false
+        if ($btnDrvReload) { $btnDrvReload.IsEnabled = $true }
+    }
+})
+$script:DriverLoadTimer.Start()
+}
+
+function Get-DriverPackageDetailsText {
+param($Row)
+if (-not $Row) { return "" }
+$inf = [string]$Row.PublishedName
+$devices = @()
+if ($script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf.ToLowerInvariant())) { $devices = @($script:DriverDeviceMap[$inf.ToLowerInvariant()]) }
+
+$lines = [System.Collections.Generic.List[string]]::new()
+[void]$lines.Add("Store File:    $inf")
+[void]$lines.Add("Driver INF:    $($Row.OriginalName)")
+[void]$lines.Add("Provider:      $($Row.Provider)")
+[void]$lines.Add("Class:         $($Row.Class)")
+[void]$lines.Add("Version:       $($Row.DisplayVer)")
+[void]$lines.Add("Driver Date:   $($Row.DisplayDate)")
+if (-not [string]::IsNullOrWhiteSpace([string]$Row.Signer)) { [void]$lines.Add("Signer:        $($Row.Signer)") }
+[void]$lines.Add("INF Path:      $env:SystemRoot\INF\$inf")
+[void]$lines.Add("Status:        $($Row.Status)")
+$detail = ([string]$Row.StatusTooltip) -replace "`r?`n", "  "
+[void]$lines.Add("Status detail: $detail")
+[void]$lines.Add("")
+if ($devices.Count -gt 0) {
+    [void]$lines.Add("Devices using this package ($($devices.Count)):")
+    foreach ($line in (Get-DriverDeviceListText -Devices $devices)) { [void]$lines.Add("  $line") }
+}
+else {
+    [void]$lines.Add("No device is currently attached to this package.")
+}
+[void]$lines.Add("")
+[void]$lines.Add("Remove (dangerous):  pnputil /delete-driver $inf /uninstall")
+return ($lines -join [Environment]::NewLine)
+}
+
+function Show-DriverPackageDetails {
+param($Row)
+if (-not $Row) { return }
+Show-TextDialog -Title "Driver Details - $($Row.PublishedName)" -Text (Get-DriverPackageDetailsText -Row $Row)
+}
+
+function Get-DriverDeviceUsageLive {
+param([string]$Inf)
+# Live single-package query. Used when the background usage map has no entry
+# for the package (still loading, or load failed).
+$devices = [System.Collections.Generic.List[object]]::new()
+try {
+    $signed = @(Get-CimInstance -ClassName Win32_PnPSignedDriver -ErrorAction Stop |
+        Where-Object { ([string]$_.InfName).ToLowerInvariant() -eq $Inf.ToLowerInvariant() })
+    foreach ($d in $signed) {
+        $state = "Unknown"
+        $entName = ""
+        try {
+            $ent = Get-CimInstance -ClassName Win32_PnPEntity -ErrorAction Stop |
+                Where-Object { [string]$_.DeviceID -eq [string]$d.DeviceID } |
+                Select-Object -First 1
+            if ($ent) {
+                $entName = [string]$ent.Name
+                $code = -1
+                try { $code = [int]$ent.ConfigManagerErrorCode } catch {}
+                $state = if ($code -eq 0 -and [string]$ent.Status -eq "OK") { "OK" } else { "Problem" }
+            }
+        }
+        catch {}
+        $name = [string]$d.DeviceName
+        if ([string]::IsNullOrWhiteSpace($name)) { $name = $entName }
+        [void]$devices.Add([PSCustomObject]@{ DeviceId = [string]$d.DeviceID; Name = $name; State = $state; Code = $code })
+    }
+}
+catch {
+    Write-GuiLog "[Drivers] Live device query failed for ${Inf}: $($_.Exception.Message)"
+}
+return @($devices)
+}
+
+function Show-DriverDevicesDialog {
+param($Row)
+if (-not $Row) { return }
+$inf = [string]$Row.PublishedName
+if ([string]::IsNullOrWhiteSpace($inf)) { return }
+
+$devices = @()
+if ($script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf.ToLowerInvariant())) {
+    $devices = @($script:DriverDeviceMap[$inf.ToLowerInvariant()])
+}
+else {
+    Set-DriverStatus "Checking devices using $inf..." -Visible $true
+    $devices = Get-DriverDeviceUsageLive -Inf $inf
+    Set-DriverStatus "" -Visible $false
+}
+
+$lines = [System.Collections.Generic.List[string]]::new()
+[void]$lines.Add("Driver package: $inf  ($($Row.Provider) — $($Row.OriginalName))")
+[void]$lines.Add("")
+if ($devices.Count -gt 0) {
+    [void]$lines.Add("$($devices.Count) present device(s) use this package:")
+    [void]$lines.Add("")
+    foreach ($line in (Get-DriverDeviceListText -Devices $devices)) { [void]$lines.Add($line) }
+}
+else {
+    [void]$lines.Add("No device is currently attached to this package.")
+    [void]$lines.Add("")
+    [void]$lines.Add("That is not proof the package is safe to remove: hardware that is switched off, disabled or disconnected can still need it — a camera that is off, an iGPU idle while the system runs on the dGPU, an antivirus module toggled off, devices that connect only occasionally (printers, USB gear, external displays). Only remove it if you are sure the device or software is gone for good.")
+}
+Show-TextDialog -Title "Devices Using $inf" -Text ($lines -join [Environment]::NewLine)
+}
+
+function Copy-DriverSelectionToClipboard {
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) {
+    Write-GuiLog "Copy skipped: no driver row selected."
+    return $false
+}
+
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.AppendLine("WMT Driver Row Data")
+[void]$sb.AppendLine("Count: $($targets.Count)")
+[void]$sb.AppendLine("Copied: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))")
+$i = 0
+foreach ($row in $targets) {
+    $i++
+    [void]$sb.AppendLine("")
+    [void]$sb.AppendLine("Row $i")
+    foreach ($p in @("PublishedName", "OriginalName", "Provider", "Class", "Signer", "DisplayVer", "DisplayDate", "Status")) {
+        $prop = $row.PSObject.Properties[$p]
+        if ($prop) {
+            $val = ([string]$prop.Value) -replace '\r?\n', ' '
+            [void]$sb.AppendLine("${p}: $val")
+        }
+    }
+}
+
+try {
+    [System.Windows.Clipboard]::SetText($sb.ToString())
+    Write-GuiLog "Copied $($targets.Count) driver row(s) to clipboard."
+    return $true
+}
+catch {
+    Write-GuiLog "ERROR: Could not copy driver row data: $($_.Exception.Message)"
+    return $false
+}
+}
+
+function Get-DriverRowsTableText {
+# Explorer-style copy of the selected rows: one header line plus one
+# tab-separated line per driver, columns matching the visible list order.
+# Tabs/newlines inside values are flattened so the paste always splits into
+# exactly 8 columns (Excel, Google Sheets, Notepad, tickets).
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) { return "" }
+
+$cols = @(
+    @("Status",     "Status"),
+    @("Class",      "Class"),
+    @("Provider",   "Provider"),
+    @("Driver",     "OriginalName"),
+    @("Store File", "PublishedName"),
+    @("Version",    "DisplayVer"),
+    @("Date",       "DisplayDate"),
+    @("Devices",    "DevicesText")
+)
+$sb = [System.Text.StringBuilder]::new()
+[void]$sb.AppendLine((@($cols | ForEach-Object { $_[0] }) -join "`t"))
+foreach ($row in $targets) {
+    $cells = foreach ($col in $cols) {
+        $val = ""
+        $prop = $row.PSObject.Properties[$col[1]]
+        if ($prop) { $val = [string]$prop.Value }
+        ((($val -replace '\r?\n', ' ') -replace '\t', ' ')).Trim()
+    }
+    [void]$sb.AppendLine((@($cells) -join "`t"))
+}
+return $sb.ToString()
+}
+
+function Copy-DriverRowsAsTable {
+# Ctrl+C target for lstDrivers. Retried briefly because SetText can lose a
+# race with another app holding the clipboard open (same pattern as the
+# library list copy).
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $null -ne $_ })
+if ($targets.Count -eq 0) {
+    Write-GuiLog "Copy skipped: no driver row selected."
+    return $false
+}
+$text = Get-DriverRowsTableText -Rows $targets
+if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+
+for ($attempt = 1; $attempt -le 5; $attempt++) {
+    try {
+        [System.Windows.Clipboard]::SetText($text)
+        Write-GuiLog "Copied $($targets.Count) driver row(s) as table (TSV)."
+        return $true
+    }
+    catch {
+        if ($attempt -eq 5) {
+            Write-GuiLog "ERROR: Could not copy driver rows: $($_.Exception.Message)"
+            return $false
+        }
+        Start-Sleep -Milliseconds 40
+    }
+}
+return $false
+}
+
+function Get-DriverInfSha256 {
+# SHA256 of the staged INF (C:\Windows\INF\<oemXX.inf>) backing a driver
+# list row — the exact package metadata file for this store entry. Used by
+# the VirusTotal context-menu lookup; returns $null when it cannot hash.
+param($Row)
+if (-not $Row) { return $null }
+$inf = [string]$Row.PublishedName
+if ([string]::IsNullOrWhiteSpace($inf) -or $inf -notmatch '(?i)\.inf$') { return $null }
+$infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+if (-not (Test-Path -LiteralPath $infPath)) { return $null }
+try {
+    $hash = Get-FileHash -LiteralPath $infPath -Algorithm SHA256 -ErrorAction Stop
+    return ([string]$hash.Hash).ToLowerInvariant()
+}
+catch {
+    return $null
+}
+}
+
+function Get-DriverGeminiPrompt {
+# "what is <driver>, <provider>, version <version>" — the lookup question
+# for the Gemini context-menu item, filled from the row's identity fields.
+param($Row)
+if (-not $Row) { return "" }
+$orig = ([string]$Row.OriginalName).Trim()
+if ([string]::IsNullOrWhiteSpace($orig) -or $orig -eq "(unknown)") { $orig = ([string]$Row.PublishedName).Trim() }
+$provider = ([string]$Row.Provider).Trim()
+$ver = ([string]$Row.DisplayVer).Trim()
+$prompt = "what is $orig"
+if (-not [string]::IsNullOrWhiteSpace($provider)) { $prompt = "$prompt, $provider" }
+if (-not [string]::IsNullOrWhiteSpace($ver)) { $prompt = "$prompt, version $ver" }
+return $prompt
+}
+
+function Open-DriverWebLookup {
+# Shared launcher for the driver web-lookup context-menu items: opens the
+# URL in the default browser and logs failures instead of crashing.
+param([string]$Url)
+if ([string]::IsNullOrWhiteSpace($Url)) { return }
+try {
+    Start-Process $Url
+}
+catch {
+    Write-GuiLog "ERROR: Could not open browser for '${Url}': $($_.Exception.Message)"
+}
+}
+
+function Show-DriverVirusTotalDialog {
+# Themed choice dialog for the VirusTotal lookup (replaces the plain
+# Yes/No/Cancel message box): search the VirusTotal database by the staged
+# INF's SHA256, or upload the file for a live scan. The hash is shown in a
+# selectable read-only box so it can be copied anywhere. Returns
+# "Hash", "Upload" or "Cancel" (Esc / close button = Cancel).
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)][string]$Hash
+)
+
+$content = @"
+<Grid Margin="18">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Name="lblInf" Grid.Row="0" FontSize="14" FontWeight="SemiBold" TextWrapping="Wrap"/>
+    <TextBlock Grid.Row="1" Text="SHA256 of the staged INF (select to copy):" Margin="0,14,0,4" Foreground="{DynamicResource TextSecondary}"/>
+    <TextBox Name="txtHash" Grid.Row="2" IsReadOnly="True" FontFamily="Consolas" FontSize="12"
+             TextWrapping="Wrap" Background="{DynamicResource BgPanel}" Padding="8,6"/>
+    <TextBlock Name="lblHint" Grid.Row="3" TextWrapping="Wrap" Margin="0,12,0,0" Foreground="{DynamicResource TextSecondary}"/>
+    <StackPanel Grid.Row="4" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+        <Button Name="btnHash" Content="Search by Hash" MinWidth="132" Height="30" Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}" Margin="0,0,8,0"
+                ToolTip="Look up this exact file in the VirusTotal database. Instant — but a file VirusTotal has never seen shows 'No results'."/>
+        <Button Name="btnUpload" Content="Upload Sample" MinWidth="132" Height="30" Margin="0,0,8,0"
+                ToolTip="Upload the INF for a live scan: opens virustotal.com and an Explorer window with the file selected so you can drag it onto the page."/>
+        <Button Name="btnCancel" Content="Cancel" Width="92" Height="30" IsCancel="True"/>
+    </StackPanel>
+</Grid>
+"@
+$dialog = New-WmtWindowFromXaml -Title "VirusTotal - $Inf" -ContentXaml $content -Width 560 -Height 272 -NoResize
+$dialog.FindName("lblInf").Text = "Check $Inf on VirusTotal"
+$dialog.FindName("txtHash").Text = $Hash
+$dialog.FindName("lblHint").Text = "Search by Hash checks the VirusTotal database for this exact file. Upload Sample sends the INF for a fresh scan — the right choice when the hash has never been seen ('No results')."
+
+$state = @{ Result = "Cancel" }
+$dialog.FindName("btnHash").Add_Click({ $state.Result = "Hash"; $dialog.DialogResult = $true }.GetNewClosure())
+$dialog.FindName("btnUpload").Add_Click({ $state.Result = "Upload"; $dialog.DialogResult = $true }.GetNewClosure())
+try { $dialog.ShowDialog() | Out-Null } catch { Write-GuiLog "ERROR: VirusTotal dialog failed: $($_.Exception.Message)"; return "Cancel" }
+return $state.Result
+}
+
+function Invoke-DriverDevicePowerCommand {
+# Runs pnputil /enable-device or /disable-device for one present device
+# instance ID (an admin operation, same as driver removal). Returns
+# Success/ExitCode/Output so the caller can log the exact failure and treat
+# the reboot-pending exit code (3010) explicitly.
+param([Parameter(Mandatory = $true)][string]$DeviceId, [Parameter(Mandatory = $true)][bool]$Enable)
+$arg = if ($Enable) { "/enable-device" } else { "/disable-device" }
+$exit = -1
+$out = @()
+try {
+    $out = @(& pnputil.exe $arg $DeviceId 2>&1)
+    $exit = $LASTEXITCODE
+}
+catch {
+    $out = @($_.Exception.Message)
+    $exit = -1
+}
+$outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+return [PSCustomObject]@{ Success = ($exit -eq 0); ExitCode = $exit; Output = $outText }
+}
+
+function Set-DriverDeviceCachedState {
+# After pnputil accepted an enable/disable, flip that device's entry inside
+# the cached usage map and re-derive the package's status in place — the
+# same in-place cache edit pattern as Remove-DriverRowsFromCache, no recheck.
+# Returns $true when a cached entry was found and updated.
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)][string]$DeviceId,
+    [Parameter(Mandatory = $true)][ValidateSet("OK", "Problem", "Unknown")][string]$State,
+    [int]$Code = -1
+)
+if (-not $script:DriverUsageLoaded -or -not $script:DriverDeviceMap) { return $false }
+$key = $Inf.ToLowerInvariant()
+if (-not $script:DriverDeviceMap.ContainsKey($key)) { return $false }
+$entry = $null
+foreach ($d in @($script:DriverDeviceMap[$key])) {
+    if ([string]$d.DeviceId -eq $DeviceId) { $entry = $d; break }
+}
+if (-not $entry) { return $false }
+Set-DriverRowProperty -Row $entry -Name "State" -Value $State
+Set-DriverRowProperty -Row $entry -Name "Code" -Value $Code
+Set-DriverStatusFlags
+Update-DriverListView
+Update-DriverStatusLabel
+return $true
+}
+
+function Invoke-DriverDeviceToggle {
+# Context-menu action behind the per-device "Enable device" / "Disable device"
+# entries: flips one present
+# device that uses the selected driver package. A running device (State OK)
+# is disabled after confirmation; anything else (disabled / problem) is
+# enabled — pnputil enable/disable are idempotent, so a wrong guess is
+# harmless. On success the cached device state is patched so the row
+# re-colors without a full recheck.
+param(
+    [Parameter(Mandatory = $true)][string]$Inf,
+    [Parameter(Mandatory = $true)]$Device
+)
+if (-not $Device -or [string]::IsNullOrWhiteSpace([string]$Device.DeviceId)) {
+    Write-GuiLog "[Drivers] Device toggle skipped: the device has no instance ID."
+    return $false
+}
+$devId = [string]$Device.DeviceId
+$name = if ([string]::IsNullOrWhiteSpace([string]$Device.Name)) { $devId } else { [string]$Device.Name }
+$disable = ([string]$Device.State -eq "OK")
+
+if ($disable) {
+    $warn = "Disable device '$name'?`n`nThe device stops working until it is re-enabled (right-click the same row and choose 'Enable device'). Its driver package will then show as 'Inactive (disabled in Device Manager)'.`n`nDevice: $devId"
+    $choice = Show-WmtMessageBox -Message $warn -Title "Disable Device" -Button YesNo -Image Warning
+    if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+        Write-GuiLog "[Drivers] Disable of '$name' cancelled."
+        return $false
+    }
+}
+
+$action = if ($disable) { "disable-device" } else { "enable-device" }
+Invoke-UiCommand {
+    param($devId, $name, $disable, $Inf)
+    $result = Invoke-DriverDevicePowerCommand -DeviceId $devId -Enable (-not $disable)
+    if ($result.ExitCode -eq 3010) {
+        Write-GuiLog "[Drivers] pnputil $(if ($disable) { '/disable-device' } else { '/enable-device' }) for '$name' needs a reboot to finish — the cached list is left unchanged; use Refresh after rebooting."
+        return
+    }
+    if (-not $result.Success) {
+        Write-GuiLog "ERROR: pnputil $(if ($disable) { '/disable-device' } else { '/enable-device' }) failed for '$name' (exit $($result.ExitCode)): $($result.Output)"
+        return
+    }
+    $newState = if ($disable) { "Problem" } else { "OK" }
+    $newCode  = if ($disable) { 22 } else { 0 }
+    $updated = Set-DriverDeviceCachedState -Inf $Inf -DeviceId $devId -State $newState -Code $newCode
+    $note = if ($updated) { " Status updated in the cached list; use Refresh for a full recheck." } else { " Use Refresh to update the driver list." }
+    if ($disable) {
+        Write-GuiLog "[Drivers] Disabled device '$name' — package ${Inf} now shows as Inactive (disabled in Device Manager).$note"
+    }
+    else {
+        Write-GuiLog "[Drivers] Enabled device '$name' — package ${Inf} is marked In Use again.$note"
+    }
+} "Toggling device '$name' ($action)..." -ArgumentList $devId, $name, $disable, $Inf
+return $true
+}
+
+function Remove-DriverRowsFromCache {
+# Drops packages that pnputil actually removed from the CACHED driver list —
+# no re-enumeration, no phase-2 recheck. Rows pnputil refused to delete keep
+# their place (and status) untouched, so the list never lies about what is
+# still staged. The Refresh button remains the way to get a fully fresh pass.
+param([string[]]$RemovedInfs)
+$goneList = @($RemovedInfs | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+if ($goneList.Count -eq 0) { return }
+if (-not $script:DriverPackages -or $script:DriverPackages.Count -eq 0) { return }
+
+$gone = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($inf in $goneList) { [void]$gone.Add([string]$inf) }
+
+$kept = [System.Collections.Generic.List[object]]::new()
+$removedCount = 0
+foreach ($row in $script:DriverPackages) {
+    if ($row.PublishedName -and $gone.Contains([string]$row.PublishedName)) { $removedCount++ }
+    else { [void]$kept.Add($row) }
+}
+if ($removedCount -eq 0) {
+    Write-GuiLog "[Drivers] No cached rows matched the removed package(s); list left unchanged."
+    return
+}
+$script:DriverPackages = @($kept)
+
+# Drop the packages from the cached device/service maps too, so tooltips,
+# details dialogs and live-status recomputation don't reference ghost rows.
+if ($script:DriverDeviceMap) {
+    foreach ($inf in $gone) { if ($script:DriverDeviceMap.ContainsKey($inf)) { $script:DriverDeviceMap.Remove($inf) } }
+}
+if ($script:DriverServiceMap) {
+    foreach ($inf in $gone) { if ($script:DriverServiceMap.ContainsKey($inf)) { $script:DriverServiceMap.Remove($inf) } }
+}
+
+# Recompute the Status column from the cached maps (pure in-memory, instant):
+# removing the kept copy of a group can un-"Old" the remaining duplicates,
+# and the counts line must match the visible rows.
+Set-DriverStatusFlags
+Update-DriverListView
+Update-DriverStatusLabel
+
+Write-GuiLog "[Drivers] Removed $removedCount package(s) from the cached list; $($script:DriverPackages.Count) remain. Use Refresh for a full recheck."
+}
+
+function Invoke-DriverPackageRemoval {
+param([object[]]$Rows)
+$targets = @($Rows | Where-Object { $_ -and $_.PublishedName })
+if ($targets.Count -eq 0) { return }
+
+$inUseTargets = @($targets | Where-Object { $_.Status -eq "In Use" })
+$listText = (@($targets | ForEach-Object { "  • $($_.PublishedName)  ($($_.Provider) — $($_.OriginalName))" }) -join "`n")
+$warn = "Remove $($targets.Count) driver package(s) from the driver store?`n`n$listText`n`nThis runs 'pnputil /delete-driver <inf> /uninstall' and cannot be undone easily. Use 'Export Drivers' first if you might need these files again."
+if ($inUseTargets.Count -gt 0) {
+    $warn = "WARNING: $($inUseTargets.Count) of these package(s) are actively used by present devices. Removing them can break that hardware until its driver is reinstalled.`n`n$warn"
+}
+$choice = Show-WmtMessageBox -Message $warn -Title "Remove Driver Package(s)" -Button YesNo -Image Warning
+if ($choice -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+$failed = [System.Collections.Generic.List[object]]::new()
+$removed = [System.Collections.Generic.List[string]]::new()
+Invoke-UiCommand {
+    param($targets, $failed, $removed)
+    foreach ($row in $targets) {
+        $inf = [string]$row.PublishedName
+        Write-GuiLog "[Drivers] pnputil /delete-driver $inf /uninstall"
+        $out = pnputil.exe /delete-driver $inf /uninstall 2>&1
+        $exit = $LASTEXITCODE
+        $outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+        if ($exit -eq 0 -or $exit -eq 3010) {
+            if ($exit -eq 3010) { Write-GuiLog "[Drivers] Removed $inf (reboot required to finish the removal)." }
+            else { Write-GuiLog "[Drivers] Removed $inf." }
+            [void]$removed.Add($inf)
+        }
+        else {
+            Write-GuiLog "[Drivers] Failed to remove ${inf}: (exit $exit) $outText"
+            [void]$failed.Add([PSCustomObject]@{ Inf = $inf; ExitCode = $exit; Output = $outText })
+        }
+    }
+} "Removing $($targets.Count) driver package(s)..." -ArgumentList $targets, $failed, $removed
+
+if ($failed.Count -gt 0) {
+    $failText = (@($failed) | ForEach-Object { "$($_.Inf) (exit $($_.ExitCode)):`n$($_.Output)" }) -join "`n`n"
+    $force = Show-WmtMessageBox -Message "Failed to remove $($failed.Count) package(s):`n`n$failText`n`nForce delete? This also removes packages Windows considers in use." -Title "Force Delete Driver Packages" -Button YesNo -Image Error
+    if ($force -eq [System.Windows.MessageBoxResult]::Yes) {
+        Invoke-UiCommand {
+            param($failed, $removed)
+            foreach ($item in $failed) {
+                Write-GuiLog "[Drivers] pnputil /delete-driver $($item.Inf) /uninstall /force"
+                $out = pnputil.exe /delete-driver $item.Inf /uninstall /force 2>&1
+                $exit = $LASTEXITCODE
+                if ($exit -eq 0 -or $exit -eq 3010) {
+                    if ($exit -eq 3010) { Write-GuiLog "[Drivers] Force-removed $($item.Inf) (reboot required to finish the removal)." }
+                    else { Write-GuiLog "[Drivers] Force-removed $($item.Inf)." }
+                    [void]$removed.Add([string]$item.Inf)
+                }
+                else {
+                    $outText = (@($out) | ForEach-Object { [string]$_ }) -join "`n"
+                    Write-GuiLog "[Drivers] Force delete failed for $($item.Inf): (exit $exit) $outText"
+                }
+            }
+        } "Force-deleting $($failed.Count) driver package(s)..." -ArgumentList $failed, $removed
+    }
+}
+
+# Update the cached list in place — only lines pnputil removed disappear;
+# no full driver-store recheck. Refresh still forces a complete reload.
+Remove-DriverRowsFromCache -RemovedInfs @($removed)
+}
+
+# --- DRIVER LIST SORTING ---
+$script:DriverSortChain = New-Object System.Collections.ArrayList
+[void]$script:DriverSortChain.Add([PSCustomObject]@{ Property = "StatusSort"; Descending = $false })
+[void]$script:DriverSortChain.Add([PSCustomObject]@{ Property = "Provider";   Descending = $false })
+
+function Resolve-DriverSortProperty {
+param([string]$Header)
+switch ($Header) {
+    "Status"     { return "StatusSort" }
+    "Class"      { return "Class" }
+    "Provider"   { return "Provider" }
+    "Driver"     { return "OriginalName" }
+    "Store File" { return "PublishedName" }
+    "Version"    { return "VersionSort" }
+    "Date"       { return "DateSort" }
+    "Devices"    { return "DevicesSort" }
+    default      { return $Header }
+}
+}
+
+if ($lstDrivers) {
+$drvSortHandler = [System.Windows.RoutedEventHandler] {
+    param($src, $e)
+    $columnHeader = Get-GridViewColumnHeaderFromSource -OriginalSource $e.OriginalSource
+    if (-not $columnHeader -or -not $columnHeader.Column) { return }
+    $header = Get-CleanHeader $columnHeader.Column.Header
+    if ([string]::IsNullOrWhiteSpace($header)) { return }
+
+    $propName = Resolve-DriverSortProperty $header
+    if ([string]::IsNullOrWhiteSpace($propName)) { return }
+
+    $isAscending = Set-SortChainPrimary -Chain $script:DriverSortChain -PropertyName $propName
+    Update-GridViewHeaders -ListView $lstDrivers -ActiveHeader $header -Ascending:$isAscending
+    Set-ListViewSort -ListView $lstDrivers -Chain $script:DriverSortChain
+}
+$lstDrivers.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $drvSortHandler, $true)
+
+# Prevent context menu from opening when right-clicking empty space, headers,
+# or scrollbars; instead select the row under the cursor first.
+$lstDrivers.Add_PreviewMouseRightButtonDown({
+    param($s, $e)
+    try { Set-WmtListViewRightClickSelection -ListView $s -OriginalSource $e.OriginalSource } catch {}
+})
+$lstDrivers.Add_ContextMenuOpening({
+    param($s, $e)
+    if (@($s.SelectedItems).Count -eq 0) { $e.Handled = $true }
+})
+
+# Keyboard on the list: Ctrl+A selects every visible row, Ctrl+C copies the
+# selected row(s) as a tab-separated table (header + one line per driver).
+$lstDrivers.Add_PreviewKeyDown({
+    param($s, $e)
+    $mods = [System.Windows.Input.Keyboard]::Modifiers
+    $isCtrl = (($mods -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control)
+    if (-not $isCtrl) { return }
+    if ($e.Key -eq [System.Windows.Input.Key]::C) {
+        if (Copy-DriverRowsAsTable -Rows @($s.SelectedItems)) { $e.Handled = $true }
+    }
+    elseif ($e.Key -eq [System.Windows.Input.Key]::A) {
+        try { $s.SelectAll() } catch {}
+        $e.Handled = $true
+    }
+})
+}
+
+# --- DRIVER LIST CONTEXT MENU ---
+if ($lstDrivers) {
+$drvCtxMenu = New-Object System.Windows.Controls.ContextMenu
+Set-WmtContextMenuChrome -ContextMenu $drvCtxMenu
+
+$miDrvDetails = New-Object System.Windows.Controls.MenuItem
+$miDrvDetails.Header = "Driver Details"
+$miDrvDetails.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-DriverPackageDetails -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvDetails)
+
+$miDrvOpenInf = New-Object System.Windows.Controls.MenuItem
+$miDrvOpenInf.Header = "Open INF Location"
+$miDrvOpenInf.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $inf = [string]$sel[0].PublishedName
+    if ([string]::IsNullOrWhiteSpace($inf)) { return }
+    $infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+    if (Test-Path -LiteralPath $infPath) {
+        Start-Process explorer.exe -ArgumentList "/select,`"$infPath`""
+        Write-GuiLog "[Drivers] Opened INF location for $inf"
+    }
+    else {
+        Show-WmtMessageBox -Message "INF file not found:`n$infPath" -Title "Open INF Location" -Image Warning | Out-Null
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvOpenInf)
+
+$miDrvDevices = New-Object System.Windows.Controls.MenuItem
+$miDrvDevices.Header = "Find Devices Using This Driver"
+$miDrvDevices.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-DriverDevicesDialog -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvDevices)
+
+# Per-device Enable/Disable entries are inserted flat into this menu on every
+# open (see Add_Opened below) — NOT as a WPF submenu, because the shared flat
+# MenuItem template has no popup part and a submenu under it silently never
+# opens. Flat items use exactly the same mechanics as every other entry in
+# this menu. This list tracks the inserted items so they can be removed again
+# on the next open.
+$script:DrvToggleMenuItems = [System.Collections.Generic.List[object]]::new()
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvCopyName = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyName.Header = "Copy Store File Name"
+$miDrvCopyName.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -gt 0) {
+        try { [System.Windows.Clipboard]::SetText((@($sel | ForEach-Object { $_.PublishedName }) -join "`n")) } catch {}
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyName)
+
+$miDrvCopyInf = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyInf.Header = "Copy Driver INF Name"
+$miDrvCopyInf.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -gt 0) {
+        try { [System.Windows.Clipboard]::SetText((@($sel | ForEach-Object { $_.OriginalName }) -join "`n")) } catch {}
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyInf)
+
+$miDrvCopyTable = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyTable.Header = "Copy as Table (Ctrl+C)"
+$miDrvCopyTable.ToolTip = "Copy the selected row(s) as a tab-separated table (header row + one line per driver) that pastes into Excel, Google Sheets or Notepad with columns intact."
+$miDrvCopyTable.Add_Click({
+    [void](Copy-DriverRowsAsTable -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyTable)
+
+$miDrvCopyRows = New-Object System.Windows.Controls.MenuItem
+$miDrvCopyRows.Header = "Copy Full Details"
+$miDrvCopyRows.Add_Click({
+    [void](Copy-DriverSelectionToClipboard -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCopyRows)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvVirusTotal = New-Object System.Windows.Controls.MenuItem
+$miDrvVirusTotal.Header = "Check on VirusTotal"
+$miDrvVirusTotal.ToolTip = "Opens a themed chooser: Search by Hash (instant database lookup by the staged INF's SHA256 — a hash VirusTotal has never seen shows 'No results') or Upload Sample (live scan — opens virustotal.com and Explorer with the INF selected for drag-and-drop). Falls back to a name search when the INF can't be hashed."
+$miDrvVirusTotal.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $row = $sel[0]
+    $inf = [string]$row.PublishedName
+    $hash = Get-DriverInfSha256 -Row $row
+    if (-not $hash) {
+        $name = ([string]$row.OriginalName).Trim()
+        if ([string]::IsNullOrWhiteSpace($name) -or $name -eq "(unknown)") { $name = $inf }
+        Write-GuiLog "[Drivers] VirusTotal lookup for ${inf} by name '$name' (INF hash unavailable)"
+        Open-DriverWebLookup -Url ("https://www.virustotal.com/gui/search/" + [Uri]::EscapeDataString($name))
+        return
+    }
+    $vtChoice = Show-DriverVirusTotalDialog -Inf $inf -Hash $hash
+    if ($vtChoice -eq "Hash") {
+        Write-GuiLog "[Drivers] VirusTotal hash search for ${inf}: $hash"
+        Open-DriverWebLookup -Url "https://www.virustotal.com/gui/search/$hash"
+    }
+    elseif ($vtChoice -eq "Upload") {
+        Write-GuiLog "[Drivers] VirusTotal upload flow for ${inf}: opening virustotal.com upload + Explorer (drag the selected INF onto the page)"
+        Open-DriverWebLookup -Url "https://www.virustotal.com/gui/home/upload"
+        $infPath = Join-Path $env:SystemRoot ("INF\" + $inf)
+        if (Test-Path -LiteralPath $infPath) {
+            Start-Process explorer.exe -ArgumentList "/select,`"$infPath`""
+        }
+    }
+    else {
+        Write-GuiLog "[Drivers] VirusTotal lookup for ${inf} cancelled."
+    }
+})
+[void]$drvCtxMenu.Items.Add($miDrvVirusTotal)
+
+$miDrvCatalog = New-Object System.Windows.Controls.MenuItem
+$miDrvCatalog.Header = "Search Microsoft Update Catalog"
+$miDrvCatalog.ToolTip = "Search catalog.update.microsoft.com for this driver's original INF name — Microsoft's safe, signed driver source. Falls back to 'Provider Class' when the INF name is unknown."
+$miDrvCatalog.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $row = $sel[0]
+    $query = ([string]$row.OriginalName).Trim()
+    if ([string]::IsNullOrWhiteSpace($query) -or $query -eq "(unknown)") {
+        $provider = ([string]$row.Provider).Trim()
+        $class = ([string]$row.Class).Trim()
+        if ($provider -and $class) { $query = "$provider $class" }
+        elseif ($provider) { $query = $provider }
+        else { $query = [string]$row.PublishedName }
+    }
+    Write-GuiLog "[Drivers] Searching Microsoft Update Catalog for '$query'"
+    Open-DriverWebLookup -Url ("https://www.catalog.update.microsoft.com/Search.aspx?q=" + [Uri]::EscapeDataString($query))
+})
+[void]$drvCtxMenu.Items.Add($miDrvCatalog)
+
+$miDrvGemini = New-Object System.Windows.Controls.MenuItem
+$miDrvGemini.Header = "Ask Gemini About This Driver"
+$miDrvGemini.ToolTip = "Asks Google's Gemini-powered AI Mode 'what is <driver>, <provider>, version <version>' and answers immediately — Gemini itself has no URL prefill, so this goes through AI Mode (udm=50). The question is also copied to the clipboard for pasting into the Gemini app if you prefer."
+$miDrvGemini.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -ne 1) { return }
+    $prompt = Get-DriverGeminiPrompt -Row $sel[0]
+    if ([string]::IsNullOrWhiteSpace($prompt)) { return }
+    try { [System.Windows.Clipboard]::SetText($prompt) } catch {}
+    Write-GuiLog "[Drivers] Asking Gemini (Google AI Mode): '$prompt' (also copied to clipboard for pasting into gemini.google.com)"
+    Open-DriverWebLookup -Url ("https://www.google.com/search?udm=50&q=" + [Uri]::EscapeDataString($prompt))
+})
+[void]$drvCtxMenu.Items.Add($miDrvGemini)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvRemove = New-Object System.Windows.Controls.MenuItem
+$miDrvRemove.Header = "Remove Driver Package..."
+Set-WmtThemedBrush -Object $miDrvRemove -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "Danger"
+$miDrvRemove.Add_Click({
+    [void](Invoke-DriverPackageRemoval -Rows @($lstDrivers.SelectedItems))
+})
+[void]$drvCtxMenu.Items.Add($miDrvRemove)
+
+[void]$drvCtxMenu.Items.Add((New-Object System.Windows.Controls.Separator))
+
+$miDrvClean = New-Object System.Windows.Controls.MenuItem
+$miDrvClean.Header = "Clean Old Drivers (DriverStore)"
+$miDrvClean.Add_Click({
+    $btn = Get-Ctrl "btnDrvClean"
+    if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+})
+[void]$drvCtxMenu.Items.Add($miDrvClean)
+
+$miDrvGhosts = New-Object System.Windows.Controls.MenuItem
+$miDrvGhosts.Header = "Remove Ghost Devices"
+$miDrvGhosts.Add_Click({
+    $btn = Get-Ctrl "btnDrvGhost"
+    if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }
+})
+[void]$drvCtxMenu.Items.Add($miDrvGhosts)
+
+$miDrvRefresh = New-Object System.Windows.Controls.MenuItem
+$miDrvRefresh.Header = "Refresh Driver List"
+$miDrvRefresh.Add_Click({ Start-DriverListLoad -Force })
+[void]$drvCtxMenu.Items.Add($miDrvRefresh)
+
+$drvCtxMenu.Add_Opened({
+    $sel = @($lstDrivers.SelectedItems)
+    $miDrvDetails.IsEnabled = ($sel.Count -eq 1)
+    $miDrvOpenInf.IsEnabled = ($sel.Count -eq 1)
+    $miDrvDevices.IsEnabled = ($sel.Count -eq 1)
+    $miDrvCopyName.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyInf.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyTable.IsEnabled = ($sel.Count -ge 1)
+    $miDrvCopyRows.IsEnabled = ($sel.Count -ge 1)
+    $miDrvRemove.IsEnabled = ($sel.Count -ge 1)
+    $miDrvVirusTotal.IsEnabled = ($sel.Count -eq 1)
+    $miDrvCatalog.IsEnabled = ($sel.Count -eq 1)
+    $miDrvGemini.IsEnabled = ($sel.Count -eq 1)
+    if ($sel.Count -eq 1) {
+        $miDrvDetails.ToolTip = "Show full details for $($sel[0].PublishedName)"
+        $miDrvOpenInf.ToolTip = "Open C:\Windows\INF with $($sel[0].PublishedName) selected"
+        $miDrvDevices.ToolTip = "List the present devices currently using $($sel[0].PublishedName)"
+        $miDrvRemove.ToolTip = "Remove $($sel[0].PublishedName) from the driver store (pnputil /delete-driver /uninstall)"
+    }
+    else {
+        $miDrvRemove.ToolTip = "Remove the selected driver package(s) from the driver store"
+    }
+
+    # Rebuild the per-device Enable/Disable entries for the current selection —
+    # flat items inserted right under "Find Devices Using This Driver" (NOT a
+    # WPF submenu: the shared flat MenuItem template has no popup part, so a
+    # submenu under it silently never opens — flat items are the same proven
+    # mechanics as every other entry in this menu). One entry per present
+    # device bound to the package, offering the action that changes its state
+    # (a running device -> disable, anything else -> enable; pnputil
+    # enable/disable are idempotent). The device rides in the MenuItem.Tag so
+    # the click handler needs no closure.
+    foreach ($old in $script:DrvToggleMenuItems) { [void]$drvCtxMenu.Items.Remove($old) }
+    $script:DrvToggleMenuItems.Clear()
+    if ($sel.Count -ne 1) { return }
+    $tStyle = $null
+    try { $tStyle = $drvCtxMenu.TryFindResource("WmtNoGutterMenuItemStyle") } catch {}
+    $tInf = [string]$sel[0].PublishedName
+    $tDevices = @()
+    if ($script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($tInf.ToLowerInvariant())) {
+        $tDevices = @($script:DriverDeviceMap[$tInf.ToLowerInvariant()])
+    }
+    $tIdx = $drvCtxMenu.Items.IndexOf($miDrvDevices) + 1
+    if ($tIdx -lt 1) { $tIdx = $drvCtxMenu.Items.Count }
+    if (-not $script:DriverUsageLoaded) {
+        $tItem = New-Object System.Windows.Controls.MenuItem
+        $tItem.Header = "Checking device usage..."
+        $tItem.IsEnabled = $false
+        if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+        $drvCtxMenu.Items.Insert($tIdx, $tItem)
+        $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+    }
+    elseif ($tDevices.Count -eq 0) {
+        $tItem = New-Object System.Windows.Controls.MenuItem
+        $tItem.Header = "No devices bound to this package"
+        $tItem.IsEnabled = $false
+        if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+        $drvCtxMenu.Items.Insert($tIdx, $tItem)
+        $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+    }
+    else {
+        $tShown = 0
+        foreach ($tDev in $tDevices) {
+            if ($tShown -ge 12) {
+                # Very wide packages: cap the menu and point at the full list.
+                $tItem = New-Object System.Windows.Controls.MenuItem
+                $tItem.Header = "... and $($tDevices.Count - 12) more device(s) — use 'Find Devices Using This Driver' for the full list"
+                $tItem.IsEnabled = $false
+                if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+                $drvCtxMenu.Items.Insert($tIdx, $tItem)
+                $script:DrvToggleMenuItems.Add($tItem)
+                break
+            }
+            $tDisable = ([string]$tDev.State -eq "OK")
+            $tName = if ([string]::IsNullOrWhiteSpace([string]$tDev.Name)) { [string]$tDev.DeviceId } else { [string]$tDev.Name }
+            $tCode = -1
+            try { $tCode = [int]$tDev.Code } catch {}
+            $tHeader = if ($tDisable) { "Disable device — $tName" } elseif ($tCode -eq 22) { "Enable device — $tName (disabled in Device Manager)" } else { "Enable device — $tName" }
+            $tItem = New-Object System.Windows.Controls.MenuItem
+            $tItem.Header = $tHeader
+            $tItem.ToolTip = "$(if ($tDisable) { 'Disables' } else { 'Enables' }) via pnputil $(if ($tDisable) { '/disable-device' } else { '/enable-device' }) — $([string]$tDev.DeviceId)"
+            $tItem.Tag = [PSCustomObject]@{ Inf = $tInf; Dev = $tDev }
+            if ($tStyle) { try { $tItem.Style = $tStyle } catch {} }
+            $tItem.Add_Click({
+                param($cSrc, $cE)
+                try {
+                    $tag = $cSrc.Tag
+                    if ($tag) { [void](Invoke-DriverDeviceToggle -Inf ([string]$tag.Inf) -Device $tag.Dev) }
+                }
+                catch {
+                    Write-GuiLog "ERROR: device toggle failed: $($_.Exception.Message)"
+                }
+            })
+            $drvCtxMenu.Items.Insert($tIdx, $tItem)
+            $script:DrvToggleMenuItems.Add($tItem); $tIdx++
+            $tShown++
+        }
+    }
+})
+
+$lstDrivers.ContextMenu = $drvCtxMenu
+
+# Double-click opens the details dialog
+$lstDrivers.Add_MouseDoubleClick({
+    param($s, $e)
+    try {
+        $sel = @($s.SelectedItems)
+        if ($sel.Count -eq 1) { Show-DriverPackageDetails -Row $sel[0] }
+    }
+    catch {}
+})
+}
+
+# --- DRIVER LIST SEARCH BOX ---
+$btnDrvClearSearch = Get-Ctrl "btnDrvClearSearch"
+$script:DrvSearchBorder = $null
+if ($txtDrvSearch) {
+$drvSearchParent = $txtDrvSearch.Parent
+if ($drvSearchParent -and $drvSearchParent.Parent -is [System.Windows.Controls.Border]) {
+    $script:DrvSearchBorder = $drvSearchParent.Parent
+}
+$txtDrvSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+$script:DrvSearchDebounceTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:DrvSearchDebounceTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+$script:DrvSearchDebounceTimer.Add_Tick({
+    try { $script:DrvSearchDebounceTimer.Stop() } catch {}
+    Update-DriverListView
+})
+$txtDrvSearch.Add_TextChanged({
+    try { $script:DrvSearchDebounceTimer.Stop() } catch {}
+    try { $script:DrvSearchDebounceTimer.Start() } catch {}
+    $hasRealText = (-not [string]::IsNullOrWhiteSpace($txtDrvSearch.Text)) -and
+                    ($txtDrvSearch.Text -notin @("Search Drivers...", "Search drivers..."))
+    if ($btnDrvClearSearch) {
+        $btnDrvClearSearch.Visibility = if ($hasRealText) { "Visible" } else { "Collapsed" }
+    }
+})
+$txtDrvSearch.Add_GotFocus({
+    $t = $txtDrvSearch
+    if ($t.Text -in @("Search Drivers...", "Search drivers...")) {
+        $t.Text = ""
+        $t.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextPrimary")
+    }
+    if ($script:DrvSearchBorder) {
+        $script:DrvSearchBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, "Accent")
+        $script:DrvSearchBorder.BorderThickness = [System.Windows.Thickness]::new(2)
+    }
+})
+$txtDrvSearch.Add_LostFocus({
+    $t = $txtDrvSearch
+    if ([string]::IsNullOrWhiteSpace($t.Text)) {
+        $t.Text = "Search drivers..."
+        $t.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+    }
+    if ($script:DrvSearchBorder) {
+        $script:DrvSearchBorder.SetResourceReference([System.Windows.Controls.Border]::BorderBrushProperty, "BorderBrush")
+        $script:DrvSearchBorder.BorderThickness = [System.Windows.Thickness]::new(1)
+    }
+})
+}
+if ($btnDrvClearSearch) {
+$btnDrvClearSearch.Add_Click({
+    $txtDrvSearch.Text = "Search drivers..."
+    $txtDrvSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
+    $btnDrvClearSearch.Visibility = "Collapsed"
+    Update-DriverListView
+})
+}
+
+if ($btnDrvReload) { $btnDrvReload.Add_Click({ Start-DriverListLoad -Force }) }
+
 # --- Cleanup ---
 if ($btnCleanDisk) { $btnCleanDisk.Add_Click({ Start-Process cleanmgr }) }
 if ($btnCleanTemp) { $btnCleanTemp.Add_Click({ Invoke-TempCleanup }) }
@@ -40411,139 +44509,306 @@ $btnToggleTheme.Add_Click({
 $script:WmtStartupTaskName = "WindowsMaintenanceTool"
 
 function Get-WmtStartupCommand {
-# Build the command parts for Task Scheduler.
-# Returns a hashtable: @{ FilePath; Arguments }
-if ($script:WmtIsCompiledExe) {
-    $exePath = $script:WmtProcessPath
-    if ([string]::IsNullOrWhiteSpace($exePath) -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) { return $null }
-    return @{ FilePath = $exePath; Arguments = "" }
-}
-else {
+    # Build the command parts for Task Scheduler.
+    # Returns a hashtable: @{ FilePath; Arguments }
+    if ($script:WmtIsCompiledExe) {
+        $exePath = $script:WmtProcessPath
+        if ([string]::IsNullOrWhiteSpace($exePath) -or -not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
+            return $null
+        }
+        return @{ FilePath = $exePath; Arguments = "" }
+    }
+
     $scriptPath = $script:WmtScriptPath
-    if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($scriptPath) -or -not (Test-Path -LiteralPath $scriptPath -PathType Leaf)) {
+        return $null
+    }
+
     $psExe = "powershell.exe"
     try {
         $cmd = Get-Command powershell.exe -ErrorAction SilentlyContinue
         if ($cmd -and $cmd.Source) { $psExe = $cmd.Source }
     }
     catch {}
-    return @{ FilePath = $psExe; Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`"" }
+
+    return @{
+        FilePath  = $psExe
+        Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`""
+    }
 }
+
+function Get-WmtStartupTask {
+    try {
+        $service = New-WmtTaskSchedulerService
+        if (-not $service) { return $null }
+
+        $root = $service.GetFolder("\")
+        return $root.GetTask($script:WmtStartupTaskName)
+    }
+    catch {
+        return $null
+    }
 }
 
 function Test-WmtStartWithWindows {
-try {
-    $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
-    if ($task -and $task.State -ne "Disabled") { return $true }
-}
-catch {}
-return $false
-}
+    try {
+        $task = Get-WmtStartupTask
+        if (-not $task) { return $false }
 
-function Test-WmtStartupEntryValid {
-# Check if the existing scheduled task points to a file that still exists.
-try {
-    $task = Get-ScheduledTask -TaskName $script:WmtStartupTaskName -ErrorAction SilentlyContinue
-    if (-not $task) { return $false }
-    foreach ($action in @($task.Actions)) {
-        $filePath = [string]$action.Execute
-        if (-not [string]::IsNullOrWhiteSpace($filePath) -and (Test-Path -LiteralPath $filePath -PathType Leaf)) {
-            return $true
-        }
+        # Task.State: 1 = Disabled, 2 = Queued, 3 = Ready, 4 = Running.
+        return ([int]$task.State -ne 1 -and [bool]$task.Enabled)
     }
-    return $false
-}
-catch {}
-return $false
-}
-
-function Repair-WmtStartupEntry {
-# If the scheduled task exists but points to a moved/deleted file,
-# update it to the current WMT path. If the current path is also
-# invalid, remove the task entirely.
-try {
-    if (-not (Test-WmtStartWithWindows)) { return }
-    $isValid = Test-WmtStartupEntryValid
-    if ($isValid) { return }
-
-    # Entry is stale � try to repair with the current path.
-    $cmdParts = Get-WmtStartupCommand
-    if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
-        # Can't build a valid command � remove the stale task.
-        Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Write-GuiLog "Start with Windows: removed stale task (file was moved or deleted)."
-        return
+    catch {
+        return $false
     }
-
-    # Recreate the task with the current path.
-    Set-WmtStartWithWindows -Enabled $true
-    Write-GuiLog "Start with Windows: updated task to current path."
-}
-catch {
-    Write-GuiLog "Failed to repair startup task: $($_.Exception.Message)"
-}
 }
 
 function Set-WmtStartWithWindows {
-param([bool]$Enabled)
-try {
-    if ($Enabled) {
-        $cmdParts = Get-WmtStartupCommand
-        if (-not $cmdParts -or [string]::IsNullOrWhiteSpace($cmdParts.FilePath)) {
-            Write-GuiLog "Start with Windows: could not determine WMT launch path."
-            return
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    try {
+        $service = New-WmtTaskSchedulerService
+        if (-not $service) {
+            Write-GuiLog "Start with Windows: could not connect to Task Scheduler."
+            return $false
         }
 
-        # Remove existing task if it exists.
-        Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+        $root = $service.GetFolder("\")
+        $existing = $null
+        try { $existing = $root.GetTask($script:WmtStartupTaskName) } catch {}
 
-        # Build the scheduled task:
-        # - Trigger: At logon
-        # - Action: Run WMT (exe or powershell.exe -File script.ps1)
-        # - Settings: Run with highest privileges (skips UAC)
-        $action = New-ScheduledTaskAction -FilePath $cmdParts.FilePath -Argument $cmdParts.Arguments
-        $trigger = New-ScheduledTaskTrigger -AtLogOn
-        $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -RunLevel Highest -LogonType Interactive
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+        if (-not $Enabled) {
+            if ($existing) {
+                try {
+                    $existing.Enabled = $false
+                    Write-GuiLog "Start with Windows disabled."
+                    return $true
+                }
+                catch {
+                    Write-GuiLog "Start with Windows: failed to disable task: $($_.Exception.Message)"
+                    return $false
+                }
+            }
 
-        Register-ScheduledTask -TaskName $script:WmtStartupTaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Force | Out-Null
-        Write-GuiLog "Start with Windows: enabled (Task Scheduler, no UAC prompt)."
+            Write-GuiLog "Start with Windows disabled (no startup task exists)."
+            return $true
+        }
+
+        $command = Get-WmtStartupCommand
+        if (-not $command) {
+            Write-GuiLog "Start with Windows: WMT launch file could not be located."
+            return $false
+        }
+
+        # Task Scheduler COM constants.
+        $TASK_TRIGGER_LOGON          = 9
+        $TASK_ACTION_EXEC            = 0
+        $TASK_CREATE_OR_UPDATE       = 6
+        $TASK_LOGON_INTERACTIVE_TOKEN = 3
+        $TASK_RUNLEVEL_HIGHEST       = 1
+
+        $definition = $service.NewTask(0)
+        $definition.RegistrationInfo.Description = "Starts Windows Maintenance Tool when the user logs on."
+        try { $definition.RegistrationInfo.Author = [Environment]::UserName } catch {}
+
+        $principal = $definition.Principal
+        $principal.UserId = "$env:USERDOMAIN\$env:USERNAME"
+        $principal.LogonType = $TASK_LOGON_INTERACTIVE_TOKEN
+        $principal.RunLevel = $TASK_RUNLEVEL_HIGHEST
+
+        $trigger = $definition.Triggers.Create($TASK_TRIGGER_LOGON)
+        try { $trigger.UserId = "$env:USERDOMAIN\$env:USERNAME" } catch {}
+        try { $trigger.Enabled = $true } catch {}
+
+        $action = $definition.Actions.Create($TASK_ACTION_EXEC)
+        $action.Path = [string]$command.FilePath
+        $action.Arguments = [string]$command.Arguments
+        try { $action.WorkingDirectory = Split-Path -Parent ([string]$command.FilePath) } catch {}
+
+        $settings = $definition.Settings
+        try { $settings.Enabled = $true } catch {}
+        try { $settings.StartWhenAvailable = $true } catch {}
+        try { $settings.DisallowStartIfOnBatteries = $false } catch {}
+        try { $settings.StopIfGoingOnBatteries = $false } catch {}
+        try { $settings.ExecutionTimeLimit = "PT0S" } catch {}
+
+        # RegisterTaskDefinition with INTERACTIVE_TOKEN keeps the task tied to
+        # the logged-on user while RunLevel=Highest removes the normal UAC prompt.
+        [void]$root.RegisterTaskDefinition(
+            $script:WmtStartupTaskName,
+            $definition,
+            $TASK_CREATE_OR_UPDATE,
+            $null,
+            $null,
+            $TASK_LOGON_INTERACTIVE_TOKEN,
+            $null
+        )
+
+        Write-GuiLog "Start with Windows enabled."
+        return $true
     }
-    else {
-        Unregister-ScheduledTask -TaskName $script:WmtStartupTaskName -Confirm:$false -ErrorAction SilentlyContinue
-        Write-GuiLog "Start with Windows: disabled."
+    catch {
+        Write-GuiLog "Start with Windows: failed to update Task Scheduler: $($_.Exception.Message)"
+        return $false
     }
 }
-catch {
-    Write-GuiLog "Failed to set Start with Windows: $($_.Exception.Message)"
-}
+
+function Test-WmtStartupEntryValid {
+    try {
+        $task = Get-WmtStartupTask
+        if (-not $task -or -not (Test-WmtStartWithWindows)) { return $false }
+
+        $command = Get-WmtStartupCommand
+        if (-not $command) { return $false }
+
+        $actions = @($task.Definition.Actions)
+        if ($actions.Count -lt 1) { return $false }
+
+        $action = $actions[0]
+        $pathMatches = ([string]$action.Path).Trim() -ieq ([string]$command.FilePath).Trim()
+        $argsMatches = ([string]$action.Arguments).Trim() -eq ([string]$command.Arguments).Trim()
+
+        if ($pathMatches -and $argsMatches) { return $true }
+
+        # The WMT executable/script was moved or updated. Rebuild the enabled
+        # task so the button remains truthful and the next logon uses the
+        # current launch path.
+        Set-WmtStartWithWindows -Enabled $true | Out-Null
+        return (Test-WmtStartWithWindows)
+    }
+    catch {
+        return $false
+    }
 }
 
 function Update-WmtStartWithWindowsButton {
-if (-not $btnStartWithWindows) { return }
-$isEnabled = Test-WmtStartWithWindows
-if ($isEnabled) {
-    $btnStartWithWindows.Content = "Stop Starting with Windows"
-    $btnStartWithWindows.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
-}
-else {
-    $btnStartWithWindows.Content = "Start with Windows"
-    $btnStartWithWindows.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
-}
+    $btn = Get-Ctrl "btnStartWithWindows"
+    if (-not $btn) { return }
+
+    $isEnabled = Test-WmtStartWithWindows
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn $isEnabled `
+        -OnLabel "Start with Windows: On" `
+        -OffLabel "Start with Windows: Off" `
+        -Description "Launches WMT automatically when Windows logs in using Task Scheduler with highest privileges."
 }
 
 if ($btnStartWithWindows) {
-# On startup, repair the startup entry if the file was moved.
-Repair-WmtStartupEntry
+    # Repair the startup entry if the WMT file was moved or the command changed.
+    Test-WmtStartupEntryValid | Out-Null
 
-# Set initial button state.
-Update-WmtStartWithWindowsButton
+    Update-WmtStartWithWindowsButton
 
-$btnStartWithWindows.Add_Click({
+    $btnStartWithWindows.Add_Click({
+        $script:WmtTaskService = $null
         $isEnabled = Test-WmtStartWithWindows
-        Set-WmtStartWithWindows -Enabled (-not $isEnabled)
-        Update-WmtStartWithWindowsButton
+        if (Set-WmtStartWithWindows -Enabled (-not $isEnabled)) {
+            Update-WmtStartWithWindowsButton
+        }
     })
+}
+
+# --- Launch Minimized ---
+# Persists the preference in WMT's settings.json. When enabled, WMT hides
+# itself to the system tray immediately after the first window render.
+function Get-WmtLaunchMinimized {
+    try {
+        $settings = Get-WmtSettings
+        return [bool]$settings.LaunchMinimized
+    }
+    catch {
+        return $false
+    }
+}
+
+function Set-WmtLaunchMinimized {
+    param([Parameter(Mandatory = $true)][bool]$Enabled)
+
+    try {
+        $settings = Get-WmtSettings
+        $settings.LaunchMinimized = $Enabled
+        Save-WmtSettings -Settings $settings
+        return $true
+    }
+    catch {
+        Write-GuiLog "Launch Minimized: failed to save setting: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Update-WmtLaunchMinimizedButton {
+    $btn = Get-Ctrl "btnLaunchMinimized"
+    if (-not $btn) { return }
+
+    $isEnabled = Get-WmtLaunchMinimized
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn $isEnabled `
+        -OnLabel "Launch Minimized: On" `
+        -OffLabel "Launch Minimized: Off" `
+        -Description "When enabled, WMT starts hidden in the system tray instead of showing the main window."
+}
+
+if ($btnLaunchMinimized) {
+    Update-WmtLaunchMinimizedButton
+
+    $btnLaunchMinimized.Add_Click({
+        $currentlyEnabled = Get-WmtLaunchMinimized
+        if (Set-WmtLaunchMinimized -Enabled (-not $currentlyEnabled)) {
+            Update-WmtLaunchMinimizedButton
+            if ($currentlyEnabled) {
+                Write-GuiLog "Launch Minimized disabled. WMT will start with a visible window."
+            }
+            else {
+                Write-GuiLog "Launch Minimized enabled. WMT will start hidden in the system tray."
+            }
+        }
+    })
+}
+
+# Start the boot-time background jobs immediately. Called when Background Jobs
+# are re-enabled at runtime (Settings toggle or search action) so the user does
+# not have to restart WMT or revisit tabs to get stats, tweak states, caches and
+# the update auto-scan timer running.
+function Start-WmtBackgroundJobsNow {
+try {
+    # My Device stats (sections run in pooled runspaces; safe to kick from UI thread)
+    if (-not $script:MyDeviceStatsStarted) {
+        $script:MyDeviceStatsStarted = $true
+        Update-MyDeviceStats
+    }
+    elseif ($script:MyDeviceStatsLastDisabled) {
+        # Stats were last loaded while background jobs were disabled: the section
+        # collector timer never ran, so My Device still shows the "scanning is
+        # disabled" placeholders. Reload now — RAM-cached sections apply instantly.
+        Update-MyDeviceStats
+    }
+
+    # Tweak states + optional features background loads (each has a one-shot guard)
+    if (-not $script:TweakStatesReady) {
+        Start-TweakButtonStatesBackgroundUpdate
+        Start-OptionalFeaturesBackgroundCheck
+    }
+
+    # AppX bloatware list (normally triggered on first Tweaks tab visit)
+    if (-not $script:AppxListLoaded) {
+        $script:AppxListLoaded = $true
+        Start-AppxBackgroundLoad
+    }
+
+    # Legendary/GOG library cache for the Updates search box (self-guarding,
+    # refreshes only when a cache file is missing or older than 24 hours)
+    try { Start-WmtLibraryCacheBuilder } catch {}
+
+    # Periodic update auto-scan timer (requires update scans enabled too)
+    if (-not (Get-WmtUpdateScansDisabled)) {
+        try { Start-WmtUpdateAutoScanTimer } catch {}
+    }
+}
+catch {
+    try { Write-GuiLog "Background jobs failed to start: $($_.Exception.Message)" } catch {}
+}
 }
 
 # ── Background Jobs Toggle ──
@@ -40553,24 +44818,30 @@ function Update-WmtDisableBgJobsButton {
     $btn = Get-Ctrl "btnDisableBgJobs"
     if (-not $btn) { return }
     $disabled = Get-WmtDisableBackgroundJobs
-    if ($disabled) {
-        $btn.Content = "Bg Jobs: Off"
-        $btn.ToolTip = "Background auto-refresh DISABLED. My Device info and Tweaks states will not auto-load. Click to re-enable."
-    }
-    else {
-        $btn.Content = "Bg Jobs: On"
-        $btn.ToolTip = "Background auto-refresh ENABLED. My Device info and Tweaks states load automatically. Click to disable."
-    }
+    # Blue = On / Gray = Off, matching the Start with Windows toggle beside it.
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn (-not $disabled) `
+        -OnLabel "Bg Jobs: On" `
+        -OffLabel "Bg Jobs: Off" `
+        -Description "Background auto-refresh. When enabled, My Device info and Tweaks states load automatically and boot-time jobs start on demand. When disabled, in-flight jobs finish but no new ones start."
 }
 
 Update-WmtDisableBgJobsButton
 
 $btnDisableBgJobs.Add_Click({
-        $currentlyDisabled = Get-WmtDisableBackgroundJobs
+        $currentlyDisabled = [System.Convert]::ToBoolean((Get-WmtDisableBackgroundJobs))
         Set-WmtDisableBackgroundJobs -Enabled (-not $currentlyDisabled)
         Update-WmtDisableBgJobsButton
-        $newState = if (-not $currentlyDisabled) { 'enabled' } else { 'disabled' }
-        Write-GuiLog "Background jobs $newState. Changes take effect on next tab visit."
+        if ($currentlyDisabled) {
+            # Bg jobs were OFF, now ON — fire the boot-time jobs immediately
+            # instead of waiting for the next tab visit or an app restart.
+            Write-GuiLog "Background jobs enabled. Starting pending background jobs..."
+            try { Start-WmtBackgroundJobsNow } catch {}
+        }
+        else {
+            Write-GuiLog "Background jobs disabled. In-flight jobs will finish; new ones will not start."
+        }
     })
 }
 
@@ -40581,30 +44852,37 @@ function Update-WmtUpdateScansButton {
     $btn = Get-Ctrl "btnDisableUpdateScans"
     if (-not $btn) { return }
     $disabled = Get-WmtUpdateScansDisabled
-    if ($disabled) {
-        $btn.Content = "Update Scans: Off"
-        $btn.ToolTip = "Update scans are DISABLED. No scans will run. Click to re-enable."
-        # Disable scan button and related update-action buttons.
-        $scanBtn = Get-Ctrl "btnWingetScan"
-        if ($scanBtn) { $scanBtn.IsEnabled = $false }
-    }
-    else {
-        $btn.Content = "Update Scans: On"
-        $btn.ToolTip = "Update scans are ENABLED. Automatic and tray-triggered scans run on schedule. Click to fully disable."
-        # Re-enable scan button.
-        $scanBtn = Get-Ctrl "btnWingetScan"
-        if ($scanBtn) { $scanBtn.IsEnabled = $true }
-    }
+    # Blue = On / Gray = Off, matching the Start with Windows toggle beside it.
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn (-not $disabled) `
+        -OnLabel "Update Scans: On" `
+        -OffLabel "Update Scans: Off" `
+        -Description "Automatic and tray-triggered update scans run on schedule when enabled. Manual scans always remain available, even when disabled."
+    # Keep the scan button and related update-action buttons in sync with the toggle state.
+    $scanBtn = Get-Ctrl "btnWingetScan"
+    if ($scanBtn) { $scanBtn.IsEnabled = (-not $disabled) }
 }
 
 Update-WmtUpdateScansButton
 
 $btnDisableUpdateScans.Add_Click({
-        $currentlyDisabled = Get-WmtUpdateScansDisabled
+        $currentlyDisabled = [System.Convert]::ToBoolean((Get-WmtUpdateScansDisabled))
         Set-WmtUpdateScansDisabled -Enabled (-not $currentlyDisabled)
         Update-WmtUpdateScansButton
         $newState = if (-not $currentlyDisabled) { 'disabled' } else { 'enabled' }
         Write-GuiLog "Update scans $newState."
+        if ($currentlyDisabled) {
+            # Update scans were OFF, now ON — restart the periodic auto-scan
+            # timer immediately (only when background jobs are also enabled).
+            if (-not (Get-WmtDisableBackgroundJobs)) {
+                try { Start-WmtUpdateAutoScanTimer } catch {}
+            }
+        }
+        else {
+            # Turning scans OFF — stop the periodic timer so no ticks fire at all.
+            try { Stop-WmtUpdateAutoScanTimer } catch {}
+        }
     })
 }
 if ($btnDonate) { $btnDonate.Add_Click({ Start-Process "https://github.com/sponsors/Chaython" }) }
@@ -40923,40 +45201,59 @@ $script:TelemetryTasks = @(
 "\Microsoft\Windows\Windows Error Reporting\QueueReporting"
 )
 
+# Live enumeration folders for the View Tasks dialog: every task the Task
+# Scheduler actually has under these folders is listed (merged with the
+# canonical list above), so the grid shows what THIS machine registered
+# instead of a fixed name list. The Office folder is name-filtered at read
+# time because it also holds non-telemetry servicing tasks.
+$script:WmtTelemetryTaskFolders = @(
+    "\Microsoft\Windows\Application Experience",
+    "\Microsoft\Windows\Customer Experience Improvement Program",
+    "\Microsoft\Windows\Autochk",
+    "\Microsoft\Windows\DiskDiagnostic",
+    "\Microsoft\Windows\Feedback\Siuf",
+    "\Microsoft\Windows\Windows Error Reporting",
+    "\Microsoft\Windows\NetTrace",
+    "\Microsoft\Windows\PI",
+    "\Microsoft\Windows\Device Information",
+    "\Microsoft\Office"
+)
+
 if ($btnTasksDisableTelemetry) { $btnTasksDisableTelemetry.Add_Click({
-    Invoke-UiCommand {
-        param($tasks)
-        foreach ($task in $tasks) {
-            $result = Invoke-WmtScheduledTaskAction -Action Disable -FullName $task
-            if ($result.Success) {
-                Write-GuiLog "Disabled: $task"
-            }
-            else {
-                Write-GuiLog "Failed to disable $task`: $($result.Message)"
-            }
-        }
-        Write-GuiLog "Telemetry tasks disabled!"
-    } "Disabling telemetry tasks..." -ArgumentList $script:TelemetryTasks
+    # Runs off the UI thread (the old Invoke-UiCommand version froze the whole
+    # window while every task did its own slow CIM lookup).
+    try {
+        Start-WmtScheduledTaskBatchAction -Action Disable -FullPaths $script:TelemetryTasks -StartMessage "Disabling telemetry tasks..." -DoneMessage "Telemetry tasks disabled!"
+    }
+    catch {
+        Write-WmtLastCrash -Context "Disable telemetry tasks failed" -Exception $_.Exception -ErrorRecord $_
+        Write-GuiLog "ERROR: Disable telemetry tasks failed: $($_.Exception.Message)"
+    }
 }) }
 
 if ($btnTasksRestore) { $btnTasksRestore.Add_Click({
-    Invoke-UiCommand {
-        param($tasks)
-        foreach ($task in $tasks) {
-            $result = Invoke-WmtScheduledTaskAction -Action Enable -FullName $task
-            if ($result.Success) {
-                Write-GuiLog "Enabled: $task"
-            }
-            else {
-                Write-GuiLog "Failed to enable $task`: $($result.Message)"
-            }
-        }
-        Write-GuiLog "Telemetry tasks restored!"
-    } "Restoring telemetry tasks..." -ArgumentList $script:TelemetryTasks
+    # Runs off the UI thread (the old Invoke-UiCommand version froze the whole
+    # window while every task did its own slow CIM lookup).
+    try {
+        Start-WmtScheduledTaskBatchAction -Action Enable -FullPaths $script:TelemetryTasks -StartMessage "Restoring telemetry tasks..." -DoneMessage "Telemetry tasks restored!"
+    }
+    catch {
+        Write-WmtLastCrash -Context "Restore telemetry tasks failed" -Exception $_.Exception -ErrorRecord $_
+        Write-GuiLog "ERROR: Restore telemetry tasks failed: $($_.Exception.Message)"
+    }
 }) }
 
 if ($btnTasksView) { $btnTasksView.Add_Click({
-    Show-WmtScheduledTasksDialog -Title "Telemetry Tasks" -FullPaths $script:TelemetryTasks
+    # Fully instrumented: if anything inside the dialog ever throws again, the
+    # exact PowerShell position and call stack land in last-crash.txt instead
+    # of an anonymous "Unhandled WPF dispatcher exception" line.
+    try {
+        Show-WmtScheduledTasksDialog -Title "Telemetry Tasks" -FullPaths $script:TelemetryTasks -TelemetryFolders $script:WmtTelemetryTaskFolders
+    }
+    catch {
+        Write-WmtLastCrash -Context "Telemetry tasks view failed" -Exception $_.Exception -ErrorRecord $_
+        Write-GuiLog "ERROR: Telemetry tasks view failed: $($_.Exception.Message)"
+    }
 }) }
 
 # --- WINDOWS UPDATE PRESETS ---
@@ -41193,7 +45490,7 @@ $btnToggleTakeOwnership.Add_Click({
                 Write-GuiLog "Take Ownership context menu added (files, folders, drives)."
             } "Adding Take Ownership..."
         }
-        Update-WmtTweakToggle $btnToggleTakeOwnership (-not $installed) "Add Take Ownership" "Remove Take Ownership"
+        Update-WmtTweakToggle $btnToggleTakeOwnership (-not $installed) "Remove Take Ownership" "Add Take Ownership"
     })
 }
 
@@ -41217,7 +45514,7 @@ $btnTogglePsHere.Add_Click({
                 Write-GuiLog "PowerShell Here context menu added."
             } "Adding PowerShell Here..."
         }
-        Update-WmtTweakToggle $btnTogglePsHere (-not $installed) "Add PowerShell Here" "Remove PowerShell Here"
+        Update-WmtTweakToggle $btnTogglePsHere (-not $installed) "Remove PowerShell Here" "Add PowerShell Here"
     })
 }
 
@@ -41942,9 +46239,81 @@ $ps = New-WmtPooledPowerShell
                 $cacheText = [System.IO.File]::ReadAllText($LegCacheFile)
                 $library = $cacheText | ConvertFrom-Json -ErrorAction Stop
                 $legCount = 0
+                # Legendary marks UE/Fab content with namespace 'ue' in its own assets.json.
+                # Use it as the authoritative UE/Fab tag (Fab app_names are arbitrary, e.g. "PlatformFunctionsPlugin_5.4").
+                $ueAppNames = @{}
+                # Legendary's config home (every release since ~2021, Windows included)
+                # is %USERPROFILE%\.config\legendary, overridable via LEGENDARY_CONFIG_PATH
+                # or XDG_CONFIG_HOME. Older builds used %USERPROFILE%\.legendary, and
+                # Heroic keeps its own copy. Probe every candidate; missing files are
+                # skipped and all hits are merged below.
+                $ueAssetsFiles = @()
+                try { if ($env:LEGENDARY_CONFIG_PATH) { $ueAssetsFiles += (Join-Path $env:LEGENDARY_CONFIG_PATH "assets.json") } } catch {}
+                try { if ($env:XDG_CONFIG_HOME) { $ueAssetsFiles += (Join-Path $env:XDG_CONFIG_HOME "legendary\assets.json") } } catch {}
+                try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".config\legendary\assets.json") } } catch {}
+                try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".legendary\assets.json") } } catch {}
+                try { if ($env:APPDATA) { $ueAssetsFiles += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\assets.json") } } catch {}
+                foreach ($ueAssetsFile in $ueAssetsFiles) {
+                    if (-not (Test-Path -LiteralPath $ueAssetsFile -PathType Leaf)) { continue }
+                    try {
+                        $assetsJson = [System.IO.File]::ReadAllText($ueAssetsFile) | ConvertFrom-Json -ErrorAction Stop
+                        foreach ($platformProp in @($assetsJson.PSObject.Properties)) {
+                            # Platform value can be an array of assets (legendary) or a map of
+                            # app_name -> asset (heroic-style assets.json). Handle both.
+                            $uePlatformAssets = @()
+                            if ($platformProp.Value -is [System.Collections.IEnumerable] -and $platformProp.Value -isnot [string] -and $platformProp.Value -isnot [System.Management.Automation.PSCustomObject]) {
+                                $uePlatformAssets = @($platformProp.Value)
+                            }
+                            elseif ($platformProp.Value -and $platformProp.Value.PSObject) {
+                                $uePlatformAssets = @($platformProp.Value.PSObject.Properties | ForEach-Object { $_.Value })
+                            }
+                            foreach ($asset in @($uePlatformAssets)) {
+                                if (([string]$asset.namespace) -eq 'ue') {
+                                    $ueKey = ([string]$asset.app_name).Trim().ToLowerInvariant()
+                                    if ($ueKey) { $ueAppNames[$ueKey] = $true }
+                                }
+                            }
+                        }
+                    }
+                    catch {}
+                }
+                # Per-game metadata files are legendary's most durable UE tag
+                # source: every synced game gets metadata/<app_name>.json with
+                # the EGS namespace inside, even when assets.json is missing
+                # or stale.
+                $ueMetaRoots = @()
+                try { if ($env:LEGENDARY_CONFIG_PATH) { $ueMetaRoots += (Join-Path $env:LEGENDARY_CONFIG_PATH "metadata") } } catch {}
+                try { if ($env:XDG_CONFIG_HOME) { $ueMetaRoots += (Join-Path $env:XDG_CONFIG_HOME "legendary\metadata") } } catch {}
+                try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".config\legendary\metadata") } } catch {}
+                try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".legendary\metadata") } } catch {}
+                try { if ($env:APPDATA) { $ueMetaRoots += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\metadata") } } catch {}
                 foreach ($game in @($library)) {
                     $title = [string]$game.Title
                     if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                    # Tag Unreal Engine / Fab marketplace assets. The UI hides them
+                    # when the "Hide Unreal Engine / Fab assets" toggle is checked;
+                    # update checks are never affected by the toggle.
+                    $legId = ([string]$game.Id).Trim()
+                    # Prefer the IsUe tag newer WMT builds write into the cache
+                    # (from legendary's own namespace data), then fall back to the
+                    # assets.json namespace set and the name patterns so older or
+                    # stale caches still get tagged. OR semantics: a false tag from
+                    # a text-parsed cache does not veto the other sources.
+                    $legIsUe = $false
+                    try { if ($game.PSObject.Properties["IsUe"]) { $legIsUe = [bool]$game.IsUe } } catch {}
+                    if (-not $legIsUe) { $legIsUe = ($ueAppNames.ContainsKey($legId.ToLowerInvariant()) -or $legId -match '^UE[_-]?\d' -or $title -match '^\s*Unreal Engine\b' -or $legId -match '^[0-9a-fA-F]{32}$' -or $legId -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or $legId -match '(?i)(?:^|_)(?:5\.\d+)$' -or $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b') }
+                    if (-not $legIsUe -and $ueMetaRoots.Count -gt 0) {
+                        foreach ($ueMetaRoot in $ueMetaRoots) {
+                            $ueMetaCandidate = Join-Path $ueMetaRoot "$legId.json"
+                            if (-not (Test-Path -LiteralPath $ueMetaCandidate -PathType Leaf)) { continue }
+                            try {
+                                $ueMetaJson = [System.IO.File]::ReadAllText($ueMetaCandidate) | ConvertFrom-Json -ErrorAction Stop
+                                if ($ueMetaJson -and $ueMetaJson.metadata -and $ueMetaJson.metadata.PSObject.Properties["namespace"] -and ([string]$ueMetaJson.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                            }
+                            catch {}
+                            break
+                        }
+                    }
                     $isInst = $false
                     try { if ($game.PSObject.Properties["IsInstalled"]) { $isInst = [bool]$game.IsInstalled } } catch {}
                     $instVer = ""
@@ -41958,6 +46327,7 @@ $ps = New-WmtPooledPowerShell
                             Available   = if (-not [string]::IsNullOrWhiteSpace($latestVer)) { $latestVer } else { "-" }
                             IsInstalled = $isInst
                             ProviderKey = "legendary"
+                            IsUe        = $legIsUe
                         })
                     $legCount++
                 }
@@ -42040,6 +46410,7 @@ $script:WmtLibraryScanTimer.Add_Tick({
             if ($lstLibrary -and $brdLibraryList -and $brdLibraryList.Visibility -eq [System.Windows.Visibility]::Visible) {
                 $lstLibrary.Items.Clear()
                 foreach ($item in $script:WmtLibraryScanResults) {
+                    if (Test-WmtFabAssetHidden $item) { continue }
                     [void]$lstLibrary.Items.Add($item)
                 }
                 if ($lblLibraryStatus) {
@@ -42071,30 +46442,38 @@ $script:WmtLibraryScanTimer.Start()
 
 if ($btnShowLibrary -and $btnBackToCatalog -and $btnLibraryRefresh -and $brdCatalogList -and $brdLibraryList -and $pnlCatalogActions -and $lstLibrary) {
 $btnShowLibrary.Add_Click({
-        # Switch to library view (keep all buttons visible).
-        $brdCatalogList.Visibility = "Collapsed"
-        $brdLibraryList.Visibility = "Visible"
-        if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Visible" }
-        if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Visible" }
+        try {
+            # Switch to library view (keep all buttons visible).
+            $brdCatalogList.Visibility = "Collapsed"
+            $brdLibraryList.Visibility = "Visible"
+            if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Visible" }
+            if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Visible" }
+            if ($btnToggleFabAssets) { $btnToggleFabAssets.Visibility = "Visible" }
 
-        # Highlight the Your Library button (AccentBtn style).
-        if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) }
+            # Highlight the Your Library button (AccentBtn style).
+            if ($btnShowLibrary) { $btnShowLibrary.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style]) }
 
-        # If we have pre-loaded results, display them instantly.
-        if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0) {
-            $lstLibrary.Items.Clear()
-            foreach ($item in $script:WmtLibraryScanResults) {
-                [void]$lstLibrary.Items.Add($item)
+            # If we have pre-loaded results, display them instantly.
+            if ($script:WmtLibraryScanResults -and $script:WmtLibraryScanResults.Count -gt 0) {
+                $lstLibrary.Items.Clear()
+                foreach ($item in $script:WmtLibraryScanResults) {
+                    if (Test-WmtFabAssetHidden $item) { continue }
+                    [void]$lstLibrary.Items.Add($item)
+                }
+                if ($lblLibraryStatus) {
+                    $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+                }
             }
-            if ($lblLibraryStatus) {
-                $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+            elseif (-not $script:WmtLibraryScanRunspace) {
+                Start-WmtLibraryScan
+            }
+            else {
+                if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
             }
         }
-        elseif (-not $script:WmtLibraryScanRunspace) {
-            Start-WmtLibraryScan
-        }
-        else {
-            if ($lblLibraryStatus) { $lblLibraryStatus.Text = "Scanning libraries..." }
+        catch {
+            Write-WmtLastCrash -Context "Open library view failed" -Exception $_.Exception -ErrorRecord $_
+            Write-GuiLog "ERROR: Could not open the library view: $($_.Exception.Message)"
         }
     })
 
@@ -42104,6 +46483,7 @@ $btnBackToCatalog.Add_Click({
         $brdCatalogList.Visibility = "Visible"
         if ($btnBackToCatalog) { $btnBackToCatalog.Visibility = "Collapsed" }
         if ($btnLibraryRefresh) { $btnLibraryRefresh.Visibility = "Collapsed" }
+        if ($btnToggleFabAssets) { $btnToggleFabAssets.Visibility = "Collapsed" }
         if ($lblLibraryStatus) { $lblLibraryStatus.Text = "" }
 
         # Restore the Your Library button to ActionBtn style (gray).
@@ -42111,8 +46491,43 @@ $btnBackToCatalog.Add_Click({
     })
 
 $btnLibraryRefresh.Add_Click({
-        Start-WmtLibraryScan
+        try { Start-WmtLibraryScan }
+        catch {
+            Write-WmtLastCrash -Context "Library refresh failed" -Exception $_.Exception -ErrorRecord $_
+            Write-GuiLog "ERROR: Library refresh failed: $($_.Exception.Message)"
+        }
     })
+
+# --- Unreal Engine / Fab assets visibility toggle (Your Library) ---
+# Hides UE/Fab assets from the library view only; update scans for them
+# are never disabled. Persisted in settings.json as HideLegendaryUeAssets.
+# State lives in $global:WmtHideUeAssets (see Test-WmtFabAssetHidden) so the
+# search debounce and every list population path share one live value.
+if ($btnToggleFabAssets) {
+$btnToggleFabAssets.Add_Click({
+        $global:WmtHideUeAssets = -not $global:WmtHideUeAssets
+        try {
+            $wmtUeSettings = Get-WmtSettings
+            if ($wmtUeSettings -is [System.Collections.IDictionary]) { $wmtUeSettings["HideLegendaryUeAssets"] = [bool]$global:WmtHideUeAssets }
+            else { $wmtUeSettings | Add-Member -MemberType NoteProperty -Name "HideLegendaryUeAssets" -Value ([bool]$global:WmtHideUeAssets) -Force }
+            Save-WmtSettings -Settings $wmtUeSettings
+        }
+        catch {}
+        Set-WmtFabAssetsButtonLabel
+        # Re-apply the filter instantly; Update-WmtLibrarySearch respects any
+        # active search text and the shared hide flag.
+        Update-WmtLibrarySearch
+        # Rebuild the Legendary cache to match the new visibility: Hidden
+        # (default) builds it without --include-ue, Shown with UE/Fab rows.
+        # The builder's completion handler refreshes the open library view,
+        # so flipping the toggle both ways takes effect without a restart.
+        try { Start-WmtLibraryCacheBuilder } catch { Write-GuiLog "Fab assets cache refresh failed: $($_.Exception.Message)" }
+        if ($lblLibraryStatus -and $brdLibraryList -and $brdLibraryList.Visibility -eq "Visible" -and $lstLibrary -and $lstLibrary.Items.Count -gt 0) {
+            $lblLibraryStatus.Text = "$($lstLibrary.Items.Count) game(s) in your library."
+        }
+        Write-GuiLog ("Unreal Engine / Fab assets are now " + $(if ($global:WmtHideUeAssets) { "hidden" } else { "shown" }) + " in Your Library. Update checks are unaffected.")
+    })
+}
 
 # --- Library context menu ---
 # Helper: get the selected library item.
@@ -42532,9 +46947,10 @@ if ($ctxLibrary -and $lstLibrary) {
             # Show Install only if NOT installed.
             if ($miLibInstall) { $miLibInstall.Visibility = if (-not $isInstalled) { [System.Windows.Visibility]::Visible } else { [System.Windows.Visibility]::Collapsed } }
 
-            # Store page + Copy ID always visible.
+            # Store page + Copy ID + Copy Row Data always visible.
             if ($miLibStorePage) { $miLibStorePage.Visibility = [System.Windows.Visibility]::Visible }
             if ($miLibCopyId) { $miLibCopyId.Visibility = [System.Windows.Visibility]::Visible }
+            if ($miLibCopyRows) { $miLibCopyRows.Visibility = [System.Windows.Visibility]::Visible }
         }.GetNewClosure())
 
     if ($miLibLaunch) {
@@ -42616,6 +47032,38 @@ if ($ctxLibrary -and $lstLibrary) {
                 try { Set-Clipboard -Value $id; Write-GuiLog "Copied ID: $id" } catch {}
             }.GetNewClosure())
     }
+
+    if ($miLibCopyRows) {
+        $miLibCopyRows.Add_Click({
+                # Full-row copy (Source/Name/Id/Version/Available/IsUe) - the
+                # same TSV Ctrl+C produces, so the UE/Fab tag of any row can
+                # be verified straight from a paste.
+                try { [void](Copy-WmtLibrarySelectedRowsToClipboard -ListView $lstLibrary) } catch { Write-GuiLog "ERROR: Copy row data failed: $($_.Exception.Message)" }
+            }.GetNewClosure())
+    }
+}
+
+# Ctrl+C copies the selected library line(s) to the clipboard as
+# tab-separated rows (Source, Name, ID, Installed, Latest, IsUe); Ctrl+A
+# selects every row first. Mirrors the keyboard support the updates list
+# has; "Copy Row Data" in the right-click menu performs the same copy.
+if ($lstLibrary) {
+    $lstLibrary.Add_PreviewKeyDown({
+            param($s, $e)
+            try {
+                $hasControl = (([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control) -eq [System.Windows.Input.ModifierKeys]::Control)
+                if ($hasControl -and $e.Key -eq [System.Windows.Input.Key]::C) {
+                    if (Copy-WmtLibrarySelectedRowsToClipboard -ListView $s) { $e.Handled = $true }
+                }
+                elseif ($hasControl -and $e.Key -eq [System.Windows.Input.Key]::A) {
+                    $s.SelectAll()
+                    $e.Handled = $true
+                }
+            }
+            catch {
+                Write-GuiLog "ERROR: Library key handler failed: $($_.Exception.Message)"
+            }
+        })
 }
 
 # --- Library search box ---
@@ -42637,12 +47085,14 @@ function Update-WmtLibrarySearch {
     if ([string]::IsNullOrWhiteSpace($query)) {
         # No filter � show all.
         foreach ($item in $script:WmtLibraryScanResults) {
+            if (Test-WmtFabAssetHidden $item) { continue }
             [void]$lstLibrary.Items.Add($item)
         }
     }
     else {
         $needle = $query.ToLowerInvariant()
         foreach ($item in $script:WmtLibraryScanResults) {
+            if (Test-WmtFabAssetHidden $item) { continue }
             $name = ([string]$item.Name).ToLowerInvariant()
             $id = ([string]$item.Id).ToLowerInvariant()
             $source = ([string]$item.Source).ToLowerInvariant()
@@ -42703,7 +47153,6 @@ if ($txtLibrarySearch) {
     $script:WmtLibrarySearchTimer.Add_Tick({
             try { $script:WmtLibrarySearchTimer.Stop() } catch {}
             Update-WmtLibrarySearch
-            $script:WmtLibrarySearchTimer = $null
         }.GetNewClosure())
 }
 
@@ -43084,8 +47533,8 @@ function Sync-WmtTweakOverlayHide {
 # states background job AND the optional features background check have
 # completed.  Updates the overlay subtitle so the user knows what's still loading.
 try {
-    $tweakStatesDone = $script:TweakStatesReady
-    $optFeaturesDone = $script:OptionalFeaturesReady
+    $tweakStatesDone = [bool]$script:TweakStatesReady
+    $optFeaturesDone = [bool]$script:OptionalFeaturesReady
     if ($tweakStatesDone -and $optFeaturesDone) {
         Set-TweakStatesLoadingOverlay -Visible $false
     }
@@ -43095,6 +47544,18 @@ try {
         Set-TweakStatesLoadingOverlay -Visible $true
         $sub = Get-Ctrl "txtTweakOverlaySubtitle"
         if ($sub) { $sub.Text = "Tweak buttons loaded. Checking optional features (.NET, WSL, Hyper-V...)" }
+        }
+    elseif (-not $tweakStatesDone -and $optFeaturesDone) {
+        # Optional features are ready, but tweak toggle buttons are still loading.
+        Set-TweakStatesLoadingOverlay -Visible $true
+        $sub = Get-Ctrl "txtTweakOverlaySubtitle"
+        if ($sub) { $sub.Text = "Optional features loaded. Loading tweak buttons..." }
+    }
+    else {
+        # Both tweak states and optional features are still loading.
+        Set-TweakStatesLoadingOverlay -Visible $true
+        $sub = Get-Ctrl "txtTweakOverlaySubtitle"
+        if ($sub) { $sub.Text = "Loading tweak buttons and checking optional features..." }
     }
 } catch {}
 }
@@ -43485,6 +47946,26 @@ $script:TweakStatesBgTimeout.Add_Tick({
 $script:TweakStatesBgTimeout.Start()
 }
 
+$script:OptionalFeaturesMap = @{
+    "Microsoft-Hyper-V-All"              = "btnFeatHyperV"
+    "Microsoft-Windows-Subsystem-Linux"  = "btnFeatWSL"
+    "Containers-DisposableClientVM"      = "btnFeatSandbox"
+    "NetFx3"                             = "btnFeatDotNet35"
+    "ServicesForNFS-ClientOnly"          = "btnFeatNFS"
+    "TelnetClient"                       = "btnFeatTelnet"
+    "IIS-WebServerRole"                  = "btnFeatIIS"
+    "WindowsMediaPlayer"                 = "btnFeatLegacy"
+    "VirtualMachinePlatform"             = "btnFeatVMP"
+    "HypervisorPlatform"                 = "btnFeatWHP"
+    "OpenSSH.Client"                     = "btnFeatSSHClient"
+    "OpenSSH.Server"                     = "btnFeatSSHServer"
+    "Windows-Defender-ApplicationGuard"  = "btnFeatAppGuard"
+    "WirelessDisplay"                    = "btnFeatMiracast"
+    "QuickAssist"                        = "btnFeatQuickAssist"
+    "XpsViewer"                          = "btnFeatXPS"
+    "TIFFIFilter"                        = "btnFeatTIFF"
+}
+
 function Start-OptionalFeaturesBackgroundCheck {
 # Check all optional features in a SINGLE query (not 17 separate calls).
 # Runs only ONCE, deferred until the user first visits the Tweaks tab
@@ -43493,25 +47974,7 @@ if ($script:OptionalFeaturesCheckStarted) { return }
 $script:OptionalFeaturesCheckStarted = $true
 
 # Map feature names to button names
-$featureMap = @{
-    "Microsoft-Hyper-V-All"             = "btnFeatHyperV"
-    "Microsoft-Windows-Subsystem-Linux" = "btnFeatWSL"
-    "Containers-DisposableClientVM"     = "btnFeatSandbox"
-    "NetFx3"                            = "btnFeatDotNet35"
-    "ServicesForNFS-ClientOnly"         = "btnFeatNFS"
-    "TelnetClient"                      = "btnFeatTelnet"
-    "IIS-WebServerRole"                 = "btnFeatIIS"
-    "WindowsMediaPlayer"                = "btnFeatLegacy"
-    "VirtualMachinePlatform"            = "btnFeatVMP"
-    "HypervisorPlatform"                = "btnFeatWHP"
-    "OpenSSH.Client"                    = "btnFeatSSHClient"
-    "OpenSSH.Server"                    = "btnFeatSSHServer"
-    "Windows-Defender-ApplicationGuard" = "btnFeatAppGuard"
-    "WirelessDisplay"                   = "btnFeatMiracast"
-    "QuickAssist"                       = "btnFeatQuickAssist"
-    "XpsViewer"                         = "btnFeatXPS"
-    "TIFFIFilter"                       = "btnFeatTIFF"
-}
+$featureMap = $script:OptionalFeaturesMap
 
 # Run in a background runspace (shared pool)
 $ps = New-WmtPooledPowerShell
@@ -43607,7 +48070,76 @@ $script:FeaturesCheckTimer.Add_Tick({
 $script:FeaturesCheckTimer.Start()
 }
 
+function Update-OptionalFeaturesSynchronously {
+    $featureMap = $script:OptionalFeaturesMap
+    $results = @{}
+    $useCmdlet = $false
+    try {
+        if (Get-Command Get-WindowsOptionalFeature -ErrorAction SilentlyContinue) {
+            $useCmdlet = $true
+        }
+    }
+    catch {}
+    if ($useCmdlet) {
+        try {
+            Write-GuiLog "[Optional Features] Querying all features with PowerShell..."
+            $allFeatures = Get-WindowsOptionalFeature -Online -ErrorAction SilentlyContinue
+            if ($allFeatures) {
+                foreach ($feat in $allFeatures) {
+                    $btnName = $featureMap[$feat.FeatureName]
+                    if ($btnName) {
+                        $results[$btnName] = ($feat.State -eq "Enabled")
+                    }
+                }
+            }
+        }
+        catch {
+            try { Write-GuiLog "[Optional Features] PowerShell query failed: $($_.Exception.Message)" } catch {}
+        }
+    }
+    if ($results.Count -eq 0) {
+        try {
+            Write-GuiLog "[Optional Features] Querying all features with DISM..."
+            $output = Invoke-WmtCliText `
+                -FilePath "dism" `
+                -Arguments "/Online /Get-Features" `
+                -TimeoutMs 120000
+            foreach ($featureName in $featureMap.Keys) {
+                $btnName = $featureMap[$featureName]
+                if ($output -match "(?s)Feature Name :\s*$([regex]::Escape($featureName))\s*\r?\n.*?State\s*:\s*Enabled") {
+                    $results[$btnName] = $true
+                }
+                else {
+                    $results[$btnName] = $false
+                }
+            }
+        }
+        catch {
+            try { Write-GuiLog "[Optional Features] DISM query failed: $($_.Exception.Message)" } catch {}
+        }
+    }
+    foreach ($btnName in $results.Keys) {
+        $btn = Get-Ctrl $btnName
+        if (-not $btn) { continue }
+        if ($results[$btnName]) {
+            $btn.Style = ($window.FindResource("AccentBtn") -as [System.Windows.Style])
+            $btn.ToolTip = "Current state: Enabled (Blue = installed/active)`nClick to uninstall this feature (Gray).`nRestart recommended after toggling.`n`nOptional Windows feature. See card description for details."
+        }
+        else {
+            $btn.Style = ($window.FindResource("ActionBtn") -as [System.Windows.Style])
+            $btn.ToolTip = "Current state: Disabled (Gray = not installed)`nClick to install this feature (Blue).`nRestart recommended after toggling.`n`nOptional Windows feature. See card description for details."
+        }
+    }
+    Write-GuiLog "[Optional Features] Synchronous detection completed. Buttons updated: $($results.Count)"
+}
+
 $onMainWindowContentRendered = {
+# Build identity first: the title suffix and the log line answer
+# "is this the latest build?" without guessing (see the download page
+# for the line count / size / MD5 of the newest delivery).
+try {
+    Write-GuiLog "WMT GUI v$AppVersion started."
+} catch {}
 $settings = Get-WmtSettings
 
 # Restore persisted window geometry/state when valid.
@@ -43676,6 +48208,22 @@ $preloadDeferTimer.Start()
 # (deferred to avoid competing with My Device page stats for system resources).
 Update-MyDeviceResponsiveLayout
 Update-TweaksResponsiveLayout
+
+# If Launch Minimized is enabled, hide the freshly rendered window in the
+# system tray. This runs after ContentRendered so WPF has a real window to hide.
+try {
+    if (Get-WmtLaunchMinimized) {
+        if (Initialize-WmtTrayIcon -Window $window) {
+            $script:WmtHiddenToTray = $true
+            $window.ShowInTaskbar = $false
+            $window.Hide()
+            Write-GuiLog "Launch Minimized is enabled. WMT started hidden in the system tray."
+        }
+    }
+}
+catch {
+    try { Write-GuiLog "Launch Minimized startup handling failed: $($_.Exception.Message)" } catch {}
+}
 }.GetNewClosure()
 [void]$window.Add_ContentRendered($onMainWindowContentRendered)
 
@@ -43738,6 +48286,10 @@ $script:WmtLibraryCacheAsyncResult = $null
 
 function Start-WmtLibraryCacheBuilder {
 try {
+    if ($script:WmtLibraryCacheAsyncResult -and -not $script:WmtLibraryCacheAsyncResult.IsCompleted) {
+        Write-GuiLog "Library cache build already in progress."
+        return
+    }
     $settings = Get-WmtSettings
     $enabled = @($settings.EnabledProviders)
     $toggles = Get-WmtProviderToggles -Settings $settings
@@ -43898,7 +48450,19 @@ try {
                     if ($LegendaryExe -and (Test-Path -LiteralPath $LegendaryExe -PathType Leaf)) {
                         $psi = New-Object System.Diagnostics.ProcessStartInfo
                         $psi.FileName = $LegendaryExe
-                        $psi.Arguments = "list --json"
+                        # --include-ue only while UE/Fab assets are shown;
+                        # this runspace cannot call the settings helper,
+                        # so read the persisted flag from settings.json.
+                        $ueFlag = ""
+                        try {
+                            $wmtUeSettingsFile = Join-Path (Split-Path -Parent $LegCacheFile) "settings.json"
+                            if (Test-Path -LiteralPath $wmtUeSettingsFile -PathType Leaf) {
+                                $wmtUeSettingsJson = [System.IO.File]::ReadAllText($wmtUeSettingsFile) | ConvertFrom-Json -ErrorAction Stop
+                                if ($wmtUeSettingsJson.PSObject.Properties["HideLegendaryUeAssets"] -and -not [bool]$wmtUeSettingsJson.HideLegendaryUeAssets) { $ueFlag = " --include-ue" }
+                            }
+                        }
+                        catch {}
+                        $psi.Arguments = "--api-timeout 30 list --json$ueFlag"
                         $psi.RedirectStandardOutput = $true
                         $psi.RedirectStandardError = $true
                         $psi.UseShellExecute = $false
@@ -43928,6 +48492,28 @@ try {
                                             try { if ($game.PSObject.Properties["version"]) { $installedVer = [string]$game.version } } catch {}
                                             if ([string]::IsNullOrWhiteSpace($installedVer)) { $installedVer = $latestVer }
                                         }
+                                        # Tag UE/Fab assets from the JSON namespace data
+                                        # (asset_infos per platform, or the metadata blob).
+                                        $legIsUe = $false
+                                        try {
+                                            if ($game.PSObject.Properties["asset_infos"] -and $game.asset_infos) {
+                                                foreach ($aiProp in @($game.asset_infos.PSObject.Properties)) {
+                                                    # Object form: read .namespace directly. String form:
+                                                    # legendary serializes GameAsset objects via str() (json
+                                                    # default=str), so the value arrives as a Python repr - match
+                                                    # the namespace field inside that text instead.
+                                                    if ($aiProp.Value -is [string]) {
+                                                        if ($aiProp.Value -match "(?i)namespace\s*=\s*'ue'") { $legIsUe = $true; break }
+                                                    }
+                                                    elseif (([string]$aiProp.Value.namespace) -eq 'ue') { $legIsUe = $true; break }
+                                                }
+                                            }
+                                        } catch {}
+                                        if (-not $legIsUe) {
+                                            try {
+                                                if ($game.PSObject.Properties["metadata"] -and $game.metadata -and $game.metadata.PSObject.Properties["namespace"] -and ([string]$game.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                                            } catch {}
+                                        }
                                         $result.Add([PSCustomObject]@{
                                                 Provider         = "legendary"
                                                 Title            = $title
@@ -43937,6 +48523,7 @@ try {
                                                 IsInstalled      = $isInstalled
                                                 Source           = "legendary"
                                                 Kind             = "Library"
+                                                IsUe             = $legIsUe
                                             })
                                     }
                                     if ($result.Count -gt 0) { $parsed = $true }
@@ -43949,25 +48536,83 @@ try {
 
                         # Attempt 2: Text parsing fallback
                         if (-not $parsed) {
-                            $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,)]+?)\s*(?:,\s*Version\s*:\s*(?<version>[^,)]+?))?\s*(?:,\s*[^)]*)?\)'
+                            # The text output carries no UE/Fab marker; tag each
+                            # row from legendary's own side data (assets.json
+                            # namespace set plus per-game metadata files) and
+                            # the name heuristics, like every other site.
+                            $ueAppNames = @{}
+                            $ueAssetsFiles = @()
+                            try { if ($env:LEGENDARY_CONFIG_PATH) { $ueAssetsFiles += (Join-Path $env:LEGENDARY_CONFIG_PATH "assets.json") } } catch {}
+                            try { if ($env:XDG_CONFIG_HOME) { $ueAssetsFiles += (Join-Path $env:XDG_CONFIG_HOME "legendary\assets.json") } } catch {}
+                            try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".config\legendary\assets.json") } } catch {}
+                            try { if ($env:USERPROFILE) { $ueAssetsFiles += (Join-Path $env:USERPROFILE ".legendary\assets.json") } } catch {}
+                            try { if ($env:APPDATA) { $ueAssetsFiles += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\assets.json") } } catch {}
+                            foreach ($ueAssetsFile in $ueAssetsFiles) {
+                                if (-not (Test-Path -LiteralPath $ueAssetsFile -PathType Leaf)) { continue }
+                                try {
+                                    $assetsJson = [System.IO.File]::ReadAllText($ueAssetsFile) | ConvertFrom-Json -ErrorAction Stop
+                                    foreach ($platformProp in @($assetsJson.PSObject.Properties)) {
+                                        $uePlatformAssets = @()
+                                        if ($platformProp.Value -is [System.Collections.IEnumerable] -and $platformProp.Value -isnot [string] -and $platformProp.Value -isnot [System.Management.Automation.PSCustomObject]) {
+                                            $uePlatformAssets = @($platformProp.Value)
+                                        }
+                                        elseif ($platformProp.Value -and $platformProp.Value.PSObject) {
+                                            $uePlatformAssets = @($platformProp.Value.PSObject.Properties | ForEach-Object { $_.Value })
+                                        }
+                                        foreach ($asset in @($uePlatformAssets)) {
+                                            if (([string]$asset.namespace) -eq 'ue') {
+                                                $ueKey = ([string]$asset.app_name).Trim().ToLowerInvariant()
+                                                if ($ueKey) { $ueAppNames[$ueKey] = $true }
+                                            }
+                                        }
+                                    }
+                                }
+                                catch {}
+                            }
+                            $ueMetaRoots = @()
+                            try { if ($env:LEGENDARY_CONFIG_PATH) { $ueMetaRoots += (Join-Path $env:LEGENDARY_CONFIG_PATH "metadata") } } catch {}
+                            try { if ($env:XDG_CONFIG_HOME) { $ueMetaRoots += (Join-Path $env:XDG_CONFIG_HOME "legendary\metadata") } } catch {}
+                            try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".config\legendary\metadata") } } catch {}
+                            try { if ($env:USERPROFILE) { $ueMetaRoots += (Join-Path $env:USERPROFILE ".legendary\metadata") } } catch {}
+                            try { if ($env:APPDATA) { $ueMetaRoots += (Join-Path $env:APPDATA "heroic\legendaryConfig\legendary\metadata") } } catch {}
+                            $regex = [regex]'\*+\s*(?<title>.+?)\s*\(\s*App(?:\s+name)?\s*:\s*(?<app>[^,|)]+?)\s*(?:[,|]\s*Version\s*:\s*(?<version>[^,|)]+?))?\s*(?:[,|]\s*[^)]*)?\)'
                             foreach ($match in $regex.Matches($stdout)) {
                                 $title = $match.Groups["title"].Value.Trim()
                                 if ([string]::IsNullOrWhiteSpace($title)) { continue }
+                                $app = $match.Groups["app"].Value.Trim()
                                 $ver = if ($match.Groups["version"].Success) { $match.Groups["version"].Value.Trim() } else { "" }
+                                $legIsUe = ($ueAppNames.ContainsKey($app.ToLowerInvariant()) -or $app -match '^UE[_-]?\d' -or $title -match '^\s*(Unreal Engine|UE[_-]?\d)' -or $app -match '^[0-9a-fA-F]{32}$' -or $app -match '(?i)^[A-Za-z0-9][A-Za-z0-9_-]{8,}V\d+$' -or $app -match '(?i)(?:^|_)(?:5\.\d+)$' -or $title -match '(?i)\b(plugin|materials?|vfx|assets?|environment|\benv\b|sample|pack|props?|textures?|shaders?|animations?|sounds?|characters?|icvfx|metahumans?|importer|dialogue\s+tree|production\s+test)\b')
+                                if (-not $legIsUe -and $ueMetaRoots.Count -gt 0) {
+                                    foreach ($ueMetaRoot in $ueMetaRoots) {
+                                        $ueMetaCandidate = Join-Path $ueMetaRoot "$app.json"
+                                        if (-not (Test-Path -LiteralPath $ueMetaCandidate -PathType Leaf)) { continue }
+                                        try {
+                                            $ueMetaJson = [System.IO.File]::ReadAllText($ueMetaCandidate) | ConvertFrom-Json -ErrorAction Stop
+                                            if ($ueMetaJson -and $ueMetaJson.metadata -and $ueMetaJson.metadata.PSObject.Properties["namespace"] -and ([string]$ueMetaJson.metadata.namespace) -eq 'ue') { $legIsUe = $true }
+                                        }
+                                        catch {}
+                                        break
+                                    }
+                                }
                                 $result.Add([PSCustomObject]@{
                                         Provider = "legendary"
                                         Title    = $title
-                                        Id       = $match.Groups["app"].Value.Trim()
+                                        Id       = $app
                                         Version  = $ver
                                         Source   = "legendary"
                                         Kind     = "Library"
+                                        IsUe     = $legIsUe
                                     })
                             }
                         }
                     }
 
                     $arr = $result.ToArray()
-                    $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                    # Guard: never wipe an existing cache with an empty result (e.g. a
+                    # network outage during the fetch) — keep the last good list.
+                    if ($arr.Count -gt 0 -or -not (Test-Path -LiteralPath $LegCacheFile -PathType Leaf)) {
+                        $arr | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $LegCacheFile -Force -Encoding UTF8
+                    }
                     Write-Output "LOG:Legendary library cached: $($arr.Count) games."
                 }
                 catch {
@@ -44295,6 +48940,14 @@ try {
             try { $script:WmtLibraryCacheRunspace.Dispose() } catch {}
             $script:WmtLibraryCacheRunspace = $null
             $script:WmtLibraryCacheAsyncResult = $null
+            # If the library view is open, refresh it from the rebuilt
+            # cache (covers the Fab-assets toggle: the rebuild flips the
+            # --include-ue flag and the open view picks the change up
+            # immediately; the boot-time build finds the view closed and
+            # skips this).
+            if ($brdLibraryList -and $brdLibraryList.Visibility -eq [System.Windows.Visibility]::Visible -and $lstLibrary) {
+                try { Start-WmtLibraryScan -Silent } catch {}
+            }
         }.GetNewClosure())
     $timer.Start()
 }
@@ -44439,7 +49092,16 @@ try {
     }
 }
 catch {}
-try { if ($script:WmtLibraryScanTimer) { $script:WmtLibraryScanTimer.Stop(); $script:WmtLibraryScanTimer = $null } } catch {}
+try { if ($script:WmtTaskBatchTimer) { $script:WmtTaskBatchTimer.Stop(); $script:WmtTaskBatchTimer = $null } } catch {}
+try {
+    if ($script:WmtTaskBatchPs) {
+        try { $script:WmtTaskBatchPs.Stop() } catch {}
+        try { $script:WmtTaskBatchPs.Dispose() } catch {}
+        $script:WmtTaskBatchPs = $null
+        $script:WmtTaskBatchAsync = $null
+    }
+}
+catch {}
 try { if ($script:WmtLibrarySearchTimer) { $script:WmtLibrarySearchTimer.Stop(); $script:WmtLibrarySearchTimer = $null } } catch {}
 try { if ($script:StatsTimer) { $script:StatsTimer.Stop(); $script:StatsTimer = $null } } catch {}
 try { if ($script:UpdateTimer) { $script:UpdateTimer.Stop(); $script:UpdateTimer = $null } } catch {}
@@ -44492,11 +49154,11 @@ if ($script:WmtDispatcherUnhandledHandler) {
 $script:WmtDispatcherUnhandledHandler = [System.Windows.Threading.DispatcherUnhandledExceptionEventHandler] {
     param($s, $eA)
 
-    try { $eventArgs.Handled = $true } catch {}
+    try { $eA.Handled = $true } catch {}
     try {
-        Write-WmtLastCrash -Context "Unhandled WPF dispatcher exception" -Exception $eventArgs.Exception
+        Write-WmtLastCrash -Context "Unhandled WPF dispatcher exception" -Exception $eA.Exception
         if ($script:WingetJob -or $script:WingetActiveAction) {
-            Reset-WmtUpdateUiAfterMonitorError -Context "Unhandled WPF dispatcher exception" -Exception $eventArgs.Exception -SkipCrashWrite
+            Reset-WmtUpdateUiAfterMonitorError -Context "Unhandled WPF dispatcher exception" -Exception $eA.Exception -SkipCrashWrite
         }
     }
     catch {}
