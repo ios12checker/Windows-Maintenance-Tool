@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v6.5-green)
+![Version](https://img.shields.io/badge/version-v6.6-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -53,7 +53,7 @@ A revolving list of all Antivirus contacts can be found here: https://docs.virus
 - Safety prompts, backups, revert actions, and clearer error messages for risky operations.
 
 ## Screenshot
-<img width="1920" height="1032" alt="image" src="https://github.com/user-attachments/assets/64a09114-e893-4de7-a9bf-8ddb08010c19" />
+<img width="1916" height="1031" alt="image" src="https://github.com/user-attachments/assets/eadd6cb7-a1da-4e83-b37e-69a80c014440" />
 
 
 
