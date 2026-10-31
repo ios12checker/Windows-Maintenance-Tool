@@ -34292,6 +34292,7 @@ catch { & $failed $_ }
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Text="Activity Log" FontSize="11" Foreground="{DynamicResource TextMuted}" FontWeight="SemiBold"
                                        VerticalAlignment="Center"/>
@@ -34323,6 +34324,9 @@ catch { & $failed $_ }
                                     </Button>
                                 </Grid>
                             </Border>
+                            <TextBlock Name="lblLogSearchCount" Grid.Column="2" Text="" Margin="7,0,2,0"
+                                       MinWidth="34" VerticalAlignment="Center" HorizontalAlignment="Center"
+                                       Foreground="{DynamicResource TextSecondary}" FontSize="10" Visibility="Collapsed"/>
                         </Grid>
                     </Border>
                     <ScrollViewer Name="svLog" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Margin="8" UseLayoutRounding="True" VerticalAlignment="Stretch">
@@ -36265,36 +36269,49 @@ $layer.Children.Clear()
 if ($Index -lt 0 -or $Length -le 0 -or $Index -ge $script:LogBox.Text.Length) { return }
 
 try {
-    # GetRectFromCharacterIndex is independent of keyboard focus, unlike TextBox selection rendering.
-    $startRect = $script:LogBox.GetRectFromCharacterIndex($Index, $true)
-    $endIndex = [Math]::Min($script:LogBox.Text.Length, $Index + $Length)
-    $endRect = $script:LogBox.GetRectFromCharacterIndex($endIndex, $false)
-    if ($startRect.IsEmpty) { return }
+    $matchIndexes = @($script:LogSearchMatchIndexes)
+    if ($matchIndexes.Count -eq 0) { $matchIndexes = @($Index) }
+    $brushConverter = [System.Windows.Media.BrushConverter]::new()
+    foreach ($matchIndex in $matchIndexes) {
+        if ($matchIndex -lt 0 -or $matchIndex -ge $script:LogBox.Text.Length) { continue }
+        # GetRectFromCharacterIndex is independent of keyboard focus, unlike TextBox selection rendering.
+        $startRect = $script:LogBox.GetRectFromCharacterIndex([int]$matchIndex, $true)
+        $endIndex = [Math]::Min($script:LogBox.Text.Length, [int]$matchIndex + $Length)
+        $endRect = $script:LogBox.GetRectFromCharacterIndex($endIndex, $false)
+        if ($startRect.IsEmpty) { continue }
 
-    $highlight = New-Object System.Windows.Shapes.Rectangle
-    $highlight.Fill = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#B8F2C94C")
-    $highlight.Stroke = [System.Windows.Media.BrushConverter]::new().ConvertFromString("#FFF2C94C")
-    $highlight.StrokeThickness = 1.0
-    $highlight.RadiusX = 2
-    $highlight.RadiusY = 2
+        $isCurrent = ([int]$matchIndex -eq $Index)
+        $highlight = New-Object System.Windows.Shapes.Rectangle
+        if ($isCurrent) {
+            $highlight.Fill = $brushConverter.ConvertFromString("#B8F2C94C")
+            $highlight.Stroke = $brushConverter.ConvertFromString("#FFF2C94C")
+        }
+        else {
+            $highlight.Fill = $brushConverter.ConvertFromString("#554DA3FF")
+            $highlight.Stroke = $brushConverter.ConvertFromString("#AA4DA3FF")
+        }
+        $highlight.StrokeThickness = 1.0
+        $highlight.RadiusX = 2
+        $highlight.RadiusY = 2
 
-    $left = [Math]::Max(0.0, $startRect.X - 1.0)
-    $top = [Math]::Max(0.0, $startRect.Y - 1.0)
-    $height = [Math]::Max(2.0, $startRect.Height + 2.0)
+        $left = [Math]::Max(0.0, $startRect.X - 1.0)
+        $top = [Math]::Max(0.0, $startRect.Y - 1.0)
+        $height = [Math]::Max(2.0, $startRect.Height + 2.0)
 
-    if (-not $endRect.IsEmpty -and [Math]::Abs($endRect.Y - $startRect.Y) -lt 1.0) {
-        $width = [Math]::Max(3.0, ($endRect.X - $startRect.X) + 2.0)
+        if (-not $endRect.IsEmpty -and [Math]::Abs($endRect.Y - $startRect.Y) -lt 1.0) {
+            $width = [Math]::Max(3.0, ($endRect.X - $startRect.X) + 2.0)
+        }
+        else {
+            # Wrapped/multi-line matches get an obvious line-width highlight rather than disappearing.
+            $width = [Math]::Max(3.0, $script:LogBox.ActualWidth - $left - 6.0)
+        }
+
+        $highlight.Width = $width
+        $highlight.Height = $height
+        [System.Windows.Controls.Canvas]::SetLeft($highlight, $left)
+        [System.Windows.Controls.Canvas]::SetTop($highlight, $top)
+        [void]$layer.Children.Add($highlight)
     }
-    else {
-        # Wrapped/multi-line matches get an obvious line-width highlight rather than disappearing.
-        $width = [Math]::Max(3.0, $script:LogBox.ActualWidth - $left - 6.0)
-    }
-
-    $highlight.Width = $width
-    $highlight.Height = $height
-    [System.Windows.Controls.Canvas]::SetLeft($highlight, $left)
-    [System.Windows.Controls.Canvas]::SetTop($highlight, $top)
-    [void]$layer.Children.Add($highlight)
 }
 catch {
     try { $layer.Children.Clear() } catch {}
@@ -36305,8 +36322,63 @@ function Clear-WmtActivityLogHighlight {
 $script:LogSearchMatchIndex = -1
 $script:LogSearchMatchLength = 0
 $script:LogSearchMatchQuery = ""
+$script:LogSearchMatchIndexes = @()
+if ($script:LogSearchCountLabel) {
+    $script:LogSearchCountLabel.Text = ""
+    $script:LogSearchCountLabel.Visibility = [System.Windows.Visibility]::Collapsed
+}
 if ($script:LogSearchHighlightLayer) {
     try { $script:LogSearchHighlightLayer.Children.Clear() } catch {}
+}
+}
+
+function Get-WmtActivityLogMatchIndexes {
+param([string]$Text, [string]$Query)
+
+$indexes = [System.Collections.Generic.List[int]]::new()
+if ([string]::IsNullOrEmpty($Text) -or [string]::IsNullOrEmpty($Query)) { return }
+$startAt = 0
+while ($startAt -lt $Text.Length) {
+    $foundAt = $Text.IndexOf($Query, $startAt, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($foundAt -lt 0) { break }
+    [void]$indexes.Add($foundAt)
+    $startAt = $foundAt + [Math]::Max(1, $Query.Length)
+}
+return $indexes.ToArray()
+}
+
+function Update-WmtActivityLogSearchDisplay {
+param([string]$Query)
+
+if ([string]::IsNullOrWhiteSpace($Query) -or $Query -eq $script:LogSearchPlaceholder) {
+    Clear-WmtActivityLogHighlight
+    return
+}
+$text = if ($script:LogBox) { [string]$script:LogBox.Text } else { "" }
+$script:LogSearchMatchIndexes = @(Get-WmtActivityLogMatchIndexes -Text $text -Query $Query)
+$total = $script:LogSearchMatchIndexes.Count
+$currentOrdinal = -1
+for ($i = 0; $i -lt $total; $i++) {
+    if ([int]$script:LogSearchMatchIndexes[$i] -eq $script:LogSearchMatchIndex) {
+        $currentOrdinal = $i + 1
+        break
+    }
+}
+if ($total -gt 0 -and $currentOrdinal -lt 0) {
+    $script:LogSearchMatchIndex = [int]$script:LogSearchMatchIndexes[0]
+    $script:LogSearchMatchLength = $Query.Length
+    $script:LogSearchMatchQuery = $Query
+    $currentOrdinal = 1
+}
+if ($script:LogSearchCountLabel) {
+    $script:LogSearchCountLabel.Text = "{0}/{1}" -f ([Math]::Max(0, $currentOrdinal)), $total
+    $script:LogSearchCountLabel.Visibility = [System.Windows.Visibility]::Visible
+}
+if ($total -gt 0 -and $script:LogSearchMatchIndex -ge 0) {
+    Show-WmtActivityLogHighlight -Index $script:LogSearchMatchIndex -Length $Query.Length
+}
+elseif ($script:LogSearchHighlightLayer) {
+    $script:LogSearchHighlightLayer.Children.Clear()
 }
 }
 
@@ -36349,6 +36421,10 @@ else {
 
 if ($index -lt 0) {
     Clear-WmtActivityLogHighlight
+    if ($script:LogSearchCountLabel) {
+        $script:LogSearchCountLabel.Text = "0/0"
+        $script:LogSearchCountLabel.Visibility = [System.Windows.Visibility]::Visible
+    }
     return $false
 }
 
@@ -36364,10 +36440,10 @@ try {
     # Force layout after navigation, then draw a real overlay over the match.
     $script:LogBox.UpdateLayout()
     if ($script:LogSearchHighlightLayer) { $script:LogSearchHighlightLayer.UpdateLayout() }
-    Show-WmtActivityLogHighlight -Index $index -Length $Query.Length
+    Update-WmtActivityLogSearchDisplay -Query $Query
 }
 catch {
-    Show-WmtActivityLogHighlight -Index $index -Length $Query.Length
+    Update-WmtActivityLogSearchDisplay -Query $Query
 }
 return $true
 }
@@ -39138,6 +39214,7 @@ $svLog = Get-Ctrl "svLog"
 $LogBox = Get-Ctrl "LogBox"
 $LogSearchHighlightLayer = Get-Ctrl "LogSearchHighlightLayer"
 $script:LogSearchHighlightLayer = $LogSearchHighlightLayer
+$script:LogSearchCountLabel = Get-Ctrl "lblLogSearchCount"
 $bdLogSearch = Get-Ctrl "bdLogSearch"
 $txtLogSearch = Get-Ctrl "txtLogSearch"
 $btnLogClearSearch = Get-Ctrl "btnLogClearSearch"
@@ -39212,6 +39289,9 @@ $LogBox.Add_TextChanged({
         $searchActive = (-not [string]::IsNullOrWhiteSpace($query)) -and $query -ne $script:LogSearchPlaceholder
         if (-not $searchActive) {
             if ($svLog) { $svLog.ScrollToEnd() } else { $s.ScrollToEnd() }
+        }
+        else {
+            try { Update-WmtActivityLogSearchDisplay -Query $query } catch {}
         }
     })
 $LogBox.Add_SizeChanged({
