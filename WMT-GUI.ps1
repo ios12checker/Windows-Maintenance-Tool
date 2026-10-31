@@ -3312,7 +3312,10 @@ if ($existing -is [System.Management.Automation.Runspaces.RunspacePool]) {
 if ($existing) { Reset-WmtRunspacePool -PoolKind $PoolKind }
 
 $iss = New-WmtRunspaceInitialState
-$maxWorkers = if ($PoolKind -eq "UiSupport") { 3 } else { 6 }
+# Scan workers spend nearly all their time waiting on external package managers, so the Background
+# pool is sized to run every provider scan at once (16) with headroom for other background work.
+# Runspaces are created on demand, and idle pools are closed while the app sits in the tray.
+$maxWorkers = if ($PoolKind -eq "UiSupport") { 3 } else { 24 }
 $pool = [runspacefactory]::CreateRunspacePool(1, $maxWorkers, $iss, $Host)
 $pool.ApartmentState = "STA"
 $pool.ThreadOptions = "ReuseThread"
@@ -50145,6 +50148,7 @@ try {
     if ($script:ScanTimer -and $script:ScanTimer.IsEnabled) { return $true }
     if ($script:GlobalScanTimer -and $script:GlobalScanTimer.IsEnabled) { return $true }
     if ($script:WingetScanSourcePreflightInProgress) { return $true }
+    if ($script:WmtDeferredWingetScanPending) { return $true }
     if ($script:WingetActiveAction) { return $true }
     if ($btnWingetScan -and -not $btnWingetScan.IsEnabled) { return $true }
 }
@@ -50867,6 +50871,29 @@ $script:WmtPeriodicMemoryTrimTimer.Add_Tick({
 })
 $script:WmtPeriodicMemoryTrimTimer.Start()
 
+function Start-WmtDeferredWingetScan {
+    # Starts the winget scanner that was held back for the source refresh, inside the scan that is
+    # already running. Returns $true when a deferred scan was waiting.
+    $deferred = $script:WmtDeferredWingetScan
+    if (-not $deferred) { return $false }
+    $script:WmtDeferredWingetScan = $null
+    try {
+        if (-not $script:ScanCancelled) {
+            $deferredEnabled = $deferred.Enabled
+            $deferredIgnoreList = $deferred.IgnoreList
+            $deferredIncludeUnknown = $deferred.IncludeUnknown
+            & $deferred.ScriptBlock $deferredEnabled $deferredIgnoreList $deferredIncludeUnknown | Out-Null
+        }
+    }
+    catch {
+        Write-GuiLog "Winget scan could not start after the source refresh: $($_.Exception.Message)"
+    }
+    finally {
+        $script:WmtDeferredWingetScanPending = $false
+    }
+    return $true
+}
+
 function Start-WingetScanSourcePreflight {
 param([string[]]$Sources)
 
@@ -50892,7 +50919,7 @@ $txtWingetSearch.ToolTip = "Wait for the scan to finish before searching."
 
 Write-GuiLog "Preparing winget sources before package scan: $($script:WingetSourcePreflightSources -join ', ')"
 if ($lblWingetStatus) {
-    $lblWingetStatus.Text = "Preparing winget sources before scan..."
+    $lblWingetStatus.Text = "Scanning providers (winget is refreshing its sources first)..."
     $lblWingetStatus.Visibility = "Visible"
 }
 
@@ -50978,10 +51005,8 @@ catch {
     $script:WingetSourcePreflightAsyncResult = $null
     $script:WingetScanSourcePreflightInProgress = $false
     $script:WingetSourcePreflightReadyForScan = $true
-    if ($btnWingetScan) {
-        $btnWingetScan.IsEnabled = $true
-        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-    }
+    # The scan is already running; just start the winget scanner that was waiting.
+    [void](Start-WmtDeferredWingetScan)
     return
 }
 $script:WingetSourcePreflightTimer = $null
@@ -51008,10 +51033,8 @@ Register-WmtUiPollOperation -Name "WingetSourcePreflight" -IntervalMs 250 -TestC
             $script:WingetSourcePreflightReadyForScan = $true
         }
 
-        if ($btnWingetScan) {
-            $btnWingetScan.IsEnabled = $true
-            $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-        }
+        # Source refresh done: the winget scanner joins the scan that is already running.
+        [void](Start-WmtDeferredWingetScan)
     } | Out-Null
 }
 
@@ -51136,8 +51159,8 @@ $script:ScanTimer.Add_Tick({
         }
     }
     else {
-        # All tasks finished
-        if ($script:ScanTimer.IsEnabled) {
+        # All tasks finished (unless the winget scanner is still waiting for its source refresh)
+        if ($script:ScanTimer.IsEnabled -and -not $script:WmtDeferredWingetScanPending) {
             $script:ScanTimer.Stop()
 
             # Stop the 120s global timeout timer too � the scan finished
@@ -51258,32 +51281,12 @@ $btnWingetScan.Add_Click({
             $previousLibraryBuild = $script:WmtLibraryCacheAsyncResult
             try { Start-WmtLibraryCacheBuilder -SteamOnly }
             catch { Write-GuiLog "Could not start Steam ownership cache build: $($_.Exception.Message)" }
-            if ($script:WmtLibraryCacheAsyncResult -and -not $script:WmtLibraryCacheAsyncResult.IsCompleted) {
-                if ($script:WmtLibraryCacheAsyncResult -ne $previousLibraryBuild) {
-                    $script:WmtWingetScanSteamCacheAttempted = $true
-                }
-                $lblWingetStatus.Text = "Waiting for Steam ownership data..."
-                Register-WmtUiPollOperation -Name "WingetScanSteamCacheWait" -IntervalMs 500 -TimeoutMs 300000 -TestComplete {
-                    -not $script:WmtLibraryCacheAsyncResult -or $script:WmtLibraryCacheAsyncResult.IsCompleted
-                } -OnComplete {
-                    $script:WmtWingetScanPreparationPending = $false
-                    $btnWingetScan.IsEnabled = $true
-                    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-                } -OnTimeout {
-                    $script:WmtWingetScanSteamCacheAttempted = $true
-                    $script:WmtWingetScanPreparationPending = $false
-                    $btnWingetScan.IsEnabled = $true
-                    Write-GuiLog "[Winget] Steam ownership cache is still building; continuing this scan without it."
-                    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-                } -OnError {
-                    param($operation, $errorRecord)
-                    $script:WmtWingetScanSteamCacheAttempted = $true
-                    $script:WmtWingetScanPreparationPending = $false
-                    $btnWingetScan.IsEnabled = $true
-                    Write-GuiLog "[Winget] Could not wait for Steam ownership data: $($errorRecord.Exception.Message)"
-                    $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
-                } | Out-Null
-                return
+            # The cache is only a seed for cross-provider duplicate filtering, and the Steam scanner reports
+            # installed games itself, so nothing waits for the build: it finishes in the background and
+            # the next scan picks it up.
+            if ($script:WmtLibraryCacheAsyncResult -and $script:WmtLibraryCacheAsyncResult -ne $previousLibraryBuild) {
+                $script:WmtWingetScanSteamCacheAttempted = $true
+                Write-GuiLog "[Winget] Building the Steam ownership cache in the background; this scan does not wait for it."
             }
         }
         $steamOwnershipJson = if ($script:WmtSteamLibraryCache -and -not (Test-Path -LiteralPath $steamCacheFile -PathType Leaf)) {
@@ -51483,26 +51486,18 @@ $btnWingetScan.Add_Click({
     Write-GuiLog "Scan-enabled providers: $($enabled -join ', ')"
     Write-GuiLog "Winget include unknown: $includeUnknown"
 
-    # Gate the actual winget scan behind a completed source refresh.
-    # This keeps startup clickable but ensures the first visible package results are collected after source prep.
+    # Only the winget scanner waits for the source refresh. Every other provider starts right away and
+    # winget joins the running scan when the refresh finishes (see Start-WmtDeferredWingetScan).
     $wingetSourcesToPrep = @()
     if ("winget" -in $enabled) { $wingetSourcesToPrep += "winget" }
-
-    if ($wingetSourcesToPrep.Count -gt 0 -and -not $script:WingetSourcePreflightReadyForScan) {
-        if (-not $script:WingetScanSourcePreflightInProgress) {
-            Start-WingetScanSourcePreflight -Sources $wingetSourcesToPrep
-        }
-        else {
-            Write-GuiLog "Waiting for winget source preflight to finish before scanning..."
-        }
-        return
-    }
-    #$script:WingetSourcePreflightReadyForScan = $false
+    $deferWingetScan = ($wingetSourcesToPrep.Count -gt 0 -and -not $script:WingetSourcePreflightReadyForScan)
     # Keep the ready flag set after the first preflight so later page/manual refreshes scan immediately.
 
     # --- Reset scan tracking ---
     $script:ActiveScans.Clear()
     $script:ScanCancelled = $false
+    $script:WmtDeferredWingetScan = $null
+    $script:WmtDeferredWingetScanPending = $false
     $script:ScanStartTime = Get-Date
     $script:WmtSteamInstalledNameKeys = $scanPrepared.SteamInstalledNameKeys
     $script:WmtProviderOwnershipIndex = $scanPrepared.ProviderOwnershipIndex
@@ -51534,6 +51529,8 @@ $btnWingetScan.Add_Click({
                     }
                 }
                 $script:ActiveScans.Clear()
+                $script:WmtDeferredWingetScan = $null
+                $script:WmtDeferredWingetScanPending = $false
                 # Stop result collection timer
                 if ($script:ScanTimer.IsEnabled) { $script:ScanTimer.Stop() }
                 $lblWingetStatus.Text = "Scan timeout - some providers did not respond."
@@ -51554,7 +51551,10 @@ $btnWingetScan.Add_Click({
     # and finalize every worker already started for this scan and restore the UI.
     try {
 
-    # A. WINGET
+    # A. WINGET - kept in a scriptblock so it can start immediately or, on the first scan after launch,
+    # as soon as the winget source refresh finishes. No other provider waits for it.
+    $startWingetScan = {
+        param($enabled, $ignoreList, $includeUnknown)
     foreach ($wingetSource in @("winget")) {
         if ($wingetSource -notin $enabled) { continue }
 
@@ -51684,6 +51684,8 @@ $btnWingetScan.Add_Click({
 
         [void](Start-WmtActiveScanWorker -PowerShell $ps)
     }
+    }
+    if (-not $deferWingetScan) { & $startWingetScan $enabled $ignoreList $includeUnknown }
 
     if ("msstore" -in $enabled) {
         $ps = New-WmtPooledPowerShell
@@ -53325,12 +53327,22 @@ $btnWingetScan.Add_Click({
         [void](Start-WmtActiveScanWorker -PowerShell $ps)
     }
 
+    # --- Winget joins the running scan once its source refresh has finished ---
+    if ($deferWingetScan) {
+        $script:WmtDeferredWingetScanPending = $true
+        $script:WmtDeferredWingetScan = @{ ScriptBlock = $startWingetScan; Enabled = $enabled; IgnoreList = $ignoreList; IncludeUnknown = $includeUnknown }
+        if ($script:WingetScanSourcePreflightInProgress) { Write-GuiLog "Winget scan will start when the source refresh finishes." }
+        else { Start-WingetScanSourcePreflight -Sources $wingetSourcesToPrep }
+    }
+
     # --- Start the result collection timer (already defined earlier in script) ---
     $script:ScanTimer.Start()
     }
     catch {
         $scanSetupError = $_.Exception.Message
         Write-GuiLog "Scan setup failed: $scanSetupError"
+        $script:WmtDeferredWingetScan = $null
+        $script:WmtDeferredWingetScanPending = $false
 
         try { if ($script:GlobalScanTimer) { $script:GlobalScanTimer.Stop() } } catch {}
         try { if ($script:ScanTimer -and $script:ScanTimer.IsEnabled) { $script:ScanTimer.Stop() } } catch {}
