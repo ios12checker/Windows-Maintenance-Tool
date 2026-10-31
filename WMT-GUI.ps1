@@ -34287,7 +34287,7 @@ catch { & $failed $_ }
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
-                    <Border Grid.Row="0" Background="{DynamicResource BgPanel}" CornerRadius="8,8,0,0" Padding="12,6" BorderThickness="0">
+                    <Border Grid.Row="0" Background="{DynamicResource BgPanel}" CornerRadius="8,8,0,0" Padding="0,6" BorderThickness="0">
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*"/>
