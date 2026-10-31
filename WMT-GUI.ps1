@@ -42441,6 +42441,7 @@ $txtWingetSearch.Add_KeyDown({ param($s, $e)
 $script:WingetSavedScanItems = $null
 if ($btnWingetClearSearch) {
 $btnWingetClearSearch.Add_Click({
+    param($s, $e)
     $txtWingetSearch.Text = "Search packages..."
     $txtWingetSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
     $btnWingetClearSearch.Visibility = "Collapsed"
@@ -50060,14 +50061,14 @@ $providerDetectionState = [PSCustomObject]@{
     StartedUtc = $providerDetectionStartedUtc
 }
 $providerDetectionTimer.Add_Tick({
-    param($sender, $eventArgs)
+    param($s, $e)
     if (-not $providerDetectionState.PowerShell -or -not $providerDetectionState.Invocation) {
-        $sender.Stop()
+        $s.Stop()
         return
     }
     if (-not $providerDetectionState.Invocation.IsCompleted) {
         if (([DateTime]::UtcNow - $providerDetectionState.StartedUtc).TotalSeconds -ge 20) {
-            $sender.Stop()
+            $s.Stop()
             Write-GuiLog "[Providers] Installed-state detection timed out; preserving last known status."
             try { Stop-WmtPowerShellInvocationAsync -PowerShell $providerDetectionState.PowerShell -Invocation $providerDetectionState.Invocation -Name "Provider status detection" } catch {}
             $providerDetectionState.PowerShell = $null
@@ -50089,7 +50090,7 @@ $providerDetectionTimer.Add_Tick({
         try { $providerDetectionState.PowerShell.Dispose() } catch {}
         $providerDetectionState.PowerShell = $null
         $providerDetectionState.Invocation = $null
-        $sender.Stop()
+        $s.Stop()
     }
     if ($detectionFailed) { return }
 
@@ -53587,7 +53588,7 @@ function Start-WmtWingetUnignoreRefresh {
     }
 }
 
-function Complete-WmtWingetUnignoreUiSave {
+function Set-WmtWingetUnignoreUiSaveCompleted {
     param([Parameter(Mandatory = $true)][string]$StateId)
 
     $state = $script:WmtWingetUnignoreUiStates[$StateId]
@@ -53615,7 +53616,7 @@ function Complete-WmtWingetUnignoreUiSave {
     }
 }
 
-function Fail-WmtWingetUnignoreUiSave {
+function Show-WmtWingetUnignoreSaveError {
     param([Parameter(Mandatory = $true)][string]$StateId, $ErrorRecord)
 
     $state = $script:WmtWingetUnignoreUiStates[$StateId]
@@ -53635,6 +53636,7 @@ function Fail-WmtWingetUnignoreUiSave {
 }
 
 $btnWingetUnignore.Add_Click({
+    param($s, $e)
     $listItems = @()
 
     $content = @"
@@ -53668,6 +53670,7 @@ $btnWingetUnignore.Add_Click({
     }
 
     $btnRestore.Add_Click({
+            param($s, $e)
             $selected = @($lb.SelectedItems)
             if ($selected.Count -eq 0) { return }
             $selectedIds = [string[]]@($selected | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
@@ -53676,8 +53679,8 @@ $btnWingetUnignore.Add_Click({
             $state['SelectedIds'] = $selectedIds
             $state['SavePending'] = $true
             $btnRestore.IsEnabled = $false
-            $saved = [scriptblock]::Create("param(`$results)`nComplete-WmtWingetUnignoreUiSave -StateId '$stateId'")
-            $saveFailed = [scriptblock]::Create("param(`$errorRecord)`nFail-WmtWingetUnignoreUiSave -StateId '$stateId' -ErrorRecord `$errorRecord")
+            $saved = [scriptblock]::Create("param(`$results)`nSet-WmtWingetUnignoreUiSaveCompleted -StateId '$stateId'")
+            $saveFailed = [scriptblock]::Create("param(`$errorRecord)`nShow-WmtWingetUnignoreSaveError -StateId '$stateId' -ErrorRecord `$errorRecord")
             $listOperation = @([pscustomobject]@{ Property = 'WingetIgnore'; Action = 'Remove'; Values = $selectedIds })
             Invoke-WmtSettingsPatchSave -Patch @{} -ListOperations $listOperation -Name ("WingetUnignore_" + [guid]::NewGuid().ToString("N")) -Message 'Saving ignored packages...' -OnComplete $saved -OnError $saveFailed
         }.GetNewClosure())
@@ -54065,6 +54068,7 @@ $script:SearchProvidersTotal = 0
 $script:SearchProvidersExpected = 0
 
 $script:SearchTimer.Add_Tick({
+    param($s, $e)
     # A cancelled search can still be unwinding in its runspace. Never let a
     # late dispatcher tick publish its buffered results into the normal list.
     if (-not $script:WmtPackageSearchActive -or $null -eq $script:SearchOutput) {
