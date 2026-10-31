@@ -53545,6 +53545,67 @@ $btnWingetIgnore.Add_Click({
 
 # --- MANAGE IGNORED (UNIGNORE) ---
 if (-not $btnWingetUnignore) { $btnWingetUnignore = Get-Ctrl "btnWingetUnignore" }
+if (-not $script:WmtWingetUnignoreUiStates) { $script:WmtWingetUnignoreUiStates = @{} }
+$unignoreUiStateStore = $script:WmtWingetUnignoreUiStates
+
+function Start-WmtWingetUnignoreRefresh {
+    $scanButton = Get-Ctrl "btnWingetScan"
+    if ($scanButton) {
+        Write-GuiLog "List updated. Refreshing..."
+        $scanButton.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    }
+    else {
+        Write-GuiLog "Could not refresh the update list because the Scan button is unavailable."
+    }
+}
+
+function Complete-WmtWingetUnignoreUiSave {
+    param([Parameter(Mandatory = $true)][string]$StateId)
+
+    $state = $script:WmtWingetUnignoreUiStates[$StateId]
+    if (-not $state) {
+        Write-GuiLog "[Winget] Ignore settings were saved, but the ignored-list UI state was unavailable."
+        return
+    }
+    $state['RefreshNeeded'] = $true
+    try {
+        $targetList = $state['ListBox']
+        foreach ($item in @($state['SelectedIds'])) {
+            if ($targetList) { [void]$targetList.Items.Remove([string]$item) }
+        }
+        if ($targetList) { try { $targetList.Items.Refresh() } catch {} }
+        $restoreButton = $state['RestoreButton']
+        if ($restoreButton -and $targetList) { $restoreButton.IsEnabled = ($targetList.Items.Count -gt 0) }
+    }
+    catch {
+        Write-GuiLog "[Winget] Ignore settings were saved, but the ignored-list UI could not refresh: $($_.Exception.Message)"
+    }
+    $state['SavePending'] = $false
+    if ($state['DialogClosed']) {
+        if ($state['RefreshNeeded']) { Start-WmtWingetUnignoreRefresh }
+        [void]$script:WmtWingetUnignoreUiStates.Remove($StateId)
+    }
+}
+
+function Fail-WmtWingetUnignoreUiSave {
+    param([Parameter(Mandatory = $true)][string]$StateId, $ErrorRecord)
+
+    $state = $script:WmtWingetUnignoreUiStates[$StateId]
+    if (-not $state) { return }
+    $state['SavePending'] = $false
+    $restoreButton = $state['RestoreButton']
+    $targetList = $state['ListBox']
+    if ($restoreButton -and $targetList) { $restoreButton.IsEnabled = ($targetList.SelectedItems.Count -gt 0) }
+    if ($state['DialogClosed']) {
+        [void]$script:WmtWingetUnignoreUiStates.Remove($StateId)
+    }
+    else {
+        $dialog = $state['Dialog']
+        $message = if ($ErrorRecord -and $ErrorRecord.Exception) { $ErrorRecord.Exception.Message } else { [string]$ErrorRecord }
+        Show-WmtMessageBox -Owner $dialog -Message "Could not save ignored packages:`n$message" -Title "Manage Ignored Updates" -Image Error | Out-Null
+    }
+}
+
 $btnWingetUnignore.Add_Click({
     $listItems = @()
 
@@ -53565,26 +53626,32 @@ $btnWingetUnignore.Add_Click({
     $btnClose = $dialog.FindName("btnClose")
     $btnRestore.IsEnabled = $false
     [void]$lb.Items.Add("Loading ignored packages...")
-    $refreshNeeded = @{ Value = $false }
+    # Keep UI references in a script-level registry so async completion does not
+    # depend on nested event-handler closure locals.
+    $stateId = [guid]::NewGuid().ToString("N")
+    $unignoreUiStateStore[$stateId] = @{
+        Dialog = $dialog
+        ListBox = $lb
+        RestoreButton = $btnRestore
+        SelectedIds = [string[]]@()
+        RefreshNeeded = $false
+        SavePending = $false
+        DialogClosed = $false
+    }
 
     $btnRestore.Add_Click({
             $selected = @($lb.SelectedItems)
             if ($selected.Count -eq 0) { return }
             $selectedIds = [string[]]@($selected | ForEach-Object { [string]$_ } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+            $state = $unignoreUiStateStore[$stateId]
+            if (-not $state) { return }
+            $state['SelectedIds'] = $selectedIds
+            $state['SavePending'] = $true
             $btnRestore.IsEnabled = $false
-            $saved = {
-                param($results)
-                foreach ($item in $selectedIds) { [void]$lb.Items.Remove($item) }
-                $refreshNeeded.Value = $true
-                $btnRestore.IsEnabled = ($lb.Items.Count -gt 0)
-            }.GetNewClosure()
+            $saved = [scriptblock]::Create("param(`$results)`nComplete-WmtWingetUnignoreUiSave -StateId '$stateId'")
+            $saveFailed = [scriptblock]::Create("param(`$errorRecord)`nFail-WmtWingetUnignoreUiSave -StateId '$stateId' -ErrorRecord `$errorRecord")
             $listOperation = @([pscustomobject]@{ Property = 'WingetIgnore'; Action = 'Remove'; Values = $selectedIds })
-            Invoke-WmtSettingsPatchSave -Patch @{} -ListOperations $listOperation -Name ("WingetUnignore_" + [guid]::NewGuid().ToString("N")) -Message 'Saving ignored packages...' -OnComplete $saved -OnError {
-                param($errorRecord)
-                $btnRestore.IsEnabled = ($lb.SelectedItems.Count -gt 0)
-                $message = if ($errorRecord -and $errorRecord.Exception) { $errorRecord.Exception.Message } else { [string]$errorRecord }
-                Show-WmtMessageBox -Owner $dialog -Message "Could not save ignored packages:`n$message" -Title "Manage Ignored Updates" -Image Error | Out-Null
-            }.GetNewClosure()
+            Invoke-WmtSettingsPatchSave -Patch @{} -ListOperations $listOperation -Name ("WingetUnignore_" + [guid]::NewGuid().ToString("N")) -Message 'Saving ignored packages...' -OnComplete $saved -OnError $saveFailed
         }.GetNewClosure())
     $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
 
@@ -53633,9 +53700,16 @@ $btnWingetUnignore.Add_Click({
     } | Out-Null
     $dialog.ShowDialog() | Out-Null
 
-    if ($refreshNeeded.Value) {
-        Write-GuiLog "List updated. Refreshing..."
-        $btnWingetScan.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+    $state = $unignoreUiStateStore[$stateId]
+    if ($state) {
+        $state['DialogClosed'] = $true
+        if ($state['RefreshNeeded']) {
+            Start-WmtWingetUnignoreRefresh
+            [void]$unignoreUiStateStore.Remove($stateId)
+        }
+        elseif (-not $state['SavePending']) {
+            [void]$unignoreUiStateStore.Remove($stateId)
+        }
     }
 })
 # --- LISTVIEW SORTING LOGIC ---
