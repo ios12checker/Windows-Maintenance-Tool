@@ -42419,8 +42419,12 @@ $txtWingetSearch.Add_KeyDown({ param($s, $e)
             return
         }
         if ($script:WmtPackageSearchActive) {
-            Write-GuiLog "Search blocked: a search is already in progress."
-            return
+            $activeQuery = [string]$script:WmtPackageSearchQuery
+            $requestedQuery = ([string]$txtWingetSearch.Text).Trim().ToLowerInvariant()
+            if ($activeQuery -eq $requestedQuery) {
+                Write-GuiLog "This package search is already running."
+                return
+            }
         }
         try {
             & $script:InvokeWingetSearch
@@ -42441,19 +42445,43 @@ $btnWingetClearSearch.Add_Click({
     $txtWingetSearch.SetResourceReference([System.Windows.Controls.Control]::ForegroundProperty, "TextMuted")
     $btnWingetClearSearch.Visibility = "Collapsed"
 
-    # Restore previous scan results if available
-    if ($script:WingetSavedScanItems -and $script:WingetSavedScanItems.Count -gt 0) {
-        $lstWinget.Items.Clear()
-        foreach ($item in $script:WingetSavedScanItems) { [void]$lstWinget.Items.Add($item) }
-        $lblWingetTitle.Text = "Package Updates"
-        $lblWingetStatus.Text = "Ready"
-        $lblWingetStatus.Visibility = "Visible"
-        $btnWingetInstall.Visibility = "Collapsed"
-        $btnWingetUpdateSel.Visibility = "Visible"
-        if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
-        if ($btnWingetUninstall) { $btnWingetUninstall.Visibility = "Visible" }
-        $script:WmtPackageSearchActive = $false
+    # Stop publishing streamed provider results before restoring the update list.
+    # The runspace may not stop immediately, so clear its shared UI handles too.
+    $searchPsToStop = $script:AsyncPowerShell
+    $searchInvocationToStop = $script:AsyncSearch
+    if ($script:SearchTimer) { try { $script:SearchTimer.Stop() } catch {} }
+    if ($searchPsToStop -and $searchInvocationToStop) {
+        Write-GuiLog "Package search cancelled."
     }
+    $script:AsyncPowerShell = $null
+    $script:AsyncSearch = $null
+    $script:SearchOutput = $null
+    $script:SearchProcessedCount = 0
+    $script:WmtPackageSearchStartedAt = $null
+    $script:WmtPackageSearchQuery = $null
+    $script:WmtPackageSearchActive = $false
+    $txtWingetSearch.IsEnabled = $true
+    $txtWingetSearch.ToolTip = ""
+    if ($searchPsToStop -and $searchInvocationToStop) {
+        try {
+            Stop-WmtPowerShellInvocationAsync -PowerShell $searchPsToStop -Invocation $searchInvocationToStop -Name "Cancelled package search"
+        }
+        catch {
+            try { Start-WmtPowerShellCleanupDetached -PowerShell $searchPsToStop -Invocation $searchInvocationToStop -Name "Cancelled package search" } catch {}
+        }
+    }
+
+    # Restore the previous update scan, or an empty normal list on a first visit.
+    $lstWinget.Items.Clear()
+    foreach ($item in @($script:WingetSavedScanItems)) { [void]$lstWinget.Items.Add($item) }
+    $script:WingetSavedScanItems = $null
+    $lblWingetTitle.Text = "Package Updates"
+    $lblWingetStatus.Text = "Ready"
+    $lblWingetStatus.Visibility = "Visible"
+    $btnWingetInstall.Visibility = "Collapsed"
+    $btnWingetUpdateSel.Visibility = "Visible"
+    if ($btnWingetUpdateAll) { $btnWingetUpdateAll.Visibility = "Visible" }
+    if ($btnWingetUninstall) { $btnWingetUninstall.Visibility = "Visible" }
     $txtWingetSearch.Focus()
 })
 }
@@ -54037,6 +54065,13 @@ $script:SearchProvidersTotal = 0
 $script:SearchProvidersExpected = 0
 
 $script:SearchTimer.Add_Tick({
+    # A cancelled search can still be unwinding in its runspace. Never let a
+    # late dispatcher tick publish its buffered results into the normal list.
+    if (-not $script:WmtPackageSearchActive -or $null -eq $script:SearchOutput) {
+        $script:SearchTimer.Stop()
+        return
+    }
+
     # Timeout check
     if ($script:AsyncSearch -and
         -not $script:AsyncSearch.IsCompleted -and
@@ -54181,9 +54216,11 @@ $script:InvokeWingetSearch = {
         return
     }
     if ([string]::IsNullOrWhiteSpace($txtWingetSearch.Text) -or $txtWingetSearch.Text -in @("Search packages...", "Search new packages...")) { return }
+    $wasShowingSearchResults = [string]$lblWingetTitle.Text -like "Search Results:*"
 
     # --- Cleanup any leftover/abandoned search state ---
     if ($script:AsyncSearch) {
+        Write-GuiLog "Cancelling the previous package search to start a new query."
         try {
             Stop-WmtPowerShellInvocationAsync -PowerShell $script:AsyncPowerShell -Invocation $script:AsyncSearch -Name "Abandoned package search"
         }
@@ -54209,9 +54246,12 @@ $script:InvokeWingetSearch = {
     if ($btnWingetUninstall) { $btnWingetUninstall.Visibility = "Collapsed" }
 
     # Save current scan results so clear button can restore them
-    $script:WingetSavedScanItems = @($lstWinget.Items | ForEach-Object { $_ })
+    if (-not $wasShowingSearchResults) {
+        $script:WingetSavedScanItems = @($lstWinget.Items | ForEach-Object { $_ })
+    }
     $lstWinget.Items.Clear()
-    $txtWingetSearch.IsEnabled = $false 
+    $txtWingetSearch.IsEnabled = $true
+    $txtWingetSearch.ToolTip = "Press Enter to replace this search with the current query."
 
     Write-GuiLog " "
     Write-GuiLog "Starting Search: '$query'"
