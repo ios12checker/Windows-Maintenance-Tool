@@ -49336,15 +49336,35 @@ $testProviderInstalled = {
 }.GetNewClosure()
 $updateProviderStatuses = {
     param([switch]$UseCache)
-    if (-not $UseCache) { & $updateProviderPathEnvironment }
     foreach ($provider in $providerDefinitions) {
         $labelCtrl = & $getWinCtrl $provider.Label
         $buttonCtrl = & $getWinCtrl $provider.Button
-        $installed = if ($UseCache) {
-            if ($providerActionStatusCache.ContainsKey($provider.Key)) { [bool]$providerActionStatusCache[$provider.Key].Installed }
-            elseif ($providerInstallState.ContainsKey($provider.Key)) { [bool]$providerInstallState[$provider.Key] }
-            else { $false }
-        } else { [bool](& $testProviderInstalled -Provider $provider) }
+        $hasStatus = $false
+        $installed = $false
+        if ($providerActionStatusCache.ContainsKey($provider.Key)) {
+            $installed = [bool]$providerActionStatusCache[$provider.Key].Installed
+            $hasStatus = $true
+        }
+        elseif ($providerInstallState.ContainsKey($provider.Key)) {
+            $installed = [bool]$providerInstallState[$provider.Key]
+            $hasStatus = $true
+        }
+        if (-not $UseCache) {
+            # Status detection is intentionally performed by the background batch
+            # detector. This closure only updates WPF controls from known state.
+            $hasStatus = $false
+        }
+        if (-not $hasStatus) {
+            if ($labelCtrl) {
+                $labelCtrl.Text = "Checking..."
+                Set-WmtThemedBrush -Object $labelCtrl -Property ([System.Windows.Controls.TextBlock]::ForegroundProperty) -ColorOrKey "TextSecondary"
+            }
+            if ($buttonCtrl) {
+                $buttonCtrl.Content = "Checking"
+                $buttonCtrl.IsEnabled = $false
+            }
+            continue
+        }
         $providerInstallState[$provider.Key] = $installed
 
         if ($installed) {
@@ -49434,7 +49454,7 @@ $startProviderAction = {
     catch {
         Write-GuiLog "[$($provider.DisplayName)] $action failed to start: $($_.Exception.Message)"
         try { Remove-Item -LiteralPath $tempScriptPath -Force -ErrorAction SilentlyContinue } catch {}
-        & $updateProviderStatuses
+        & $updateProviderStatuses -UseCache
         foreach ($prov in $providerDefinitions) {
             & $updateProviderToggleState -ProviderKey ([string]$prov.Key)
         }
@@ -49944,7 +49964,131 @@ if ($chkUpdateAutoInstall) {
     $chkUpdateAutoInstall.Add_Unchecked({ & $refreshProviderToggleStates }.GetNewClosure())
 }
 
-& $updateProviderStatuses
+# Render cached state immediately. On a first open, unknown providers remain
+# visibly "Checking..." until the single background detection pass completes.
+& $updateProviderStatuses -UseCache
+
+# Probe all providers in one worker so PATH is rebuilt once and slow command,
+# registry, or filesystem lookups never delay the modal window from appearing.
+$providerDetectionPs = [PowerShell]::Create()
+$providerDetectionInvocation = $null
+$providerDetectionStartedUtc = [DateTime]::UtcNow
+$providerDetectionScript = @'
+param($providers)
+$machinePath = [Environment]::GetEnvironmentVariable('Path','Machine')
+$userPath = [Environment]::GetEnvironmentVariable('Path','User')
+$processPath = [Environment]::GetEnvironmentVariable('Path','Process')
+$pathParts = New-Object System.Collections.Generic.List[string]
+$seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($pathValue in @($machinePath, $userPath, $processPath)) {
+    foreach ($part in @(([string]$pathValue) -split ';')) {
+        $trimmed = $part.Trim()
+        if (-not [string]::IsNullOrWhiteSpace($trimmed) -and $seenPaths.Add($trimmed)) {
+            [void]$pathParts.Add($trimmed)
+        }
+    }
+}
+$env:Path = $pathParts -join ';'
+foreach ($provider in $providers) {
+    $installed = $false
+    foreach ($commandName in @($provider.Commands)) {
+        if (-not [string]::IsNullOrWhiteSpace($commandName) -and
+            (Get-Command $commandName -ErrorAction SilentlyContinue)) {
+            $installed = $true
+            break
+        }
+    }
+    if (-not $installed) {
+        foreach ($propertyName in @('RegistryPaths','LocalPaths')) {
+            if (-not $provider.PSObject.Properties[$propertyName]) { continue }
+            foreach ($itemPath in @($provider.$propertyName)) {
+                if ([string]::IsNullOrWhiteSpace($itemPath)) { continue }
+                if ($propertyName -eq 'LocalPaths') {
+                    if (Test-Path -LiteralPath $itemPath -PathType Leaf) { $installed = $true; break }
+                }
+                elseif (Test-Path -LiteralPath $itemPath) { $installed = $true; break }
+            }
+            if ($installed) { break }
+        }
+    }
+    [PSCustomObject]@{ Key = [string]$provider.Key; Installed = [bool]$installed }
+}
+'@
+try {
+    [void]$providerDetectionPs.AddScript($providerDetectionScript).AddArgument(@($providerDefinitions))
+    $providerDetectionInvocation = $providerDetectionPs.BeginInvoke()
+}
+catch {
+    try { $providerDetectionPs.Dispose() } catch {}
+    $providerDetectionPs = $null
+    Write-GuiLog "[Providers] Could not start background installed-state detection: $($_.Exception.Message)"
+}
+
+$providerDetectionTimer = [System.Windows.Threading.DispatcherTimer]::new()
+$providerDetectionTimer.Interval = [TimeSpan]::FromMilliseconds(200)
+$providerDetectionState = [PSCustomObject]@{
+    PowerShell = $providerDetectionPs
+    Invocation = $providerDetectionInvocation
+    StartedUtc = $providerDetectionStartedUtc
+}
+$providerDetectionTimer.Add_Tick({
+    param($sender, $eventArgs)
+    if (-not $providerDetectionState.PowerShell -or -not $providerDetectionState.Invocation) {
+        $sender.Stop()
+        return
+    }
+    if (-not $providerDetectionState.Invocation.IsCompleted) {
+        if (([DateTime]::UtcNow - $providerDetectionState.StartedUtc).TotalSeconds -ge 20) {
+            $sender.Stop()
+            Write-GuiLog "[Providers] Installed-state detection timed out; preserving last known status."
+            try { Stop-WmtPowerShellInvocationAsync -PowerShell $providerDetectionState.PowerShell -Invocation $providerDetectionState.Invocation -Name "Provider status detection" } catch {}
+            $providerDetectionState.PowerShell = $null
+            $providerDetectionState.Invocation = $null
+        }
+        return
+    }
+
+    $detectedStatuses = @()
+    $detectionFailed = $false
+    try {
+        $detectedStatuses = @($providerDetectionState.PowerShell.EndInvoke($providerDetectionState.Invocation))
+    }
+    catch {
+        $detectionFailed = $true
+        Write-GuiLog "[Providers] Installed-state detection failed; preserving last known status: $($_.Exception.Message)"
+    }
+    finally {
+        try { $providerDetectionState.PowerShell.Dispose() } catch {}
+        $providerDetectionState.PowerShell = $null
+        $providerDetectionState.Invocation = $null
+        $sender.Stop()
+    }
+    if ($detectionFailed) { return }
+
+    foreach ($status in $detectedStatuses) {
+        if (-not $status -or [string]::IsNullOrWhiteSpace([string]$status.Key)) { continue }
+        $oldStatus = $providerActionStatusCache[[string]$status.Key]
+        $providerActionStatusCache[[string]$status.Key] = [PSCustomObject]@{
+            Installed = [bool]$status.Installed
+            CheckedUtc = [DateTime]::UtcNow
+            ExitCode = if ($oldStatus) { $oldStatus.ExitCode } else { $null }
+        }
+    }
+    & $updateProviderStatuses -UseCache
+    foreach ($provider in $providerDefinitions) {
+        & $updateProviderToggleState -ProviderKey ([string]$provider.Key)
+    }
+    foreach ($monitor in @($providerActionMonitors.Values)) {
+        $runningProvider = @($providerDefinitions | Where-Object { $_.Key -eq $monitor.ProviderKey } | Select-Object -First 1)
+        if (-not $runningProvider) { continue }
+        $runningButton = & $getWinCtrl $runningProvider.Button
+        $runningLabel = & $getWinCtrl $runningProvider.Label
+        if ($runningButton) { $runningButton.IsEnabled = $false; $runningButton.Content = "Running" }
+        if ($runningLabel) { $runningLabel.Text = "$($monitor.Action) running..." }
+    }
+}.GetNewClosure())
+if ($providerDetectionState.PowerShell -and $providerDetectionState.Invocation) { $providerDetectionTimer.Start() }
+
 # Reopened settings must show already-running operations and prevent duplicates.
 foreach ($monitor in @($providerActionMonitors.Values)) {
     $monitor.UpdateStatuses = $updateProviderStatuses
@@ -50139,6 +50283,11 @@ foreach ($provider in $providerDefinitions) {
     })
 
 $win.ShowDialog() | Out-Null
+if ($providerDetectionTimer) { $providerDetectionTimer.Stop() }
+if ($providerDetectionState.PowerShell -and $providerDetectionState.Invocation) {
+    try { Stop-WmtPowerShellInvocationAsync -PowerShell $providerDetectionState.PowerShell -Invocation $providerDetectionState.Invocation -Name "Provider status detection after dialog close" } catch {}
+    try { $providerDetectionState.PowerShell.Dispose() } catch {}
+}
 
 }
 
