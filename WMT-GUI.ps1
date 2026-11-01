@@ -12763,19 +12763,52 @@ Invoke-WmtUiBackgroundCommand -Name "GpeditInstall" -Msg "Installing Group Polic
     $clientTools = @(Get-ChildItem -LiteralPath $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientTools-Package~*.mum" -File -ErrorAction SilentlyContinue)
     $clientExtensions = @(Get-ChildItem -LiteralPath $packageRoot -Filter "Microsoft-Windows-GroupPolicy-ClientExtensions-Package~*.mum" -File -ErrorAction SilentlyContinue)
     if (-not $clientTools -or -not $clientExtensions) {
-        Write-Output "WARNING: Required GroupPolicy packages were not found."
-        Write-Output "Ensure you are on a compatible Windows 10/11 version."
-        return
+        $missing = @()
+        if (-not $clientTools) { $missing += "GroupPolicy ClientTools" }
+        if (-not $clientExtensions) { $missing += "GroupPolicy ClientExtensions" }
+        throw "Required package(s) not found: $($missing -join ', '). Ensure this Windows version includes the optional Group Policy packages."
     }
+
     $packages = @($clientTools + $clientExtensions) | Sort-Object Name -Unique
+    $failedPackages = New-Object System.Collections.Generic.List[string]
+    $rebootRequired = $false
+    $dismPath = Join-Path $env:SystemRoot "System32\dism.exe"
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $sysnativeDism = Join-Path $env:SystemRoot "Sysnative\dism.exe"
+        if (Test-Path -LiteralPath $sysnativeDism -PathType Leaf) { $dismPath = $sysnativeDism }
+    }
+    if (-not (Test-Path -LiteralPath $dismPath -PathType Leaf)) { throw "DISM was not found: $dismPath" }
+
     foreach ($pkg in $packages) {
         Write-Output "Installing: $($pkg.Name)..."
-        $proc = Start-Process dism.exe -ArgumentList "/online", "/norestart", "/add-package:`"$($pkg.FullName)`"" -NoNewWindow -Wait -PassThru
-        $exitCode = [int]$proc.ExitCode
-        try { $proc.Dispose() } catch {}
-        if ($exitCode -ne 0) { Write-Output " -> Failed (Exit Code: $exitCode)" }
+        $proc = $null
+        try {
+            $proc = Start-Process -FilePath $dismPath -ArgumentList @("/online", "/norestart", "/add-package:`"$($pkg.FullName)`"") -NoNewWindow -Wait -PassThru -ErrorAction Stop
+            $exitCode = [int]$proc.ExitCode
+            if ($exitCode -eq 0) {
+                Write-Output " -> Installed."
+            }
+            elseif ($exitCode -eq 3010) {
+                Write-Output " -> Installed; a reboot is required."
+                $rebootRequired = $true
+            }
+            else {
+                Write-Output " -> Failed (Exit Code: $exitCode)"
+                [void]$failedPackages.Add("$($pkg.Name) (exit code $exitCode)")
+            }
+        }
+        catch {
+            Write-Output " -> Failed to start DISM: $($_.Exception.Message)"
+            [void]$failedPackages.Add("$($pkg.Name) (DISM start failed)")
+        }
+        finally { try { if ($proc) { $proc.Dispose() } } catch {} }
     }
-    Write-Output "Installation Complete. Try running 'gpedit.msc'. (A reboot may be required)."
+
+    if ($failedPackages.Count -gt 0) {
+        throw "Group Policy package installation failed for $($failedPackages.Count) package(s): $($failedPackages -join '; ')"
+    }
+    $rebootMessage = if ($rebootRequired) { " A reboot is required." } else { "" }
+    Write-Output "Both Group Policy packages installed successfully. Try running 'gpedit.msc'.$rebootMessage"
 } | Out-Null
 }
 
@@ -16811,8 +16844,9 @@ $formatPreviewBytes = {
     <DataGrid Name="dgPreview" Grid.Row="0" MinColumnWidth="64" CanUserResizeColumns="True" AlternationCount="2" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False">
         <DataGrid.Columns>
             <DataGridTextColumn Header="RuleName" Binding="{Binding RuleName}" Width="180" IsReadOnly="True"/>
+            <DataGridTextColumn Header="Type" Binding="{Binding EntryType}" Width="100" IsReadOnly="True"/>
             <DataGridTextColumn Header="Status" Binding="{Binding Protection}" Width="160" IsReadOnly="True"/>
-            <DataGridTextColumn Header="FilePath" Binding="{Binding FilePath}" Width="440" IsReadOnly="True"/>
+            <DataGridTextColumn Header="Path / Command" Binding="{Binding FilePath}" Width="440" IsReadOnly="True"/>
             <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" SortMemberPath="Size" Width="96" IsReadOnly="True"/>
         </DataGrid.Columns>
     </DataGrid>
@@ -16850,11 +16884,14 @@ foreach ($item in @($PreviewList)) {
 
     $bytes = [int64]0
     try { $bytes = [int64]$item.RawBytes } catch {}
+    $entryType = if ([string]$item.EntryType -eq "Action") { "Action" } else { "File" }
 
     [void]$allPreviewRows.Add([PSCustomObject]@{
             RowId            = $rowId
             RuleName         = [string]$item.RuleName
-            Protection       = if ($isProtected) { $protectionReason } else { "" }
+            EntryType        = $entryType
+            IsAction         = ($entryType -eq "Action")
+            Protection       = if ($entryType -eq "Action") { "Not executed" } elseif ($isProtected) { $protectionReason } else { "" }
             FilePath         = [string]$item.FilePath
             Size             = $bytes
             SizeText         = & $formatPreviewBytes $bytes
@@ -16888,6 +16925,13 @@ $dg.Add_PreviewMouseRightButtonDown({
         }
     }.GetNewClosure())
 
+$updatePreviewSelection = {
+    $selectedFiles = @($dg.SelectedItems | Where-Object { -not [bool]$_.IsAction })
+    $btnCleanSelected.IsEnabled = ($selectedFiles.Count -gt 0)
+    $menuDelete.IsEnabled = ($selectedFiles.Count -gt 0)
+    $menuOpen.IsEnabled = ($selectedFiles.Count -eq 1)
+}.GetNewClosure()
+
 $refreshPreviewFilter = {
     $previewRows.Clear()
     foreach ($row in @($allPreviewRows.ToArray())) {
@@ -16906,10 +16950,9 @@ $refreshPreviewFilter = {
         $previewWindow.Title = "Cleanup Analysis Preview ($FinalTotalFormatted Total)"
     }
 
-    $hasRows = ($previewRows.Count -gt 0)
-    $btnCleanSelected.IsEnabled = $hasRows
-    $btnCleanAll.IsEnabled = $hasRows
-    $menuDelete.IsEnabled = $hasRows
+    $deletableRows = @($previewRows | Where-Object { -not [bool]$_.IsAction })
+    $btnCleanAll.IsEnabled = ($deletableRows.Count -gt 0)
+    & $updatePreviewSelection
 }.GetNewClosure()
 
 $removePreviewRowsByIds = {
@@ -16927,7 +16970,10 @@ $removePreviewRowsByIds = {
 
 $openSelectedPath = {
     if ($dg.SelectedItems.Count -le 0) { return }
-    $path = [string]$dg.SelectedItems[0].FilePath
+    $selectedRow = @($dg.SelectedItems | Where-Object { -not [bool]$_.IsAction } | Select-Object -First 1)
+    if ($selectedRow.Count -eq 0) { return }
+    $selectedRow = $selectedRow[0]
+    $path = [string]$selectedRow.FilePath
     if (Test-Path -LiteralPath $path) {
         Start-Process "explorer.exe" -ArgumentList "/select,`"$path`""
     }
@@ -16950,7 +16996,7 @@ $invokePreviewDeletion = {
     $deleteTargets = [System.Collections.Generic.List[object]]::new()
     $seenIds = @{}
     foreach ($target in @($Targets)) {
-        if (-not $target) { continue }
+        if (-not $target -or [bool]$target.IsAction) { continue }
         $id = [int]$target.RowId
         if ($seenIds.ContainsKey($id)) { continue }
         [void]$deleteTargets.Add([PSCustomObject]@{
@@ -17285,6 +17331,7 @@ $menuDelete.Add_Click({
         }
     }.GetNewClosure())
 $dg.Add_MouseDoubleClick({ & $openSelectedPath }.GetNewClosure())
+$dg.Add_SelectionChanged({ & $updatePreviewSelection }.GetNewClosure())
 $chkHideProtected.Add_Checked({ & $refreshPreviewFilter }.GetNewClosure())
 $chkHideProtected.Add_Unchecked({ & $refreshPreviewFilter }.GetNewClosure())
 $btnClose.Add_Click({ $previewWindow.Close() }.GetNewClosure())
@@ -17294,8 +17341,9 @@ $btnCleanSelected.Add_Click({
         }
     }.GetNewClosure())
 $btnCleanAll.Add_Click({
-        if ($previewRows.Count -eq 0) { return }
-        $confirm = Show-WmtMessageBox -Owner $previewWindow -Message "Are you sure you want to permanently delete ALL $($previewRows.Count) files shown?" -Title "Confirm Clean All" -Button YesNo -Image Warning
+        $fileRows = @($previewRows | Where-Object { -not [bool]$_.IsAction })
+        if ($fileRows.Count -eq 0) { return }
+        $confirm = Show-WmtMessageBox -Owner $previewWindow -Message "Are you sure you want to permanently delete ALL $($fileRows.Count) files shown? External command actions will not be run from this preview." -Title "Confirm Clean All" -Button YesNo -Image Warning
         if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
             & $invokePreviewDeletion -Targets @($previewRows) -ActionTitle "Cleaning All Preview Items"
         }
@@ -18095,14 +18143,20 @@ function Invoke-CleanerMlProcess {
     try {
         Write-GuiLog "CleanerML process ($RuleName): $cmd"
         if ($isAnalyze) {
-            $previewList.Add([PSCustomObject]@{
-                    RuleName         = $RuleName
-                    FilePath         = "[process] $cmd"
-                    RawBytes         = 0
-                    IsProtected      = $false
-                    ProtectionReason = "External command"
-                })
-            $stats.Deleted++
+            # Process actions are represented once as non-deletable action rows
+            # before either analyzer path starts. Never treat a command as a file.
+            return
+        }
+
+        if ($Automatic) {
+            Write-GuiLog "CleanerML process skipped during automatic cleanup ($RuleName); external commands require manual approval: $cmd"
+            return
+        }
+
+        $approvalMessage = "The selected CleanerML rule requests an external command. It will run with WMT's current privileges. Only approve commands from a source you trust.`n`nRule: $RuleName`n`nCommand:`n$cmd`n`nRun this command?"
+        $approval = Show-WmtMessageBox -Message $approvalMessage -Title "Approve CleanerML Command" -Button YesNo -Image Warning
+        if ($approval -ne [System.Windows.MessageBoxResult]::Yes) {
+            Write-GuiLog "CleanerML process action declined ($RuleName)."
             return
         }
 
@@ -18782,6 +18836,26 @@ $internalRuleDisplayNames = @{
 
 $usedOutOfProcessAnalyze = $false
 if ($isAnalyze) {
+    # Surface process actions in Analyze for visibility, but classify them as
+    # actions rather than paths. They are never executed or counted as files.
+    foreach ($item in $selections) {
+        if (-not (Test-WmtCleanupObjectFlag -InputObject $item -Name "IsCleanerML")) { continue }
+        $itemName = Get-WmtCleanupItemDisplayName -Item $item
+        $processActions = @(Get-WmtCleanupObjectValue -InputObject $item -Name "ProcessActions" -Default @())
+        foreach ($procAction in $processActions) {
+            $command = [string](Get-WmtCleanupObjectValue -InputObject $procAction -Name "Cmd" -Default "")
+            if ([string]::IsNullOrWhiteSpace($command)) { continue }
+            $previewList.Add([PSCustomObject]@{
+                    RuleName         = $itemName
+                    FilePath         = $command
+                    EntryType        = "Action"
+                    RawBytes         = 0
+                    IsProtected      = $false
+                    ProtectionReason = "External command; not executed during analysis"
+                })
+        }
+    }
+
     try {
         $scanTasks = @(New-WmtAnalyzeScanTasks -Items $selections)
         if ($scanTasks.Count -gt 0) {
