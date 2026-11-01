@@ -7,6 +7,7 @@
 #>
 
 param(
+    [Alias("DebugTheme")][switch]$Debug,
     [switch]$AutoCleanWorker,
     [string]$AutoCleanResultPath = "",
     [switch]$CleanerRefreshWorker,
@@ -18,6 +19,8 @@ param(
 # ==========================================
 $AppVersion = "6.9"
 $ErrorActionPreference = "SilentlyContinue"
+# Theme/DWM diagnostics are opt-in: launch WMT with -Debug to write HRESULTs.
+$script:WmtThemeDebug = [bool]$Debug
 # Safe until the settings manager is initialized below; the persisted value is loaded there.
 $script:WmtDebug = $false
 # Preserve UTF-8 for web content, alt codes, and Unicode symbols.
@@ -6200,16 +6203,20 @@ function Set-WmtNativeWindowTheme {
 param([System.Windows.Window]$Window)
 
 if (-not $Window) { return }
-$nativeThemeLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "WMT-native-window-theme.log"
-try {
-    if (-not [string]::IsNullOrWhiteSpace([string]$script:DataDir)) {
-        if (-not [System.IO.Directory]::Exists($script:DataDir)) { [void][System.IO.Directory]::CreateDirectory($script:DataDir) }
-        $nativeThemeLogPath = Join-Path $script:DataDir "native-window-theme.log"
+$themeDebug = [bool]$script:WmtThemeDebug
+$nativeThemeLogPath = $null
+if ($themeDebug) {
+    $nativeThemeLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "WMT-native-window-theme.log"
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:DataDir)) {
+            if (-not [System.IO.Directory]::Exists($script:DataDir)) { [void][System.IO.Directory]::CreateDirectory($script:DataDir) }
+            $nativeThemeLogPath = Join-Path $script:DataDir "native-window-theme.log"
+        }
+        $nativeHandle = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
+        [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} requested window='{1}' hwnd=0x{2:X}{3}" -f [DateTime]::Now, $Window.Title, $nativeHandle.ToInt64(), [Environment]::NewLine))
     }
-    $nativeHandle = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
-    [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} requested window='{1}' hwnd=0x{2:X}{3}" -f [DateTime]::Now, $Window.Title, $nativeHandle.ToInt64(), [Environment]::NewLine))
+    catch {}
 }
-catch {}
 try {
     if (-not ("Wmt.Native.DwmTheme" -as [type])) {
         Add-Type -TypeDefinition @'
@@ -6282,11 +6289,13 @@ namespace Wmt.Native
                 $borderColor
             )
             $resultText = @($results | ForEach-Object { "0x{0:X8}" -f [int]$_ }) -join ","
-            $line = "{0:o} theme={1} hwnd=0x{2:X} HRESULTs={3}{4}" -f [DateTime]::Now, $(if ($useDark) { "dark" } else { "light" }), $handle.ToInt64(), $resultText, [Environment]::NewLine
-            [System.IO.File]::AppendAllText($nativeThemeLogPath, $line)
+            if ($themeDebug) {
+                $line = "{0:o} theme={1} hwnd=0x{2:X} HRESULTs={3}{4}" -f [DateTime]::Now, $(if ($useDark) { "dark" } else { "light" }), $handle.ToInt64(), $resultText, [Environment]::NewLine
+                [System.IO.File]::AppendAllText($nativeThemeLogPath, $line)
+            }
         }
         catch {
-            try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} error={1}{2}" -f [DateTime]::Now, $_.Exception.Message, [Environment]::NewLine)) } catch {}
+            if ($themeDebug) { try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} error={1}{2}" -f [DateTime]::Now, $_.Exception.Message, [Environment]::NewLine)) } catch {} }
         }
     }.GetNewClosure()
 
@@ -6304,7 +6313,7 @@ namespace Wmt.Native
     }
 }
 catch {
-    try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} setup-error={1}{2}" -f [DateTime]::Now, $_.Exception.ToString(), [Environment]::NewLine)) } catch {}
+    if ($themeDebug -and $nativeThemeLogPath) { try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} setup-error={1}{2}" -f [DateTime]::Now, $_.Exception.ToString(), [Environment]::NewLine)) } catch {} }
 }
 }
 
