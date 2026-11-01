@@ -11867,8 +11867,7 @@ Register-WmtUiPollOperation -Name "SelfUpdateCheck" -IntervalMs 500 -TestComplet
                                         $updateLogBox.ScrollToEnd()
                                     }
 
-                                    Show-WmtMessageBox -Message ("Update installed successfully! The application will restart with the new version.") -Title ("Update Complete") -Button ([System.Windows.MessageBoxButton]::OK) -Image ([System.Windows.MessageBoxImage]::Information) | Out-Null
-                                    Start-Process -FilePath ([string]$result.CurrentExe) -WorkingDirectory (Split-Path -Parent ([string]$result.CurrentExe))
+                                    Show-WmtMessageBox -Message ("Update is ready. WMT will restart with the new version after this window closes.") -Title ("Update Ready") -Button ([System.Windows.MessageBoxButton]::OK) -Image ([System.Windows.MessageBoxImage]::Information) | Out-Null
                                     $allowFinalCloseState.Value = $true
                                     $updateWindow.Close()
                                 }.GetNewClosure()
@@ -11894,8 +11893,7 @@ Register-WmtUiPollOperation -Name "SelfUpdateCheck" -IntervalMs 500 -TestComplet
 
                                     $tempExe = $null
                                     $backupExe = $null
-                                    $backupCreated = $false
-                                    $updateApplied = $false
+                                    $helperScript = $null
                                     $logLines = [System.Collections.Generic.List[string]]::new()
 
                                     try {
@@ -11928,20 +11926,48 @@ Register-WmtUiPollOperation -Name "SelfUpdateCheck" -IntervalMs 500 -TestComplet
                                         }
 
                                         $backupExe = "$CurrentExe.backup"
-                                        Copy-Item -LiteralPath $CurrentExe -Destination $backupExe -Force
-                                        $backupCreated = $true
-                                        [void]$logLines.Add("Backup created at: $backupExe")
-
-                                        Copy-Item -LiteralPath $tempExe -Destination $CurrentExe -Force
-                                        $installedHash = (Get-FileHash -LiteralPath $CurrentExe -Algorithm SHA256).Hash.ToLowerInvariant()
-                                        if ($installedHash -ne $downloadHash) {
-                                            throw "Installed EXE failed SHA256 verification (disk write did not match the download)."
-                                        }
-                                        $updateApplied = $true
-
-                                        Remove-Item -LiteralPath $tempExe -Force -ErrorAction SilentlyContinue
-                                        $tempExe = $null
-                                        [void]$logLines.Add("Update installed and integrity verified.")
+                                        $helperScript = Join-Path ([System.IO.Path]::GetTempPath()) ("WMT-ExeUpdate-{0}.ps1" -f [guid]::NewGuid().ToString("N"))
+                                        $helperContent = @'
+param([int]$ProcessId, [string]$DownloadedExe, [string]$CurrentExe, [string]$BackupExe, [string]$ExpectedHash)
+$ErrorActionPreference = 'Stop'
+$sameVolumeStaged = "$CurrentExe.update-$ProcessId.tmp"
+try {
+    $running = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if ($running) { $running.WaitForExit() }
+    $actualHash = (Get-FileHash -LiteralPath $DownloadedExe -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actualHash -ne $ExpectedHash.ToLowerInvariant()) { throw 'Staged update hash changed before installation.' }
+    Copy-Item -LiteralPath $DownloadedExe -Destination $sameVolumeStaged -Force
+    $stagedHash = (Get-FileHash -LiteralPath $sameVolumeStaged -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($stagedHash -ne $ExpectedHash.ToLowerInvariant()) { throw 'Same-volume update staging failed SHA256 verification.' }
+    Copy-Item -LiteralPath $CurrentExe -Destination $BackupExe -Force
+    try {
+        Move-Item -LiteralPath $sameVolumeStaged -Destination $CurrentExe -Force
+        $installedHash = (Get-FileHash -LiteralPath $CurrentExe -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($installedHash -ne $ExpectedHash.ToLowerInvariant()) { throw 'Installed EXE failed SHA256 verification.' }
+    }
+    catch {
+        Copy-Item -LiteralPath $BackupExe -Destination $CurrentExe -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    Start-Process -FilePath $CurrentExe -WorkingDirectory (Split-Path -Parent $CurrentExe)
+}
+catch {
+    try { Add-Type -AssemblyName PresentationFramework; [System.Windows.MessageBox]::Show(('WMT update failed: ' + $_.Exception.Message), 'WMT Update', 'OK', 'Error') | Out-Null } catch {}
+}
+finally {
+    Remove-Item -LiteralPath $sameVolumeStaged -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $DownloadedExe -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+}
+'@
+                                        Set-Content -LiteralPath $helperScript -Value $helperContent -Encoding UTF8 -ErrorAction Stop
+                                        $quotedHelper = '"{0}"' -f $helperScript
+                                        $quotedDownload = '"{0}"' -f $tempExe
+                                        $quotedCurrent = '"{0}"' -f $CurrentExe
+                                        $quotedBackup = '"{0}"' -f $backupExe
+                                        $helperArgs = '-NoProfile -ExecutionPolicy Bypass -File {0} {1} {2} {3} {4} {5}' -f $quotedHelper, $PID, $quotedDownload, $quotedCurrent, $quotedBackup, $downloadHash
+                                        Start-Process -FilePath 'powershell.exe' -ArgumentList $helperArgs -WindowStyle Hidden -ErrorAction Stop
+                                        [void]$logLines.Add("Verified update staged; replacement will run after WMT exits. Backup: $backupExe")
 
                                         [PSCustomObject]@{
                                             CurrentExe = $CurrentExe
@@ -11950,11 +11976,11 @@ Register-WmtUiPollOperation -Name "SelfUpdateCheck" -IntervalMs 500 -TestComplet
                                         }
                                     }
                                     catch {
-                                        if (-not $updateApplied -and $backupCreated -and $backupExe -and (Test-Path -LiteralPath $backupExe)) {
-                                            Copy-Item -LiteralPath $backupExe -Destination $CurrentExe -Force -ErrorAction SilentlyContinue
-                                        }
                                         if ($tempExe -and (Test-Path -LiteralPath $tempExe)) {
                                             Remove-Item -LiteralPath $tempExe -Force -ErrorAction SilentlyContinue
+                                        }
+                                        if ($helperScript -and (Test-Path -LiteralPath $helperScript)) {
+                                            Remove-Item -LiteralPath $helperScript -Force -ErrorAction SilentlyContinue
                                         }
                                         throw
                                     }
