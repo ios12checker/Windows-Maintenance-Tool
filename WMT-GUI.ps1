@@ -53708,7 +53708,17 @@ $btnWingetScan.Add_Click({
 # --- IGNORE SELECTED ---
 if (-not $btnWingetIgnore) { $btnWingetIgnore = Get-Ctrl "btnWingetIgnore" }
 $btnWingetIgnore.Add_Click({
-    $selected = @($lstWinget.SelectedItems)
+    # Ignore both explicitly checked rows and highlighted rows. Keep the union
+    # ordered and unique by ID so a checked + selected row is only counted once.
+    $selectedItems = [System.Collections.Generic.List[object]]::new()
+    $selectedIdSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in @($lstWinget.SelectedItems) + @(Get-WmtUpdateListCheckedItems)) {
+        if (-not (Test-WmtUpdateListActionableItem -Item $item)) { continue }
+        $itemId = ([string]$item.Id).Trim()
+        if ([string]::IsNullOrWhiteSpace($itemId) -or -not $selectedIdSet.Add($itemId)) { continue }
+        [void]$selectedItems.Add($item)
+    }
+    $selected = $selectedItems.ToArray()
     if ($selected.Count -eq 0) { return }
 
     $msg = "Ignore $($selected.Count) package(s)?`n`nThese updates will be hidden from future scans."
