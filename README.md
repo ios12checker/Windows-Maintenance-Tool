@@ -92,7 +92,7 @@ Alternatively, with internet access, `gh attestation verify .\WindowsMaintenance
 
 ## Screenshot
 
-<img width="1902" height="1024" alt="image" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/c1654c21-b233-4719-a67e-0c4a1833b28a" />
+<img width="1902" height="1024" alt="image" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/5cf72184-d9f8-4fdc-a83e-9e2b897cfdb1" />
 
 
 
