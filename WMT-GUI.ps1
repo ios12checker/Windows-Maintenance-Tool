@@ -134,6 +134,84 @@ public class TokenManipulator {
 }
 '@
 }
+$script:WmtTaskbarAppUserModelId = "ios12checker.WindowsMaintenanceTool"
+if (-not ([System.Management.Automation.PSTypeName]'WmtTaskbarAppId.Native').Type) {
+    Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+namespace WmtTaskbarAppId {
+    public static class Native {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+        public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+    }
+}
+'@
+}
+try { [void][WmtTaskbarAppId.Native]::SetCurrentProcessExplicitAppUserModelID($script:WmtTaskbarAppUserModelId) } catch {}
+if (-not ([System.Management.Automation.PSTypeName]'WmtTaskbarWindowAppId.Native').Type) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace WmtTaskbarWindowAppId {
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PropertyKey { public Guid FormatId; public uint PropertyId; }
+    [StructLayout(LayoutKind.Explicit, Size=16)]
+    public struct PropVariant { [FieldOffset(0)] public ushort Type; [FieldOffset(8)] public IntPtr Pointer; }
+    [ComImport, Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface IPropertyStore {
+        [PreserveSig] int GetCount(out uint count);
+        [PreserveSig] int GetAt(uint index, out PropertyKey key);
+        [PreserveSig] int GetValue(ref PropertyKey key, out PropVariant value);
+        [PreserveSig] int SetValue(ref PropertyKey key, ref PropVariant value);
+        [PreserveSig] int Commit();
+    }
+    [ComImport, Guid("56FDF342-FD6D-11d0-958A-006097C9A090"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    public interface ITaskbarList {
+        [PreserveSig] int HrInit();
+        [PreserveSig] int AddTab(IntPtr hwnd);
+        [PreserveSig] int DeleteTab(IntPtr hwnd);
+        [PreserveSig] int ActivateTab(IntPtr hwnd);
+        [PreserveSig] int SetActiveAlt(IntPtr hwnd);
+    }
+    public static class Native {
+        [DllImport("shell32.dll", PreserveSig=true)]
+        static extern int SHGetPropertyStoreForWindow(IntPtr hwnd, ref Guid iid, out IPropertyStore store);
+        [DllImport("ole32.dll", PreserveSig=true)]
+        static extern int CoCreateInstance(ref Guid clsid, IntPtr outer, uint context, ref Guid iid, out ITaskbarList taskbar);
+        [DllImport("ole32.dll", PreserveSig=true)]
+        static extern int PropVariantClear(ref PropVariant value);
+        public static int SetWindowAppUserModelId(IntPtr hwnd, string appId) {
+            Guid iid = new Guid("886D8EEB-8CF2-4446-8D02-CDBA1DBDCF99");
+            IPropertyStore store;
+            int hr = SHGetPropertyStoreForWindow(hwnd, ref iid, out store);
+            if (hr < 0 || store == null) return hr;
+            PropertyKey key = new PropertyKey();
+            key.FormatId = new Guid("9F4C2855-9F79-4B39-A8D0-E1D42DE1D5F3");
+            key.PropertyId = 5;
+            PropVariant value = new PropVariant();
+            value.Type = 31; // VT_LPWSTR
+            value.Pointer = Marshal.StringToCoTaskMemUni(appId);
+            try {
+                hr = store.SetValue(ref key, ref value);
+                if (hr < 0) return hr;
+                return store.Commit();
+            }
+            finally { PropVariantClear(ref value); }
+        }
+        public static int EnsureTaskbarButton(IntPtr hwnd) {
+            Guid clsid = new Guid("56FDF344-FD6D-11d0-958A-006097C9A090");
+            Guid iid = new Guid("56FDF342-FD6D-11d0-958A-006097C9A090");
+            ITaskbarList taskbar;
+            int hr = CoCreateInstance(ref clsid, IntPtr.Zero, 1, ref iid, out taskbar);
+            if (hr < 0 || taskbar == null) return hr;
+            hr = taskbar.HrInit();
+            if (hr < 0) return hr;
+            return taskbar.AddTab(hwnd);
+        }
+    }
+}
+'@
+}
+
 $startupProc = $null
 try {
 $startupProc = [System.Diagnostics.Process]::GetCurrentProcess()
@@ -33476,7 +33554,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
         "-Mode", (ConvertTo-WmtProcessArgument $Mode),
         "-TargetPath", (ConvertTo-WmtProcessArgument $TargetPath)
     ) -join " "
-    Start-Process -FilePath $powershellExe -Verb RunAs -ArgumentList $arguments -ErrorAction Stop | Out-Null
+    Start-Process -FilePath $powershellExe -Verb RunAs -ArgumentList $arguments -WindowStyle Normal -ErrorAction Stop | Out-Null
     return
 }
 
@@ -49283,7 +49361,7 @@ Write-Host ""
 $tmpAuthScript = Join-Path $gogdlDir ("gogdl_auth_{0}.ps1" -f ([Guid]::NewGuid().ToString("N")))
 try {
     [System.IO.File]::WriteAllText($tmpAuthScript, $authScript, [System.Text.Encoding]::UTF8)
-    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $tmpAuthScript -Wait
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $tmpAuthScript -WindowStyle Normal -Wait
 }
 finally {
     if (Test-Path -LiteralPath $tmpAuthScript) {
@@ -67320,6 +67398,23 @@ try {
     Write-GuiLog "WMT GUI v$AppVersion started."
 } catch {}
 $settings = Get-WmtSettings
+$launchMinimized = Get-WmtLaunchMinimized
+# Reassert taskbar visibility and assign a window-level shell identity after
+# WPF creates the HWND. The process-level AppUserModelID above alone may be
+# ignored for a WPF window hosted by powershell.exe.
+try {
+    if (-not $launchMinimized) { $window.ShowInTaskbar = $true }
+    $mainHwnd = [System.Windows.Interop.WindowInteropHelper]::new($window).Handle
+    if ($mainHwnd -ne [IntPtr]::Zero) {
+        $taskbarIdentityHr = [WmtTaskbarWindowAppId.Native]::SetWindowAppUserModelId($mainHwnd, $script:WmtTaskbarAppUserModelId)
+        if ($taskbarIdentityHr -lt 0) { Write-GuiLog ("[Startup] Could not set the taskbar window identity (HRESULT 0x{0:X8})." -f $taskbarIdentityHr) }
+        if (-not $launchMinimized) {
+            $taskbarButtonHr = [WmtTaskbarWindowAppId.Native]::EnsureTaskbarButton($mainHwnd)
+            if ($taskbarButtonHr -lt 0) { Write-GuiLog ("[Startup] Could not register the taskbar button (HRESULT 0x{0:X8})." -f $taskbarButtonHr) }
+        }
+    }
+}
+catch { try { Write-GuiLog "[Startup] Could not initialize the taskbar window identity: $($_.Exception.Message)" } catch {} }
 
 # Restore persisted window geometry/state when valid.
 if ($settings.WindowBounds) {
@@ -67407,7 +67502,7 @@ Update-TweaksResponsiveLayout
 # If Launch Minimized is enabled, hide the freshly rendered window in the
 # system tray. This runs after ContentRendered so WPF has a real window to hide.
 try {
-    if (Get-WmtLaunchMinimized) {
+    if ($launchMinimized) {
         if (Initialize-WmtTrayIcon -Window $window) {
             $script:WmtHiddenToTray = $true
             $window.ShowInTaskbar = $false
