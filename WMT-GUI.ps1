@@ -16,7 +16,7 @@ param(
 # ==========================================
 # 1. SETUP
 # ==========================================
-$AppVersion = "6.8"
+$AppVersion = "6.9"
 $ErrorActionPreference = "SilentlyContinue"
 # Safe until the settings manager is initialized below; the persisted value is loaded there.
 $script:WmtDebug = $false
@@ -3390,10 +3390,9 @@ if ($existing -is [System.Management.Automation.Runspaces.RunspacePool]) {
 if ($existing) { Reset-WmtRunspacePool -PoolKind $PoolKind }
 
 $iss = New-WmtRunspaceInitialState
-# Scan workers spend nearly all their time waiting on external package managers, so the Background
-# pool is sized to run every provider scan at once (16) with headroom for other background work.
-# Runspaces are created on demand, and idle pools are closed while the app sits in the tray.
-$maxWorkers = if ($PoolKind -eq "UiSupport") { 3 } else { 24 }
+# Keep background concurrency bounded so provider scans cannot starve WPF input
+# or desktop composition. Runspaces are created on demand and queued as needed.
+$maxWorkers = if ($PoolKind -eq "UiSupport") { 3 } else { 8 }
 $pool = [runspacefactory]::CreateRunspacePool(1, $maxWorkers, $iss, $Host)
 $pool.ApartmentState = "STA"
 $pool.ThreadOptions = "ReuseThread"
@@ -3461,6 +3460,11 @@ for ($attempt = 1; $attempt -le 2; $attempt++) {
         $ps = [PowerShell]::Create()
         try {
             $ps.RunspacePool = $pool
+            # Shared runspace workers should yield CPU to WPF input and desktop
+            # composition while startup and feature jobs run.
+            [void]$ps.AddScript({
+                try { [void]([System.Threading.Thread]::CurrentThread.Priority = [System.Threading.ThreadPriority]::BelowNormal) } catch {}
+            })
             return $ps
         }
         catch {
@@ -6196,6 +6200,16 @@ function Set-WmtNativeWindowTheme {
 param([System.Windows.Window]$Window)
 
 if (-not $Window) { return }
+$nativeThemeLogPath = Join-Path ([System.IO.Path]::GetTempPath()) "WMT-native-window-theme.log"
+try {
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:DataDir)) {
+        if (-not [System.IO.Directory]::Exists($script:DataDir)) { [void][System.IO.Directory]::CreateDirectory($script:DataDir) }
+        $nativeThemeLogPath = Join-Path $script:DataDir "native-window-theme.log"
+    }
+    $nativeHandle = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
+    [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} requested window='{1}' hwnd=0x{2:X}{3}" -f [DateTime]::Now, $Window.Title, $nativeHandle.ToInt64(), [Environment]::NewLine))
+}
+catch {}
 try {
     if (-not ("Wmt.Native.DwmTheme" -as [type])) {
         Add-Type -TypeDefinition @'
@@ -6209,35 +6223,89 @@ namespace Wmt.Native
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int valueSize);
 
-        public static void SetDarkMode(IntPtr hwnd, bool enabled)
+        private static int ToColorRef(string color)
         {
-            if (hwnd == IntPtr.Zero) return;
+            if (String.IsNullOrEmpty(color)) return 0;
+            color = color.TrimStart('#');
+            if (color.Length != 6) return 0;
+            int red = Convert.ToInt32(color.Substring(0, 2), 16);
+            int green = Convert.ToInt32(color.Substring(2, 2), 16);
+            int blue = Convert.ToInt32(color.Substring(4, 2), 16);
+            return red | (green << 8) | (blue << 16);
+        }
+
+        public static int[] SetTheme(IntPtr hwnd, bool enabled, string caption, string text, string border)
+        {
+            if (hwnd == IntPtr.Zero) return new int[] { unchecked((int)0x80070006), 0, 0, 0, 0 };
             int value = enabled ? 1 : 0;
 
             // DWMWA_USE_IMMERSIVE_DARK_MODE is 20 on current Windows 10/11;
             // 19 covers older Windows 10 builds that exposed the attribute.
-            DwmSetWindowAttribute(hwnd, 20, ref value, sizeof(int));
-            DwmSetWindowAttribute(hwnd, 19, ref value, sizeof(int));
+            int darkModeResult = DwmSetWindowAttribute(hwnd, 20, ref value, sizeof(int));
+            int legacyDarkModeResult = DwmSetWindowAttribute(hwnd, 19, ref value, sizeof(int));
+
+            // Windows 11 supports explicit non-client colors. Older Windows
+            // versions ignore these attributes and keep their system colors.
+            int captionColor = ToColorRef(caption);
+            int textColor = ToColorRef(text);
+            int borderColor = ToColorRef(border);
+            int captionResult = DwmSetWindowAttribute(hwnd, 35, ref captionColor, sizeof(int)); // DWMWA_CAPTION_COLOR
+            int textResult = DwmSetWindowAttribute(hwnd, 36, ref textColor, sizeof(int));       // DWMWA_TEXT_COLOR
+            int borderResult = DwmSetWindowAttribute(hwnd, 34, ref borderColor, sizeof(int));   // DWMWA_BORDER_COLOR
+            return new int[] { darkModeResult, legacyDarkModeResult, captionResult, textResult, borderResult };
         }
     }
 }
 '@
     }
 
-    $useDark = ([string]$script:CurrentTheme -ne "light")
+    # Capture the main script's palette values before GetNewClosure creates a
+    # dynamic module. Resolving $script: variables inside that callback points
+    # at the dynamic module's script scope instead of WMT's script scope.
+    $activeTheme = [string]$script:CurrentTheme
+    $palette = if ($script:ThemePalettes -and $script:ThemePalettes.ContainsKey($activeTheme)) { $script:ThemePalettes[$activeTheme] } else { $script:ThemePalettes.dark }
+    $useDark = ($activeTheme -ne "light")
+    $captionColor = [string]$palette.BgPanel
+    $textColor = [string]$palette.TextPrimary
+    $borderColor = [string]$palette.BorderBrush
     $applyNativeTheme = {
         param($s, $e)
+        $null = $s
+        $null = $e
         try {
             $handle = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
-            [Wmt.Native.DwmTheme]::SetDarkMode($handle, $useDark)
+            $results = [Wmt.Native.DwmTheme]::SetTheme(
+                $handle,
+                $useDark,
+                $captionColor,
+                $textColor,
+                $borderColor
+            )
+            $resultText = @($results | ForEach-Object { "0x{0:X8}" -f [int]$_ }) -join ","
+            $line = "{0:o} theme={1} hwnd=0x{2:X} HRESULTs={3}{4}" -f [DateTime]::Now, $(if ($useDark) { "dark" } else { "light" }), $handle.ToInt64(), $resultText, [Environment]::NewLine
+            [System.IO.File]::AppendAllText($nativeThemeLogPath, $line)
         }
-        catch {}
+        catch {
+            try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} error={1}{2}" -f [DateTime]::Now, $_.Exception.Message, [Environment]::NewLine)) } catch {}
+        }
     }.GetNewClosure()
 
-    if ($Window.IsSourceInitialized) { & $applyNativeTheme $Window $null }
+    # IsSourceInitialized is not a dependable Window property across WPF
+    # versions. A nonzero interop handle tells us the event has already fired.
+    $nativeHandle = [System.Windows.Interop.WindowInteropHelper]::new($Window).Handle
+    if ($nativeHandle -ne [IntPtr]::Zero) { & $applyNativeTheme $Window $null }
     else { $Window.Add_SourceInitialized($applyNativeTheme) }
+
+    # WPF can reset non-client attributes while it finishes showing the HWND.
+    # Reapply once after the first paint, with the already-captured palette.
+    if ($nativeHandle -eq [IntPtr]::Zero -and [object]::ReferenceEquals($Window, $window) -and -not $script:WmtNativeThemeHooksInstalled) {
+        $script:WmtNativeThemeHooksInstalled = $true
+        $Window.Add_ContentRendered($applyNativeTheme)
+    }
 }
-catch {}
+catch {
+    try { [System.IO.File]::AppendAllText($nativeThemeLogPath, ("{0:o} setup-error={1}{2}" -f [DateTime]::Now, $_.Exception.ToString(), [Environment]::NewLine)) } catch {}
+}
 }
 
 function New-WmtDataTable {
@@ -36342,6 +36410,7 @@ if ($TabButtons) {
 }
 
 $script:CurrentTheme = $Theme
+Set-WmtNativeWindowTheme -Window $window
 if ($script:WmtTrayMenu) { Set-WmtTrayMenuTheme -Menu $script:WmtTrayMenu }
 }
 
@@ -67481,16 +67550,12 @@ if ($settings.WindowState -eq "Maximized") {
 # 1. Click the Updates tab by default.
 (Get-Ctrl "btnTabUpdates").RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
 
-# 1b. Start opening the runspace pools asynchronously after first paint.
-# Keep launch-minimized + Reduce RAM behavior lazy.
-if (-not ((Get-WmtLaunchMinimized) -and (Get-WmtReduceRamInTray))) {
-    try { $null = Initialize-WmtRunspacePool -PoolKind UiSupport } catch { Write-GuiLog "[Pool] UI-support startup: $($_.Exception.Message)" }
-    try { $null = Initialize-WmtRunspacePool -PoolKind Background } catch { Write-GuiLog "[Pool] Background startup: $($_.Exception.Message)" }
-}
+# Runspace pools open on demand. Pre-opening both pools here duplicates work
+# while the user is trying to interact with the window.
 
-# 2. Warm hidden pages in the background (deferred 1s so UI paints first).
+# 2. Warm hidden pages in the background after the UI has had time to settle.
 $script:preloadDeferTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:preloadDeferTimer.Interval = [TimeSpan]::FromSeconds(1)
+$script:preloadDeferTimer.Interval = [TimeSpan]::FromSeconds(5)
 $script:preloadDeferTimer.Add_Tick({
         try { $script:preloadDeferTimer.Stop() } catch {}
         if (-not (Test-WmtAggressiveTrayMemoryMode)) {
@@ -68238,6 +68303,17 @@ try {
                 catch {
                     Write-Output "LOG:PyPI index fetch failed: $($_.Exception.Message)"
                 }
+                finally {
+                    # This runs in a reusable pooled runspace. Clear the parsed
+                    # response and derived names so the session state cannot
+                    # retain hundreds of thousands of project objects after
+                    # the one-time cache refresh completes.
+                    $resp = $null
+                    $names = $null
+                    $headers = $null
+                    $wmtTlsProtocols = $null
+                    try { [System.GC]::Collect() } catch {}
+                }
             }
             # --- Fetch Steam library (inline, self-contained) ---
             if ($DoSteam) {
@@ -68455,7 +68531,7 @@ catch {
 
 # Kick off the background library cache builder shortly after the window opens.
 $script:bootCacheTimer = New-Object System.Windows.Threading.DispatcherTimer
-$script:bootCacheTimer.Interval = [TimeSpan]::FromSeconds(2)
+$script:bootCacheTimer.Interval = [TimeSpan]::FromSeconds(12)
 $script:bootCacheTimer.Add_Tick({
     try { $script:bootCacheTimer.Stop() } catch {}
     if (-not (Test-WmtAggressiveTrayMemoryMode)) {
@@ -68699,4 +68775,10 @@ $script:WmtApplication.MainWindow = $window
 catch {
 Write-WmtLastCrash -Context "WMT application loop failed" -Exception $_.Exception -ErrorRecord $_
 Write-Warning "WMT application loop failed: $($_.Exception.Message)"
+}
+if ($script:WmtIsCompiledExe) {
+    # PS2EXE may retain foreground runspace threads after WPF has shut down.
+    # The window's Closing/Closed handlers have already saved settings and
+    # scheduled worker cleanup, so terminate the compiled host with the UI.
+    [System.Environment]::Exit(0)
 }
