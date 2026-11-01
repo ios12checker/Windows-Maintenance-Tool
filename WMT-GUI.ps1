@@ -17914,6 +17914,54 @@ function Invoke-CleanerMlTruncate {
     }
 }
 
+function Invoke-WmtCleanupBackgroundWorker {
+    param(
+        [Parameter(Mandatory = $true)][scriptblock]$ScriptBlock,
+        [object[]]$ArgumentList = @()
+    )
+
+    $worker = New-WmtPooledPowerShell -PoolKind Background
+    $asyncResult = $null
+    try {
+        [void]$worker.AddScript($ScriptBlock.ToString())
+        foreach ($argument in $ArgumentList) { [void]$worker.AddArgument($argument) }
+        $asyncResult = $worker.BeginInvoke()
+
+        while (-not $asyncResult.IsCompleted) {
+            if ($Automatic) {
+                [void]$asyncResult.AsyncWaitHandle.WaitOne(200)
+                continue
+            }
+
+            # Keep the cleanup progress window responsive while the worker does
+            # the potentially long-running database or external process work.
+            $frame = [System.Windows.Threading.DispatcherFrame]::new()
+            $timer = New-Object System.Windows.Threading.DispatcherTimer
+            $timer.Interval = [TimeSpan]::FromMilliseconds(100)
+            $stopFrame = {
+                $timer.Stop()
+                $frame.Continue = $false
+            }.GetNewClosure()
+            $timer.add_Tick($stopFrame)
+            $timer.Start()
+            [System.Windows.Threading.Dispatcher]::PushFrame($frame)
+            $timer.remove_Tick($stopFrame)
+        }
+
+        $results = @($worker.EndInvoke($asyncResult))
+        if ($worker.Streams.Error.Count -gt 0) {
+            throw [string]$worker.Streams.Error[0]
+        }
+        return $results
+    }
+    finally {
+        if ($asyncResult) {
+            try { $asyncResult.AsyncWaitHandle.Close() } catch {}
+        }
+        try { $worker.Dispose() } catch {}
+    }
+}
+
 function Invoke-CleanerMlSqliteVacuum {
     param(
         $Rule,
@@ -17927,36 +17975,55 @@ function Invoke-CleanerMlSqliteVacuum {
         try {
             $size = $target.Length
             if (-not $isAnalyze) {
-                $vacuumSucceeded = $false
-                try {
-                    Add-Type -Path (Join-Path ([System.AppDomain]::CurrentDomain.BaseDirectory) "System.Data.SQLite.dll") -ErrorAction Stop
-                    $sqliteConn = New-Object System.Data.SQLite.SQLiteConnection
-                    $sqliteConn.ConnectionString = "Data Source=$($target.FullName);Version=3;"
-                    $sqliteConn.Open()
-                    $vacuumCmd = $sqliteConn.CreateCommand()
-                    $vacuumCmd.CommandText = "VACUUM;"
-                    $vacuumCmd.CommandTimeout = 300
-                    [void]$vacuumCmd.ExecuteNonQuery()
-                    $sqliteConn.Close()
-                    $vacuumSucceeded = $true
-                }
-                catch {
+                $vacuumResult = Invoke-WmtCleanupBackgroundWorker -ScriptBlock {
+                    param($DatabasePath, $BaseDirectory)
+
+                    $vacuumSucceeded = $false
+                    $failureMessage = ""
+                    $sqliteConn = $null
+                    $vacuumCmd = $null
                     try {
-                        $sqlite3Exe = Get-Command "sqlite3.exe" -ErrorAction SilentlyContinue
-                        if ($sqlite3Exe) {
-                            $proc = Start-Process -FilePath $sqlite3Exe.Source -ArgumentList @($target.FullName, "VACUUM;") -NoNewWindow -Wait -PassThru -ErrorAction Stop
-                            $sqliteExitCode = [int]$proc.ExitCode
-                            try { $proc.Dispose() } catch {}
-                            if ($sqliteExitCode -eq 0) { $vacuumSucceeded = $true }
-                        }
+                        Add-Type -Path (Join-Path $BaseDirectory "System.Data.SQLite.dll") -ErrorAction Stop
+                        $sqliteConn = New-Object System.Data.SQLite.SQLiteConnection
+                        $sqliteConn.ConnectionString = "Data Source=$DatabasePath;Version=3;"
+                        $sqliteConn.Open()
+                        $vacuumCmd = $sqliteConn.CreateCommand()
+                        $vacuumCmd.CommandText = "VACUUM;"
+                        $vacuumCmd.CommandTimeout = 300
+                        [void]$vacuumCmd.ExecuteNonQuery()
+                        $vacuumSucceeded = $true
                     }
-                    catch { if ($script:WmtDebug) { Write-GuiLog "SQLite VACUUM failed ($($target.FullName)): $($_.Exception.Message)" } }
-                }
-                if ($vacuumSucceeded) {
+                    catch {
+                        $failureMessage = $_.Exception.Message
+                        try {
+                            $sqlite3Exe = Get-Command "sqlite3.exe" -ErrorAction SilentlyContinue
+                            if ($sqlite3Exe) {
+                                $proc = Start-Process -FilePath $sqlite3Exe.Source -ArgumentList @($DatabasePath, "VACUUM;") -NoNewWindow -Wait -PassThru -ErrorAction Stop
+                                $sqliteExitCode = [int]$proc.ExitCode
+                                try { $proc.Dispose() } catch {}
+                                if ($sqliteExitCode -eq 0) { $vacuumSucceeded = $true }
+                                else { $failureMessage = "sqlite3.exe exited with code $sqliteExitCode" }
+                            }
+                        }
+                        catch { $failureMessage = $_.Exception.Message }
+                    }
+                    finally {
+                        try { if ($vacuumCmd) { $vacuumCmd.Dispose() } } catch {}
+                        try { if ($sqliteConn) { $sqliteConn.Close(); $sqliteConn.Dispose() } } catch {}
+                    }
+
+                    [PSCustomObject]@{ Succeeded = $vacuumSucceeded; Error = $failureMessage }
+                } -ArgumentList @([string]$target.FullName, [string][System.AppDomain]::CurrentDomain.BaseDirectory)
+
+                $vacuumResult = @($vacuumResult | Where-Object { $_ -is [pscustomobject] }) | Select-Object -Last 1
+                if ($vacuumResult -and $vacuumResult.Succeeded) {
                     $newSize = (Get-Item -LiteralPath $target.FullName -Force -ErrorAction SilentlyContinue).Length
                     $recovered = [Math]::Max(0, $size - $newSize)
                     $stats.Deleted++
                     $stats.Bytes += $recovered
+                }
+                elseif ($vacuumResult -and $vacuumResult.Error -and $script:WmtDebug) {
+                    Write-GuiLog "SQLite VACUUM failed ($($target.FullName)): $($vacuumResult.Error)"
                 }
             }
             else {
@@ -18039,18 +18106,39 @@ function Invoke-CleanerMlProcess {
             return
         }
 
-        if ($wait) {
-            $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -NoNewWindow -Wait -PassThru -ErrorAction Stop
-            $cleanerExitCode = [int]$proc.ExitCode
-            try { $proc.Dispose() } catch {}
+        $processResult = Invoke-WmtCleanupBackgroundWorker -ScriptBlock {
+            param($Command, $WaitForExit)
+            try {
+                if ($WaitForExit) {
+                    $proc = Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $Command -NoNewWindow -Wait -PassThru -ErrorAction Stop
+                    $exitCode = [int]$proc.ExitCode
+                    try { $proc.Dispose() } catch {}
+                    return [PSCustomObject]@{ Succeeded = ($exitCode -eq 0); ExitCode = $exitCode; Error = "" }
+                }
+
+                Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $Command -NoNewWindow -ErrorAction Stop | Out-Null
+                return [PSCustomObject]@{ Succeeded = $true; ExitCode = 0; Error = "" }
+            }
+            catch {
+                return [PSCustomObject]@{ Succeeded = $false; ExitCode = -1; Error = $_.Exception.Message }
+            }
+        } -ArgumentList @($cmd, $wait)
+
+        $processResult = @($processResult | Where-Object { $_ -is [pscustomobject] }) | Select-Object -Last 1
+        if ($processResult -and $processResult.Error) {
+            Write-GuiLog "CleanerML process error ($cmd): $($processResult.Error)"
+        }
+        elseif ($processResult -and $processResult.Succeeded) {
+            $cleanerExitCode = [int]$processResult.ExitCode
             if ($cleanerExitCode -ne 0) {
                 Write-GuiLog "CleanerML process warning: exit code $cleanerExitCode for: $cmd"
             }
+            $stats.Deleted++
         }
-        else {
-            Start-Process -FilePath "cmd.exe" -ArgumentList "/c", $cmd -NoNewWindow -ErrorAction Stop
+        elseif ($processResult) {
+            Write-GuiLog "CleanerML process warning: exit code $([int]$processResult.ExitCode) for: $cmd"
+            $stats.Deleted++
         }
-        $stats.Deleted++
     }
     catch { if ($script:WmtDebug) { Write-GuiLog "Process action error ($cmd): $($_.Exception.Message)" } }
 }
