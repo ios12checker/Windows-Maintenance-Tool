@@ -5614,6 +5614,45 @@ foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($Element)) {
 }
 }
 
+function Set-WmtWindowIcon {
+param([System.Windows.Window]$Window)
+
+if (-not $Window) { return }
+$icon = $null
+try {
+    $image = $null
+    if ($script:WmtIsCompiledExe -and -not [string]::IsNullOrWhiteSpace($script:WmtProcessPath)) {
+        try {
+            $icon = [System.Drawing.Icon]::ExtractAssociatedIcon($script:WmtProcessPath)
+            if ($icon) {
+                $image = [System.Windows.Interop.Imaging]::CreateBitmapSourceFromHIcon(
+                    $icon.Handle,
+                    [System.Windows.Int32Rect]::Empty,
+                    [System.Windows.Media.Imaging.BitmapSizeOptions]::FromEmptyOptions()
+                )
+            }
+        }
+        catch {}
+    }
+
+    if (-not $image -and -not [string]::IsNullOrWhiteSpace($script:WmtRootPath)) {
+        $iconPath = Join-Path $script:WmtRootPath "PS2EXE\WMT.ico"
+        if (Test-Path -LiteralPath $iconPath -PathType Leaf) {
+            $image = [System.Windows.Media.Imaging.BitmapFrame]::Create([Uri]::new($iconPath))
+        }
+    }
+
+    if ($image) {
+        if (-not $image.IsFrozen) { $image.Freeze() }
+        $Window.Icon = $image
+    }
+}
+catch {}
+finally {
+    if ($icon) { try { $icon.Dispose() } catch {} }
+}
+}
+
 function New-WmtWindowFromFullXaml {
 param(
     [Parameter(Mandatory = $true)]$Xaml,
@@ -5648,6 +5687,7 @@ try { $dialog = [Windows.Markup.XamlReader]::Load($reader) }
 finally { $reader.Close() }
 $dialog.Resources['__WmtRuntimeResourcesApplied'] = $true
 Add-WmtThemeResources -Element $dialog
+Set-WmtWindowIcon -Window $dialog
 Connect-WmtResponsiveTables -Element $dialog
 if (-not $NoOwner) { Set-WmtWindowOwner -Child $dialog }
 return $dialog
