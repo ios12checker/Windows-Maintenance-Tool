@@ -424,6 +424,12 @@ dist\WindowsMaintenanceTool.exe
 
 The EXE build uses the version from `$AppVersion` in `WMT-GUI.ps1` and requires administrator privileges at runtime.
 
+For theme diagnostics, PS2EXE reserves `-Debug` for its own debugger switch. Pass script arguments after `-end` so WMT receives its debug switch:
+
+```powershell
+.\dist\WindowsMaintenanceTool.exe -end -Debug
+```
+
 ### Manual Launch
 
 ```powershell
