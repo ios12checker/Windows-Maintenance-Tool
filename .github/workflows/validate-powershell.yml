@@ -1498,7 +1498,7 @@ jobs:
               $d=New-WmtWindowFromFullXaml -Xaml $cleanupPreviewXaml -NoOwner
               try {
                   $grid=$d.FindName('dgPreview')
-                  $rows=@(1..60 | ForEach-Object { [pscustomobject]@{RuleName='Temporary files';Protection='';FilePath="C:\Temp\example$_.tmp";SizeText='1 KB';Size=1024} })
+                  $rows=@(1..60 | ForEach-Object { [pscustomobject]@{RuleName='Temporary files';EntryType='File';Protection='';FilePath="C:\Temp\example$_.tmp";SizeText='1 KB';Size=1024} })
                   $grid.ItemsSource=$rows; $grid.SelectedIndex=0
                   foreach ($theme in @('dark','light')) {
                       Set-WmtThemeResources -Element $d -Palette $script:ThemePalettes[$theme]
@@ -1508,11 +1508,11 @@ jobs:
                           $viewer=Get-WmtVisualDescendant -Element $grid -DescendantType ([Windows.Controls.ScrollViewer])
                           $total=($grid.Columns | Measure-Object -Property ActualWidth -Sum).Sum
                           Assert ([Math]::Abs($total-$viewer.ViewportWidth) -le 2 -and $viewer.ScrollableWidth -eq 0) "Cleanup preview leaves unused width or overflows at window width $width."
-                          if ($width -eq 1400) { Assert ($grid.Columns[2].ActualWidth -gt $narrowPathWidth+100) 'Cleanup paths do not grow when the window is stretched.' }
-                          if ($width -eq 960) { $narrowPathWidth=$grid.Columns[2].ActualWidth }
+                          if ($width -eq 1400) { Assert ($grid.Columns[3].ActualWidth -gt $narrowPathWidth+100) 'Cleanup paths do not grow when the window is stretched.' }
+                          if ($width -eq 960) { $narrowPathWidth=$grid.Columns[3].ActualWidth }
                       }
                   }
-                  $vC=$grid.Columns[2]
+                  $vC=$grid.Columns[3]
                   $header=@(Find-VisualsOfType $grid ([Windows.Controls.Primitives.DataGridColumnHeader]) | Where-Object { $_.Column -eq $vC })[0]
                   $handle=$header.Template.FindName('PART_RightHeaderGripper',$header)
                   $handle.RaiseEvent([Windows.Controls.Primitives.DragStartedEventArgs]::new(0,0))
@@ -1539,12 +1539,12 @@ jobs:
               $d=New-WmtWindowFromFullXaml -Xaml $cleanupPreviewXaml -NoOwner
               try {
                   $grid=$d.FindName('dgPreview')
-                  $grid.ItemsSource=@([pscustomobject]@{RuleName='Temporary files';Protection='';FilePath='C:\Users\Example\AppData\Local\Temp\Folder\example.tmp';SizeText='1 KB';Size=1024})
+                  $grid.ItemsSource=@([pscustomobject]@{RuleName='Temporary files';EntryType='File';Protection='';FilePath='C:\Users\Example\AppData\Local\Temp\Folder\example.tmp';SizeText='1 KB';Size=1024})
                   $grid.SelectedIndex=0
                   Measure-Window $d 960 500
                   $position=$grid.TranslatePoint([Windows.Point]::new(0,0),$d.Content)
                   Assert ($d.Content.Margin -eq [Windows.Thickness]::new(0) -and $position.X -eq 0 -and $position.Y -eq 0 -and [Math]::Abs($grid.ActualWidth-$d.Content.ActualWidth) -lt 1) 'Cleanup preview still has outer padding around the table.'
-                  Assert ($grid.Columns.Count -eq 4) 'Cleanup preview contains an extra data column.'
+                  Assert ($grid.Columns.Count -eq 5) 'Cleanup preview must show rule, type, status, path/command, and size.'
                   $filler=@(Find-VisualsOfType $grid ([Windows.Controls.Primitives.DataGridColumnHeader]) | Where-Object { $null -eq $_.Column })[0]
                   $fillerBorder=$filler.Template.FindName('HeaderBorder',$filler)
                   Assert ($fillerBorder.Background.Color.A -eq 0 -and -not $filler.IsHitTestVisible) 'Cleanup preview still displays a blank trailing column header.'
@@ -1565,7 +1565,7 @@ jobs:
                       $column.Width=[Windows.Controls.DataGridLength]::new($oldWidth)
                       Measure-Window $d 960 500
                   }
-                  $grid.Columns[2].Width=[Windows.Controls.DataGridLength]::new(1200)
+                  $grid.Columns[3].Width=[Windows.Controls.DataGridLength]::new(1200)
                   Measure-Window $d 760 500
                   $viewer=Get-WmtVisualDescendant -Element $grid -DescendantType ([Windows.Controls.ScrollViewer])
                   Assert ($viewer.ScrollableWidth -gt 0 -and $viewer.ComputedHorizontalScrollBarVisibility -eq 'Visible') 'Expanded analysis columns cannot scroll horizontally.'
