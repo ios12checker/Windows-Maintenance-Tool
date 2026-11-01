@@ -29356,7 +29356,20 @@ return ""
 
 function Get-WmtDriverStorePackages {
 param([object[]]$RawOutput = $null)
-$rawOutput = if ($null -ne $RawOutput) { @($RawOutput) } else { @(pnputil.exe /enum-drivers 2>&1) }
+if ($null -ne $RawOutput) {
+    $rawOutput = @($RawOutput)
+}
+else {
+    $pnputilPath = Join-Path $env:SystemRoot 'System32\pnputil.exe'
+    $enumeration = Invoke-WmtProcess -FilePath $pnputilPath -Arguments '/enum-drivers' -TimeoutMs 60000 -Encoding OEM -KillTree
+    if ($enumeration.TimedOut) { throw 'pnputil /enum-drivers timed out; driver inventory is unknown.' }
+    if ($enumeration.TerminationFailed -or $enumeration.OutputReadTimedOut) { throw 'pnputil /enum-drivers did not finish cleanly; driver inventory is unknown.' }
+    if (-not [string]::IsNullOrWhiteSpace([string]$enumeration.Error)) { throw "pnputil /enum-drivers failed: $($enumeration.Error)" }
+    if ([int]$enumeration.ExitCode -ne 0) { throw "pnputil /enum-drivers failed with exit code $($enumeration.ExitCode)." }
+    $outputText = ([string]$enumeration.StdOut) + [Environment]::NewLine + ([string]$enumeration.StdErr)
+    if ([string]::IsNullOrWhiteSpace($outputText)) { throw 'pnputil /enum-drivers returned no output; driver inventory is unknown.' }
+    $rawOutput = @($outputText -split '\r?\n')
+}
 $drivers = [System.Collections.Generic.List[object]]::new()
 $current = $null
 
@@ -30579,26 +30592,42 @@ $dismRestoreCode = $LASTEXITCODE
 
 Write-Host ""
 Write-Host "[4/4] Cleaning temporary files..." -ForegroundColor Yellow
+function Test-WmtTempPathSafe {
+param([string]$Path, [switch]$Directory)
+if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+try {
+    $attributes = [System.IO.File]::GetAttributes($Path)
+    if (($attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) { return $false }
+    if ($Directory -and ($attributes -band [System.IO.FileAttributes]::Directory) -eq 0) { return $false }
+    return $true
+} catch { return $false }
+}
 function Get-TempFilesStreamed {
 param([string]$Root)
-if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+if (-not (Test-WmtTempPathSafe -Path $Root -Directory) -or -not [System.IO.Directory]::Exists($Root)) { return }
 $pending = [System.Collections.Generic.Stack[string]]::new()
 $pending.Push($Root)
 while ($pending.Count -gt 0) {
     $dir = $pending.Pop()
+    if (-not (Test-WmtTempPathSafe -Path $dir -Directory)) { continue }
     try {
-        foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $file }
+        foreach ($file in [System.IO.Directory]::EnumerateFiles($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            if (Test-WmtTempPathSafe -Path $file) { $file }
+        }
     } catch {}
     try {
-        foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) { $pending.Push($child) }
+        foreach ($child in [System.IO.Directory]::EnumerateDirectories($dir, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+            if (Test-WmtTempPathSafe -Path $child -Directory) { $pending.Push($child) }
+        }
     } catch {}
 }
 }
 function Remove-EmptyTempDirs {
 param([string]$Root)
-if (-not $Root -or -not [System.IO.Directory]::Exists($Root)) { return }
+if (-not (Test-WmtTempPathSafe -Path $Root -Directory) -or -not [System.IO.Directory]::Exists($Root)) { return }
 try {
     foreach ($dir in [System.IO.Directory]::EnumerateDirectories($Root, "*", [System.IO.SearchOption]::TopDirectoryOnly)) {
+        if (-not (Test-WmtTempPathSafe -Path $dir -Directory)) { continue }
         Remove-EmptyTempDirs $dir
         try { [System.IO.Directory]::Delete($dir, $false) } catch {}
     }
@@ -30608,9 +30637,10 @@ $targets = @($env:TEMP, "$env:SystemRoot\Temp")
 $deletedCount = 0
 $deletedBytes = 0
 foreach ($path in $targets) {
-if (-not $path -or -not [System.IO.Directory]::Exists($path)) { continue }
+if (-not (Test-WmtTempPathSafe -Path $path -Directory) -or -not [System.IO.Directory]::Exists($path)) { continue }
 foreach ($file in Get-TempFilesStreamed $path) {
     try {
+        if (-not (Test-WmtTempPathSafe -Path $file)) { continue }
         $info = [System.IO.FileInfo]::new($file)
         $deletedBytes += $info.Length
         try { [System.IO.File]::SetAttributes($file, [System.IO.FileAttributes]::Normal) } catch {}
@@ -56047,14 +56077,26 @@ $btnDISMCheck.Add_Click({
         }
     }.GetNewClosure()
     Invoke-WmtUiBackgroundCommand -Name "DismCheckHealth" -Msg "Running DISM CheckHealth..." -SuppressResultLog -Sb {
-        $text = Invoke-WmtCliText -FilePath "dism" -Arguments "/online /cleanup-image /checkhealth" -TimeoutMs 120000
-        $message = "DISM Check completed."
+        $dismPath = Join-Path $env:SystemRoot 'System32\dism.exe'
+        $result = Invoke-WmtProcess -FilePath $dismPath -Arguments '/online /English /cleanup-image /checkhealth' -TimeoutMs 120000 -Encoding OEM -KillTree
+        if ($result.TimedOut) { throw 'DISM CheckHealth timed out.' }
+        if ($result.TerminationFailed -or $result.OutputReadTimedOut) { throw 'DISM CheckHealth did not finish cleanly.' }
+        if (-not [string]::IsNullOrWhiteSpace([string]$result.Error)) { throw "DISM CheckHealth failed: $($result.Error)" }
+        if ([int]$result.ExitCode -ne 0) { throw "DISM CheckHealth failed with exit code $($result.ExitCode). $($result.StdErr)" }
+        $text = (([string]$result.StdOut) + [Environment]::NewLine + ([string]$result.StdErr)).Trim()
+        if ([string]::IsNullOrWhiteSpace($text)) { throw 'DISM CheckHealth returned no output.' }
+
+        $message = 'DISM CheckHealth completed, but WMT could not determine the component-store state. Review the output below.'
         $needsRepair = $false
         if ($text -match "No component store corruption detected") { $message = "DISM Check: no corruption detected." }
         elseif ($text -match "component store is repairable") { $message = "DISM Check: corruption detected (repairable)."; $needsRepair = $true }
-        elseif ($text -match "The operation completed successfully") { $message = "DISM Check: completed successfully." }
+        elseif ($text -match "component store cannot be repaired") { $message = "DISM Check: corruption was detected, but DISM reports it cannot be repaired." }
         [PSCustomObject]@{ Text=[string]$text; Message=$message; NeedsRepair=$needsRepair }
-    } -OnComplete $done | Out-Null
+    } -OnComplete $done -OnError {
+        param($errorRecord)
+        $detail = if ($errorRecord -and $errorRecord.Exception) { [string]$errorRecord.Exception.Message } else { [string]$errorRecord }
+        Show-WmtMessageBox -Message ("DISM CheckHealth failed: $detail") -Title "DISM CheckHealth" -Image Error | Out-Null
+    } | Out-Null
 })
 $btnDISMRestore.Add_Click({
 
