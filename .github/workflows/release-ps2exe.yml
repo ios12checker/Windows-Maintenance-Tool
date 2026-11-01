@@ -480,6 +480,7 @@ jobs:
           $chocoVersion = ($parts[0..2] -join ".")
           $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
           $releaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+          $iconUrl = "https://raw.githack.com/$env:GITHUB_REPOSITORY/$env:RELEASE_TAG/PS2EXE/WMT.ico"
 
           $packageRoot = Join-Path $env:RUNNER_TEMP "wmt-chocolatey"
           $toolsDir = Join-Path $packageRoot "tools"
@@ -496,6 +497,7 @@ jobs:
               <owners>Chaython</owners>
               <copyright>Copyright (c) 2025-2026 ios12checker, Chaython Meredith</copyright>
               <projectUrl>https://github.com/Chaython/Windows-Maintenance-Tool</projectUrl>
+              <iconUrl>$iconUrl</iconUrl>
               <projectSourceUrl>https://github.com/Chaython/Windows-Maintenance-Tool</projectSourceUrl>
               <packageSourceUrl>https://github.com/Chaython/Windows-Maintenance-Tool</packageSourceUrl>
               <bugTrackerUrl>https://github.com/Chaython/Windows-Maintenance-Tool/issues</bugTrackerUrl>
