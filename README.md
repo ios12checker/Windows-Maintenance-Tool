@@ -1,6 +1,6 @@
 # Windows Maintenance Tool
 
-![Version](https://img.shields.io/badge/version-v6.8-green)
+![Version](https://img.shields.io/badge/version-v6.9-green)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-blue)
 ![PowerShell](https://img.shields.io/badge/PowerShell-5.1%2B-5391FE)
 ![License: MIT](https://img.shields.io/badge/license-MIT-blue)
@@ -92,14 +92,28 @@ Alternatively, with internet access, `gh attestation verify .\WindowsMaintenance
 
 ## Screenshot
 
-<img width="1902" height="1024" alt="image" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/5cf72184-d9f8-4fdc-a83e-9e2b897cfdb1" />
+<img width="1902" height="1024" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/5cf72184-d9f8-4fdc-a83e-9e2b897cfdb1" />
 
 
 
 <details open>
+<summary><strong>What's new in v6.9 (October 2026)</strong></summary>
+
+v6.9 focuses on startup responsiveness, lower background resource use, and compiled-app theming.
+
+- Improved native title-bar colors and theme handling for the compiled EXE.
+- Bounded background runspace concurrency and lowered worker thread priority to keep the interface responsive during scans.
+- Open runspace pools on demand and defer hidden-page warm-up so startup work does not compete with initial interaction.
+- Release parsed PyPI catalog data after processing to reduce retained memory.
+
+This is the **source version on `Main`**; the release executable and package-manager manifests are updated only when a new release is built and published.
+
+</details>
+
+<details>
 <summary><strong>What's new in v6.8 (October 2026)</strong></summary>
 
-v6.8 updates WMT's software catalogue, game import/recovery, system tweaks, driver maintenance, package logging, and background-operation safety. This is the **source version on `Main`**; the release executable and package-manager manifests are updated only when a new release is built and published.
+v6.8 updated WMT's software catalogue, game import/recovery, system tweaks, driver maintenance, package logging, and background-operation safety.
 
 ### Software catalogue and game libraries
 
