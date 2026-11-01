@@ -67,4 +67,4 @@ This Privacy Policy may be updated periodically to maintain compliance with repo
 
 ## 7. Contact & Issues
 If you have questions regarding this Privacy Policy or data security within WMT, please open an issue on the official project repository:
-* **Repository Issues:** `https://github.com/ios12checker/WMT-GUI/issues`
+* **Repository Issues:** `https://github.com/ios12checker/Windows-Maintenance-Tool/issues`
