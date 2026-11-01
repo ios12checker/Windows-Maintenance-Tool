@@ -3366,7 +3366,8 @@ jobs:
           $cbText = $els[$idx].Extent.Text
           $cbText = $cbText.Replace('[System.Windows.MessageBox]::Show(', 'MockShow(').Replace('[System.Windows.MessageBoxButton]::YesNo', '"YesNo"').Replace('[System.Windows.MessageBoxButton]::OK', '"OK"').Replace('[System.Windows.MessageBoxImage]::Question', '"Question"').Replace('[System.Windows.MessageBoxImage]::Warning', '"Warning"').Replace('[System.Windows.MessageBoxResult]::Yes', '"Yes"')
           $script:shown = @(); $script:started = @(); $script:answer = 'Yes'
-          function MockShow { param($a) $script:shown += [string]$a[0]; return $script:answer }
+          function MockShow { param($Message, $Title, $Button, $Image) $script:shown += [string]$Message; return $script:answer }
+          function Show-WmtMessageBox { param($Message, $Title, $Button, $Image) MockShow -Message $Message -Title $Title -Button $Button -Image $Image }
           function Start-Process { param($FilePath, $ArgumentList, $WindowStyle) $script:started += $ArgumentList }
           $callback = & ([scriptblock]::Create($cbText))
           function Summary($failed, $restart) { [pscustomobject]@{ WmtNetworkRepairSummary = $true; FailedSteps = $failed; RestartRecommended = $restart } }
