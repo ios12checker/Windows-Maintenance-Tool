@@ -29360,7 +29360,11 @@ if ($null -ne $RawOutput) {
     $rawOutput = @($RawOutput)
 }
 else {
-    $pnputilPath = Join-Path $env:SystemRoot 'System32\pnputil.exe'
+    $systemToolsDirectory = Join-Path $env:SystemRoot 'System32'
+    if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+        $systemToolsDirectory = Join-Path $env:SystemRoot 'Sysnative'
+    }
+    $pnputilPath = Join-Path $systemToolsDirectory 'pnputil.exe'
     $enumeration = Invoke-WmtProcess -FilePath $pnputilPath -Arguments '/enum-drivers' -TimeoutMs 60000 -Encoding OEM -KillTree
     if ($enumeration.TimedOut) { throw 'pnputil /enum-drivers timed out; driver inventory is unknown.' }
     if ($enumeration.TerminationFailed -or $enumeration.OutputReadTimedOut) { throw 'pnputil /enum-drivers did not finish cleanly; driver inventory is unknown.' }
@@ -30573,21 +30577,28 @@ $ErrorActionPreference = "Continue"
 $ProgressPreference = "Continue"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 
+$systemToolsDirectory = Join-Path $env:SystemRoot 'System32'
+if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    $systemToolsDirectory = Join-Path $env:SystemRoot 'Sysnative'
+}
+$sfcPath = Join-Path $systemToolsDirectory 'sfc.exe'
+$dismPath = Join-Path $systemToolsDirectory 'dism.exe'
+
 Write-Host ("WMT Quick Fix started at {0}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss")) -ForegroundColor Cyan
 Write-Host ""
 
 Write-Host "[1/4] Running SFC /SCANNOW..." -ForegroundColor Yellow
-sfc /scannow
+& $sfcPath /scannow
 $sfcCode = $LASTEXITCODE
 
 Write-Host ""
 Write-Host "[2/4] Running DISM /Online /Cleanup-Image /CheckHealth..." -ForegroundColor Yellow
-dism /online /cleanup-image /checkhealth
+& $dismPath /online /cleanup-image /checkhealth
 $dismCheckCode = $LASTEXITCODE
 
 Write-Host ""
 Write-Host "[3/4] Running DISM /Online /Cleanup-Image /RestoreHealth..." -ForegroundColor Yellow
-dism /online /cleanup-image /restorehealth
+& $dismPath /online /cleanup-image /restorehealth
 $dismRestoreCode = $LASTEXITCODE
 
 Write-Host ""
@@ -56077,7 +56088,11 @@ $btnDISMCheck.Add_Click({
         }
     }.GetNewClosure()
     Invoke-WmtUiBackgroundCommand -Name "DismCheckHealth" -Msg "Running DISM CheckHealth..." -SuppressResultLog -Sb {
-        $dismPath = Join-Path $env:SystemRoot 'System32\dism.exe'
+        $systemToolsDirectory = Join-Path $env:SystemRoot 'System32'
+        if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+            $systemToolsDirectory = Join-Path $env:SystemRoot 'Sysnative'
+        }
+        $dismPath = Join-Path $systemToolsDirectory 'dism.exe'
         $result = Invoke-WmtProcess -FilePath $dismPath -Arguments '/online /English /cleanup-image /checkhealth' -TimeoutMs 120000 -Encoding OEM -KillTree
         if ($result.TimedOut) { throw 'DISM CheckHealth timed out.' }
         if ($result.TerminationFailed -or $result.OutputReadTimedOut) { throw 'DISM CheckHealth did not finish cleanly.' }
