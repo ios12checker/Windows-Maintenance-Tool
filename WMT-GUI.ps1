@@ -28852,31 +28852,48 @@ $btnBrowse.Add_Click({
         }
     }.GetNewClosure())
 $btnDelete.Add_Click({
+        # Capture UI references in this event scope before creating the nested
+        # async callbacks. GetNewClosure on nested PowerShell event handlers can
+        # otherwise resolve the function-local window as $null.
+        $deleteDialog = $dialog
+        $deleteStatus = $lblStatus
+        $deleteButton = $btnDelete
+        $deleteGrid = $dg
+        $deleteRows = $rows
         $items = & $selected
         if ($items.Count -eq 0) { return }
-        if ((Show-WmtMessageBox -Owner $dialog -Message "Permanently delete $($items.Count) selected shortcut(s)?`n`nThis action is immediate." -Title "Confirm Delete" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
+        $selectedCount = @($items).Count
+        if ((Show-WmtMessageBox -Owner $deleteDialog -Message "Permanently delete $selectedCount selected shortcut(s)?`n`nThis action is immediate." -Title "Confirm Delete" -Button YesNo -Image Warning) -ne [System.Windows.MessageBoxResult]::Yes) { return }
         $deleteRecords = @($items | ForEach-Object { [PSCustomObject]@{ FullPath = [string]$_.FullPath; Shortcut = [string]$_.Shortcut } })
-        $btnDelete.IsEnabled = $false
+        $deleteButton.IsEnabled = $false
         $deleteComplete = {
             param($results)
-            if (-not $dialog.IsLoaded) { return }
-            $btnDelete.IsEnabled = $true
+            if (-not $deleteDialog -or -not $deleteDialog.IsLoaded) { return }
+            $deleteButton.IsEnabled = $true
             $result = @($results | Where-Object { $_ -and $_.PSObject.Properties['DeletedPaths'] } | Select-Object -Last 1)[0]
-            if (-not $result) { $lblStatus.Text = "Delete failed: no result returned."; return }
+            if (-not $result) { $deleteStatus.Text = "Delete failed: no result returned."; return }
             $deleted = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
             foreach ($path in @($result.DeletedPaths)) { [void]$deleted.Add([string]$path) }
-            foreach ($item in $items) { if ($deleted.Contains([string]$item.FullPath)) { [void]$rows.Remove($item) } }
-            $lblStatus.Text = "Deleted $($deleted.Count) of $($deleteRecords.Count) shortcut(s)."
+            $remainingRows = @($deleteRows | Where-Object { -not $deleted.Contains([string]$_.FullPath) })
+            $deleteRows.Clear()
+            foreach ($row in $remainingRows) { [void]$deleteRows.Add($row) }
+            # Rebind after replacing the collection contents so the DataGrid
+            # drops deleted rows immediately, even if its view missed a change
+            # notification during the asynchronous completion callback.
+            $deleteGrid.ItemsSource = $null
+            $deleteGrid.ItemsSource = $deleteRows
+            $deleteGrid.Items.Refresh()
+            $deleteStatus.Text = "Deleted $($deleted.Count) of $($deleteRecords.Count) shortcut(s)."
             foreach ($failure in @($result.Failures)) { Write-GuiLog "[Broken Shortcuts] $failure" }
             if (@($result.Failures).Count -gt 0) {
-                Show-WmtMessageBox -Owner $dialog -Message (@($result.Failures) -join "`r`n") -Title "Delete Failed" -Image Warning | Out-Null
+                Show-WmtMessageBox -Owner $deleteDialog -Message (@($result.Failures) -join "`r`n") -Title "Delete Failed" -Image Warning | Out-Null
             }
         }.GetNewClosure()
         $deleteError = {
             param($errorRecord)
-            if (-not $dialog.IsLoaded) { return }
-            $btnDelete.IsEnabled = $true
-            Show-WmtMessageBox -Owner $dialog -Message "Could not delete selected shortcuts:`n$($errorRecord.Exception.Message)" -Title "Delete Failed" -Image Error | Out-Null
+            if (-not $deleteDialog -or -not $deleteDialog.IsLoaded) { return }
+            $deleteButton.IsEnabled = $true
+            Show-WmtMessageBox -Owner $deleteDialog -Message "Could not delete selected shortcuts:`n$($errorRecord.Exception.Message)" -Title "Delete Failed" -Image Error | Out-Null
         }.GetNewClosure()
         $job = Invoke-WmtUiBackgroundCommand -Name ("BrokenShortcutDelete_" + [guid]::NewGuid().ToString("N")) `
             -Msg "Deleting selected shortcuts..." -ArgumentList (,$deleteRecords) -SuppressResultLog `
