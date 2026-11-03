@@ -8,6 +8,8 @@
 [![Sponsor Chaython](https://img.shields.io/badge/Sponsor-Chaython-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/Chaython)
 [![Sponsor ios12checker](https://img.shields.io/badge/Sponsor-ios12checker-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/ios12checker)
 
+Now available on winget! `winget install Chaython.WindowsMaintenanceTool`
+
 Windows Maintenance Tool (WMT) is an all-in-one Windows 10/11 maintenance GUI for updates, repairs, cleanup, drivers, networking, firewall management, system tuning, compression, software/game libraries, and diagnostics. It brings tasks that normally live across Settings, Control Panel, PowerShell, Task Scheduler, Registry Editor, Device Manager, and separate utilities into one interface.
 
 WMT is designed for technicians, power users, and everyday users who want visible status, searchable tools, confirmation prompts, backups where appropriate, and background work that avoids freezing the WPF interface.
