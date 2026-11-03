@@ -305,6 +305,19 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 # 2. HELPER FUNCTIONS
 # ==========================================
 
+# v6.9 moved ConvertTo-StorageSizeText into $script:MyDeviceCommonHelpers, which is
+# only injected into background runspaces, so GUI-scope callers could not resolve it
+# (Compact drive choices, network throughput labels). Restore a real definition here.
+function ConvertTo-StorageSizeText {
+    param([double]$Bytes)
+
+    if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ("{0:N0} MB" -f ($Bytes / 1MB)) }
+    if ($Bytes -gt 0) { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
+    return "0 B"
+}
+
 function Write-GuiLog {
 param($Msg)
 if ($script:LogBox) {
@@ -36162,6 +36175,7 @@ catch { & $failed $_ }
                                                                 <RowDefinition Height="Auto"/>
                                                                 <RowDefinition Height="Auto"/>
                                                                 <RowDefinition Height="Auto"/>
+                                                                <RowDefinition Height="Auto"/>
                                                             </Grid.RowDefinitions>
                                                             <Grid.ColumnDefinitions>
                                                                 <ColumnDefinition Width="*"/>
@@ -36173,6 +36187,7 @@ catch { & $failed $_ }
                                                             <Button Name="btnMyDeviceChkdsk" Grid.Row="1" Grid.Column="1" Content="CHKDSK" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Check all drives for filesystem errors"/>
                                                             <Button Name="btnMyDeviceDiskCleanup" Grid.Row="2" Grid.Column="0" Content="Disk Cleanup" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Open Windows Disk Cleanup"/>
                                                             <Button Name="btnMyDeviceTempCleanup" Grid.Row="2" Grid.Column="1" Content="Temp Files" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="Clean temporary files"/>
+                                                            <Button Name="btnMyDeviceDiskUsage" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Content="Disk Usage" Style="{StaticResource ActionBtn}" HorizontalAlignment="Stretch" ToolTip="WinDirStat-style disk usage analyzer for this PC: scan a drive or folder and see what is using the space."/>
                                                         </Grid>
                                                     </StackPanel>
                                                 </Grid>
@@ -36478,6 +36493,7 @@ catch { & $failed $_ }
                             <Button Name="btnTaskManager" Content="Task Scheduler" Style="{StaticResource ActionBtn}" ToolTip="Manage scheduled tasks"/>
                             <Button Name="btnCtxBuilder" Content="Context Menu" Style="{StaticResource ActionBtn}" ToolTip="Customize right-click menu"/>
                             <Button Name="btnUtilResetGPU" Content="Reset GPU" Style="{StaticResource WarningBtn}" ToolTip="Restart the GPU driver (Win+Ctrl+Shift+B). Screen will flash black briefly. Useful when the display freezes or artifacts appear."/>
+                            <Button Name="btnUtilDiskUsage" Content="Disk Usage" Style="{StaticResource ActionBtn}" ToolTip="WinDirStat-style disk usage analyzer: scan a folder or drive and see a treemap of what is using the space, with the largest folders, files, and file types."/>
                         </WrapPanel>
                     </StackPanel>
                 </Border>
@@ -37345,6 +37361,8 @@ $iconDeferTimer.Add_Tick({
     Set-ButtonIcon "btnUtilCompact" "M7,3H17A2,2 0 0,1 19,5V19A2,2 0 0,1 17,21H7A2,2 0 0,1 5,19V5A2,2 0 0,1 7,3M9,5V7H11V5H9M11,7V9H13V7H11M9,9V11H11V9H9M11,11V13H13V11H11M9,13V15H11V13H9M11,15V17H13V15H11M9,17V19H11V17H9Z" "Compact Compression" "Compress or decompress NTFS folders and drives with compact.exe"
     Set-ButtonIcon "btnMyDeviceTrim" "M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M12,4A6,6 0 0,0 6,10C6,13.31 8.69,16 12,16A6,6 0 0,0 18,10C18,6.69 15.31,4 12,4M12,14A4,4 0 0,1 8,10A4,4 0 0,1 12,6A4,4 0 0,1 16,10A4,4 0 0,1 12,14Z" "Trim" "Runs Trim/ReTrim or defrag optimization for storage drives"
     Set-ButtonIcon "btnMyDeviceDiskpart" "M4,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M4,8V18H20V8H4M6,10L10,14L6,18V15L8,14L6,13V10M11,16H18V18H11V16Z" "Disk Mgmt" "Opens Windows Disk Management"
+    Set-ButtonIcon "btnUtilDiskUsage" "M11,2V22C5.9,21.5 2,17.2 2,12C2,6.8 5.9,2.5 11,2M13,2V11H22C21.5,6.2 17.8,2.5 13,2M13,13V22C17.7,21.5 21.5,17.8 22,13H13Z" "Disk Usage" "Scan a folder or drive and map what is using the space (WinDirStat-style treemap)"
+    Set-ButtonIcon "btnMyDeviceDiskUsage" "M11,2V22C5.9,21.5 2,17.2 2,12C2,6.8 5.9,2.5 11,2M13,2V11H22C21.5,6.2 17.8,2.5 13,2M13,13V22C17.7,21.5 21.5,17.8 22,13H13Z" "Disk Usage" "Scan this PC's storage and map the biggest space consumers"
     Set-ButtonIcon "btnMyDeviceDriveBenchmark" "M12,16A2,2 0 0,0 14,14C14,13.62 13.9,13.27 13.71,12.97L17.71,8.97L16.29,7.56L12.29,11.55C12.19,11.53 12.1,11.5 12,11.5A2.5,2.5 0 0,0 9.5,14A2.5,2.5 0 0,0 12,16M12,3A11,11 0 0,1 23,14H21A9,9 0 0,0 12,5A9,9 0 0,0 3,14H1A11,11 0 0,1 12,3M5.64,7.64L7.05,9.05C6.4,9.71 5.92,10.54 5.67,11.46L3.74,10.94C4.11,9.68 4.77,8.55 5.64,7.64M18.36,7.64C19.23,8.55 19.89,9.68 20.26,10.94L18.33,11.46C18.08,10.54 17.6,9.71 16.95,9.05L18.36,7.64Z" "Benchmark" "Runs a quick read/write benchmark in the background"
     Set-ButtonIcon "btnMyDeviceExport" "M14,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V8L14,2M13,9V3.5L18.5,9H13M12,17L8,13H10.5V10H13.5V13H16L12,17Z" "Export" "Saves the current My Device details to the data folder"
     Set-ButtonIcon "btnUtilWinRE" "M12,2L3,6V12C3,17.55 6.84,22.74 12,24C17.16,22.74 21,17.55 21,12V6L12,2M11,7H13V14H11V7M11,16H13V18H11V16Z" "Check WinRE" "Check Windows Recovery Environment status"
@@ -39417,6 +39435,7 @@ $btnCleanupOneDrive = Get-Ctrl "btnCleanupOneDrive"
 $btnUtilSysInfo = Get-Ctrl "btnUtilSysInfo"
 $btnUtilTrim = Get-Ctrl "btnUtilTrim"
 $btnUtilCompact = Get-Ctrl "btnUtilCompact"
+$btnUtilDiskUsage = Get-Ctrl "btnUtilDiskUsage"
 $btnUtilWinRE = Get-Ctrl "btnUtilWinRE"
 $btnUtilRestoreMgr = Get-Ctrl "btnUtilRestoreMgr"
 $btnUtilStartupMgr = Get-Ctrl "btnUtilStartupMgr"
@@ -42145,6 +42164,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnUtilResetGPU"     "Reset GPU Driver"                "btnTabUtils"
     Add-SearchIndexEntry "btnUtilTrim"          "Trim SSD (Optimize)"             "btnTabUtils"
     Add-SearchIndexEntry "btnUtilCompact"       "Compact Compression Folder Drive XPRESS LZX NTFS" "btnTabUtils"
+    Add-SearchIndexEntry "btnUtilDiskUsage"     "Disk Usage Analyzer WinDirStat Treemap Largest Files Space" "btnTabUtils"
     Add-SearchIndexEntry "btnUtilWinRE"         "Check WinRE Status"              "btnTabUtils"
     Add-SearchIndexEntry "btnUtilRestoreMgr"    "System Restore Manager"          "btnTabUtils"
     Add-SearchIndexEntry "btnUtilStartupMgr"    "Startup Manager (4 Tabs)"        "btnTabUtils"
@@ -42184,6 +42204,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnMyDeviceGPUDriver" "Check GPU Drivers" "btnTabMyDevice"
     Add-SearchIndexEntry "btnMyDeviceTrim" "Trim / Defrag Storage Drives" "btnTabMyDevice"
     Add-SearchIndexEntry "btnMyDeviceDiskpart" "Open Disk Management" "btnTabMyDevice"
+    Add-SearchIndexEntry "btnMyDeviceDiskUsage" "Disk Usage Analyzer Storage Drives Treemap Space Map" "btnTabMyDevice"
     Add-SearchIndexEntry "btnMyDeviceDriveBenchmark" "Drive Benchmark" "btnTabMyDevice"
     Add-SearchIndexEntry "btnMyDeviceWinUpdate" "Check for Windows Updates" "btnTabMyDevice"
     Add-SearchIndexEntry "btnMyDeviceExport" "Export My Device Details" "btnTabMyDevice"
@@ -60789,6 +60810,1708 @@ function Show-WmtCompactManager {
     $dialog.ShowDialog() | Out-Null
 }
 
+# ==========================================
+# DISK USAGE ANALYZER (WinDirStat-style space map)
+# ==========================================
+# The analyzer scans a folder or drive on a background runspace, then draws a
+# squarified treemap of the biggest space consumers plus flat lists of the
+# largest folders, files, and file types. Nothing is deleted or moved without
+# an explicit confirmation.
+
+function Get-WmtDiskUsageParentPath {
+    param([string]$Path)
+
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $null }
+    $trimmed = $Path.TrimEnd('\')
+    if ($trimmed.Length -lt 2) { return $null }
+    # A volume root ("C:\") or a UNC share root ("\\server\share") has no parent.
+    if ($trimmed -match '^[A-Za-z]:$') { return $null }
+    if ($trimmed -match '^\\\\[^\\]+\\[^\\]+$') { return $null }
+
+    $index = $trimmed.LastIndexOf('\')
+    if ($index -le 0) { return $null }
+    $parent = $trimmed.Substring(0, $index)
+    if ($parent -match '^[A-Za-z]:$') { return ($parent + '\') }
+    return $parent
+}
+
+function ConvertTo-WmtDiskUsageSize {
+    param([double]$Bytes)
+
+    if ($Bytes -ge 1TB) { return ("{0:N2} TB" -f ($Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ("{0:N1} GB" -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ("{0:N0} MB" -f ($Bytes / 1MB)) }
+    if ($Bytes -gt 0) { return ("{0:N0} KB" -f ($Bytes / 1KB)) }
+    return "0 B"
+}
+function Get-WmtDiskUsageDriveChoices {
+    $result = [System.Collections.Generic.List[object]]::new()
+
+    try {
+        foreach ($volume in @(Get-Volume -ErrorAction Stop |
+                Where-Object { $null -ne $_.DriveLetter -and [string]$_.DriveType -eq 'Fixed' } |
+                Sort-Object DriveLetter)) {
+            $drivePath = ('{0}:\' -f $volume.DriveLetter)
+            $label = if ([string]::IsNullOrWhiteSpace([string]$volume.FileSystemLabel)) { '(No label)' } else { [string]$volume.FileSystemLabel }
+            $sizeText = if ($volume.Size -gt 0) { ConvertTo-WmtDiskUsageSize ([double]$volume.Size) } else { 'unknown size' }
+            $freeText = if ($volume.SizeRemaining -gt 0) { ConvertTo-WmtDiskUsageSize ([double]$volume.SizeRemaining) } else { 'unknown' }
+            $result.Add([PSCustomObject]@{
+                    Path    = $drivePath
+                    Display = ('{0}  {1}  -  {2} free of {3}' -f $drivePath, $label, $freeText, $sizeText)
+                })
+        }
+    }
+    catch {}
+
+    if ($result.Count -eq 0) {
+        try {
+            foreach ($disk in @(Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -ErrorAction Stop | Sort-Object DeviceID)) {
+                $drivePath = ('{0}\' -f $disk.DeviceID)
+                $label = if ([string]::IsNullOrWhiteSpace([string]$disk.VolumeName)) { '(No label)' } else { [string]$disk.VolumeName }
+                $sizeText = if ($disk.Size -gt 0) { ConvertTo-WmtDiskUsageSize ([double]$disk.Size) } else { 'unknown size' }
+                $freeText = if ($disk.FreeSpace -gt 0) { ConvertTo-WmtDiskUsageSize ([double]$disk.FreeSpace) } else { 'unknown' }
+                $result.Add([PSCustomObject]@{
+                        Path    = $drivePath
+                        Display = ('{0}  {1}  -  {2} free of {3}' -f $drivePath, $label, $freeText, $sizeText)
+                    })
+            }
+        }
+        catch {}
+    }
+
+    return @($result)
+}
+
+function New-WmtDiskUsageTree {
+    param(
+        $Dirs,
+        $Files,
+        [string]$RootPath,
+        [long]$RootBytes
+    )
+
+    function New-UsageNode {
+        param([string]$Path, [long]$Bytes, [int]$FileCount, [bool]$IsDir, [string]$Ext)
+        # GetFileName rather than Split-Path: brackets and other wildcard
+        # characters are common in real Windows folder names.
+        $leaf = [System.IO.Path]::GetFileName($Path.TrimEnd('\'))
+        if ([string]::IsNullOrWhiteSpace($leaf)) { $leaf = $Path }
+        return @{
+            Name        = [string]$leaf
+            Path        = [string]$Path
+            Bytes       = [long]$Bytes
+            Files       = [int]$FileCount
+            IsDir       = [bool]$IsDir
+            IsSynthetic = $false
+            Ext         = [string]$Ext
+            Children    = [System.Collections.Generic.List[object]]::new()
+        }
+    }
+
+    $nodes = @{}
+    $rootNode = New-UsageNode -Path $RootPath -Bytes $RootBytes -FileCount 0 -IsDir $true -Ext ''
+    $nodes[$RootPath] = $rootNode
+
+    foreach ($dir in @($Dirs)) {
+        $dirPath = [string]$dir.Path
+        if ([string]::IsNullOrWhiteSpace($dirPath) -or $nodes.ContainsKey($dirPath)) { continue }
+        $nodes[$dirPath] = New-UsageNode -Path $dirPath -Bytes ([long]$dir.Bytes) -FileCount ([int]$dir.Files) -IsDir $true -Ext ''
+    }
+
+    # Attach each folder to its nearest known parent so the tree stays connected
+    # even when small folders were pruned out of the scan result.
+    foreach ($dir in @($Dirs)) {
+        $dirPath = [string]$dir.Path
+        if ($dirPath -ieq $RootPath) { continue }
+        if (-not $nodes.ContainsKey($dirPath)) { continue }
+
+        $parentPath = Get-WmtDiskUsageParentPath $dirPath
+        $guard = 0
+        while ($parentPath -and -not $nodes.ContainsKey($parentPath) -and $guard -lt 32) {
+            $parentPath = Get-WmtDiskUsageParentPath $parentPath
+            $guard++
+        }
+
+        if ($parentPath -and $nodes.ContainsKey($parentPath) -and -not ($parentPath -ieq $dirPath)) {
+            [void]$nodes[$parentPath].Children.Add($nodes[$dirPath])
+        }
+        else {
+            [void]$rootNode.Children.Add($nodes[$dirPath])
+        }
+    }
+
+    # Only the largest files are kept by the scanner; they hang off whichever
+    # folder in the pruned tree contains them.
+    foreach ($file in @($Files)) {
+        $filePath = [string]$file.Path
+        if ([string]::IsNullOrWhiteSpace($filePath)) { continue }
+
+        $parentPath = Get-WmtDiskUsageParentPath $filePath
+        $guard = 0
+        while ($parentPath -and -not $nodes.ContainsKey($parentPath) -and $guard -lt 32) {
+            $parentPath = Get-WmtDiskUsageParentPath $parentPath
+            $guard++
+        }
+        if (-not $parentPath -or -not $nodes.ContainsKey($parentPath)) { continue }
+
+        $fileNode = New-UsageNode -Path $filePath -Bytes ([long]$file.Bytes) -FileCount 1 -IsDir $false -Ext ([string]$file.Ext)
+        [void]$nodes[$parentPath].Children.Add($fileNode)
+    }
+
+    # Everything not tracked individually becomes one "other items" block so the
+    # treemap always adds up to the real folder size.
+    $items = [System.Collections.Generic.List[object]]::new()
+    foreach ($key in @($nodes.Keys)) {
+        $node = $nodes[$key]
+
+        if ([bool]$node.IsDir) {
+            $childBytes = [long]0
+            $childFiles = 0
+            foreach ($child in @($node.Children)) {
+                $childBytes += [long]$child.Bytes
+                if ([bool]$child.IsDir) { $childFiles += [int]$child.Files } else { $childFiles++ }
+            }
+
+            $rest = [long]$node.Bytes - $childBytes
+            if ($rest -gt 0) {
+                $restCount = [int]$node.Files - $childFiles
+                if ($restCount -lt 0) { $restCount = 0 }
+                $restLabel = if ($restCount -gt 0) { ('{0:N0} other items' -f $restCount) } else { 'Other / not scanned' }
+                [void]$node.Children.Add(@{
+                        Name        = $restLabel
+                        Path        = [string]$node.Path
+                        Bytes       = [long]$rest
+                        Files       = [int]$restCount
+                        IsDir       = $false
+                        IsSynthetic = $true
+                        Ext         = '(other)'
+                        Children    = [System.Collections.Generic.List[object]]::new()
+                    })
+            }
+
+            $node.Children = @($node.Children | Sort-Object -Property @{ Expression = { [long]$_.Bytes } } -Descending)
+        }
+
+        if ($key -ine $RootPath) {
+            $items.Add([PSCustomObject]@{
+                    Name        = [string]$node.Name
+                    Path        = [string]$node.Path
+                    Bytes       = [long]$node.Bytes
+                    Files       = [int]$node.Files
+                    IsDir       = [bool]$node.IsDir
+                    IsSynthetic = $false
+                    Ext         = ''
+                })
+        }
+    }
+
+    foreach ($file in @($Files)) {
+        $filePath = [string]$file.Path
+        $leaf = [System.IO.Path]::GetFileName($filePath.TrimEnd('\'))
+        $items.Add([PSCustomObject]@{
+                Name        = [string]$leaf
+                Path        = [string]$filePath
+                Bytes       = [long]$file.Bytes
+                Files       = 1
+                IsDir       = $false
+                IsSynthetic = $false
+                Ext         = [string]$file.Ext
+            })
+    }
+
+    return [PSCustomObject]@{
+        Root  = $rootNode
+        Items = $items.ToArray()
+    }
+}
+
+function Get-WmtSquarifiedRects {
+    param(
+        [double[]]$Values,
+        [double]$X,
+        [double]$Y,
+        [double]$Width,
+        [double]$Height
+    )
+
+    # Classic squarified treemap layout: keep rows as square as possible while
+    # filling the available rectangle. Emits one rect per input value (by index).
+    $total = 0.0
+    foreach ($value in $Values) { $total += $value }
+    if ($total -le 0 -or $Width -le 0 -or $Height -le 0) { return }
+
+    $scale = ($Width * $Height) / $total
+    $areas = [double[]]::new($Values.Count)
+    for ($i = 0; $i -lt $Values.Count; $i++) {
+        $area = [double]$Values[$i] * $scale
+        if ($area -lt 0.05) { $area = 0.05 }
+        $areas[$i] = $area
+    }
+
+    $cursorX = $X
+    $cursorY = $Y
+    $freeWidth = $Width
+    $freeHeight = $Height
+    $index = 0
+
+    while ($index -lt $areas.Length) {
+        $shortSide = [Math]::Min($freeWidth, $freeHeight)
+        if ($shortSide -le 0.01) { break }
+
+        $rowSum = 0.0
+        $rowMin = [double]::MaxValue
+        $rowMax = 0.0
+        $rowCount = 0
+        $bestWorst = [double]::MaxValue
+
+        while (($index + $rowCount) -lt $areas.Length) {
+            $area = $areas[$index + $rowCount]
+            $nextSum = $rowSum + $area
+            $nextMin = [Math]::Min($rowMin, $area)
+            $nextMax = [Math]::Max($rowMax, $area)
+            $sideSquared = $shortSide * $shortSide
+            $worst = [Math]::Max(($sideSquared * $nextMax) / ($nextSum * $nextSum), ($nextSum * $nextSum) / ($sideSquared * $nextMin))
+            if ($rowCount -eq 0 -or $worst -le $bestWorst) {
+                $rowSum = $nextSum
+                $rowMin = $nextMin
+                $rowMax = $nextMax
+                $bestWorst = $worst
+                $rowCount++
+            }
+            else { break }
+        }
+
+        if ($rowCount -eq 0) { break }
+
+        if ($freeWidth -ge $freeHeight) {
+            $thickness = $rowSum / $freeHeight
+            if ($thickness -le 0) { $thickness = 1 }
+            $offset = 0.0
+            for ($k = 0; $k -lt $rowCount; $k++) {
+                $area = $areas[$index + $k]
+                $rectHeight = $area / $thickness
+                [PSCustomObject]@{ Index = ($index + $k); X = $cursorX; Y = ($cursorY + $offset); W = $thickness; H = $rectHeight }
+                $offset += $rectHeight
+            }
+            $cursorX += $thickness
+            $freeWidth -= $thickness
+        }
+        else {
+            $thickness = $rowSum / $freeWidth
+            if ($thickness -le 0) { $thickness = 1 }
+            $offset = 0.0
+            for ($k = 0; $k -lt $rowCount; $k++) {
+                $area = $areas[$index + $k]
+                $rectWidth = $area / $thickness
+                [PSCustomObject]@{ Index = ($index + $k); X = ($cursorX + $offset); Y = $cursorY; W = $rectWidth; H = $thickness }
+                $offset += $rectWidth
+            }
+            $cursorY += $thickness
+            $freeHeight -= $thickness
+        }
+
+        $index += $rowCount
+    }
+}
+
+function Add-WmtTreemapShapes {
+    param(
+        [System.Windows.Controls.Canvas]$Canvas,
+        $Node,
+        [double]$X,
+        [double]$Y,
+        [double]$Width,
+        [double]$Height,
+        [int]$Depth,
+        [hashtable]$State
+    )
+
+    if ($State.Count -ge $State.MaxShapes) { return }
+    if ($Width -lt 2 -or $Height -lt 2) { return }
+
+    $children = @($Node.Children)
+    if ($children.Count -eq 0) { return }
+
+    $values = [double[]]::new($children.Count)
+    for ($i = 0; $i -lt $children.Count; $i++) {
+        $childBytes = [double]$children[$i].Bytes
+        if ($childBytes -le 0) { $childBytes = 0.01 }
+        $values[$i] = $childBytes
+    }
+
+    $rects = @(Get-WmtSquarifiedRects -Values $values -X $X -Y $Y -Width $Width -Height $Height)
+
+    foreach ($rect in $rects) {
+        if ($State.Count -ge $State.MaxShapes) { return }
+        if ($rect.Index -lt 0 -or $rect.Index -ge $children.Count) { continue }
+
+        $child = $children[$rect.Index]
+        $left = [Math]::Max($X, $rect.X)
+        $top = [Math]::Max($Y, $rect.Y)
+        $right = [Math]::Min($X + $Width, $rect.X + $rect.W)
+        $bottom = [Math]::Min($Y + $Height, $rect.Y + $rect.H)
+        $rectWidth = $right - $left
+        $rectHeight = $bottom - $top
+        if ($rectWidth -le 0.6 -or $rectHeight -le 0.6) { continue }
+
+        $childChildren = @($child.Children)
+        $canNest = ($Depth -lt $State.MaxDepth) -and ($childChildren.Count -gt 0) -and ($rectWidth -ge 14) -and ($rectHeight -ge 10)
+        if ($canNest) {
+            Add-WmtTreemapShapes -Canvas $Canvas -Node $child -X ($left + 1) -Y ($top + 1) -Width ($rectWidth - 2) -Height ($rectHeight - 2) -Depth ($Depth + 1) -State $State
+            continue
+        }
+
+        $colorKey = 'other'
+        if ([bool]$child.IsDir) { $colorKey = 'dir' }
+        elseif (-not [string]::IsNullOrWhiteSpace([string]$child.Ext) -and $State.ExtColors.ContainsKey([string]$child.Ext)) {
+            $colorKey = [string]$child.Ext
+        }
+        elseif ([bool]$child.IsSynthetic) { $colorKey = 'other' }
+
+        if (-not $State.Brushes.ContainsKey($colorKey)) {
+            $State.Brushes[$colorKey] = New-WmtBrush (Get-WmtDiskUsageColor -Key $colorKey -ExtColors $State.ExtColors)
+        }
+
+        $shape = [System.Windows.Shapes.Rectangle]::new()
+        $shape.Width = $rectWidth
+        $shape.Height = $rectHeight
+        $shape.Fill = $State.Brushes[$colorKey]
+        $shape.StrokeThickness = 0
+        $shape.Tag = $child
+        $shape.ToolTip = ('{0}{1}{2}{3}{4}' -f [string]$child.Name, [Environment]::NewLine, (ConvertTo-WmtDiskUsageSize ([double]$child.Bytes)), [Environment]::NewLine, [string]$child.Path)
+        [System.Windows.Controls.Canvas]::SetLeft($shape, $left)
+        [System.Windows.Controls.Canvas]::SetTop($shape, $top)
+        [void]$Canvas.Children.Add($shape)
+        $State.Count++
+
+        if ($State.ShowLabels -and $State.Labels -lt 130 -and $rectWidth -ge 62 -and $rectHeight -ge 22) {
+            $label = [System.Windows.Controls.TextBlock]::new()
+            $label.Text = [string]$child.Name
+            $label.FontSize = 10
+            $label.Width = [Math]::Max(10, $rectWidth - 6)
+            $label.TextTrimming = 'CharacterEllipsis'
+            $label.TextWrapping = 'NoWrap'
+            $label.IsHitTestVisible = $false
+            $label.Foreground = $State.LabelBrush
+            [System.Windows.Controls.Canvas]::SetLeft($label, ($left + 3))
+            [System.Windows.Controls.Canvas]::SetTop($label, ($top + 2))
+            [void]$Canvas.Children.Add($label)
+            $State.Labels++
+        }
+    }
+}
+
+function Get-WmtDiskUsageColor {
+    param([string]$Key, [hashtable]$ExtColors)
+
+    if ($Key -eq 'dir') { return '#42506A' }
+    if ($Key -eq 'other') { return '#5B6474' }
+    if ($ExtColors -and $ExtColors.ContainsKey($Key)) { return [string]$ExtColors[$Key] }
+    return '#6B7280'
+}
+
+# Compiled scanner source: warmed up when the dialog opens, then reused by every
+# scan in this process. Kept at script scope so the warm-up and the scan worker
+# both get the exact same text.
+$script:WmtDiskUsageScannerSource = @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+
+namespace Wmt.DiskUsage
+{
+    public sealed class ScanRow
+    {
+        public string Path;
+        public long Bytes;
+        public int Files;
+        public string Ext;
+    }
+
+    public sealed class ExtRow
+    {
+        public string Name;
+        public long Bytes;
+        public int Count;
+    }
+
+    public sealed class ScanResult
+    {
+        public string Root;
+        public long TotalBytes;
+        public long FileCount;
+        public int DirCount;
+        public int Skipped;
+        public int Warnings;
+        public bool Cancelled;
+        public int ElapsedMs;
+        public ScanRow[] Dirs;
+        public ScanRow[] Files;
+        public ExtRow[] Extensions;
+    }
+
+    // Single-pass depth-first walk: each folder is opened exactly once and both
+    // files and subfolders are taken from that one enumeration, which halves the
+    // directory syscalls compared to enumerating files and folders separately.
+    public static class Scanner
+    {
+        private const long MinRowBytes = 1048576;
+
+        private sealed class Frame
+        {
+            public string Path;
+            public long Bytes;
+            public int Files;
+            public List<DirectoryInfo> SubDirs;
+            public int Cursor;
+        }
+
+        public static ScanResult Scan(string rootPath, Hashtable state, int topFileLimit, double dirThresholdRatio, int dirLimit)
+        {
+            if (topFileLimit < 1) { topFileLimit = 400; }
+            if (dirLimit < 100) { dirLimit = 100; }
+
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            string root = NormalizeRoot(rootPath);
+
+            long totalFiles = 0;
+            long totalBytes = 0;
+            int folderCount = 0;
+            int warnings = 0;
+            int skipped = 0;
+            bool cancelled = false;
+
+            List<ScanRow> folderRows = new List<ScanRow>();
+            List<ScanRow> largest = new List<ScanRow>();
+            long folderRowMin = MinRowBytes;
+            long largestMin = MinRowBytes;
+            Dictionary<string, long> extBytes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, int> extCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            Stack<Frame> stack = new Stack<Frame>();
+
+            // The scan root is opened exactly like any other folder.
+            Frame rootFrame = new Frame();
+            rootFrame.Path = string.Empty;
+            List<DirectoryInfo> rootChildren = new List<DirectoryInfo>();
+            try { rootChildren.Add(new DirectoryInfo(root)); }
+            catch { warnings++; }
+            rootFrame.SubDirs = rootChildren;
+            rootFrame.Cursor = 0;
+            stack.Push(rootFrame);
+
+            int tick = 0;
+
+            while (stack.Count > 0)
+            {
+                if ((tick & 0x3FF) == 0 && ReadCancel(state))
+                {
+                    cancelled = true;
+                    break;
+                }
+
+                Frame current = stack.Peek();
+
+                if (current.Cursor >= current.SubDirs.Count)
+                {
+                    stack.Pop();
+                    if (stack.Count > 0)
+                    {
+                        Frame parent = stack.Peek();
+                        parent.Bytes += current.Bytes;
+                        parent.Files += current.Files;
+                    }
+
+                    if (current.Path.Length > 0 &&
+                        !string.Equals(current.Path, root, StringComparison.OrdinalIgnoreCase) &&
+                        current.Bytes >= folderRowMin)
+                    {
+                        ScanRow row = new ScanRow();
+                        row.Path = current.Path;
+                        row.Bytes = current.Bytes;
+                        row.Files = current.Files;
+                        folderRows.Add(row);
+                        if (folderRows.Count >= dirLimit * 3)
+                        {
+                            TrimRows(folderRows, dirLimit, ref folderRowMin);
+                        }
+                    }
+                    continue;
+                }
+
+                DirectoryInfo child = current.SubDirs[current.Cursor];
+                current.Cursor++;
+
+                bool isReparse;
+                try { isReparse = (child.Attributes & FileAttributes.ReparsePoint) != 0; }
+                catch { isReparse = true; }
+                if (isReparse && current.Path.Length > 0)
+                {
+                    skipped++;
+                    continue;
+                }
+
+                string childPath;
+                try { childPath = child.FullName; }
+                catch { warnings++; continue; }
+
+                long frameBytes = 0;
+                int frameFiles = 0;
+                List<DirectoryInfo> frameDirs = new List<DirectoryInfo>();
+                folderCount++;
+
+                // One pass over the folder: sizes for files, queue for subfolders.
+                try
+                {
+                    foreach (FileSystemInfo entry in child.EnumerateFileSystemInfos())
+                    {
+                        DirectoryInfo asDir = entry as DirectoryInfo;
+                        if (asDir != null)
+                        {
+                            frameDirs.Add(asDir);
+                            continue;
+                        }
+
+                        FileInfo file = entry as FileInfo;
+                        if (file == null) { continue; }
+
+                        long length = 0;
+                        try { length = file.Length; }
+                        catch { continue; }
+
+                        frameBytes += length;
+                        frameFiles++;
+                        totalFiles++;
+                        totalBytes += length;
+                        tick++;
+
+                        string ext = file.Extension;
+                        if (string.IsNullOrEmpty(ext)) { ext = "(none)"; }
+
+                        long knownBytes;
+                        if (extBytes.TryGetValue(ext, out knownBytes)) { extBytes[ext] = knownBytes + length; }
+                        else { extBytes[ext] = length; }
+
+                        int knownCount;
+                        if (extCounts.TryGetValue(ext, out knownCount)) { extCounts[ext] = knownCount + 1; }
+                        else { extCounts[ext] = 1; }
+
+                        if (length >= largestMin)
+                        {
+                            ScanRow fileRow = new ScanRow();
+                            fileRow.Path = file.FullName;
+                            fileRow.Bytes = length;
+                            fileRow.Ext = ext;
+                            largest.Add(fileRow);
+                            if (largest.Count >= topFileLimit * 3)
+                            {
+                                TrimRows(largest, topFileLimit, ref largestMin);
+                            }
+                        }
+                    }
+                }
+                catch { warnings++; }
+
+                Frame frame = new Frame();
+                frame.Path = childPath;
+                frame.Bytes = frameBytes;
+                frame.Files = frameFiles;
+                frame.SubDirs = frameDirs;
+                frame.Cursor = 0;
+                stack.Push(frame);
+
+                if (state != null && (tick & 0x7FF) == 0)
+                {
+                    state["Files"] = totalFiles;
+                    state["Bytes"] = totalBytes;
+                    state["Dirs"] = folderCount;
+                    state["Dir"] = childPath;
+                }
+            }
+
+            if (state != null)
+            {
+                state["Files"] = totalFiles;
+                state["Bytes"] = totalBytes;
+                state["Dirs"] = folderCount;
+                state["Done"] = true;
+            }
+
+            long rootTotal = rootFrame.Bytes;
+            if (totalBytes > rootTotal) { rootTotal = totalBytes; }
+
+            long threshold = Math.Max(MinRowBytes, (long)(rootTotal * dirThresholdRatio));
+
+            folderRows.Sort(CompareDescending);
+            List<ScanRow> dirs = new List<ScanRow>();
+            ScanRow rootRow = new ScanRow();
+            rootRow.Path = root;
+            rootRow.Bytes = rootTotal;
+            rootRow.Files = rootFrame.Files;
+            dirs.Add(rootRow);
+            for (int i = 0; i < folderRows.Count && dirs.Count < dirLimit; i++)
+            {
+                if (folderRows[i].Bytes < threshold) { continue; }
+                dirs.Add(folderRows[i]);
+            }
+
+            List<ExtRow> extSorted = new List<ExtRow>();
+            foreach (KeyValuePair<string, long> pair in extBytes)
+            {
+                int count;
+                extCounts.TryGetValue(pair.Key, out count);
+                ExtRow row = new ExtRow();
+                row.Name = pair.Key;
+                row.Bytes = pair.Value;
+                row.Count = count;
+                extSorted.Add(row);
+            }
+            extSorted.Sort(delegate (ExtRow a, ExtRow b) { return b.Bytes.CompareTo(a.Bytes); });
+
+            List<ExtRow> extList = new List<ExtRow>();
+            long otherBytes = 0;
+            int otherCount = 0;
+            for (int i = 0; i < extSorted.Count; i++)
+            {
+                if (i < 40) { extList.Add(extSorted[i]); }
+                else
+                {
+                    otherBytes += extSorted[i].Bytes;
+                    otherCount += extSorted[i].Count;
+                }
+            }
+            if (otherBytes > 0)
+            {
+                ExtRow other = new ExtRow();
+                other.Name = "(other)";
+                other.Bytes = otherBytes;
+                other.Count = otherCount;
+                extList.Add(other);
+            }
+
+            largest.Sort(CompareDescending);
+            if (largest.Count > topFileLimit)
+            {
+                largest.RemoveRange(topFileLimit, largest.Count - topFileLimit);
+            }
+
+            stopwatch.Stop();
+
+            ScanResult result = new ScanResult();
+            result.Root = root;
+            result.TotalBytes = rootTotal;
+            result.FileCount = totalFiles;
+            result.DirCount = folderCount;
+            result.Skipped = skipped;
+            result.Warnings = warnings;
+            result.Cancelled = cancelled;
+            result.ElapsedMs = (int)stopwatch.ElapsedMilliseconds;
+            result.Dirs = dirs.ToArray();
+            result.Files = largest.ToArray();
+            result.Extensions = extList.ToArray();
+            return result;
+        }
+
+        private static bool ReadCancel(Hashtable state)
+        {
+            if (state == null) { return false; }
+            object value = state["Cancel"];
+            return value is bool && (bool)value;
+        }
+
+        private static int CompareDescending(ScanRow a, ScanRow b)
+        {
+            return b.Bytes.CompareTo(a.Bytes);
+        }
+
+        private static void TrimRows(List<ScanRow> rows, int limit, ref long minimum)
+        {
+            rows.Sort(CompareDescending);
+            if (rows.Count > limit) { rows.RemoveRange(limit, rows.Count - limit); }
+            if (rows.Count > 0)
+            {
+                long smallest = rows[rows.Count - 1].Bytes;
+                minimum = smallest > MinRowBytes ? smallest : MinRowBytes;
+            }
+        }
+
+        private static string NormalizeRoot(string path)
+        {
+            string root = path;
+            try { root = Path.GetFullPath(path); }
+            catch { }
+            bool isDriveRoot = root.Length == 3 && root[1] == ':' && root[2] == '\\';
+            if (!isDriveRoot) { root = root.TrimEnd('\\'); }
+            if (root.Length == 2 && root[1] == ':') { root += "\\"; }
+            return root;
+        }
+    }
+}
+
+'@
+
+function Show-WmtDiskUsageAnalyzer {
+    param([string]$InitialPath = '')
+
+    [xml]$usageXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Disk Usage Analyzer" Width="1200" Height="860" MinWidth="980" MinHeight="680"
+        ResizeMode="CanResizeWithGrip" WindowStartupLocation="CenterOwner"
+        Background="{DynamicResource BgDark}" Foreground="{DynamicResource TextPrimary}"
+        FontFamily="Segoe UI Variable Display, Segoe UI, Arial" FontSize="13">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="2.4*" MinHeight="160"/>
+            <RowDefinition Height="7"/>
+            <RowDefinition Height="1.4*" MinHeight="140"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Text="Disk Usage Analyzer" FontSize="22" FontWeight="SemiBold"/>
+            <TextBlock Text="WinDirStat-style space map. Scan a folder or drive to see a treemap of what is using the space, plus the largest folders, files, and file types."
+                       Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,5,0,0"/>
+        </StackPanel>
+
+        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox Name="txtUsagePath" Grid.Column="0" MinHeight="32" VerticalContentAlignment="Center" Margin="0,0,8,0"
+                         ToolTip="Folder or drive to analyze"/>
+                <ComboBox Name="cmbUsageDrive" Grid.Column="1" Width="215" MinHeight="32" Margin="0,0,8,0"
+                          ToolTip="Pick a local drive"/>
+                <Button Name="btnUsageBrowse" Grid.Column="2" Content="Browse..." Width="92" Margin="0,0,8,0"/>
+                <Button Name="btnUsageScan" Grid.Column="3" Content="Scan" Width="92" Margin="0,0,8,0"
+                        Background="{DynamicResource Success}" Foreground="{DynamicResource SuccessText}"/>
+                <Button Name="btnUsageStop" Grid.Column="4" Content="Stop" Width="78" IsEnabled="False"/>
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <ProgressBar Name="prgUsage" Grid.Column="0" Width="180" Height="6" Minimum="0" Maximum="100"
+                         IsIndeterminate="False" Visibility="Collapsed" VerticalAlignment="Center" Margin="0,0,12,0"/>
+            <TextBlock Name="txtUsageStatus" Grid.Column="1" Text="Pick a folder or drive, then press Scan."
+                       Foreground="{DynamicResource TextSecondary}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+            <TextBlock Name="txtUsageSelection" Grid.Column="2" Text="" MaxWidth="430" Margin="12,0,0,0"
+                       Foreground="{DynamicResource Accent}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+        </Grid>
+
+        <Border Grid.Row="3" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="2">
+            <Grid>
+                <Canvas Name="cvTreemap" ClipToBounds="True" Background="Transparent"/>
+                <TextBlock Name="txtTreemapHint" Text="The space map appears here after a scan."
+                           HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{DynamicResource TextMuted}"/>
+            </Grid>
+        </Border>
+
+        <GridSplitter Grid.Row="4" Height="7" HorizontalAlignment="Stretch" VerticalAlignment="Center"
+                      Background="Transparent" ResizeDirection="Rows" ResizeBehavior="PreviousAndNext"/>
+
+        <Border Grid.Row="5" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+                <Grid Grid.Row="0" Margin="0,0,0,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="Auto"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <ComboBox Name="cmbUsageView" Grid.Column="0" Width="150" MinHeight="28" Margin="0,0,8,0">
+                        <ComboBoxItem Content="All items" Tag="all" IsSelected="True"/>
+                        <ComboBoxItem Content="Folders only" Tag="folders"/>
+                        <ComboBoxItem Content="Files only" Tag="files"/>
+                    </ComboBox>
+                    <TextBox Name="txtUsageFilter" Grid.Column="1" Width="240" MinHeight="28" VerticalContentAlignment="Center" Margin="0,0,10,0"
+                             ToolTip="Filter the list by name or path"/>
+                    <TextBlock Name="txtUsageCount" Grid.Column="2" Text="" Foreground="{DynamicResource TextMuted}" VerticalAlignment="Center"/>
+                </Grid>
+                <DataGrid Grid.Row="1" Name="dgUsage" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                          CanUserDeleteRows="False" SelectionMode="Single" HeadersVisibility="Column"
+                          GridLinesVisibility="Horizontal" MinHeight="110">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="1.5*" SortMemberPath="Name"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" Width="95" SortMemberPath="Bytes"/>
+                        <DataGridTextColumn Header="Share" Binding="{Binding ShareText}" Width="80" SortMemberPath="Bytes"/>
+                        <DataGridTextColumn Header="Items" Binding="{Binding ItemsText}" Width="75" SortMemberPath="Files"/>
+                        <DataGridTextColumn Header="Folder" Binding="{Binding FolderText}" Width="2.4*" SortMemberPath="FolderText"/>
+                    </DataGrid.Columns>
+                </DataGrid>
+            </Grid>
+        </Border>
+
+        <WrapPanel Grid.Row="6" Name="pnlUsageLegend" Orientation="Horizontal" Margin="0,8,0,0"/>
+
+        <StackPanel Grid.Row="7" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+            <Button Name="btnUsageOpen" Content="Open Location" MinWidth="120" Margin="0,0,8,0" IsEnabled="False"/>
+            <Button Name="btnUsageRecycle" Content="Recycle Bin" MinWidth="110" Margin="0,0,8,0"
+                    Background="{DynamicResource Warning}" Foreground="{DynamicResource WarningText}" IsEnabled="False"/>
+            <Button Name="btnUsageExport" Content="Export Report" MinWidth="118" Margin="0,0,8,0" IsEnabled="False"/>
+            <Button Name="btnUsageClose" Content="Close" MinWidth="90" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>
+'@
+
+    $dialog = New-WmtWindowFromFullXaml -Xaml $usageXaml
+    $scannerSource = [string]$script:WmtDiskUsageScannerSource
+
+    $txtPath = $dialog.FindName('txtUsagePath')
+    $cmbDrive = $dialog.FindName('cmbUsageDrive')
+    $btnBrowse = $dialog.FindName('btnUsageBrowse')
+    $btnScan = $dialog.FindName('btnUsageScan')
+    $btnStop = $dialog.FindName('btnUsageStop')
+    $prgUsage = $dialog.FindName('prgUsage')
+    $txtStatus = $dialog.FindName('txtUsageStatus')
+    $txtSelection = $dialog.FindName('txtUsageSelection')
+    $cvTreemap = $dialog.FindName('cvTreemap')
+    $txtTreemapHint = $dialog.FindName('txtTreemapHint')
+    $cmbView = $dialog.FindName('cmbUsageView')
+    $txtFilter = $dialog.FindName('txtUsageFilter')
+    $txtCount = $dialog.FindName('txtUsageCount')
+    $dgUsage = $dialog.FindName('dgUsage')
+    $pnlLegend = $dialog.FindName('pnlUsageLegend')
+    $btnOpen = $dialog.FindName('btnUsageOpen')
+    $btnRecycle = $dialog.FindName('btnUsageRecycle')
+    $btnExport = $dialog.FindName('btnUsageExport')
+    $btnClose = $dialog.FindName('btnUsageClose')
+
+    $palette = @(
+        '#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F', '#EDC948',
+        '#B07AA1', '#FF9DA7', '#9C755F', '#BAB0AC', '#86BCB6', '#8CD17D',
+        '#B6992D', '#499894', '#D37295', '#FABFD2', '#79706E', '#D4A6C8'
+    )
+
+    $scanState = [hashtable]::Synchronized(@{
+            Files  = [int64]0
+            Bytes  = [int64]0
+            Dirs   = [int]0
+            Dir    = ''
+            Cancel = $false
+            Done   = $false
+        })
+
+    $worker = @{
+        Ps       = $null
+        Async    = $null
+        Runspace = $null
+        Started  = $null
+    }
+
+    $model = @{
+        Scan      = $null
+        Root      = $null
+        Items     = @()
+        ExtColors = @{}
+        Selected  = $null
+    }
+
+    # --- Background scanner -------------------------------------------------
+    # Runs on its own runspace: enumerate once, roll folder totals up children
+    # first, then keep only folders big enough to matter plus the largest files.
+    $scanWorker = {
+        param($RootPath, $State, $TopFileLimit, $DirThresholdRatio, $DirLimit, $ScannerSource)
+
+        $WarningPreference = 'SilentlyContinue'
+        $ProgressPreference = 'SilentlyContinue'
+        $startedUtc = [DateTime]::UtcNow
+        # The compiled scanner is warmed up when the dialog opens, so this is
+        # normally a no-op. Compile here only if that has not finished yet, and
+        # tolerate another runspace compiling the same type at the same moment.
+        $scannerType = 'Wmt.DiskUsage.Scanner' -as [type]
+        if (-not $scannerType) {
+            try { Add-Type -TypeDefinition $ScannerSource -Language CSharp -ErrorAction Stop }
+            catch { Start-Sleep -Milliseconds 250 }
+            $scannerType = 'Wmt.DiskUsage.Scanner' -as [type]
+        }
+        if ($scannerType) {
+            $fastResult = [Wmt.DiskUsage.Scanner]::Scan($RootPath, $State, $TopFileLimit, $DirThresholdRatio, $DirLimit)
+            if ($fastResult) { return $fastResult }
+        }
+
+
+        function Get-ParentFolder([string]$FolderPath) {
+            $trimmed = $FolderPath.TrimEnd('\')
+            if ($trimmed.Length -lt 2) { return $null }
+            if ($trimmed -match '^[A-Za-z]:$') { return $null }
+            if ($trimmed -match '^\\\\[^\\]+\\[^\\]+$') { return $null }
+            $cut = $trimmed.LastIndexOf('\')
+            if ($cut -le 0) { return $null }
+            $parent = $trimmed.Substring(0, $cut)
+            if ($parent -match '^[A-Za-z]:$') { return ($parent + '\') }
+            return $parent
+        }
+
+        $root = $null
+        try { $root = [System.IO.Path]::GetFullPath($RootPath) } catch { $root = $RootPath }
+        if ($root -notmatch '^[A-Za-z]:\\$' -and $root -notmatch '^\\\\[^\\]+\\[^\\]+\\$') { $root = $root.TrimEnd('\') }
+
+        $ownBytes = [System.Collections.Generic.Dictionary[string, long]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $ownFiles = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $extBytes = [System.Collections.Generic.Dictionary[string, long]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $extCounts = [System.Collections.Generic.Dictionary[string, int]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $pending = [System.Collections.Generic.Stack[string]]::new()
+        $largest = [System.Collections.Generic.List[object]]::new()
+
+        $largestThreshold = [long]1048576
+        $totalFiles = [int64]0
+        $totalBytes = [int64]0
+        $warnings = 0
+        $skipped = 0
+        $cancelled = $false
+        $tick = 0
+
+        [void]$pending.Push($root)
+
+        while ($pending.Count -gt 0) {
+            if ($State.Cancel) { $cancelled = $true; break }
+
+            $folder = $pending.Pop()
+            $ownBytes[$folder] = [long]0
+            $ownFiles[$folder] = 0
+            $folderBytes = [long]0
+            $folderFiles = 0
+
+            try {
+                $info = [System.IO.DirectoryInfo]::new($folder)
+                foreach ($fileInfo in $info.EnumerateFiles()) {
+                    $length = [long]$fileInfo.Length
+                    $folderBytes += $length
+                    $totalFiles++
+                    $folderFiles++
+                    $tick++
+
+                    $extension = $fileInfo.Extension
+                    if ([string]::IsNullOrEmpty($extension)) { $extension = '(none)' }
+                    else { $extension = $extension.ToLowerInvariant() }
+
+                    $current = [long]0
+                    if ($extBytes.TryGetValue($extension, [ref]$current)) { $extBytes[$extension] = $current + $length }
+                    else { $extBytes[$extension] = $length }
+                    $currentCount = 0
+                    if ($extCounts.TryGetValue($extension, [ref]$currentCount)) { $extCounts[$extension] = $currentCount + 1 }
+                    else { $extCounts[$extension] = 1 }
+
+                    if ($length -ge $largestThreshold) {
+                        [void]$largest.Add([PSCustomObject]@{ Path = $fileInfo.FullName; Bytes = $length; Ext = $extension })
+                        if ($largest.Count -ge ($TopFileLimit * 3)) {
+                            $sorted = @($largest | Sort-Object -Property Bytes -Descending)
+                            $largest.Clear()
+                            for ($k = 0; $k -lt $TopFileLimit -and $k -lt $sorted.Count; $k++) { [void]$largest.Add($sorted[$k]) }
+                            if ($largest.Count -gt 0) { $largestThreshold = [long]$largest[$largest.Count - 1].Bytes }
+                        }
+                    }
+
+                    if (($tick % 400) -eq 0) {
+                        $State.Files = $totalFiles
+                        $State.Bytes = $totalBytes + $folderBytes
+                        $State.Dir = $folder
+                    }
+                }
+            }
+            catch { $warnings++ }
+
+            $ownBytes[$folder] = $folderBytes
+            $ownFiles[$folder] = $folderFiles
+            $totalBytes += $folderBytes
+
+            try {
+                foreach ($subFolder in $info.EnumerateDirectories()) {
+                    if (($subFolder.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                        $skipped++
+                        continue
+                    }
+                    [void]$pending.Push($subFolder.FullName)
+                }
+            }
+            catch { $warnings++ }
+
+            $State.Files = $totalFiles
+            $State.Bytes = $totalBytes
+            $State.Dirs = $ownBytes.Count
+            $State.Dir = $folder
+        }
+
+        # Children sort after parents alphabetically, so walking the list in
+        # reverse ordinal order rolls every folder total up into its parent.
+        $folders = [string[]]@($ownBytes.Keys)
+        if ($folders.Length -gt 0) {
+            [Array]::Sort($folders, [System.StringComparer]::Ordinal)
+            [Array]::Reverse($folders)
+        }
+
+        $totals = [System.Collections.Generic.Dictionary[string, long]]::new($ownBytes, [System.StringComparer]::OrdinalIgnoreCase)
+        $fileTotals = [System.Collections.Generic.Dictionary[string, int]]::new($ownFiles, [System.StringComparer]::OrdinalIgnoreCase)
+
+        foreach ($folder in $folders) {
+            $parent = Get-ParentFolder $folder
+            if (-not $parent) { continue }
+            $parentValue = [long]0
+            if (-not $totals.TryGetValue($parent, [ref]$parentValue)) { continue }
+            $totals[$parent] = $parentValue + $totals[$folder]
+            $parentFiles = 0
+            if ($fileTotals.TryGetValue($parent, [ref]$parentFiles)) { $fileTotals[$parent] = $parentFiles + $fileTotals[$folder] }
+        }
+
+        $rootTotal = [long]$totalBytes
+        if ($totals.ContainsKey($root)) { $rootTotal = [long]$totals[$root] }
+
+        $threshold = [long][Math]::Max(262144, ([double]$rootTotal * [double]$DirThresholdRatio))
+        $candidates = [System.Collections.Generic.List[object]]::new()
+        foreach ($folder in $folders) {
+            if ($folder -ieq $root) { continue }
+            $size = [long]$totals[$folder]
+            if ($size -lt $threshold) { continue }
+            [void]$candidates.Add([PSCustomObject]@{
+                    Path  = $folder
+                    Bytes = $size
+                    Files = [int]$fileTotals[$folder]
+                })
+        }
+
+        $kept = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        [void]$kept.Add($root)
+        $dirOutput = [System.Collections.Generic.List[object]]::new()
+        [void]$dirOutput.Add([PSCustomObject]@{ Path = $root; Bytes = $rootTotal; Files = [int]$fileTotals[$root] })
+
+        foreach ($candidate in @($candidates | Sort-Object -Property Bytes -Descending)) {
+            if ($dirOutput.Count -ge $DirLimit) { break }
+            if ($kept.Add([string]$candidate.Path)) { [void]$dirOutput.Add($candidate) }
+
+            $ancestor = Get-ParentFolder ([string]$candidate.Path)
+            while ($ancestor -and -not ($ancestor -ieq $root) -and $dirOutput.Count -lt $DirLimit) {
+                if (-not $kept.Add($ancestor)) { break }
+                $ancestorBytes = [long]0
+                if ($totals.TryGetValue($ancestor, [ref]$ancestorBytes)) { }
+                $ancestorFiles = 0
+                if ($fileTotals.TryGetValue($ancestor, [ref]$ancestorFiles)) { }
+                [void]$dirOutput.Add([PSCustomObject]@{ Path = $ancestor; Bytes = $ancestorBytes; Files = [int]$ancestorFiles })
+                $ancestor = Get-ParentFolder $ancestor
+            }
+        }
+
+        $extOutput = [System.Collections.Generic.List[object]]::new()
+        $extOtherBytes = [long]0
+        $extOtherCount = 0
+        $extIndex = 0
+        foreach ($extension in @($extBytes.Keys | Sort-Object { $extBytes[$_] } -Descending)) {
+            if ($extIndex -lt 40) {
+                [void]$extOutput.Add([PSCustomObject]@{ Name = $extension; Bytes = [long]$extBytes[$extension]; Count = [int]$extCounts[$extension] })
+            }
+            else {
+                $extOtherBytes += [long]$extBytes[$extension]
+                $extOtherCount += [int]$extCounts[$extension]
+            }
+            $extIndex++
+        }
+        if ($extOtherBytes -gt 0) {
+            [void]$extOutput.Add([PSCustomObject]@{ Name = '(other)'; Bytes = $extOtherBytes; Count = $extOtherCount })
+        }
+
+        $largestFiles = @($largest | Sort-Object -Property Bytes -Descending)
+        if ($largestFiles.Count -gt $TopFileLimit) { $largestFiles = $largestFiles[0..($TopFileLimit - 1)] }
+
+        $State.Done = $true
+        $State.Files = $totalFiles
+        $State.Bytes = $totalBytes
+
+        [PSCustomObject]@{
+            Root       = $root
+            TotalBytes = [long]$rootTotal
+            FileCount  = [int64]$totalFiles
+            DirCount   = [int]$folders.Length
+            Skipped    = [int]$skipped
+            Warnings   = [int]$warnings
+            Cancelled  = [bool]$cancelled
+            ElapsedMs  = [int]([DateTime]::UtcNow - $startedUtc).TotalMilliseconds
+            Dirs       = $dirOutput.ToArray()
+            Files      = $largestFiles
+            Extensions = $extOutput.ToArray()
+        }
+    }
+
+    # --- UI helpers ---------------------------------------------------------
+    $scanTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $scanTimer.Interval = [TimeSpan]::FromMilliseconds(250)
+
+    $renderTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $renderTimer.Interval = [TimeSpan]::FromMilliseconds(180)
+
+    $setRunning = {
+        param([bool]$Running)
+        $prgUsage.Visibility = if ($Running) { 'Visible' } else { 'Collapsed' }
+        $prgUsage.IsIndeterminate = $Running
+        if (-not $Running) { $prgUsage.Value = 100 }
+        $btnScan.IsEnabled = -not $Running
+        $btnStop.IsEnabled = $Running
+        $btnBrowse.IsEnabled = -not $Running
+        $cmbDrive.IsEnabled = -not $Running
+        $txtPath.IsEnabled = -not $Running
+        $dialog.Cursor = if ($Running) { [System.Windows.Input.Cursors]::Wait } else { $null }
+    }.GetNewClosure()
+
+    $setSelection = {
+        param($item)
+        $model.Selected = $item
+        if (-not $item) {
+            $txtSelection.Text = ''
+            $txtSelection.ToolTip = $null
+            $btnOpen.IsEnabled = $false
+            $btnRecycle.IsEnabled = $false
+            return
+        }
+
+        $bytes = [double]$item.Bytes
+        $totalBytes = 0.0
+        if ($model.Scan) { $totalBytes = [double]$model.Scan.TotalBytes }
+        $share = if ($totalBytes -gt 0) { ($bytes / $totalBytes) * 100 } else { 0 }
+
+        $kind = if ([bool]$item.IsDir) { 'Folder' }
+            elseif ([bool]$item.IsSynthetic) { 'Group' }
+            else { 'File' }
+        $txtSelection.Text = ('{0} - {1} ({2:N1}% of scan)' -f $kind, (ConvertTo-WmtDiskUsageSize $bytes), $share)
+        $txtSelection.ToolTip = [string]$item.Path
+        $btnOpen.IsEnabled = -not [string]::IsNullOrWhiteSpace([string]$item.Path)
+        $btnRecycle.IsEnabled = (-not [bool]$item.IsDir) -and (-not [bool]$item.IsSynthetic) -and (-not [string]::IsNullOrWhiteSpace([string]$item.Path))
+    }.GetNewClosure()
+
+    $refreshGrid = {
+        $filterText = ([string]$txtFilter.Text).Trim()
+        $mode = 'all'
+        if ($cmbView.SelectedItem -and $cmbView.SelectedItem.Tag) { $mode = [string]$cmbView.SelectedItem.Tag }
+
+        $rows = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in @($model.Items)) {
+            if ($mode -eq 'folders' -and -not [bool]$item.IsDir) { continue }
+            if ($mode -eq 'files' -and [bool]$item.IsDir) { continue }
+            if (-not [string]::IsNullOrWhiteSpace($filterText)) {
+                if (([string]$item.Path).IndexOf($filterText, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            }
+            [void]$rows.Add($item)
+        }
+
+        $dgUsage.ItemsSource = $rows
+        $txtCount.Text = ('{0:N0} of {1:N0} item(s) listed' -f $rows.Count, @($model.Items).Count)
+    }.GetNewClosure()
+
+    $openLocation = {
+        param($item)
+        if (-not $item) { return }
+        $targetPath = [string]$item.Path
+        if ([string]::IsNullOrWhiteSpace($targetPath)) { return }
+
+        try {
+            if ([bool]$item.IsDir -or [bool]$item.IsSynthetic) {
+                if (Test-Path -LiteralPath $targetPath -PathType Container) {
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $targetPath)
+                }
+                elseif (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+                    Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $targetPath)
+                }
+                else {
+                    Show-WmtMessageBox -Message ('That path no longer exists:{0}{1}' -f [Environment]::NewLine, $targetPath) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
+                }
+            }
+            elseif (Test-Path -LiteralPath $targetPath -PathType Leaf) {
+                Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $targetPath)
+            }
+            else {
+                Show-WmtMessageBox -Message ('That file no longer exists:{0}{1}' -f [Environment]::NewLine, $targetPath) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
+            }
+        }
+        catch {
+            Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+
+    $recycleItem = {
+        param($item)
+        if (-not $item -or [bool]$item.IsDir -or [bool]$item.IsSynthetic) { return }
+        $targetPath = [string]$item.Path
+        if ([string]::IsNullOrWhiteSpace($targetPath)) { return }
+        if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            Show-WmtMessageBox -Message ('That file no longer exists:{0}{1}' -f [Environment]::NewLine, $targetPath) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
+            return
+        }
+
+        $sizeText = ConvertTo-WmtDiskUsageSize ([double]$item.Bytes)
+        $confirmText = ('Send this file to the Recycle Bin?{0}{0}{1}{0}Size: {2}' -f [Environment]::NewLine, $targetPath, $sizeText)
+        $answer = Show-WmtMessageBox -Message $confirmText -Title 'Disk Usage Analyzer' -Button YesNo -Image Warning
+        if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        $removed = $false
+        try {
+            if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) {
+                Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
+            }
+            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($targetPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+            $removed = $true
+        }
+        catch {
+            $removed = $false
+        }
+
+        if (-not $removed) {
+            $fallback = ('The Recycle Bin transfer failed for:{0}{1}{0}{0}Delete it permanently instead? This cannot be undone.' -f [Environment]::NewLine, $targetPath)
+            $answer = Show-WmtMessageBox -Message $fallback -Title 'Disk Usage Analyzer' -Button YesNo -Image Warning
+            if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
+            try {
+                Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                $removed = $true
+            }
+            catch {
+                Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+                return
+            }
+        }
+
+        $model.Items = @($model.Items | Where-Object { -not ($_.Path -ieq $targetPath) })
+        & $refreshGrid
+        & $setSelection $null
+        $txtStatus.Text = ('Removed {0}. Rescan to refresh the space map.' -f $targetPath)
+        Write-GuiLog ('[Disk Usage] Removed {0}' -f $targetPath)
+    }.GetNewClosure()
+
+    $drawTreemap = {
+        $canvas = $cvTreemap
+        $width = [double]$canvas.ActualWidth
+        $height = [double]$canvas.ActualHeight
+        $canvas.Children.Clear()
+
+        if (-not $model.Root -or $width -lt 30 -or $height -lt 30) {
+            $txtTreemapHint.Visibility = 'Visible'
+            return
+        }
+
+        $state = @{
+            MaxDepth   = 6
+            MaxShapes  = 2200
+            Count      = 0
+            Labels     = 0
+            ShowLabels = $true
+            Brushes    = @{}
+            ExtColors  = $model.ExtColors
+            LabelBrush = New-WmtBrush '#F5F7FA'
+        }
+
+        Add-WmtTreemapShapes -Canvas $canvas -Node $model.Root -X 0 -Y 0 -Width $width -Height $height -Depth 0 -State $state
+        $txtTreemapHint.Visibility = if ($state.Count -gt 0) { 'Collapsed' } else { 'Visible' }
+    }.GetNewClosure()
+
+    $renderTimer.Add_Tick({
+            $renderTimer.Stop()
+            try { & $drawTreemap } catch { Write-GuiLog ('[Disk Usage] Treemap error: ' + $_.Exception.Message) }
+        }.GetNewClosure())
+
+    $applyScan = {
+        param($scan)
+
+        $model.Scan = $scan
+        $model.Selected = $null
+        & $setSelection $null
+
+        $tree = New-WmtDiskUsageTree -Dirs @($scan.Dirs) -Files @($scan.Files) -RootPath ([string]$scan.Root) -RootBytes ([long]$scan.TotalBytes)
+        $model.Root = $tree.Root
+
+        $extColors = @{}
+        $paletteIndex = 0
+        foreach ($extension in @($scan.Extensions)) {
+            if ($paletteIndex -lt $palette.Count) { $extColors[[string]$extension.Name] = $palette[$paletteIndex] }
+            else { $extColors[[string]$extension.Name] = $palette[$paletteIndex % $palette.Count] }
+            $paletteIndex++
+        }
+        $model.ExtColors = $extColors
+
+        $totalBytes = [double]$scan.TotalBytes
+        $items = [System.Collections.Generic.List[object]]::new()
+        foreach ($item in @($tree.Items)) {
+            $share = if ($totalBytes -gt 0) { (([double]$item.Bytes / $totalBytes) * 100) } else { 0 }
+            $items.Add([PSCustomObject]@{
+                    Name        = [string]$item.Name
+                    Path        = [string]$item.Path
+                    Bytes       = [long]$item.Bytes
+                    Files       = [int]$item.Files
+                    IsDir       = [bool]$item.IsDir
+                    IsSynthetic = [bool]$item.IsSynthetic
+                    Ext         = [string]$item.Ext
+                    SizeText    = ConvertTo-WmtDiskUsageSize ([double]$item.Bytes)
+                    ShareText   = ('{0:N1}%' -f $share)
+                    ItemsText   = if ([bool]$item.IsDir) { '{0:N0}' -f $item.Files } else { 'file' }
+                    FolderText  = [string](Get-WmtDiskUsageParentPath ([string]$item.Path))
+                })
+        }
+        $model.Items = @($items | Sort-Object -Property Bytes -Descending)
+
+        # Extension legend: top twelve file types by size.
+        $pnlLegend.Children.Clear()
+        $legendIndex = 0
+        foreach ($extension in @($scan.Extensions)) {
+            if ($legendIndex -ge 12) { break }
+            $share = if ($totalBytes -gt 0) { (([double]$extension.Bytes / $totalBytes) * 100) } else { 0 }
+            $chip = [System.Windows.Controls.StackPanel]::new()
+            $chip.Orientation = 'Horizontal'
+            $chip.Margin = '0,0,14,6'
+            $chip.ToolTip = ('{0:N0} file(s), {1} - {2:N1}% of the scan' -f [int]$extension.Count, (ConvertTo-WmtDiskUsageSize ([double]$extension.Bytes)), $share)
+
+            $swatch = [System.Windows.Controls.Border]::new()
+            $swatch.Width = 11
+            $swatch.Height = 11
+            $swatch.CornerRadius = '2'
+            $swatch.VerticalAlignment = 'Center'
+            $swatch.Margin = '0,0,6,0'
+            $swatch.Background = New-WmtBrush (Get-WmtDiskUsageColor -Key ([string]$extension.Name) -ExtColors $extColors)
+            [void]$chip.Children.Add($swatch)
+
+            $label = [System.Windows.Controls.TextBlock]::new()
+            $label.Text = ('{0}  {1}  {2:N1}%' -f [string]$extension.Name, (ConvertTo-WmtDiskUsageSize ([double]$extension.Bytes)), $share)
+            $label.VerticalAlignment = 'Center'
+            $label.FontSize = 12
+            $label.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, 'TextSecondary')
+            [void]$chip.Children.Add($label)
+            [void]$pnlLegend.Children.Add($chip)
+            $legendIndex++
+        }
+
+        & $refreshGrid
+        & $drawTreemap
+
+        $elapsedSeconds = [double]$scan.ElapsedMs / 1000.0
+        $summary = ('{0} files in {1:N0} folders - {2} - scanned in {3:N1}s' -f ('{0:N0}' -f $scan.FileCount), [int]$scan.DirCount, (ConvertTo-WmtDiskUsageSize $totalBytes), $elapsedSeconds)
+        if ([int]$scan.Warnings -gt 0) { $summary += (' - {0:N0} folder(s) skipped (access denied or unreadable)' -f [int]$scan.Warnings) }
+        if ([bool]$scan.Cancelled) { $summary = 'Scan stopped early - showing partial results. ' + $summary }
+        $txtStatus.Text = $summary
+        $btnExport.IsEnabled = $true
+    }.GetNewClosure()
+
+    $stopScan = {
+        if (-not $worker.Async) { return }
+        $scanState.Cancel = $true
+        $txtStatus.Text = 'Stopping the scan...'
+        $btnStop.IsEnabled = $false
+    }.GetNewClosure()
+
+    $startScan = {
+        param([string]$Target)
+
+        if ($worker.Async) { return }
+
+        $target = [string]$Target
+        if ([string]::IsNullOrWhiteSpace($target)) { $target = ([string]$txtPath.Text).Trim() }
+        if ([string]::IsNullOrWhiteSpace($target)) {
+            Show-WmtMessageBox -Message 'Choose a folder or drive to analyze first.' -Title 'Disk Usage Analyzer' -Image Information | Out-Null
+            return
+        }
+
+        try { $target = [System.IO.Path]::GetFullPath($target) }
+        catch {
+            Show-WmtMessageBox -Message ('That path is not valid: ' + $target) -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+            return
+        }
+        $target = $target.TrimEnd('\')
+        if ($target -match '^[A-Za-z]:$') { $target = $target + '\' }
+
+        if (-not (Test-Path -LiteralPath $target -PathType Container)) {
+            Show-WmtMessageBox -Message ('Folder not found:' + [Environment]::NewLine + $target) -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+            return
+        }
+
+        $txtPath.Text = $target
+        $scanState.Files = [int64]0
+        $scanState.Bytes = [int64]0
+        $scanState.Dirs = [int]0
+        $scanState.Dir = ''
+        $scanState.Cancel = $false
+        $scanState.Done = $false
+
+        & $setRunning $true
+        $txtStatus.Text = ('Scanning {0}...' -f $target)
+        Write-GuiLog ('[Disk Usage] Scanning {0}...' -f $target)
+
+        try {
+            $runspace = [runspacefactory]::CreateRunspace()
+            $runspace.ApartmentState = 'MTA'
+            $runspace.ThreadOptions = 'ReuseThread'
+            $runspace.Open()
+
+            $ps = [PowerShell]::Create()
+            $ps.Runspace = $runspace
+            [void]$ps.AddScript($scanWorker.ToString())
+            [void]$ps.AddParameter('RootPath', $target)
+            [void]$ps.AddParameter('State', $scanState)
+            [void]$ps.AddParameter('TopFileLimit', 400)
+            [void]$ps.AddParameter('DirThresholdRatio', 0.0005)
+            [void]$ps.AddParameter('DirLimit', 5000)
+            [void]$ps.AddParameter('ScannerSource', $scannerSource)
+
+            $worker.Runspace = $runspace
+            $worker.Ps = $ps
+            $worker.Started = [DateTime]::UtcNow
+            $worker.Async = $ps.BeginInvoke()
+            $scanTimer.Start()
+        }
+        catch {
+            & $setRunning $false
+            $txtStatus.Text = 'Could not start the scan: ' + $_.Exception.Message
+            Write-GuiLog ('[Disk Usage] Could not start the scan: ' + $_.Exception.Message)
+            try { if ($ps) { $ps.Dispose() } } catch {}
+            try { if ($runspace) { $runspace.Close(); $runspace.Dispose() } } catch {}
+            $worker.Ps = $null
+            $worker.Runspace = $null
+            $worker.Async = $null
+            return
+        }
+    }.GetNewClosure()
+
+    $scanTimer.Add_Tick({
+            if (-not $worker.Async) { $scanTimer.Stop(); return }
+
+            if (-not $worker.Async.IsCompleted) {
+                $liveFiles = [int64]$scanState.Files
+                $liveBytes = [double]$scanState.Bytes
+                $liveDir = [string]$scanState.Dir
+                $txtStatus.Text = ('Scanning... {0:N0} files - {1} - {2}' -f $liveFiles, (ConvertTo-WmtDiskUsageSize $liveBytes), $liveDir)
+                return
+            }
+
+            $scanTimer.Stop()
+            $btnStop.IsEnabled = $false
+
+            $result = $null
+            $failure = $null
+            try {
+                $output = $worker.Ps.EndInvoke($worker.Async)
+                foreach ($entry in @($output)) {
+                    if ($null -eq $entry) { continue }
+                    if ($entry.PSObject.Properties['Root'] -and $entry.PSObject.Properties['Dirs']) { $result = $entry }
+                }
+            }
+            catch { $failure = $_.Exception.Message }
+
+            $elapsed = 0.0
+            if ($worker.Started) { $elapsed = ([DateTime]::UtcNow - [DateTime]$worker.Started).TotalSeconds }
+
+            try { $worker.Ps.Dispose() } catch {}
+            try { $worker.Runspace.Close(); $worker.Runspace.Dispose() } catch {}
+            $worker.Ps = $null
+            $worker.Async = $null
+            $worker.Runspace = $null
+            $worker.Started = $null
+
+            & $setRunning $false
+
+            if (-not $result) {
+                $message = if ($failure) { $failure } else { 'The scan returned no data.' }
+                $txtStatus.Text = 'Scan failed: ' + $message
+                Write-GuiLog ('[Disk Usage] Scan failed: ' + $message)
+                return
+            }
+
+            $txtStatus.Text = 'Building the space map...'
+            try { $dialog.Dispatcher.Invoke([System.Windows.Threading.DispatcherPriority]::Background, [action]{}) } catch {}
+
+            try {
+                & $applyScan $result
+                Write-GuiLog ('[Disk Usage] {0:N0} files, {1:N0} folders, {2} in {3:N1}s.' -f [int64]$result.FileCount, [int]$result.DirCount, (ConvertTo-WmtDiskUsageSize ([double]$result.TotalBytes)), $elapsed)
+            }
+            catch {
+                $txtStatus.Text = 'Could not build the space map: ' + $_.Exception.Message
+                Write-GuiLog ('[Disk Usage] Build failed: ' + $_.Exception.Message)
+            }
+        }.GetNewClosure())
+
+    $exportReport = {
+        if (-not $model.Scan) {
+            Show-WmtMessageBox -Message 'Run a scan before exporting a report.' -Title 'Disk Usage Analyzer' -Image Information | Out-Null
+            return
+        }
+
+        try {
+            $scan = $model.Scan
+            $totalBytes = [double]$scan.TotalBytes
+            $lines = [System.Collections.Generic.List[string]]::new()
+            $lines.Add('Windows Maintenance Tool - Disk Usage Report')
+            $lines.Add(('Generated: {0}' -f (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')))
+            $lines.Add(('Root: {0}' -f [string]$scan.Root))
+            $lines.Add(('Total size: {0}' -f (ConvertTo-WmtDiskUsageSize $totalBytes)))
+            $lines.Add(('Files: {0:N0}   Folders: {1:N0}' -f [int64]$scan.FileCount, [int]$scan.DirCount))
+            if ([bool]$scan.Cancelled) { $lines.Add('NOTE: the scan was stopped early; totals are partial.') }
+            $lines.Add('')
+
+            $lines.Add('LARGEST FOLDERS')
+            $lines.Add('---------------')
+            foreach ($item in @($model.Items | Where-Object { $_.IsDir } | Select-Object -First 200)) {
+                $share = if ($totalBytes -gt 0) { (([double]$item.Bytes / $totalBytes) * 100) } else { 0 }
+                $lines.Add(('{0,10}  {1,6:N1}%  {2}' -f (ConvertTo-WmtDiskUsageSize ([double]$item.Bytes)), $share, [string]$item.Path))
+            }
+            $lines.Add('')
+
+            $lines.Add('LARGEST FILES')
+            $lines.Add('-------------')
+            foreach ($file in @($scan.Files | Select-Object -First 200)) {
+                $share = if ($totalBytes -gt 0) { (([double]$file.Bytes / $totalBytes) * 100) } else { 0 }
+                $lines.Add(('{0,10}  {1,6:N1}%  {2}' -f (ConvertTo-WmtDiskUsageSize ([double]$file.Bytes)), $share, [string]$file.Path))
+            }
+            $lines.Add('')
+
+            $lines.Add('FILE TYPES')
+            $lines.Add('----------')
+            foreach ($extension in @($scan.Extensions)) {
+                $share = if ($totalBytes -gt 0) { (([double]$extension.Bytes / $totalBytes) * 100) } else { 0 }
+                $lines.Add(('{0,10}  {1,6:N1}%  {2,10:N0} file(s)  {3}' -f (ConvertTo-WmtDiskUsageSize ([double]$extension.Bytes)), $share, [int]$extension.Count, [string]$extension.Name))
+            }
+
+            $outFile = Join-Path (Get-DataPath) ('DiskUsage_{0}.txt' -f (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
+            Set-Content -Path $outFile -Value $lines -Encoding UTF8
+            Write-GuiLog ('[Disk Usage] Exported report to {0}' -f $outFile)
+            Show-WmtMessageBox -Message ('Disk usage report saved to:' + [Environment]::NewLine + $outFile) -Title 'Export Complete' -Image Information | Out-Null
+        }
+        catch {
+            Write-GuiLog ('[Disk Usage] Export failed: ' + $_.Exception.Message)
+            Show-WmtMessageBox -Message ('Export failed:' + [Environment]::NewLine + $_.Exception.Message) -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+
+    # --- Wiring -------------------------------------------------------------
+    Connect-WmtPathPicker -TextBox $txtPath -BrowseButton $btnBrowse -Description 'Select a folder to analyze' -Owner $dialog
+
+    foreach ($drive in @(Get-WmtDiskUsageDriveChoices)) {
+        $driveItem = [System.Windows.Controls.ComboBoxItem]::new()
+        $driveItem.Content = [string]$drive.Display
+        $driveItem.Tag = [string]$drive.Path
+        [void]$cmbDrive.Items.Add($driveItem)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($InitialPath)) {
+        if (-not [string]::IsNullOrWhiteSpace($env:SystemDrive)) { $InitialPath = $env:SystemDrive + '\' }
+        else { $InitialPath = $env:USERPROFILE }
+    }
+    $txtPath.Text = $InitialPath
+
+    $cmbDrive.Add_SelectionChanged({
+            if (-not $cmbDrive.SelectedItem) { return }
+            $chosen = [string]$cmbDrive.SelectedItem.Tag
+            if (-not [string]::IsNullOrWhiteSpace($chosen)) { $txtPath.Text = $chosen }
+        }.GetNewClosure())
+
+    $btnScan.Add_Click({ & $startScan }.GetNewClosure())
+    $btnStop.Add_Click({ & $stopScan }.GetNewClosure())
+    $btnClose.Add_Click({ $dialog.Close() }.GetNewClosure())
+    $btnExport.Add_Click({ & $exportReport }.GetNewClosure())
+
+    $btnOpen.Add_Click({
+            if ($model.Selected) { & $openLocation $model.Selected }
+        }.GetNewClosure())
+
+    $btnRecycle.Add_Click({
+            if ($model.Selected) { & $recycleItem $model.Selected }
+        }.GetNewClosure())
+
+    $txtPath.Add_KeyDown({
+            param($sender, $args)
+            if ($args.Key -eq [System.Windows.Input.Key]::Enter) {
+                & $startScan
+                $args.Handled = $true
+            }
+        }.GetNewClosure())
+
+    $cmbView.Add_SelectionChanged({ & $refreshGrid }.GetNewClosure())
+    $txtFilter.Add_TextChanged({ & $refreshGrid }.GetNewClosure())
+
+    $dgUsage.Add_SelectionChanged({
+            $row = $dgUsage.SelectedItem
+            if ($row) { & $setSelection $row }
+        }.GetNewClosure())
+
+    $dgUsage.Add_MouseDoubleClick({
+            if ($dgUsage.SelectedItem) { & $openLocation $dgUsage.SelectedItem }
+        }.GetNewClosure())
+
+    $cvTreemap.Add_MouseLeftButtonDown({
+            param($sender, $args)
+            $source = $args.OriginalSource
+            if (-not ($source -is [System.Windows.Shapes.Rectangle])) { return }
+            $node = $source.Tag
+            if (-not $node) { return }
+
+            & $setSelection $node
+
+            # Keep the list in sync with the clicked block.
+            foreach ($row in @($dgUsage.Items)) {
+                if ([string]$row.Path -ieq [string]$node.Path -and [bool]$row.IsDir -eq [bool]$node.IsDir) {
+                    $dgUsage.SelectedItem = $row
+                    try { $dgUsage.ScrollIntoView($row) } catch {}
+                    break
+                }
+            }
+
+            if ($args.ClickCount -eq 2) { & $openLocation $node }
+        }.GetNewClosure())
+
+    $cvTreemap.Add_SizeChanged({
+            if (-not $model.Root) { return }
+            $renderTimer.Stop()
+            $renderTimer.Start()
+        }.GetNewClosure())
+
+    $dialog.Add_Closed({
+            try { $scanTimer.Stop() } catch {}
+            try { $renderTimer.Stop() } catch {}
+            try { $scanState.Cancel = $true } catch {}
+            try { if ($worker.Ps -and $worker.Async) { $worker.Ps.Stop() } } catch {}
+            try { if ($worker.Ps) { $worker.Ps.Dispose() } } catch {}
+            try {
+                if ($worker.Runspace) {
+                    $worker.Runspace.Close()
+                    $worker.Runspace.Dispose()
+                }
+            }
+            catch {}
+            $worker.Ps = $null
+            $worker.Async = $null
+            $worker.Runspace = $null
+        }.GetNewClosure())
+
+    & $setRunning $false
+    & $refreshGrid
+    # Compile the scanner now, off the UI thread, so the first scan starts
+    # immediately instead of paying the compile cost when Scan is pressed.
+    if (-not ('Wmt.DiskUsage.Scanner' -as [type]) -and -not [string]::IsNullOrWhiteSpace($scannerSource)) {
+        try {
+            Invoke-WmtUiBackgroundCommand -Name 'WmtDiskUsageScannerWarmup' -Msg 'Preparing the disk usage scanner...' -Quiet -SuppressResultLog -Sb {
+                param($Source)
+                if (-not ('Wmt.DiskUsage.Scanner' -as [type])) {
+                    Add-Type -TypeDefinition $Source -Language CSharp -ErrorAction Stop
+                }
+            } -ArgumentList @($scannerSource) | Out-Null
+        }
+        catch { }
+    }
+
+    $dialog.ShowDialog() | Out-Null
+}
+
+if ($btnUtilDiskUsage) { $btnUtilDiskUsage.Add_Click({ Show-WmtDiskUsageAnalyzer }) }
+
 if ($btnUtilCompact) { $btnUtilCompact.Add_Click({ Show-WmtCompactManager }) }
 
 if ($btnUpdateServices) { $btnUpdateServices.Add_Click({
@@ -66837,6 +68560,7 @@ btnMyDeviceDriverRestore     = "btnDrvRestore"
 btnMyDeviceChkdsk            = "btnCHKDSK"
 btnMyDeviceDiskCleanup       = "btnCleanDisk"
 btnMyDeviceTempCleanup       = "btnCleanTemp"
+btnMyDeviceDiskUsage         = "btnUtilDiskUsage"
 }.GetEnumerator() | ForEach-Object {
 Connect-WmtMyDeviceShortcut -ShortcutButtonName $_.Key -TargetButtonName $_.Value
 }

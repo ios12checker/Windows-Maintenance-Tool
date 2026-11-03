@@ -87,6 +87,7 @@ Alternatively, with internet access, `gh attestation verify .\WindowsMaintenance
 - Rebuilt Drivers page that inventories third-party Driver Store packages and classifies in-use, old/superseded, unattached, and inactive packages.
 - Advanced cleanup with internal rules, Winapp2, Winapp3, BleachBit CleanerML, preview/analyze mode, configurable cache/update refresh intervals, and optional automatic cleanup.
 - Compact Compression utility for folders and drives with persistent tracking, skip lists, change-aware recompression, and scheduled auto-recompression that can run without the WMT window being open.
+- WinDirStat-style **Disk Usage Analyzer** in Utilities and under My Device > Storage Drives: background scan, interactive treemap, largest folders/files/file types, file-type legend, open-location, export, and Recycle Bin cleanup.
 - Firewall Manager with background rule loading, cached details, and fast protocol/port preloading through the Windows Firewall COM/.NET path with fallback behavior.
 - Background runspace/process infrastructure for long-running scans, DISM, networking, service, driver, package, and other operations so the GUI remains responsive.
 - Safety-focused registry cleanup, backups/revert paths, review-only findings, confirmation prompts, and detailed activity logging.
@@ -164,6 +165,7 @@ v6.7 is a broad maintenance and reliability update focused on background executi
 - Added the **Compact Compression** tracker with persistent folder/drive history, automatic recompression, custom schedules, change detection, per-target state/results, and optional skip lists for already-compressed or poor-compression file formats.
 - Added Windows Task Scheduler integration for Compact recompression so scheduled compression can run even when WMT itself is closed.
 - Hardened Compact tracker persistence, including automatic recovery/repair when stale ACLs on the ProgramData tracker block WMT from reading or updating it.
+- Added a **Disk Usage Analyzer** (WinDirStat-style) to Utilities and My Device > Storage Drives: recursive background scan, squarified treemap of the biggest space consumers, largest folders/files/file types, filtering, report export, open-location, and Recycle Bin cleanup.
 - Added configurable cleaner **local cache refresh**, **upstream definition checks**, and **automatic cleaning** intervals.
 - Automatic cleaning uses only explicitly saved cleaner selections and runs in a separate hidden worker process while WMT is open or hidden in the tray; overlapping runs are prevented and the global **BG Jobs** toggle disables new cleaner background work.
 - Added **Show Enabled** filtering and substantial cleaner worker/poller race, closure, startup, cancellation, and completion-state hardening.
@@ -401,6 +403,7 @@ Quick Find is in the left sidebar above the navigation buttons (without an extra
 - Startup Manager.
 - Restore Manager.
 - Compact Compression manager.
+- Disk Usage Analyzer with a squarified treemap space map, largest folder/file lists, and file-type breakdown.
 - Context menu builder.
 - System reports.
 - Release download statistics.
