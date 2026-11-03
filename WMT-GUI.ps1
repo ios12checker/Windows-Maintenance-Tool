@@ -5690,6 +5690,9 @@ Add-WmtThemeResources -Element $dialog
 Set-WmtWindowIcon -Window $dialog
 Connect-WmtResponsiveTables -Element $dialog
 if (-not $NoOwner) { Set-WmtWindowOwner -Child $dialog }
+if ($script:ThemePalettes -and $script:ThemePalettes.Count -gt 0) {
+    Set-WmtNativeWindowTheme -Window $dialog
+}
 return $dialog
 }
 
@@ -6243,6 +6246,22 @@ function Set-WmtNativeWindowTheme {
 param([System.Windows.Window]$Window)
 
 if (-not $Window) { return }
+if (-not $script:WmtNativeThemedWindows) {
+    $script:WmtNativeThemedWindows = [System.Collections.ArrayList]::new()
+}
+$windowIsTracked = $false
+foreach ($trackedWindow in @($script:WmtNativeThemedWindows)) {
+    if ([object]::ReferenceEquals($trackedWindow, $Window)) { $windowIsTracked = $true; break }
+}
+if (-not $windowIsTracked) {
+    [void]$script:WmtNativeThemedWindows.Add($Window)
+    $nativeThemedWindows = $script:WmtNativeThemedWindows
+    $Window.Add_Closed({
+        param($closedWindow, $e)
+        $null = $e
+        [void]$nativeThemedWindows.Remove($closedWindow)
+    }.GetNewClosure())
+}
 $themeDebug = [bool]$script:WmtThemeDebug
 $nativeThemeLogPath = $null
 if ($themeDebug) {
@@ -27566,6 +27585,7 @@ $benchWindow.MinWidth = 620
 $benchWindow.MinHeight = 420
 $benchWindow.WindowStartupLocation = "CenterOwner"
 Add-WmtThemeResources -Element $benchWindow
+Set-WmtNativeWindowTheme -Window $benchWindow
 Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::BackgroundProperty) -ColorOrKey "BgDark"
 Set-WmtThemedBrush -Object $benchWindow -Property ([System.Windows.Controls.Control]::ForegroundProperty) -ColorOrKey "TextPrimary"
 
@@ -36663,6 +36683,13 @@ if ($TabButtons) {
 
 $script:CurrentTheme = $Theme
 Set-WmtNativeWindowTheme -Window $window
+if ($script:WmtNativeThemedWindows) {
+    foreach ($themedWindow in @($script:WmtNativeThemedWindows)) {
+        if (-not [object]::ReferenceEquals($themedWindow, $window)) {
+            Set-WmtNativeWindowTheme -Window $themedWindow
+        }
+    }
+}
 if ($script:WmtTrayMenu) { Set-WmtTrayMenuTheme -Menu $script:WmtTrayMenu }
 }
 
