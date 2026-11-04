@@ -62427,10 +62427,10 @@ function Show-WmtDiskUsageAnalyzer {
         }.GetNewClosure())
 
     $txtPath.Add_KeyDown({
-            param($sender, $args)
-            if ($args.Key -eq [System.Windows.Input.Key]::Enter) {
+            param($s, $a)
+            if ($a.Key -eq [System.Windows.Input.Key]::Enter) {
                 & $startScan
-                $args.Handled = $true
+                $a.Handled = $true
             }
         }.GetNewClosure())
 
@@ -62447,8 +62447,8 @@ function Show-WmtDiskUsageAnalyzer {
         }.GetNewClosure())
 
     $cvTreemap.Add_MouseLeftButtonDown({
-            param($sender, $args)
-            $source = $args.OriginalSource
+            param($s, $a)
+            $source = $a.OriginalSource
             if (-not ($source -is [System.Windows.Shapes.Rectangle])) { return }
             $node = $source.Tag
             if (-not $node) { return }
@@ -62464,7 +62464,7 @@ function Show-WmtDiskUsageAnalyzer {
                 }
             }
 
-            if ($args.ClickCount -eq 2) { & $openLocation $node }
+            if ($a.ClickCount -eq 2) { & $openLocation $node }
         }.GetNewClosure())
 
     $cvTreemap.Add_SizeChanged({
