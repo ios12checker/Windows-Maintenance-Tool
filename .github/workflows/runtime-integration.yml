@@ -20,8 +20,8 @@ permissions:
 
 jobs:
   implementation-safety:
-    name: WMT implementation safety (\${{ matrix.os }})
-    runs-on: \${{ matrix.os }}
+    name: WMT implementation safety (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     strategy:
       fail-fast: false
