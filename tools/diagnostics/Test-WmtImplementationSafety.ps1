@@ -11,7 +11,7 @@ if($parseErrors.Count){throw "WMT source parse failed: $($parseErrors[0].Message
 function Import-WmtFunction([string]$Name){
     $node=$ast.Find({param($n)$n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $Name},$true)
     if(-not $node){throw "WMT function missing: $Name"}
-    Set-Item -Path ("Function:script:" + $Name) -Value ([scriptblock]::Create($node.Extent.Text))
+    Set-Item -Path ("Function:global:" + $Name) -Value ([scriptblock]::Create($node.Extent.Text))
 }
 # Exercise WMT's actual atomic settings writer against isolated temporary files.
 Import-WmtFunction 'Write-WmtSettingsFileAtomic'
