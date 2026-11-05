@@ -9,6 +9,7 @@ on:
       - "WMT-GUI.ps1"
       - "PS2EXE/**/*.ps1"
       - "tools/diagnostics/**/*.ps1"
+      - "tools/diagnostics/Test-WmtRuntimeSafety.ps1"
       - ".github/workflows/validate-powershell.yml"
   pull_request:
     branches:
@@ -17,6 +18,7 @@ on:
       - "WMT-GUI.ps1"
       - "PS2EXE/**/*.ps1"
       - "tools/diagnostics/**/*.ps1"
+      - "tools/diagnostics/Test-WmtRuntimeSafety.ps1"
       - ".github/workflows/validate-powershell.yml"
 
 permissions:
@@ -3514,3 +3516,22 @@ jobs:
               try { if ($pool) { $pool.Close() } } catch {}
               try { if ($pool) { $pool.Dispose() } } catch {}
           }
+
+
+  runtime-safety:
+    name: Runtime safety contracts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+        powershell: [WindowsPowerShell, pwsh]
+    steps:
+      - name: Check out exact commit
+        uses: actions/checkout@v4
+      - name: Run isolated runtime safety tests
+        shell: ${{ matrix.powershell }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\tools\diagnostics\Test-WmtRuntimeSafety.ps1
