@@ -1,0 +1,36 @@
+name: WMT Runtime Integration Tests
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [Main]
+    paths:
+      - "WMT-GUI.ps1"
+      - "tools/diagnostics/Test-WmtImplementationSafety.ps1"
+      - ".github/workflows/runtime-integration.yml"
+  pull_request:
+    branches: [Main]
+    paths:
+      - "WMT-GUI.ps1"
+      - "tools/diagnostics/Test-WmtImplementationSafety.ps1"
+      - ".github/workflows/runtime-integration.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  implementation-safety:
+    name: WMT implementation safety (\${{ matrix.os }})
+    runs-on: \${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exercise actual WMT runtime safety implementations
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\tools\diagnostics\Test-WmtImplementationSafety.ps1
