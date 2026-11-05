@@ -3526,7 +3526,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025]
-        powershell: [WindowsPowerShell, pwsh]
+        powershell: [powershell, pwsh]
     steps:
       - name: Check out exact commit
         uses: actions/checkout@v4
