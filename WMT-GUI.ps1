@@ -5863,7 +5863,7 @@ return $dialog
 function New-WmtContextMenu {
 param(
     [Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Items,
-    [System.Windows.Controls.Control]$Target
+    [System.Windows.FrameworkElement]$Target
 )
 $menu = [System.Windows.Controls.ContextMenu]::new()
 Set-WmtContextMenuChrome -ContextMenu $menu
@@ -61178,7 +61178,8 @@ function Add-WmtTreemapShapes {
         $shape.Fill = $State.Brushes[$colorKey]
         $shape.StrokeThickness = 0
         $shape.Tag = $child
-        $shape.ToolTip = ('{0}{1}{2}{3}{4}' -f [string]$child.Name, [Environment]::NewLine, (ConvertTo-WmtDiskUsageSize ([double]$child.Bytes)), [Environment]::NewLine, [string]$child.Path)
+        $shape.ToolTip = ('{0}{1}{2}{3}{4}{5}' -f [string]$child.Name, [Environment]::NewLine, (ConvertTo-WmtDiskUsageSize ([double]$child.Bytes)), [Environment]::NewLine, [string]$child.Path, $(if ([bool]$child.IsDir) { [Environment]::NewLine + 'Click to scan this folder; right-click for actions.' } else { '' }))
+        if ([bool]$child.IsDir) { $shape.Cursor = [System.Windows.Input.Cursors]::Hand }
         [System.Windows.Controls.Canvas]::SetLeft($shape, $left)
         [System.Windows.Controls.Canvas]::SetTop($shape, $top)
         [void]$Canvas.Children.Add($shape)
@@ -61576,7 +61577,7 @@ function Show-WmtDiskUsageAnalyzer {
 
         <StackPanel Grid.Row="0" Margin="0,0,0,12">
             <TextBlock Text="Disk Usage Analyzer" FontSize="22" FontWeight="SemiBold"/>
-            <TextBlock Text="WinDirStat-style space map. Scan a folder or drive to see a treemap of what is using the space, plus the largest folders, files, and file types."
+            <TextBlock Text="WinDirStat-style space map. Click a folder block to scan inside it, right-click for file actions, and expand folders in the list below."
                        Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,5,0,0"/>
         </StackPanel>
 
@@ -61646,11 +61647,11 @@ function Show-WmtDiskUsageAnalyzer {
                              ToolTip="Filter the list by name or path"/>
                     <TextBlock Name="txtUsageCount" Grid.Column="2" Text="" Foreground="{DynamicResource TextMuted}" VerticalAlignment="Center"/>
                 </Grid>
-                <DataGrid Grid.Row="1" Name="dgUsage" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False"
+                <DataGrid Grid.Row="1" Name="dgUsage" AutoGenerateColumns="False" IsReadOnly="True" CanUserAddRows="False" CanUserSortColumns="False"
                           CanUserDeleteRows="False" SelectionMode="Single" HeadersVisibility="Column"
                           GridLinesVisibility="Horizontal" MinHeight="110">
                     <DataGrid.Columns>
-                        <DataGridTextColumn Header="Name" Binding="{Binding Name}" Width="1.5*" SortMemberPath="Name"/>
+                        <DataGridTextColumn Header="Name" Binding="{Binding TreeName}" Width="1.5*" SortMemberPath="Name"/>
                         <DataGridTextColumn Header="Size" Binding="{Binding SizeText}" Width="95" SortMemberPath="Bytes"/>
                         <DataGridTextColumn Header="Share" Binding="{Binding ShareText}" Width="80" SortMemberPath="Bytes"/>
                         <DataGridTextColumn Header="Items" Binding="{Binding ItemsText}" Width="75" SortMemberPath="Files"/>
@@ -61722,6 +61723,8 @@ function Show-WmtDiskUsageAnalyzer {
         Scan      = $null
         Root      = $null
         Items     = @()
+        TreeItems = @()
+        Expanded  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
         ExtColors = @{}
         Selected  = $null
     }
@@ -61992,7 +61995,7 @@ function Show-WmtDiskUsageAnalyzer {
         $txtSelection.Text = ('{0} - {1} ({2:N1}% of scan)' -f $kind, (ConvertTo-WmtDiskUsageSize $bytes), $share)
         $txtSelection.ToolTip = [string]$item.Path
         $btnOpen.IsEnabled = -not [string]::IsNullOrWhiteSpace([string]$item.Path)
-        $btnRecycle.IsEnabled = (-not [bool]$item.IsDir) -and (-not [bool]$item.IsSynthetic) -and (-not [string]::IsNullOrWhiteSpace([string]$item.Path))
+        $btnRecycle.IsEnabled = (-not [bool]$item.IsSynthetic) -and (-not [string]::IsNullOrWhiteSpace([string]$item.Path))
     }.GetNewClosure()
 
     $refreshGrid = {
@@ -62001,17 +62004,32 @@ function Show-WmtDiskUsageAnalyzer {
         if ($cmbView.SelectedItem -and $cmbView.SelectedItem.Tag) { $mode = [string]$cmbView.SelectedItem.Tag }
 
         $rows = [System.Collections.Generic.List[object]]::new()
-        foreach ($item in @($model.Items)) {
+        $filtering = -not [string]::IsNullOrWhiteSpace($filterText)
+        foreach ($item in @($model.TreeItems)) {
+            if (-not $filtering -and $mode -eq 'all') {
+                $isVisible = $true
+                foreach ($ancestorPath in @($item.Ancestors)) {
+                    if (-not $model.Expanded.Contains([string]$ancestorPath)) {
+                        $isVisible = $false
+                        break
+                    }
+                }
+                if (-not $isVisible) { continue }
+            }
             if ($mode -eq 'folders' -and -not [bool]$item.IsDir) { continue }
             if ($mode -eq 'files' -and [bool]$item.IsDir) { continue }
-            if (-not [string]::IsNullOrWhiteSpace($filterText)) {
+            if ($filtering) {
                 if (([string]$item.Path).IndexOf($filterText, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
             }
+            $branch = if (-not [bool]$item.IsDir -or -not [bool]$item.HasChildren) { '   ' }
+                elseif ($model.Expanded.Contains([string]$item.Path)) { '[-] ' }
+                else { '[+] ' }
+            $item.TreeName = ('{0}{1}{2}' -f ('    ' * [int]$item.Depth), $branch, [string]$item.Name)
             [void]$rows.Add($item)
         }
 
         $dgUsage.ItemsSource = $rows
-        $txtCount.Text = ('{0:N0} of {1:N0} item(s) listed' -f $rows.Count, @($model.Items).Count)
+        $txtCount.Text = ('{0:N0} of {1:N0} item(s) listed' -f $rows.Count, @($model.TreeItems).Count)
     }.GetNewClosure()
 
     $openLocation = {
@@ -62044,18 +62062,101 @@ function Show-WmtDiskUsageAnalyzer {
         }
     }.GetNewClosure()
 
+    $openItem = {
+        param($item)
+        if (-not $item) { return }
+        $targetPath = [string]$item.Path
+        if ([string]::IsNullOrWhiteSpace($targetPath) -or [bool]$item.IsSynthetic) { return }
+        try {
+            if ([bool]$item.IsDir) {
+                if (-not (Test-Path -LiteralPath $targetPath -PathType Container)) {
+                    throw ('That folder no longer exists: ' + $targetPath)
+                }
+                Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $targetPath)
+            }
+            else {
+                if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+                    throw ('That file no longer exists: ' + $targetPath)
+                }
+                Start-Process -FilePath $targetPath
+            }
+        }
+        catch {
+            Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+
+    $copyItemPath = {
+        param($item)
+        if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.Path)) { return }
+        try { [System.Windows.Clipboard]::SetText([string]$item.Path) }
+        catch {
+            Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+
+    $showItemProperties = {
+        param($item)
+        if (-not $item -or [string]::IsNullOrWhiteSpace([string]$item.Path)) { return }
+        $targetPath = [string]$item.Path
+        $shell = $null
+        try {
+            if (-not (Test-Path -LiteralPath $targetPath)) { throw ('That path no longer exists: ' + $targetPath) }
+            $shell = New-Object -ComObject Shell.Application
+            if ([bool]$item.IsDir) {
+                $shellItem = $shell.Namespace($targetPath).Self
+            }
+            else {
+                $parentPath = [System.IO.Path]::GetDirectoryName($targetPath)
+                $leafName = [System.IO.Path]::GetFileName($targetPath)
+                $shellItem = $shell.Namespace($parentPath).ParseName($leafName)
+            }
+            if (-not $shellItem) { throw ('Could not open properties for: ' + $targetPath) }
+            try { $shellItem.InvokeVerb('properties') }
+            catch {
+                $propertiesVerb = @($shellItem.Verbs()) | Where-Object { (($_.Name -replace '&', '').Trim()) -match '(?i)^properties$' } | Select-Object -First 1
+                if (-not $propertiesVerb) { throw }
+                $propertiesVerb.DoIt()
+            }
+        }
+        catch {
+            Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+        finally {
+            if ($shell -and [System.Runtime.InteropServices.Marshal]::IsComObject($shell)) {
+                [void][System.Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell)
+            }
+        }
+    }.GetNewClosure()
+
+    $openCommandPrompt = {
+        param($item)
+        if (-not $item -or [bool]$item.IsSynthetic) { return }
+        $workingDirectory = if ([bool]$item.IsDir) { [string]$item.Path } else { [System.IO.Path]::GetDirectoryName([string]$item.Path) }
+        if (-not (Test-Path -LiteralPath $workingDirectory -PathType Container)) {
+            Show-WmtMessageBox -Message ('That folder no longer exists: ' + $workingDirectory) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
+            return
+        }
+        try { Start-Process -FilePath $env:ComSpec -WorkingDirectory $workingDirectory }
+        catch {
+            Show-WmtMessageBox -Message $_.Exception.Message -Title 'Disk Usage Analyzer' -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+
     $recycleItem = {
         param($item)
-        if (-not $item -or [bool]$item.IsDir -or [bool]$item.IsSynthetic) { return }
+        if (-not $item -or [bool]$item.IsSynthetic) { return }
         $targetPath = [string]$item.Path
         if ([string]::IsNullOrWhiteSpace($targetPath)) { return }
-        if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
-            Show-WmtMessageBox -Message ('That file no longer exists:{0}{1}' -f [Environment]::NewLine, $targetPath) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
+        $pathType = if ([bool]$item.IsDir) { 'Container' } else { 'Leaf' }
+        if (-not (Test-Path -LiteralPath $targetPath -PathType $pathType)) {
+            Show-WmtMessageBox -Message ('That path no longer exists:{0}{1}' -f [Environment]::NewLine, $targetPath) -Title 'Disk Usage Analyzer' -Image Warning | Out-Null
             return
         }
 
         $sizeText = ConvertTo-WmtDiskUsageSize ([double]$item.Bytes)
-        $confirmText = ('Send this file to the Recycle Bin?{0}{0}{1}{0}Size: {2}' -f [Environment]::NewLine, $targetPath, $sizeText)
+        $itemType = if ([bool]$item.IsDir) { 'folder and its contents' } else { 'file' }
+        $confirmText = ('Send this {0} to the Recycle Bin?{1}{1}{2}{1}Size: {3}' -f $itemType, [Environment]::NewLine, $targetPath, $sizeText)
         $answer = Show-WmtMessageBox -Message $confirmText -Title 'Disk Usage Analyzer' -Button YesNo -Image Warning
         if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
@@ -62064,7 +62165,12 @@ function Show-WmtDiskUsageAnalyzer {
             if (-not ('Microsoft.VisualBasic.FileIO.FileSystem' -as [type])) {
                 Add-Type -AssemblyName Microsoft.VisualBasic -ErrorAction Stop
             }
-            [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($targetPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+            if ([bool]$item.IsDir) {
+                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($targetPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+            }
+            else {
+                [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($targetPath, 'OnlyErrorDialogs', 'SendToRecycleBin')
+            }
             $removed = $true
         }
         catch {
@@ -62072,11 +62178,17 @@ function Show-WmtDiskUsageAnalyzer {
         }
 
         if (-not $removed) {
-            $fallback = ('The Recycle Bin transfer failed for:{0}{1}{0}{0}Delete it permanently instead? This cannot be undone.' -f [Environment]::NewLine, $targetPath)
+            $fallbackAction = if ([bool]$item.IsDir) { 'Delete this folder and all its contents permanently instead?' } else { 'Delete it permanently instead?' }
+            $fallback = ('The Recycle Bin transfer failed for:{0}{1}{0}{0}{2} This cannot be undone.' -f [Environment]::NewLine, $targetPath, $fallbackAction)
             $answer = Show-WmtMessageBox -Message $fallback -Title 'Disk Usage Analyzer' -Button YesNo -Image Warning
             if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
             try {
-                Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                if ([bool]$item.IsDir) {
+                    Remove-Item -LiteralPath $targetPath -Recurse -Force -ErrorAction Stop
+                }
+                else {
+                    Remove-Item -LiteralPath $targetPath -Force -ErrorAction Stop
+                }
                 $removed = $true
             }
             catch {
@@ -62085,7 +62197,10 @@ function Show-WmtDiskUsageAnalyzer {
             }
         }
 
-        $model.Items = @($model.Items | Where-Object { -not ($_.Path -ieq $targetPath) })
+        $subtreePrefix = $targetPath.TrimEnd('\') + '\'
+        $model.Items = @($model.Items | Where-Object { -not ($_.Path -ieq $targetPath) -and -not ([string]$_.Path).StartsWith($subtreePrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+        $model.TreeItems = @($model.TreeItems | Where-Object { -not ($_.Path -ieq $targetPath) -and -not ([string]$_.Path).StartsWith($subtreePrefix, [System.StringComparison]::OrdinalIgnoreCase) })
+        [void]$model.Expanded.Remove($targetPath)
         & $refreshGrid
         & $setSelection $null
         $txtStatus.Text = ('Removed {0}. Rescan to refresh the space map.' -f $targetPath)
@@ -62128,10 +62243,57 @@ function Show-WmtDiskUsageAnalyzer {
 
         $model.Scan = $scan
         $model.Selected = $null
+        $model.Expanded.Clear()
+        [void]$model.Expanded.Add([string]$scan.Root)
         & $setSelection $null
 
         $tree = New-WmtDiskUsageTree -Dirs @($scan.Dirs) -Files @($scan.Files) -RootPath ([string]$scan.Root) -RootBytes ([long]$scan.TotalBytes)
         $model.Root = $tree.Root
+
+        $treeRows = [System.Collections.Generic.List[object]]::new()
+        $treeStack = [System.Collections.Generic.Stack[object]]::new()
+        $rootChildren = @($tree.Root.Children)
+        for ($i = $rootChildren.Count - 1; $i -ge 0; $i--) {
+            if ([bool]$rootChildren[$i].IsSynthetic) { continue }
+            $treeStack.Push([PSCustomObject]@{
+                    Node      = $rootChildren[$i]
+                    Depth     = 0
+                    Ancestors = [string[]]@([string]$tree.Root.Path)
+                })
+        }
+        while ($treeStack.Count -gt 0) {
+            $entry = $treeStack.Pop()
+            $node = $entry.Node
+            $children = @($node.Children | Where-Object { -not [bool]$_.IsSynthetic })
+            [void]$treeRows.Add([PSCustomObject]@{
+                    Name        = [string]$node.Name
+                    Path        = [string]$node.Path
+                    Bytes       = [long]$node.Bytes
+                    Files       = [int]$node.Files
+                    IsDir       = [bool]$node.IsDir
+                    IsSynthetic = [bool]$node.IsSynthetic
+                    Ext         = [string]$node.Ext
+                    Depth       = [int]$entry.Depth
+                    Ancestors   = [string[]]$entry.Ancestors
+                    HasChildren = ($children.Count -gt 0)
+                    TreeName    = ''
+                    SizeText    = ConvertTo-WmtDiskUsageSize ([double]$node.Bytes)
+                    ShareText   = if ([double]$scan.TotalBytes -gt 0) { '{0:N1}%' -f (([double]$node.Bytes / [double]$scan.TotalBytes) * 100) } else { '0.0%' }
+                    ItemsText   = if ([bool]$node.IsDir) { '{0:N0}' -f [int]$node.Files } else { 'file' }
+                    FolderText  = [string](Get-WmtDiskUsageParentPath ([string]$node.Path))
+                })
+            if ([bool]$node.IsDir) {
+                $nextAncestors = [string[]](@($entry.Ancestors) + [string]$node.Path)
+                for ($i = $children.Count - 1; $i -ge 0; $i--) {
+                    $treeStack.Push([PSCustomObject]@{
+                            Node      = $children[$i]
+                            Depth     = [int]$entry.Depth + 1
+                            Ancestors = $nextAncestors
+                        })
+                }
+            }
+        }
+        $model.TreeItems = $treeRows.ToArray()
 
         $extColors = @{}
         $paletteIndex = 0
@@ -62339,6 +62501,18 @@ function Show-WmtDiskUsageAnalyzer {
             }
         }.GetNewClosure())
 
+    $openInAnalyzer = {
+        param($item)
+        if (-not $item -or [bool]$item.IsSynthetic) { return }
+        if ([bool]$item.IsDir) {
+            $txtPath.Text = [string]$item.Path
+            & $startScan -Target ([string]$item.Path)
+        }
+        else {
+            & $openLocation $item
+        }
+    }.GetNewClosure()
+
     $exportReport = {
         if (-not $model.Scan) {
             Show-WmtMessageBox -Message 'Run a scan before exporting a report.' -Title 'Disk Usage Analyzer' -Image Information | Out-Null
@@ -62390,6 +62564,27 @@ function Show-WmtDiskUsageAnalyzer {
             Show-WmtMessageBox -Message ('Export failed:' + [Environment]::NewLine + $_.Exception.Message) -Title 'Disk Usage Analyzer' -Image Error | Out-Null
         }
     }.GetNewClosure()
+
+    $usageMenuItems = @(
+        @{ Header = 'Open'; Action = { & $openItem $model.Selected }.GetNewClosure() }
+        @{ Header = 'Explore in File Explorer'; Action = { & $openLocation $model.Selected }.GetNewClosure() }
+        @{ Header = 'Copy Path'; Action = { & $copyItemPath $model.Selected }.GetNewClosure() }
+        @{ Header = 'Open Command Prompt Here'; Action = { & $openCommandPrompt $model.Selected }.GetNewClosure() }
+        @{ Separator = $true }
+        @{ Header = 'Properties'; Action = { & $showItemProperties $model.Selected }.GetNewClosure() }
+        @{ Separator = $true }
+        @{ Header = 'Send to Recycle Bin'; Action = { & $recycleItem $model.Selected }.GetNewClosure() }
+    )
+    $mapContextMenu = New-WmtContextMenu -Items $usageMenuItems -Target $cvTreemap
+    $listContextMenu = New-WmtContextMenu -Items $usageMenuItems -Target $dgUsage
+    $updateUsageContextMenu = {
+        param($menu)
+        $item = $model.Selected
+        $isUsable = ($item -and -not [bool]$item.IsSynthetic -and -not [string]::IsNullOrWhiteSpace([string]$item.Path))
+        foreach ($index in @(0, 1, 2, 3, 5, 7)) { $menu.Items[$index].IsEnabled = [bool]$isUsable }
+    }.GetNewClosure()
+    $mapContextMenu.Add_Opened({ & $updateUsageContextMenu $mapContextMenu }.GetNewClosure())
+    $listContextMenu.Add_Opened({ & $updateUsageContextMenu $listContextMenu }.GetNewClosure())
 
     # --- Wiring -------------------------------------------------------------
     Connect-WmtPathPicker -TextBox $txtPath -BrowseButton $btnBrowse -Description 'Select a folder to analyze' -Owner $dialog
@@ -62443,7 +62638,37 @@ function Show-WmtDiskUsageAnalyzer {
         }.GetNewClosure())
 
     $dgUsage.Add_MouseDoubleClick({
-            if ($dgUsage.SelectedItem) { & $openLocation $dgUsage.SelectedItem }
+            if ($dgUsage.SelectedItem) { & $openInAnalyzer $dgUsage.SelectedItem }
+        }.GetNewClosure())
+
+    $dgUsage.Add_PreviewMouseLeftButtonDown({
+            param($s, $a)
+            if ($a.ClickCount -ne 1) { return }
+            $cell = Get-WmtVisualAncestor -Element $a.OriginalSource -AncestorType ([System.Windows.Controls.DataGridCell])
+            if (-not $cell -or $cell.Column.DisplayIndex -ne 0) { return }
+            $row = Get-WmtVisualAncestor -Element $cell -AncestorType ([System.Windows.Controls.DataGridRow])
+            if (-not $row -or -not $row.Item -or -not [bool]$row.Item.IsDir -or -not [bool]$row.Item.HasChildren) { return }
+
+            $item = $row.Item
+            $dgUsage.SelectedItem = $item
+            & $setSelection $item
+            if ($model.Expanded.Contains([string]$item.Path)) { [void]$model.Expanded.Remove([string]$item.Path) }
+            else { [void]$model.Expanded.Add([string]$item.Path) }
+            & $refreshGrid
+            $a.Handled = $true
+        }.GetNewClosure())
+
+    $dgUsage.Add_PreviewMouseRightButtonDown({
+            param($s, $a)
+            $row = Get-WmtVisualAncestor -Element $a.OriginalSource -AncestorType ([System.Windows.Controls.DataGridRow])
+            if (-not $row) {
+                & $setSelection $null
+                & $updateUsageContextMenu $listContextMenu
+                return
+            }
+            $dgUsage.SelectedItem = $row.Item
+            & $setSelection $row.Item
+            & $updateUsageContextMenu $listContextMenu
         }.GetNewClosure())
 
     $cvTreemap.Add_MouseLeftButtonDown({
@@ -62464,7 +62689,33 @@ function Show-WmtDiskUsageAnalyzer {
                 }
             }
 
-            if ($a.ClickCount -eq 2) { & $openLocation $node }
+            if ([bool]$node.IsDir -and $a.ClickCount -eq 1) {
+                $txtPath.Text = [string]$node.Path
+                & $startScan -Target ([string]$node.Path)
+            }
+            elseif (-not [bool]$node.IsDir -and $a.ClickCount -eq 2) {
+                & $openLocation $node
+            }
+        }.GetNewClosure())
+
+    $cvTreemap.Add_PreviewMouseRightButtonDown({
+            param($s, $a)
+            $source = $a.OriginalSource
+            if (-not ($source -is [System.Windows.Shapes.Rectangle])) {
+                & $setSelection $null
+                & $updateUsageContextMenu $mapContextMenu
+                return
+            }
+            $node = $source.Tag
+            if (-not $node) { return }
+            & $setSelection $node
+            foreach ($row in @($dgUsage.Items)) {
+                if ([string]$row.Path -ieq [string]$node.Path -and [bool]$row.IsDir -eq [bool]$node.IsDir) {
+                    $dgUsage.SelectedItem = $row
+                    break
+                }
+            }
+            & $updateUsageContextMenu $mapContextMenu
         }.GetNewClosure())
 
     $cvTreemap.Add_SizeChanged({
