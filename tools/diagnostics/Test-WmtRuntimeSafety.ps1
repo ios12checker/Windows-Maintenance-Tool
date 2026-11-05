@@ -5,9 +5,14 @@ Set-StrictMode -Version Latest
 $passed = 0
 function Assert-That([bool]$Condition, [string]$Message) { if (-not $Condition) { throw "FAILED: $Message" }; $script:passed++; Write-Host "PASS: $Message" }
 # Isolated runtime contract tests; no host registry, devices, or services are modified.
-$cts = [Threading.CancellationTokenSource]::new(); $started = [Threading.ManualResetEventSlim]::new($false); $finished = [Threading.ManualResetEventSlim]::new($false)
-$task = [Threading.Tasks.Task]::Run([Action]{ $started.Set(); try { while (-not $cts.Token.IsCancellationRequested) { [Threading.Thread]::Sleep(10) } } finally { $finished.Set() } })
-Assert-That $started.Wait(3000) 'cancellable worker starts'; $cts.Cancel(); Assert-That $finished.Wait(3000) 'active worker exits after cancellation'; Assert-That $task.Wait(3000) 'cancelled worker reaches terminal state'; $cts.Dispose(); $started.Dispose(); $finished.Dispose()
+# Cancellation while a real PowerShell pipeline is active.
+$cancelPool = [runspacefactory]::CreateRunspacePool(1,1); $cancelPool.Open(); $cancelPs = [PowerShell]::Create(); $cancelPs.RunspacePool = $cancelPool
+$null = $cancelPs.AddScript('while ($true) { Start-Sleep -Milliseconds 40 }')
+$cancelAsync = $cancelPs.BeginInvoke(); Start-Sleep -Milliseconds 200; $cancelPs.Stop()
+$cancelState = $cancelPs.InvocationStateInfo.State
+try { $null = $cancelPs.EndInvoke($cancelAsync) } catch { }
+Assert-That ($cancelState -eq [System.Management.Automation.PSInvocationState]::Stopped) 'active PowerShell worker reaches Stopped after cancellation'
+$cancelPs.Dispose(); $cancelPool.Close(); $cancelPool.Dispose()
 $pool = [runspacefactory]::CreateRunspacePool(1,1); $pool.Open(); $ps = [PowerShell]::Create(); $ps.RunspacePool = $pool; $null = $ps.AddScript('throw "intentional worker termination fault"'); $async = $ps.BeginInvoke(); $reported = $false
 try { $null = $ps.EndInvoke($async) } catch { $reported = $_.ToString().Contains('intentional worker termination fault') } finally { $ps.Dispose(); $pool.Close(); $pool.Dispose() }
 Assert-That $reported 'worker termination exceptions are observable'
