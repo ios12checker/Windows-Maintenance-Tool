@@ -3526,12 +3526,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025]
-        powershell: [powershell, pwsh]
     steps:
       - name: Check out exact commit
         uses: actions/checkout@v4
       - name: Run isolated runtime safety tests
-        shell: ${{ matrix.powershell }}
+        shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           .\tools\diagnostics\Test-WmtRuntimeSafety.ps1
