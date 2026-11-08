@@ -57,8 +57,6 @@ jobs:
           git fetch --depth=1 origin "$env:GITHUB_SHA"
           git checkout --detach FETCH_HEAD
 
-      # Determine the version before SignPath; the final hash must be calculated
-      # after signing because Authenticode changes the executable's bytes.
       - name: Read release version
         id: version
         shell: powershell
@@ -74,15 +72,11 @@ jobs:
           }
 
           $version = $match.Groups[2].Value.TrimStart("v")
-          $parts = @($version.Split("."))
-          while ($parts.Count -lt 4) { $parts += "0" }
-          $fileVersion = ($parts[0..3] -join ".")
           $tag = "v$version"
 
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "file_version=$fileVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Release version: $version; PE version: $fileVersion"
+          Write-Host "Release version: $version"
 
       - name: Validate stable release source and version availability
         if: ${{ github.event_name == 'workflow_dispatch' && !inputs.prerelease }}
@@ -134,69 +128,6 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           .\PS2EXE\Build-Exe.ps1 -InstallPS2EXE
-
-      # SignPath Foundation approval and its GitHub App/project configuration
-      # are prerequisites. Until explicitly enabled, releases remain unchanged.
-      - name: Validate SignPath configuration
-        if: ${{ github.event_name == 'workflow_dispatch' && vars.WMT_SIGNPATH_ENABLED == 'true' }}
-        shell: powershell
-        env:
-          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
-          SIGNPATH_ORGANIZATION_ID: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          SIGNPATH_PROJECT_SLUG: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          foreach ($name in @(
-              'SIGNPATH_API_TOKEN', 'SIGNPATH_ORGANIZATION_ID',
-              'SIGNPATH_PROJECT_SLUG', 'SIGNPATH_SIGNING_POLICY_SLUG'
-          )) {
-              if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-                  throw "SignPath is enabled but $name is not configured."
-              }
-          }
-
-      - name: Upload unsigned executable to SignPath
-        if: ${{ github.event_name == 'workflow_dispatch' && vars.WMT_SIGNPATH_ENABLED == 'true' }}
-        id: signpath_unsigned
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: wmt-signpath-unsigned
-          path: dist/WindowsMaintenanceTool.exe
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: Sign executable with SignPath
-        if: ${{ github.event_name == 'workflow_dispatch' && vars.WMT_SIGNPATH_ENABLED == 'true' }}
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
-        with:
-          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
-          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
-          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
-          github-artifact-id: ${{ steps.signpath_unsigned.outputs.artifact-id }}
-          parameters: |
-            wmtVersion: "${{ steps.version.outputs.file_version }}"
-          wait-for-completion: true
-          wait-for-completion-timeout-in-seconds: "3600"
-          output-artifact-directory: signpath-signed
-
-      - name: Verify and adopt signed executable
-        if: ${{ github.event_name == 'workflow_dispatch' && vars.WMT_SIGNPATH_ENABLED == 'true' }}
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          $signed = ".\\signpath-signed\\WindowsMaintenanceTool.exe"
-          $release = ".\\dist\\WindowsMaintenanceTool.exe"
-          if (-not (Test-Path -LiteralPath $signed -PathType Leaf)) {
-              throw "SignPath did not return WindowsMaintenanceTool.exe at the expected path."
-          }
-          $signature = Get-AuthenticodeSignature -LiteralPath $signed
-          if ($signature.Status -ne 'Valid' -or -not $signature.SignerCertificate) {
-              throw "SignPath output has no valid, trusted Authenticode signature: $($signature.Status)"
-          }
-          Write-Host "Verified Authenticode publisher: $($signature.SignerCertificate.Subject)"
-          Copy-Item -LiteralPath $signed -Destination $release -Force
 
       - name: Calculate final release SHA-256
         id: checksum
@@ -252,7 +183,6 @@ jobs:
 
       # Rolling builds reuse the same parse-checked PS2EXE build, checksum and
       # verified Sigstore provenance as the manually published stable releases.
-      # SignPath requires manual approval; automatic previews stay unsigned.
       - name: Publish rolling prerelease
         if: github.event_name == 'push'
         shell: powershell
@@ -398,7 +328,7 @@ jobs:
               "--target", $env:GITHUB_SHA,
               "--title", "Windows Maintenance Tool $env:RELEASE_TAG",
               "--generate-notes",
-              "--notes", "Code signing policy: https://github.com/$env:GITHUB_REPOSITORY/blob/Main/docs/CODE_SIGNING.md"
+              "--notes", "This release is not Authenticode-signed. Verify its provenance with the instructions at https://github.com/$env:GITHUB_REPOSITORY#verify-release-provenance-sigstore--github-attestations"
           )
           if ($env:PRERELEASE -eq "true") {
               $args += "--prerelease"

@@ -3516,7 +3516,384 @@ jobs:
               try { if ($pool) { $pool.Close() } } catch {}
               try { if ($pool) { $pool.Dispose() } } catch {}
           }
+      - name: Smoke test Disk Usage Analyzer scanner, navigation and handler safety
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $script:passed = 0
+          function Assert-Wmt([bool]$Condition, [string]$Message) {
+              if (-not $Condition) { throw "FAILED: $Message" }
+              $script:passed++
+              Write-Host "PASS: $Message"
+          }
+          $tokens = $null; $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path (Get-Location).Path 'WMT-GUI.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count -ne 0) { throw 'WMT must parse before Disk Usage Analyzer tests.' }
+          # Functions are defined at script scope (as in the app) so closures resolve them the same way.
+          foreach ($name in @('Get-WmtDiskUsageParentPath', 'Invoke-WmtActionByName', 'New-WmtGuardedHandler',
+                  'New-WmtDiskUsageNavigator', 'Add-WmtDiskUsageScan', 'Find-WmtDiskUsageCachedNode',
+                  'Get-WmtDiskUsageEntryForNode', 'Push-WmtDiskUsageHistory', 'Get-WmtDiskUsageBackTarget',
+                  'Invoke-WmtDiskUsageNavigation')) {
+              $functionAst = $ast.Find({
+                      param($node)
+                      $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+                  }, $true)
+              if (-not $functionAst) { throw "Missing Disk Usage function: $name" }
+              Invoke-Expression $functionAst.Extent.Text
+          }
+          # ---------------------------------------------------------------------------------
+          # Disk Usage Analyzer: scanner, cache-backed Back/Up navigation, handler safety and
+          # static checks on the window code. Everything is imported from WMT-GUI.ps1 itself, so
+          # the shipped text is what is tested. Runs in its own scope so its variables cannot
+          # collide with the checks above.
+          #   * Scanner: full folder tree, sizes, ordering, Find, Detach, Search, caps, Stop.
+          #   * Navigation: Back/Up/open are served from the cached scan and never call the
+          #     disk-scan callback; only a path outside every cached scan does.
+          #   * Handler safety: reproduces the "expression after '&' ... not valid" error for
+          #     closures built before their target exists and proves the guard and the
+          #     late-bound action registry contain it.
+          #   * Static checks: closures only capture variables assigned before they are created,
+          #     every called action is registered, the window has one tab (Details) and only
+          #     uses theme resources that exist in every palette.
+          # ---------------------------------------------------------------------------------
+          & {
+              # ---- import the real scanner and functions -------------------------------------
+              $sourceAssign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:WmtDiskUsageScannerSource' }, $true)
+              if (-not $sourceAssign) { throw 'Scanner source assignment not found in WMT-GUI.ps1.' }
+              $scannerSource = [string]$sourceAssign.Right.Expression.Value
 
+              $addTypeArgs = @{ TypeDefinition = $scannerSource; Language = 'CSharp'; ErrorAction = 'Stop' }
+              # Windows PowerShell 5.1 compiles C# 5 only; make PowerShell 7 enforce the same.
+              if ($PSVersionTable.PSVersion.Major -ge 6) { $addTypeArgs['CompilerOptions'] = @('/langversion:5') }
+              if (-not ('Wmt.DiskUsage.Scanner' -as [type])) { Add-Type @addTypeArgs }
+              Assert-Wmt ([bool]('Wmt.DiskUsage.Scanner' -as [type])) 'scanner source compiles (C# 5 compatible)'
+
+              # ================================ scanner =========================================
+              $MB = 1MB
+              $base = Join-Path ([System.IO.Path]::GetTempPath()) ('wmt-du-' + [guid]::NewGuid().ToString('N'))
+              function New-TestFile([string]$Path, [long]$Size) { $stream = [System.IO.File]::Create($Path); $stream.SetLength($Size); $stream.Close() }
+              $bigRoot = $null
+              try {
+                  $null = New-Item -ItemType Directory -Path (Join-Path $base 'a/deep'), (Join-Path $base 'b'), (Join-Path $base 'c') -Force
+                  New-TestFile (Join-Path $base 'a/a1.dat') (2 * $MB); New-TestFile (Join-Path $base 'a/a2.txt') 10
+                  New-TestFile (Join-Path $base 'a/deep/d1.log') (3 * $MB)
+                  New-TestFile (Join-Path $base 'b/b1.bin') ([long](1.5 * $MB))
+                  New-TestFile (Join-Path $base 'top.txt') 100
+                  New-TestFile (Join-Path $base 'big.bin') (5 * $MB)
+                  if ($PSVersionTable.PSEdition -eq 'Core' -and $IsLinux) { & ln -s (Join-Path $base 'b') (Join-Path $base 'link-to-b') }
+
+                  $state = [hashtable]::Synchronized(@{ Cancel = $false; Done = $false })
+                  $scan = [Wmt.DiskUsage.Scanner]::Scan($base, $state, 400)
+                  $expected = [long](2 * $MB + 10 + 3 * $MB + 1.5 * $MB + 100 + 5 * $MB)
+                  Assert-Wmt ($scan.TotalBytes -eq $expected) "root total is exact ($expected bytes)"
+                  Assert-Wmt ($scan.FileCount -eq 6 -and $scan.DirCount -eq 5) 'file and folder counts are exact (6 files, 5 folders)'
+                  Assert-Wmt ($state.Done -eq $true) 'progress state is marked done'
+                  if ($PSVersionTable.PSEdition -eq 'Core' -and $IsLinux) { Assert-Wmt ($scan.Skipped -eq 1) 'a symlinked folder is skipped, not double counted' }
+
+                  $root = $scan.RootNode
+                  Assert-Wmt ((@($root.Children | ForEach-Object { $_.Name }) -join ',') -eq 'a,big.bin,b,c') 'root children are sorted largest first'
+                  $a = $root.Children[0]
+                  Assert-Wmt ($a.Bytes -eq (5 * $MB + 10) -and $a.Files -eq 3) 'a folder rolls up its subfolders'
+                  Assert-Wmt ((@($scan.Files | ForEach-Object { $_.Name }) -join ',') -eq 'big.bin,d1.log,a1.dat,b1.bin') 'only files of 1 MB or more are retained, largest first'
+                  Assert-Wmt ($a.Children[0].Path -eq ($scan.Root.TrimEnd('\') + '\a\deep')) 'child paths are built from the parent'
+
+                  Assert-Wmt ($root.Find($scan.Root.TrimEnd('\') + '\A\DEEP').Name -eq 'deep') 'Find is case-insensitive'
+                  Assert-Wmt ($null -eq $root.Find($scan.Root.TrimEnd('\') + '\a\nope') -and $null -eq $root.Find('Z:\elsewhere')) 'Find returns null for missing or outside paths'
+
+                  $map = $root.MapChildren(); $sum = 0; foreach ($m in $map) { $sum += $m.Bytes }
+                  Assert-Wmt ($sum -eq $root.Bytes) 'treemap children (with the "other items" block) add up to the folder size'
+                  Assert-Wmt (@($root.Children | Where-Object { $_.IsSynthetic }).Count -eq 0) 'the synthetic block is never part of the real tree'
+
+                  $under = [Wmt.DiskUsage.Scanner]::FilesUnder($a, $scan.Files)
+                  Assert-Wmt ((@($under | ForEach-Object { $_.Name }) -join ',') -eq 'd1.log,a1.dat') 'FilesUnder returns only files beneath a folder'
+                  $hits = [Wmt.DiskUsage.Scanner]::Search($root, 'DEE', $true, $true, 50)
+                  Assert-Wmt (@($hits).Count -eq 1 -and $hits[0].Name -eq 'deep') 'Search matches names case-insensitively'
+                  $hits = [Wmt.DiskUsage.Scanner]::Search($root, '\a\deep', $true, $false, 50)
+                  Assert-Wmt (@($hits).Count -eq 1) 'Search with a backslash matches full folder paths'
+                  $top = [Wmt.DiskUsage.Scanner]::LargestFolders($root, 2)
+                  Assert-Wmt ((@($top | ForEach-Object { $_.Name }) -join ',') -eq 'a,deep') 'LargestFolders returns the biggest folders anywhere in the tree'
+
+                  $before = $root.Bytes; $deep = $a.Children[0]; [void]$root.MapChildren()
+                  $deep.Detach()
+                  Assert-Wmt ($root.Bytes -eq $before - 3 * $MB -and $a.Bytes -eq 2 * $MB + 10 -and $root.Files -eq 5) 'Detach takes the subtree out of every ancestor'
+                  $map = $root.MapChildren(); $sum = 0; foreach ($m in $map) { $sum += $m.Bytes }
+                  Assert-Wmt ($sum -eq $root.Bytes) 'the treemap still adds up after Detach (caches were invalidated)'
+                  $deep.Detach()
+                  Assert-Wmt ($root.Bytes -eq $before - 3 * $MB) 'detaching twice is harmless'
+
+                  $wide = [Wmt.DiskUsage.Node]::new(); $wide.Name = 'C:\wide'; $wide.IsDir = $true
+                  $kids = New-Object 'System.Collections.Generic.List[Wmt.DiskUsage.Node]'
+                  foreach ($i in 1..1500) { $k = [Wmt.DiskUsage.Node]::new(); $k.Name = "k$i"; $k.IsDir = $true; $k.Parent = $wide; $k.Bytes = 1501 - $i; $k.Files = 1; $kids.Add($k) }
+                  $wide.Children = $kids.ToArray(); $wide.Files = 1507; $wide.Bytes = (1500 * 1501 / 2) + 77
+                  $wideMap = $wide.MapChildren(); $wideSum = 0; foreach ($m in $wideMap) { $wideSum += $m.Bytes }
+                  Assert-Wmt ($wideMap.Length -le [Wmt.DiskUsage.Node]::MaxMapBlocks -and $wideSum -eq $wide.Bytes -and $wide.Children.Length -eq 1500) 'a folder with 1500 entries draws a capped treemap that still adds up, while the tree keeps every child'
+
+                  $cancelled = [Wmt.DiskUsage.Scanner]::Scan($base, ([hashtable]::Synchronized(@{ Cancel = $true })), 400)
+                  Assert-Wmt ($cancelled.Cancelled -and $cancelled.TotalBytes -le $expected -and $cancelled.RootNode.Children.Length -eq 0) 'Stop before the first folder yields an empty but valid result'
+
+                  $capped = [Wmt.DiskUsage.Scanner]::Scan($base, $null, 400, 2)
+                  $capMap = $capped.RootNode.MapChildren(); $capSum = 0; foreach ($m in $capMap) { $capSum += $m.Bytes }
+                  Assert-Wmt ($capped.Truncated -and $capped.TotalBytes -eq $expected -and $capSum -eq $capped.TotalBytes) 'the node cap keeps totals exact and the treemap consistent'
+                  $missing = [Wmt.DiskUsage.Scanner]::Scan((Join-Path $base 'does-not-exist'), $null, 400)
+                  Assert-Wmt ($missing.TotalBytes -eq 0) 'a missing folder scans to an empty result without throwing'
+
+                  # Stop in the middle of a large scan: the partial tree must be consistent.
+                  $bigRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('wmt-du-big-' + [guid]::NewGuid().ToString('N'))
+                  $dirTotal = 2000
+                  foreach ($i in 1..$dirTotal) { $d = Join-Path $bigRoot "d$i"; $null = [System.IO.Directory]::CreateDirectory($d); [System.IO.File]::WriteAllText((Join-Path $d 'f.txt'), '0123456789') }
+                  $partial = $null
+                  for ($attempt = 1; $attempt -le 8 -and -not $partial; $attempt++) {
+                      $cancelState = [hashtable]::Synchronized(@{ Cancel = $false; Dirs = 0 })
+                      $worker = [powershell]::Create()
+                      [void]$worker.AddScript({ param($p, $s) [Wmt.DiskUsage.Scanner]::Scan($p, $s, 400) }).AddArgument($bigRoot).AddArgument($cancelState)
+                      $async = $worker.BeginInvoke()
+                      $deadline = [DateTime]::UtcNow.AddSeconds(30)
+                      while ([int]$cancelState.Dirs -lt 64 -and -not $async.IsCompleted -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 1 }
+                      $cancelState.Cancel = $true
+                      $result = $worker.EndInvoke($async)[0]; $worker.Dispose()
+                      if ($result.Cancelled -and $result.DirCount -gt 0 -and $result.DirCount -le $dirTotal) { $partial = $result }
+                  }
+                  if ($partial) {
+                      $inconsistent = 0; $visited = 0; $pending = New-Object 'System.Collections.Generic.Stack[object]'; $pending.Push($partial.RootNode)
+                      while ($pending.Count) {
+                          $node = $pending.Pop(); $visited++; $childSum = 0
+                          foreach ($child in $node.Children) { $childSum += $child.Bytes; if ($child.IsDir) { $pending.Push($child) } }
+                          if ($childSum -gt $node.Bytes) { $inconsistent++ }
+                          $mapSum = 0; foreach ($m in $node.MapChildren()) { $mapSum += $m.Bytes }
+                          if ($mapSum -ne $node.Bytes) { $inconsistent++ }
+                      }
+                      Assert-Wmt ($inconsistent -eq 0 -and $partial.TotalBytes -le $dirTotal * 10) "Stop in the middle of a scan leaves a consistent partial tree ($visited folders)"
+                  }
+                  else { Write-Host 'SKIP: the scan finished before Stop could interrupt it (machine too fast); mid-scan consistency not exercised.' }
+                  $full = [Wmt.DiskUsage.Scanner]::Scan($bigRoot, $null, 400)
+                  Assert-Wmt ($full.TotalBytes -eq $dirTotal * 10 -and $full.DirCount -eq ($dirTotal + 1)) "an uninterrupted scan of $dirTotal folders is exact"
+              }
+              finally {
+                  foreach ($path in @($base, $bigRoot)) { if ($path) { Remove-Item -LiteralPath $path -Recurse -Force -ErrorAction SilentlyContinue } }
+              }
+
+              # ============================ navigation and cache ================================
+              function New-TestDir([string]$Name, $Parent, [long]$Bytes) {
+                  $node = [Wmt.DiskUsage.Node]::new(); $node.Name = $Name; $node.IsDir = $true; $node.Bytes = $Bytes; $node.Files = 1; $node.Parent = $Parent
+                  if ($Parent) { $Parent.Children = @($Parent.Children) + $node }
+                  return $node
+              }
+              function New-TestScan($RootNode) { $s = [Wmt.DiskUsage.ScanResult]::new(); $s.Root = $RootNode.Path; $s.RootNode = $RootNode; $s.Files = @(); $s.Extensions = @(); return $s }
+
+              $cRoot = New-TestDir 'C:\' $null 1000
+              $users = New-TestDir 'Users' $cRoot 600; $me = New-TestDir 'me' $users 500; $docs = New-TestDir 'Docs' $me 300; $null = New-TestDir 'Windows' $cRoot 400
+              $scanC = New-TestScan $cRoot
+              $meRoot = New-TestDir 'C:\Users\me' $null 500; $null = New-TestDir 'Docs' $meRoot 300; $null = New-TestDir 'Pics' $meRoot 200
+              $scanMe = New-TestScan $meRoot
+
+              $nav = New-WmtDiskUsageNavigator
+              $entryC = Add-WmtDiskUsageScan -Navigator $nav -Scan $scanC
+              $log = New-Object 'System.Collections.Generic.List[string]'
+              $onShow = { param($node, $entry) $log.Add('show:' + $node.Path) }.GetNewClosure()
+              $onScan = { param($path, $record) $log.Add('scan:' + $path + '|record:' + $record) }.GetNewClosure()
+              function Invoke-TestNav([string]$Kind, [string]$Current, [string]$Target = '', $Prefer = $null) {
+                  Invoke-WmtDiskUsageNavigation -Navigator $nav -Kind $Kind -CurrentPath $Current -TargetPath $Target -PreferEntry $Prefer -OnShow $onShow -OnScan $onScan
+              }
+              function Get-ScanCalls { @($log | Where-Object { $_ -like 'scan:*' }).Count }
+
+              $hit = Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'C:\Users\me\Docs'
+              Assert-Wmt ($hit -and $hit.Node.Name -eq 'Docs' -and $hit.Entry -eq $entryC) 'a folder deep inside a cached scan is found in memory'
+              Assert-Wmt ($null -eq (Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'D:\Other') -and $null -eq (Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'C:\Users\nobody')) 'paths outside the scan or missing inside it are not found'
+
+              $result = Invoke-TestNav 'Open' 'C:\' 'C:\Users'
+              Assert-Wmt ($result -eq 'cache' -and $log[$log.Count - 1] -eq 'show:C:\Users') 'opening a cached folder is served from memory'
+              $null = Invoke-TestNav 'Open' 'C:\Users' 'C:\Users\me'; $null = Invoke-TestNav 'Open' 'C:\Users\me' 'C:\Users\me\Docs'
+              Assert-Wmt ((Get-ScanCalls) -eq 0 -and ($nav.History -join '|') -eq 'C:\|C:\Users|C:\Users\me') 'three levels of opening folders caused zero disk scans and were remembered for Back'
+
+              $null = Invoke-TestNav 'Up' 'C:\Users\me\Docs'; $null = Invoke-TestNav 'Up' 'C:\Users\me'; $null = Invoke-TestNav 'Up' 'C:\Users'
+              Assert-Wmt ($log[$log.Count - 1] -eq 'show:C:\' -and (Get-ScanCalls) -eq 0) 'Up three times, to the scan root, caused zero disk scans'
+              Assert-Wmt ((Invoke-TestNav 'Up' 'C:\') -eq 'none') 'Up from a volume root does nothing'
+
+              $historyBefore = $nav.History.Count
+              $result = Invoke-TestNav 'Back' 'C:\'
+              Assert-Wmt ($result -eq 'cache' -and $log[$log.Count - 1] -eq 'show:C:\Users' -and $nav.History.Count -eq $historyBefore - 1) 'Back returns to the previous folder from memory and shortens history'
+              $null = Invoke-TestNav 'Back' 'C:\Users'; $null = Invoke-TestNav 'Back' 'C:\Users\me'
+              Assert-Wmt ((Get-ScanCalls) -eq 0) 'repeated Back caused zero disk scans'
+              $nav.History.Clear()
+              Assert-Wmt ((Invoke-TestNav 'Back' 'C:\') -eq 'none') 'Back with no history does nothing'
+
+              $nav = New-WmtDiskUsageNavigator; $null = Add-WmtDiskUsageScan -Navigator $nav -Scan $scanMe; $log.Clear()
+              $result = Invoke-TestNav 'Up' 'C:\Users\me'
+              Assert-Wmt ($result -eq 'scan' -and $log[$log.Count - 1] -eq 'scan:C:\Users|record:C:\Users\me' -and $nav.History.Count -eq 0) 'Up beyond the scanned root is the one case that needs the disk, and history is written only after that scan succeeds'
+
+              $nav = New-WmtDiskUsageNavigator; $entryC = Add-WmtDiskUsageScan -Navigator $nav -Scan $scanC; $entryMe = Add-WmtDiskUsageScan -Navigator $nav -Scan $scanMe
+              Assert-Wmt ((Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'C:\Users\me\Docs').Entry -eq $entryMe) 'with two covering scans the newest wins by default'
+              Assert-Wmt ((Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'C:\Users\me\Docs' -PreferEntry $entryC).Entry -eq $entryC) 'the scan already on screen is preferred'
+              $null = Add-WmtDiskUsageScan -Navigator $nav -Scan (New-TestScan $cRoot)
+              Assert-Wmt (@($nav.Entries | Where-Object { $_.Scan.Root -eq 'C:\' }).Count -eq 1 -and $nav.Entries.Count -eq 2) 'rescanning a root replaces its cache entry'
+
+              $nav = New-WmtDiskUsageNavigator
+              foreach ($i in 1..150) { Push-WmtDiskUsageHistory -Navigator $nav -Path "C:\d$i" }
+              Push-WmtDiskUsageHistory -Navigator $nav -Path 'C:\D150'; Push-WmtDiskUsageHistory -Navigator $nav -Path ''
+              Assert-Wmt ($nav.History.Count -eq 100 -and $nav.History[0] -eq 'C:\d51') 'history is capped at 100 and ignores duplicates and blanks'
+
+              $nav = New-WmtDiskUsageNavigator; $null = Add-WmtDiskUsageScan -Navigator $nav -Scan $scanC
+              Push-WmtDiskUsageHistory -Navigator $nav -Path 'C:\Users'; Push-WmtDiskUsageHistory -Navigator $nav -Path 'Q:\vanished\folder'
+              Assert-Wmt ((Get-WmtDiskUsageBackTarget -Navigator $nav) -eq 'C:\Users') 'Back skips a folder that is neither cached nor on disk'
+              $docs.Detach()
+              Assert-Wmt ($null -eq (Find-WmtDiskUsageCachedNode -Navigator $nav -Path 'C:\Users\me\Docs') -and $null -eq (Get-WmtDiskUsageEntryForNode -Navigator $nav -Node $docs)) 'a recycled folder is no longer served from the cache'
+
+              # ============================== handler safety ====================================
+              $script:logged = New-Object 'System.Collections.Generic.List[string]'
+              # Script scope on purpose: the guard's closure resolves Write-GuiLog the way the app does.
+              function script:Write-GuiLog { param($Msg) $script:logged.Add([string]$Msg) }
+              $errors = New-Object 'System.Collections.Generic.List[string]'
+              $sink = { param($n, $m) $errors.Add("$n=>$m") }.GetNewClosure()
+
+              function New-TestHandlerSet {
+                  param($Sink)
+                  $act = @{}
+                  $call = { param([string]$Name) Invoke-WmtActionByName -Registry $act -Name $Name -ArgumentList $args }.GetNewClosure()
+                  $earlyRaw = { & $refreshLater }.GetNewClosure()      # built before its target exists: the original bug
+                  $refreshLater = { 'late' }
+                  $version = { 'v1' }
+                  $staleRaw = { & $version }.GetNewClosure()
+                  $version = { 'v2' }
+                  $box = @{ got = $null }
+                  $tab = New-WmtGuardedHandler -Name 'tab-selected' -Body ({ param($s, $e) & $call 'refresh' $s.Tag }.GetNewClosure()) -OnError $Sink
+                  $act['refresh'] = { param($tag) $box.got = "refreshed:$tag" }.GetNewClosure()
+                  $act['versioned'] = { 'v1' }
+                  $versioned = New-WmtGuardedHandler -Name 'versioned' -Body ({ & $call 'versioned' }.GetNewClosure()) -OnError $Sink
+                  $act['versioned'] = { 'v2' }
+                  $guardedEarly = New-WmtGuardedHandler -Name 'early' -Body $earlyRaw -OnError $Sink
+                  return @{ Box = $box; Act = $act; EarlyRaw = $earlyRaw; StaleRaw = $staleRaw; GuardedEarly = $guardedEarly; Tab = $tab; Versioned = $versioned }
+              }
+              $handlers = New-TestHandlerSet -Sink $sink
+
+              $rawMessage = ''
+              try { & $handlers.EarlyRaw } catch { $rawMessage = $_.Exception.Message }
+              Assert-Wmt ($rawMessage -like "The expression after '&'*not valid*") 'reproduced: a closure built before its target exists throws "expression after &"'
+              Assert-Wmt ((& $handlers.StaleRaw) -eq 'v1') 'reproduced: a closure keeps a stale block after the variable is reassigned'
+              $threw = $false; try { & $handlers.GuardedEarly } catch { $threw = $true }
+              Assert-Wmt ((-not $threw) -and $script:logged[$script:logged.Count - 1] -like '*early failed*' -and $errors[$errors.Count - 1] -like 'early=>*') 'the guard keeps that exception off the dispatcher, logs it and reports it to the status line'
+              & $handlers.Tab ([pscustomobject]@{ Tag = 'Details' }) $null
+              Assert-Wmt ($handlers.Box.got -eq 'refreshed:Details') 'an action registered after its handler was built is still found'
+              Assert-Wmt ((& $handlers.Versioned) -eq 'v2') 're-registering an action is picked up by existing handlers'
+              $handlers.Act.Remove('refresh'); & $handlers.Tab ([pscustomobject]@{ Tag = 'x' }) $null
+              Assert-Wmt ($script:logged[$script:logged.Count - 1] -like '*Action "refresh" is not defined*') 'a missing action is reported by name, not as an opaque "&" error'
+              $handlers.Act['refresh'] = 'not a script block'; & $handlers.Tab ([pscustomobject]@{ Tag = 'x' }) $null
+              Assert-Wmt ($script:logged[$script:logged.Count - 1] -like '*not defined or is not a script block*') 'a registry entry that is not a script block is rejected clearly'
+              $nullBody = New-WmtGuardedHandler -Name 'null-body' -Body $null -OnError $sink
+              $threw = $false; try { & $nullBody } catch { $threw = $true }
+              Assert-Wmt ((-not $threw) -and $script:logged[$script:logged.Count - 1] -like '*null-body failed*') 'a null handler body is logged, not thrown'
+              $failingSink = New-WmtGuardedHandler -Name 'boom' -Body { throw 'kaboom' } -OnError { throw 'sink also fails' }
+              $threw = $false; try { & $failingSink } catch { $threw = $true }
+              Assert-Wmt (-not $threw) 'even a failing error sink cannot escape'
+              $pair = @{}
+              $forwarding = New-WmtGuardedHandler -Name 'ok' -Body ({ param($a, $b) $pair.value = "$a/$b" }.GetNewClosure())
+              & $forwarding 1 2
+              Assert-Wmt ($pair.value -eq '1/2') 'the guard forwards sender and event args to the handler body'
+
+              # ==================== static checks on the analyzer window code ===================
+              $analyzer = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-WmtDiskUsageAnalyzer' }, $true)
+              if (-not $analyzer) { throw 'Show-WmtDiskUsageAnalyzer not found.' }
+
+              function Get-TestAssignedNames($Root) {
+                  $names = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+                  foreach ($n in $Root.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+                      $v = if ($n.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $n.Left } elseif ($n.Left -is [System.Management.Automation.Language.ConvertExpressionAst] -and $n.Left.Child -is [System.Management.Automation.Language.VariableExpressionAst]) { $n.Left.Child } else { $null }
+                      if ($v) { [void]$names.Add($v.VariablePath.UserPath) }
+                  }
+                  foreach ($n in $Root.FindAll({ param($x) $x -is [System.Management.Automation.Language.ForEachStatementAst] }, $true)) { [void]$names.Add($n.Variable.VariablePath.UserPath) }
+                  foreach ($n in $Root.FindAll({ param($x) $x -is [System.Management.Automation.Language.ParameterAst] }, $true)) { [void]$names.Add($n.Name.VariablePath.UserPath) }
+                  return , $names
+              }
+              $closures = @($analyzer.Body.FindAll({ param($x) $x -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and $x.Member.Value -eq 'GetNewClosure' -and $x.Expression -is [System.Management.Automation.Language.ScriptBlockExpressionAst] }, $true))
+              Assert-Wmt ($closures.Count -gt 20) "the closure check inspects the analyzer's closures ($($closures.Count) found)"
+              $allAssignments = @($analyzer.Body.FindAll({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true))
+              $allForeach = @($analyzer.Body.FindAll({ param($x) $x -is [System.Management.Automation.Language.ForEachStatementAst] }, $true))
+              $parameterNames = @($analyzer.Body.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+              $ignored = 'true', 'false', 'null', '_', 'args', 'PSItem', 'this', 'input', 'PSCmdlet', 'MyInvocation', 'PSBoundParameters', 'Error', 'LASTEXITCODE', 'Matches', 'env'
+              $captureProblems = New-Object 'System.Collections.Generic.List[string]'
+              foreach ($closure in $closures) {
+                  $block = $closure.Expression; $inner = Get-TestAssignedNames $block; $start = $closure.Extent.StartOffset
+                  $defined = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+                  foreach ($p in $parameterNames) { [void]$defined.Add($p) }
+                  foreach ($n in $allAssignments) {
+                      $insideBlock = ($n.Extent.StartOffset -ge $block.Extent.StartOffset -and $n.Extent.EndOffset -le $block.Extent.EndOffset)
+                      if ($n.Extent.EndOffset -le $start -and -not $insideBlock) {
+                          $v = if ($n.Left -is [System.Management.Automation.Language.VariableExpressionAst]) { $n.Left } elseif ($n.Left -is [System.Management.Automation.Language.ConvertExpressionAst] -and $n.Left.Child -is [System.Management.Automation.Language.VariableExpressionAst]) { $n.Left.Child } else { $null }
+                          if ($v) { [void]$defined.Add($v.VariablePath.UserPath) }
+                      }
+                  }
+                  foreach ($n in $allForeach) { if ($n.Extent.StartOffset -le $start) { [void]$defined.Add($n.Variable.VariablePath.UserPath) } }
+                  $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+                  foreach ($v in $block.FindAll({ param($x) $x -is [System.Management.Automation.Language.VariableExpressionAst] }, $true)) {
+                      $p = $v.VariablePath
+                      if ($p.IsDriveQualified -or $p.IsGlobal -or $p.IsScript) { continue }
+                      $name = $p.UserPath
+                      if ($ignored -contains $name -or $inner.Contains($name) -or -not $seen.Add($name)) { continue }
+                      if (-not $defined.Contains($name)) { $captureProblems.Add("line $($closure.Extent.StartLineNumber): `$$name") }
+                  }
+              }
+              Assert-Wmt ($captureProblems.Count -eq 0) ('every variable captured by a GetNewClosure() block is assigned before the block is created' + $(if ($captureProblems.Count) { ' - ' + (($captureProblems | Select-Object -First 5) -join '; ') } else { '' }))
+
+              $analyzerText = $analyzer.Extent.Text
+              $registered = @([regex]::Matches($analyzerText, '(?m)^\s*\$act\.([A-Za-z]+)\s*=') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+              $called = @([regex]::Matches($analyzerText, "&\s*\`$call\s+'([A-Za-z]+)'") | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+              $unregistered = @($called | Where-Object { $registered -notcontains $_ })
+              Assert-Wmt ($registered.Count -gt 15 -and $unregistered.Count -eq 0) ('every action the handlers call by name is registered' + $(if ($unregistered.Count) { ': missing ' + ($unregistered -join ', ') } else { '' }))
+              $directCalls = @([regex]::Matches($analyzerText, '(?m)^[^#\r\n]*&\s*\$(?!call\b|guard\b)([A-Za-z]+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+              Assert-Wmt ($directCalls.Count -eq 0) ('handlers never invoke a captured variable with "&" directly' + $(if ($directCalls.Count) { ': ' + ($directCalls -join ', ') } else { '' }))
+
+              # ---- the window XAML
+              $xamlAssign = $analyzer.Body.Find({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '[xml]$usageXaml' }, $true)
+              [xml]$xaml = [string]$xamlAssign.Right.Expression.Value
+              $tabItems = @($xaml.SelectNodes("//*[local-name()='TabItem']"))
+              Assert-Wmt ($tabItems.Count -eq 1 -and $tabItems[0].GetAttribute('Header') -eq 'Details') 'the analyzer has exactly one tab: Details'
+              Assert-Wmt (@($xaml.SelectNodes("//*[local-name()='TreeView']")).Count -eq 1) 'folders are browsed through one hierarchical TreeView'
+
+              $xamlText = [string]$xamlAssign.Right.Expression.Value
+              $controls = @('txtUsagePath', 'btnUsageBack', 'btnUsageUp', 'btnUsageScan', 'tabUsage', 'tvUsage', 'cvTreemap', 'cmbUsageView', 'txtUsageFilter', 'pnlUsageLegend')
+              $missingControls = @($controls | Where-Object { @($xaml.SelectNodes("//*[@*[local-name()='Name' and .='$_']]")).Count -ne 1 })
+              Assert-Wmt ($missingControls.Count -eq 0) 'every control the code looks up exists exactly once'
+
+              $paletteAssign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:ThemePalettes' }, $true)
+              $palettes = & ([scriptblock]::Create($paletteAssign.Right.Extent.Text))
+              $dynamicKeys = @([regex]::Matches($xamlText, '\{DynamicResource\s+([A-Za-z0-9_]+)\}') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+              $absent = @()
+              foreach ($paletteName in $palettes.Keys) { foreach ($key in $dynamicKeys) { if (-not $palettes[$paletteName].ContainsKey($key)) { $absent += "$paletteName/$key" } } }
+              Assert-Wmt ($dynamicKeys.Count -gt 10 -and $absent.Count -eq 0) ('tab and tree styles only use theme resources that exist in every palette (' + $dynamicKeys.Count + ' keys, ' + @($palettes.Keys).Count + ' palettes)')
+
+              $resourceKeys = @($xaml.SelectNodes("//*[local-name()='Window.Resources']/*") | ForEach-Object { $_.GetAttribute('Key', 'http://schemas.microsoft.com/winfx/2006/xaml') } | Where-Object { $_ })
+              $staticProblems = @([regex]::Matches($xamlText, '\{StaticResource\s+([A-Za-z0-9_]+)\}') | ForEach-Object {
+                      $key = $_.Groups[1].Value; $defIndex = $xamlText.IndexOf('x:Key="' + $key + '"')
+                      if ($resourceKeys -notcontains $key -or $defIndex -lt 0 -or $defIndex -gt $_.Index) { $key }
+                  })
+              Assert-Wmt ($staticProblems.Count -eq 0) 'every StaticResource refers to a style defined earlier in the window resources'
+
+              $templateProblems = @()
+              foreach ($template in $xaml.SelectNodes("//*[local-name()='ControlTemplate']")) {
+                  $names = @($template.SelectNodes('.//*[@*[local-name()="Name"]]') | ForEach-Object { $_.GetAttribute('Name', 'http://schemas.microsoft.com/winfx/2006/xaml') })
+                  foreach ($node in $template.SelectNodes('.//*[@TargetName or @SourceName]')) {
+                      foreach ($attribute in 'TargetName', 'SourceName') { $target = $node.GetAttribute($attribute); if ($target -and $names -notcontains $target) { $templateProblems += "$($template.GetAttribute('TargetType')): $target" } }
+                  }
+              }
+              Assert-Wmt ($templateProblems.Count -eq 0) 'every trigger and setter target resolves inside its control template'
+              foreach ($type in '{x:Type TabItem}', '{x:Type TreeViewItem}') {
+                  $template = @($xaml.SelectNodes("//*[local-name()='ControlTemplate'][@TargetType='$type']"))[0]
+                  $style = @($xaml.SelectNodes("//*[local-name()='Style'][@TargetType='$type']"))[0]
+                  $baseSetters = @($style.SelectNodes("./*[local-name()='Setter']") | ForEach-Object { $_.GetAttribute('Property') })
+                  Assert-Wmt (($baseSetters -contains 'Background') -and ($baseSetters -contains 'Foreground') -and ($baseSetters -contains 'BorderBrush')) "$type has a themed normal state (background, foreground, border)"
+                  foreach ($state in 'IsMouseOver', 'IsSelected', 'IsKeyboardFocused') {
+                      # A real Trigger of its own (not just a mention inside another trigger's conditions) that sets something.
+                      $trigger = @($template.SelectNodes("./*[local-name()='ControlTemplate.Triggers']/*[local-name()='Trigger'][@Property='$state']"))
+                      $setters = if ($trigger.Count) { @($trigger[0].SelectNodes("./*[local-name()='Setter']")) } else { @() }
+                      Assert-Wmt ($trigger.Count -ge 1 -and $setters.Count -ge 1) "$type is themed for $state"
+                      $usesTheme = ($trigger.Count -ge 1) -and ($trigger[0].OuterXml -match '\{DynamicResource ')
+                      Assert-Wmt $usesTheme "$type $state state uses theme resources, not hard-coded colours"
+                  }
+                  $disabled = @($template.SelectNodes("./*[local-name()='ControlTemplate.Triggers']/*[local-name()='Trigger'][@Property='IsEnabled']"))
+                  Assert-Wmt ($disabled.Count -ge 1) "$type has a disabled state"
+              }
+          }
+          Write-Host "Disk Usage Analyzer tests passed: $script:passed assertions."
 
   runtime-safety:
     name: Runtime safety contracts (${{ matrix.os }})

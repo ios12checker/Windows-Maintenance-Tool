@@ -39,26 +39,13 @@ If your antivirus reports WMT as a PUP or false positive, submit the file to the
 VirusTotal maintains a broader vendor contact directory here: https://docs.virustotal.com/docs/false-positive-contacts
 </details>
 
-## Code signing policy
-
-SignPath Authenticode signing is **prepared but disabled** pending foundation
-approval. Future approved releases can use SignPath Foundation in addition
-to GitHub's Sigstore build provenance. Current releases must not be assumed
-to have Authenticode signatures.
-
-See the [Code signing policy and activation guide](docs/CODE_SIGNING.md)
-for release approvers, security expectations, SignPath project setup,
-required GitHub variables/secrets, and verification instructions. The
-proposed [SignPath artifact configuration](.signpath/artifact-configurations/default.xml)
-enforces WMT's executable metadata when approved and activated.
-
 ## Download channels
 
 **Stable releases:** [Versioned GitHub releases](https://github.com/Chaython/Windows-Maintenance-Tool/releases/latest) are published manually. Only those stable releases are eligible for optional WinGet/Chocolatey updates.
 
 **Rolling prerelease:** [Latest Main preview](https://github.com/Chaython/Windows-Maintenance-Tool/releases/tag/rolling) is built automatically on pushes to Main after the executable passes the build syntax check, SHA-256 hashing and GitHub/Sigstore provenance verification. The rolling tag and its download assets are replaced with the newest successful build; **the URL remains the same but the file bytes can change**. This channel is for testing, not package-manager distribution.
 
-Both newly published channels include WindowsMaintenanceTool.exe, WindowsMaintenanceTool.exe.sha256, and WindowsMaintenanceTool.exe.sigstore.json. The rolling release notes identify the exact source commit and SHA-256. Download the EXE and bundle together, and use the documented attestation verification below. Automatic rolling builds intentionally skip SignPath's manual Authenticode approval process, even when stable-release signing is enabled.
+Both newly published channels include WindowsMaintenanceTool.exe, WindowsMaintenanceTool.exe.sha256, and WindowsMaintenanceTool.exe.sigstore.json. The rolling release notes identify the exact source commit and SHA-256. Download the EXE and bundle together, and use the documented attestation verification below. Neither channel is Authenticode-signed; verify downloads with the provenance steps below.
 
 ## Verify release provenance (Sigstore / GitHub Attestations)
 
@@ -87,7 +74,7 @@ Alternatively, with internet access, `gh attestation verify .\WindowsMaintenance
 - Rebuilt Drivers page that inventories third-party Driver Store packages and classifies in-use, old/superseded, unattached, and inactive packages.
 - Advanced cleanup with internal rules, Winapp2, Winapp3, BleachBit CleanerML, preview/analyze mode, configurable cache/update refresh intervals, and optional automatic cleanup.
 - Compact Compression utility for folders and drives with persistent tracking, skip lists, change-aware recompression, and scheduled auto-recompression that can run without the WMT window being open.
-- WinDirStat-style **Disk Usage Analyzer** in Utilities and under My Device > Storage Drives: background scan, interactive treemap with folder drill-down, expandable folder tree, right-click file actions, largest folders/files/file types, file-type legend, export, and Recycle Bin cleanup.
+- WinDirStat-style **Disk Usage Analyzer** in Utilities and under My Device > Storage Drives: background scan, interactive treemap, a single **Details** tab with a themed folder tree that reaches every scanned folder and subfolder, **Back**/**Up** navigation that reuses the scan in memory instead of rescanning, right-click file actions, file-type legend, export, and Recycle Bin cleanup.
 - Firewall Manager with background rule loading, cached details, and fast protocol/port preloading through the Windows Firewall COM/.NET path with fallback behavior.
 - Background runspace/process infrastructure for long-running scans, DISM, networking, service, driver, package, and other operations so the GUI remains responsive.
 - Safety-focused registry cleanup, backups/revert paths, review-only findings, confirmation prompts, and detailed activity logging.
@@ -143,7 +130,7 @@ v6.8 updated WMT's software catalogue, game import/recovery, system tweaks, driv
 
 - Improved package-install transcripts, including captured output from child processes launched by custom PowerShell/CMD installer commands and more readable CLIXML/UTF-16 error output.
 - Added lightweight **F5**, **Ctrl+F**, and **Ctrl+Shift+F** context-sensitive shortcuts, and restored the one-time update scan on launch without rescanning merely because the Updates tab is opened.
-- Prepared **GitHub/Sigstore artifact attestations** and release provenance verification. SignPath Authenticode signing is **not enabled** and still requires approval; an attestation does not remove SmartScreen or antivirus warnings.
+- Prepared **GitHub/Sigstore artifact attestations** and release provenance verification. Releases are not Authenticode-signed, and an attestation does not remove SmartScreen or antivirus warnings.
 - Expanded Windows PowerShell syntax and smoke/regression checks around the ghost scanner, pagefile, driver dialogs, process output, and timeouts.
 
 </details>
@@ -165,7 +152,7 @@ v6.7 is a broad maintenance and reliability update focused on background executi
 - Added the **Compact Compression** tracker with persistent folder/drive history, automatic recompression, custom schedules, change detection, per-target state/results, and optional skip lists for already-compressed or poor-compression file formats.
 - Added Windows Task Scheduler integration for Compact recompression so scheduled compression can run even when WMT itself is closed.
 - Hardened Compact tracker persistence, including automatic recovery/repair when stale ACLs on the ProgramData tracker block WMT from reading or updating it.
-- Added a **Disk Usage Analyzer** (WinDirStat-style) to Utilities and My Device > Storage Drives: recursive background scan, squarified treemap with folder drill-down, expandable folder tree, right-click file actions, largest folders/files/file types, filtering, report export, open-location, and Recycle Bin cleanup.
+- Added a **Disk Usage Analyzer** (WinDirStat-style) to Utilities and My Device > Storage Drives: recursive background scan that keeps the full folder tree in memory, squarified treemap, a single **Details** tab with a hierarchical folder tree (every folder and subfolder, filtering across the whole scan), **Back**/**Up** and folder drill-down served from the cached scan (only **Scan** reads the disk), right-click file actions, report export, open-location, and Recycle Bin cleanup. Tab and tree styling uses WMT theme resources for normal, hover, selected, and focused states, and every analyzer event handler is guarded so an error is reported in the status line instead of reaching the WPF dispatcher.
 - Added configurable cleaner **local cache refresh**, **upstream definition checks**, and **automatic cleaning** intervals.
 - Automatic cleaning uses only explicitly saved cleaner selections and runs in a separate hidden worker process while WMT is open or hidden in the tray; overlapping runs are prevented and the global **BG Jobs** toggle disables new cleaner background work.
 - Added **Show Enabled** filtering and substantial cleaner worker/poller race, closure, startup, cancellation, and completion-state hardening.
@@ -403,7 +390,7 @@ Quick Find is in the left sidebar above the navigation buttons (without an extra
 - Startup Manager.
 - Restore Manager.
 - Compact Compression manager.
-- Disk Usage Analyzer with a squarified treemap space map, folder drill-down, expandable folder tree, right-click file actions, largest folder/file lists, and file-type breakdown.
+- Disk Usage Analyzer with a squarified treemap space map, a Details folder tree covering every scanned folder, cache-backed Back/Up navigation, right-click file actions, and file-type breakdown.
 - Context menu builder.
 - System reports.
 - Release download statistics.
@@ -533,7 +520,7 @@ WMT stores generated data next to the script in its local `data` folder.
 <summary><strong>Development and Releases</strong></summary>
 
 - `.github/workflows/validate-powershell.yml` validates PowerShell syntax and can also be run manually.
-- `.github/workflows/release-ps2exe.yml` automatically publishes a rolling prerelease from `Main`, and separately supports manual versioned releases, Sigstore attestations, and optional SignPath Authenticode signing for manual releases after approval.
+- `.github/workflows/release-ps2exe.yml` automatically publishes a rolling prerelease from `Main`, and separately supports manual versioned releases, both with Sigstore attestations.
 - Release tooling includes optional WinGet submission and Chocolatey package publication paths when the required secrets/package entries are available.
 - Long-running GUI operations are increasingly routed through shared runspace/process/polling infrastructure to keep the main WPF dispatcher responsive.
 
