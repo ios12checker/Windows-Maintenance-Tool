@@ -183,14 +183,28 @@ jobs:
                   throw "Quick Find must treat $controlName as a direct Settings action."
               }
           }
-          if ($rendererText -notmatch '\$isSettingsAction\s+-or\s+\$isRestartExplorerAction' -or
-              $rendererText -notmatch '-not\s+\$isSettingsAction') {
+          if ($rendererText -notmatch '\$isQuickFindDirectAction\s*=\s*\(\$isSettingsAction' -or
+              $rendererText -notmatch '-not\s+\$isQuickFindDirectAction') {
               throw 'Quick Find Settings actions must bypass Tweaks loading/state fallbacks and host the original button.'
+          }
+          foreach ($controlName in @('btnSearchIndexRebuild', 'btnSearchIndexOptions', 'btnTasksDisableTelemetry')) {
+              if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
+                  throw "Quick Find must treat $controlName as a direct action."
+              }
           }
           if ($rendererText -notmatch '\$isServiceViewAction\s*=\s*\(\[string\]\$original\.Name\s+-eq\s+"btnSvcView"\)' -or
               $rendererText -notmatch '\$isRestartExplorerAction\s+-or\s+\$isServiceViewAction' -or
               $source -notmatch 'Add-SearchIndexEntry\s+"btnSvcView"\s+"View Services"\s+"btnTabTweaks"') {
               throw 'View Services must be hosted as a direct Quick Find action without waiting for tweak-state readiness.'
+          }
+          if ($rendererText -notmatch '\$optionalStateKnown\s*=' -or
+              $rendererText -notmatch 'OptionalFeatureUnavailableCache' -or
+              $source -notmatch 'Add-SearchIndexEntry\s+"btnFeatAppGuard"\s+"Application Guard"\s+"btnTabTweaks"') {
+              throw 'Application Guard must show its known unavailable state instead of a loading fallback.'
+          }
+          if ($source -notmatch 'Add-SearchIndexEntry\s+"btnTasksDisableTelemetry"\s+"Telemetry Tasks"\s+"btnTabTweaks"' -or
+              $source -match 'Add-SearchIndex(?:Navigation)?Entry[^\r\n]+"(?:Disable|Enable) (?:Background Jobs|Debug Logs|Update Scans|Start with Windows|Launch Minimized|Telemetry Tasks|Copilot|Recall)"') {
+              throw 'Quick Find toggle titles must be state-neutral instead of duplicating Enable/Disable wording.'
           }
           foreach ($controlName in @('btnWUDefault', 'btnWUSecurity', 'btnWUDisable')) {
               if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {

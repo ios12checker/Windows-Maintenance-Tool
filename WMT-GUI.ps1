@@ -41865,8 +41865,9 @@ function Sync-WmtQuickFindStateAvailability {
         }
         $optional = [bool]($script:OptionalFeaturesMap -and $script:OptionalFeaturesMap.Values -contains $name)
         $ready = if ($optional) {
-            [bool]($script:OptionalFeaturesReady -and $script:OptionalFeatureStateCache -and
-                $script:OptionalFeatureStateCache.ContainsKey($name))
+            [bool]($script:OptionalFeaturesReady -and (
+                ($script:OptionalFeatureStateCache -and $script:OptionalFeatureStateCache.ContainsKey($name)) -or
+                ($script:OptionalFeatureUnavailableCache -and $script:OptionalFeatureUnavailableCache.ContainsKey($name))))
         } else {
             [bool]($script:TweakStatesReady -and (
                 ($script:TweakCurrentStates -and $script:TweakCurrentStates.Contains($name)) -or
@@ -42220,7 +42221,11 @@ function Update-WmtQuickFindResults {
             ))
             $isRestartExplorerAction = ([string]$entry.Item.Button.Name -eq "btnPowerUserRestartExplorer")
             $isServiceViewAction = ([string]$entry.Item.Button.Name -eq "btnSvcView")
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isServiceViewAction -and
+            $isSearchIndexAction = ([string]$entry.Item.Button.Name -in @("btnSearchIndexRebuild", "btnSearchIndexOptions"))
+            $isTelemetryTasksAction = ([string]$entry.Item.Button.Name -eq "btnTasksDisableTelemetry")
+            $isQuickFindDirectAction = ($isSettingsAction -or $isRestartExplorerAction -or $isServiceViewAction -or
+                $isSearchIndexAction -or $isTelemetryTasksAction)
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isQuickFindDirectAction -and
                 -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $stateLabel = [System.Windows.Controls.TextBlock]::new()
                 $stateLabel.FontSize = 12
@@ -42266,16 +42271,21 @@ function Update-WmtQuickFindResults {
             ))
             $isRestartExplorerAction = ([string]$original.Name -eq "btnPowerUserRestartExplorer")
             $isServiceViewAction = ([string]$original.Name -eq "btnSvcView")
+            $isSearchIndexAction = ([string]$original.Name -in @("btnSearchIndexRebuild", "btnSearchIndexOptions"))
+            $isTelemetryTasksAction = ([string]$original.Name -eq "btnTasksDisableTelemetry")
+            $isQuickFindDirectAction = ($isSettingsAction -or $isRestartExplorerAction -or $isServiceViewAction -or
+                $isSearchIndexAction -or $isTelemetryTasksAction)
             $tweakReady = $true
             if ($entry.Item.Tab -eq "btnTabTweaks") {
                 if ($isMouseSpeedGroup) {
                     # Missing speed data affects state text, not action availability.
                     $tweakReady = [bool]$script:TweakStatesReady
                 }
-                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isServiceViewAction -or $isWindowsUpdatePresetGroup -or
+                elseif ($isQuickFindDirectAction -or $isWindowsUpdatePresetGroup -or
                         $isBatterySaverPresetGroup -or $isServicePresetGroup) {
-                    # These controls perform actions and do not have toggle-state readiness.
-                    $tweakReady = [bool]$original.IsEnabled
+                    # The native control enforces action availability; do not report
+                    # its disabled state as a missing toggle-state scan.
+                    $tweakReady = $true
                 }
                 elseif ([string]$original.Name -eq "btnToggleSearchDisplay") {
                     # The control has three modes and is tracked outside binary toggle state.
@@ -42285,8 +42295,11 @@ function Update-WmtQuickFindResults {
                     $isOptional = ($script:OptionalFeaturesMap -and $script:OptionalFeaturesMap.Values -contains $original.Name)
                     $tweakReady = if ($isOptional) { $script:OptionalFeaturesReady } else { $script:TweakStatesReady }
                     if ($isOptional) {
-                        $tweakReady = $tweakReady -and $script:OptionalFeatureStateCache -and
-                            $script:OptionalFeatureStateCache.ContainsKey($original.Name)
+                        $optionalStateKnown = ($script:OptionalFeatureStateCache -and
+                            $script:OptionalFeatureStateCache.ContainsKey($original.Name)) -or
+                            ($script:OptionalFeatureUnavailableCache -and
+                            $script:OptionalFeatureUnavailableCache.ContainsKey($original.Name))
+                        $tweakReady = $tweakReady -and $optionalStateKnown
                     } else {
                         $tweakReady = $tweakReady -and (
                             ($script:TweakCurrentStates -and $script:TweakCurrentStates.Contains($original.Name)) -or
@@ -42294,7 +42307,7 @@ function Update-WmtQuickFindResults {
                     }
                 }
             }
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isServiceViewAction -and
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isQuickFindDirectAction -and
                 -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $readinessName = if ($isMouseSpeedGroup) { "__MouseSpeed" } else { [string]$original.Name }
                 $script:WmtQuickFindRenderedReadiness[$readinessName] = [bool]$tweakReady
@@ -42607,24 +42620,14 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnSupportDiscord"    "Join Discord Support"            "btnTabSupport"
     Add-SearchIndexEntry "btnSupportIssue"      "Report an Issue (GitHub)"        "btnTabSupport"
     Add-SearchIndexEntry "btnToggleTheme"       "Toggle Theme"                    "btnTabSupport"
-    Add-SearchIndexEntry "btnDisableBgJobs"      "Background Jobs"                 "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Background Jobs" "btnDisableBgJobs" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Background Jobs" "btnDisableBgJobs" "btnTabSupport"
-    Add-SearchIndexEntry "btnDebugMode"          "Debug Logs"                      "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Debug Logs" "btnDebugMode" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Debug Logs" "btnDebugMode" "btnTabSupport"
+    Add-SearchIndexEntry "btnDisableBgJobs"      "Background Jobs"                 "btnTabSupport" "" "enable disable"
+    Add-SearchIndexEntry "btnDebugMode"          "Debug Logs"                      "btnTabSupport" "" "enable disable"
     Add-SearchIndexEntry "btnRememberWindowSizes" "Remember Window Sizes" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Remember Window Sizes On" "btnRememberWindowSizes" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Remember Window Sizes Off" "btnRememberWindowSizes" "btnTabSupport"
-    Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
-    Add-SearchIndexEntry "btnStartWithWindows" "Start with Windows"              "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Start with Windows" "btnStartWithWindows" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Start with Windows" "btnStartWithWindows" "btnTabSupport"
-    Add-SearchIndexEntry "btnLaunchMinimized" "Launch Minimized" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Launch Minimized" "btnLaunchMinimized" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Launch Minimized" "btnLaunchMinimized" "btnTabSupport"
+    Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport" "" "enable disable"
+    Add-SearchIndexEntry "btnStartWithWindows" "Start with Windows"              "btnTabSupport" "" "enable disable"
+    Add-SearchIndexEntry "btnLaunchMinimized" "Launch Minimized" "btnTabSupport" "" "enable disable"
     Add-SearchIndexNavigationEntry "Light Mode" "btnToggleTheme" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Application Dark Mode" "btnToggleTheme" "btnTabSupport"
 
@@ -42705,11 +42708,9 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnDevSettings" "Developer Settings" "btnTabTweaks"
 
     Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
-    Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
+    Add-SearchIndexEntry "btnTasksDisableTelemetry" "Telemetry Tasks" "btnTabTweaks" "" "disable scheduled tasks"
     # --- NEW TWEAK SEARCH ENTRIES ---
-    Add-SearchIndexEntry "btnToggleCopilot" "Disable Copilot" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleCopilot" "Copilot" "btnTabTweaks"
-    Add-SearchIndexEntry "btnToggleRecall" "Disable Recall" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleRecall" "Recall" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleClickToDo" "Click To Do" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleAISvcAutoStart" "Windows AI Data Analysis Policy Recall Snapshots" "btnTabTweaks"
