@@ -5706,6 +5706,49 @@ if (-not $NoOwner) { Set-WmtWindowOwner -Child $dialog }
 if ($script:ThemePalettes -and $script:ThemePalettes.Count -gt 0) {
     Set-WmtNativeWindowTheme -Window $dialog
 }
+
+# Persist resizable WMT subwindow dimensions by a stable key derived from the
+# window title. This is shared by Disk Analyzer and other XAML-backed dialogs.
+try {
+    $subwindowKey = [regex]::Replace([string]$dialog.Title, '[^A-Za-z0-9]', '')
+    if ($subwindowKey -eq 'DiskUsageAnalyzer' -and $dialog.ResizeMode -ne [System.Windows.ResizeMode]::NoResize) {
+        $settings = Get-WmtSettings
+        $allBounds = Get-WmtSettingsMember -Settings $settings -Name 'SubwindowBounds' -Default $null
+        $savedBounds = Get-WmtSettingsMember -Settings $allBounds -Name $subwindowKey -Default $null
+        if ($savedBounds) {
+            $savedWidth = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Width' -Default 0)
+            $savedHeight = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Height' -Default 0)
+            if ($savedWidth -ge [double]$dialog.MinWidth -and $savedHeight -ge [double]$dialog.MinHeight -and
+                $savedWidth -le [System.Windows.SystemParameters]::VirtualScreenWidth -and
+                $savedHeight -le [System.Windows.SystemParameters]::VirtualScreenHeight) {
+                $dialog.Width = $savedWidth
+                $dialog.Height = $savedHeight
+            }
+        }
+        $saveSubwindowBounds = {
+            try {
+                if ($dialog.WindowState -ne [System.Windows.WindowState]::Normal) { return }
+                $width = [double]$dialog.ActualWidth
+                $height = [double]$dialog.ActualHeight
+                if ($width -lt [double]$dialog.MinWidth -or $height -lt [double]$dialog.MinHeight) { return }
+                $current = Get-WmtSettings
+                $existing = Get-WmtSettingsMember -Settings $current -Name 'SubwindowBounds' -Default @{}
+                $copy = @{}
+                if ($existing -is [System.Collections.IDictionary]) {
+                    foreach ($key in $existing.Keys) { $copy[[string]$key] = $existing[$key] }
+                } elseif ($existing) {
+                    foreach ($property in $existing.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+                }
+                $copy[$subwindowKey] = @{ Width = $width; Height = $height }
+                if ($current -is [System.Collections.IDictionary]) { $current['SubwindowBounds'] = $copy }
+                else { $current | Add-Member -MemberType NoteProperty -Name 'SubwindowBounds' -Value $copy -Force }
+                Save-WmtSettings -Settings $current
+            } catch {}
+        }.GetNewClosure()
+        [void]$dialog.Add_Closed($saveSubwindowBounds)
+    }
+} catch {}
+
 return $dialog
 }
 
@@ -9365,6 +9408,7 @@ try {
         Theme                      = $theme
         WindowState                = $windowState
         WindowBounds               = $windowBounds
+        SubwindowBounds            = (Get-WmtSettingsMember -Settings $Settings -Name 'SubwindowBounds' -Default @{})
     }
 
     $json = $saveObj | ConvertTo-Json -Depth 8
@@ -62027,8 +62071,8 @@ function Show-WmtDiskUsageAnalyzer {
         <Style TargetType="{x:Type TabControl}">
             <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="Template">
@@ -62043,9 +62087,8 @@ function Show-WmtDiskUsageAnalyzer {
                                       KeyboardNavigation.TabIndex="1"/>
                             <Border x:Name="ContentPanel" Grid.Row="1"
                                     Background="{TemplateBinding Background}"
-                                    BorderBrush="{TemplateBinding BorderBrush}"
-                                    BorderThickness="{TemplateBinding BorderThickness}"
-                                    CornerRadius="0,6,6,6"
+                                    BorderBrush="Transparent"
+                                    BorderThickness="0"
                                     KeyboardNavigation.DirectionalNavigation="Contained"
                                     KeyboardNavigation.TabIndex="2"
                                     KeyboardNavigation.TabNavigation="Local">
@@ -62081,7 +62124,7 @@ function Show-WmtDiskUsageAnalyzer {
                         <Border x:Name="Bd" Background="{TemplateBinding Background}"
                                 BorderBrush="{TemplateBinding BorderBrush}"
                                 BorderThickness="{TemplateBinding BorderThickness}"
-                                CornerRadius="6,6,0,0" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+                                CornerRadius="0" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
                             <ContentPresenter x:Name="Content" ContentSource="Header"
                                               HorizontalAlignment="Center" VerticalAlignment="Center"
                                               RecognizesAccessKey="True"
@@ -62092,21 +62135,11 @@ function Show-WmtDiskUsageAnalyzer {
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
                             </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource BorderAccent}"/>
-                            </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgElevated}"/>
                                 <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
                             </Trigger>
-                            <MultiTrigger>
-                                <MultiTrigger.Conditions>
-                                    <Condition Property="IsSelected" Value="True"/>
-                                    <Condition Property="IsKeyboardFocused" Value="True"/>
-                                </MultiTrigger.Conditions>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentHover}"/>
-                            </MultiTrigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.55"/>
                                 <Setter Property="Cursor" Value="Arrow"/>
@@ -62120,8 +62153,8 @@ function Show-WmtDiskUsageAnalyzer {
         <Style TargetType="{x:Type TreeView}">
             <Setter Property="Background" Value="{DynamicResource BgDark}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="0"/>
             <Setter Property="SnapsToDevicePixels" Value="True"/>
             <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/>
@@ -62197,20 +62230,10 @@ function Show-WmtDiskUsageAnalyzer {
                             <Trigger SourceName="Bd" Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgHover}"/>
                             </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource BorderAccent}"/>
-                            </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource Accent}"/>
                                 <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
                             </Trigger>
-                            <MultiTrigger>
-                                <MultiTrigger.Conditions>
-                                    <Condition Property="IsSelected" Value="True"/>
-                                    <Condition Property="IsKeyboardFocused" Value="True"/>
-                                </MultiTrigger.Conditions>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource AccentText}"/>
-                            </MultiTrigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.55"/>
                             </Trigger>
@@ -62303,40 +62326,52 @@ function Show-WmtDiskUsageAnalyzer {
                     <Grid Grid.Row="0" Margin="0,0,0,8">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
-                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="280"/>
                             <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
                         <ComboBox Name="cmbUsageView" Grid.Column="0" Width="150" MinHeight="28" Margin="0,0,8,0">
                             <ComboBoxItem Content="All items" Tag="all" IsSelected="True"/>
                             <ComboBoxItem Content="Folders only" Tag="folders"/>
                             <ComboBoxItem Content="Largest files" Tag="files"/>
                         </ComboBox>
-                        <TextBox Name="txtUsageFilter" Grid.Column="1" Width="240" MinHeight="28" VerticalContentAlignment="Center" Margin="0,0,10,0"
-                                 ToolTip="Search every scanned folder and the largest files by name. Include a backslash to match full paths."/>
-                        <TextBlock Name="txtUsageCount" Grid.Column="2" Text="" Foreground="{DynamicResource TextMuted}" VerticalAlignment="Center"/>
+                        <Border Grid.Column="1" MinHeight="30" Margin="0,0,12,0"
+                                Style="{StaticResource ModernSearchBoxStyle}">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Path Grid.Column="0" Data="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z"
+                                      Fill="{DynamicResource TextMuted}" Stretch="Uniform" Height="14" Width="14"
+                                      VerticalAlignment="Center" Margin="12,0,6,0"/>
+                                <TextBox Name="txtUsageFilter" Grid.Column="1" MinHeight="28" VerticalContentAlignment="Center"
+                                         Background="Transparent" BorderThickness="0" Padding="0" Margin="0"
+                                         Foreground="{DynamicResource TextMuted}" CaretBrush="{DynamicResource TextPrimary}"
+                                         ToolTip="Search within the selected folder and its descendants. Include a backslash to match full paths."/>
+                            </Grid>
+                        </Border>
+                        <TextBlock Name="txtUsageFolderSummary" Grid.Column="2" Margin="0,0,12,0"
+                                   Foreground="{DynamicResource TextSecondary}" VerticalAlignment="Center"/>
+                        <TextBlock Name="txtUsageCount" Grid.Column="3" Text="" Foreground="{DynamicResource TextMuted}" VerticalAlignment="Center"/>
                     </Grid>
-                    <!-- Column header. Widths mirror the tree rows (95 / 80 / 75) plus the 12px themed scrollbar. -->
-                    <Border Grid.Row="1" Background="{DynamicResource BgElevated}" BorderBrush="{DynamicResource BorderBrush}"
-                            BorderThickness="1,1,1,0" Padding="0,6">
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*"/>
-                                <ColumnDefinition Width="95"/>
-                                <ColumnDefinition Width="80"/>
-                                <ColumnDefinition Width="75"/>
-                                <ColumnDefinition Width="12"/>
-                            </Grid.ColumnDefinitions>
-                            <TextBlock Grid.Column="0" Text="Name" Margin="24,0,0,0" FontWeight="SemiBold" TextWrapping="NoWrap"
-                                       Foreground="{DynamicResource TextSecondary}"/>
-                            <TextBlock Grid.Column="1" Text="Size" Margin="0,0,10,0" TextAlignment="Right" FontWeight="SemiBold" TextWrapping="NoWrap"
-                                       Foreground="{DynamicResource TextSecondary}"/>
-                            <TextBlock Grid.Column="2" Text="Share" Margin="0,0,10,0" TextAlignment="Right" FontWeight="SemiBold" TextWrapping="NoWrap"
-                                       Foreground="{DynamicResource TextSecondary}"/>
-                            <TextBlock Grid.Column="3" Text="Items" Margin="0,0,10,0" TextAlignment="Right" FontWeight="SemiBold" TextWrapping="NoWrap"
-                                       Foreground="{DynamicResource TextSecondary}"/>
-                        </Grid>
-                    </Border>
-                    <TreeView Name="tvUsage" Grid.Row="2" BorderThickness="1,0,1,1" MinHeight="110"/>
+                    <!-- Use the same native ListView/GridView header host as Package Updates.
+                         This gives the headers one continuous surface and real WPF resize grippers. -->
+                    <ListView Name="lvUsageHeaders" Grid.Row="1" Height="36" Padding="0"
+                              Background="Transparent" BorderThickness="0"
+                              ScrollViewer.HorizontalScrollBarVisibility="Hidden"
+                              ScrollViewer.VerticalScrollBarVisibility="Hidden"
+                              ScrollViewer.CanContentScroll="False">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Name" Width="600"/>
+                                <GridViewColumn Header="Size" Width="95"/>
+                                <GridViewColumn Header="Share" Width="80"/>
+                                <GridViewColumn Header="Items" Width="75"/>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                    <TreeView Name="tvUsage" Grid.Row="2" BorderThickness="0" MinHeight="110"/>
                 </Grid>
             </TabItem>
         </TabControl>
@@ -62375,6 +62410,8 @@ function Show-WmtDiskUsageAnalyzer {
         cmbView        = 'cmbUsageView'
         txtFilter      = 'txtUsageFilter'
         txtCount       = 'txtUsageCount'
+        txtFolderSummary = 'txtUsageFolderSummary'
+        usageHeaders = 'lvUsageHeaders'
         tvUsage        = 'tvUsage'
         pnlLegend      = 'pnlUsageLegend'
         btnOpen        = 'btnUsageOpen'
@@ -62403,6 +62440,8 @@ function Show-WmtDiskUsageAnalyzer {
     $cmbView = $found.cmbView
     $txtFilter = $found.txtFilter
     $txtCount = $found.txtCount
+    $txtFolderSummary = $found.txtFolderSummary
+    $lvUsageHeaders = $found.usageHeaders
     $tvUsage = $found.tvUsage
     $pnlLegend = $found.pnlLegend
     $btnOpen = $found.btnOpen
@@ -62445,6 +62484,8 @@ function Show-WmtDiskUsageAnalyzer {
         Restore       = $null     # expanded folder paths to re-open during a tree rebuild
         Chunk         = 250       # tree rows created per expand ("Show next ..." loads the rest)
         FlatLimit     = 500
+        SortColumn    = 'size'
+        SortDescending = $true
     }
 
     # --- Late-bound actions and guarded handlers ----------------------------
@@ -62794,19 +62835,58 @@ function Show-WmtDiskUsageAnalyzer {
     # wide folders load in chunks; a "Show next ..." row loads the rest, which
     # keeps every subfolder reachable without freezing the window.
     $onExpanded = (& $guard 'expand folder' ({
-                param($sender, $e)
-                & $call 'expandItem' $sender $e.OriginalSource
+                param($s, $e)
+                & $call 'expandItem' $s $e.OriginalSource
             }.GetNewClosure()))
+
+    $act.sortRows = {
+        param([string]$Column)
+        if ($model.SortColumn -eq $Column) { $model.SortDescending = -not [bool]$model.SortDescending }
+        else {
+            $model.SortColumn = $Column
+            $model.SortDescending = ($Column -ne 'name')
+        }
+        & $call 'updateSortHeaders'
+        & $call 'rebuildTree' $true
+    }.GetNewClosure()
+
+    $act.updateSortHeaders = {
+        $columns = @($lvUsageHeaders.View.Columns)
+        $labels = @('Name', 'Size', 'Share', 'Items')
+        $keys = @('name', 'size', 'share', 'items')
+        for ($i = 0; $i -lt [Math]::Min($columns.Count, 4); $i++) {
+            $arrow = if ($model.SortColumn -eq $keys[$i]) { if ($model.SortDescending) { '  ▼' } else { '  ▲' } } else { '' }
+            $columns[$i].Header = $labels[$i] + $arrow
+        }
+    }.GetNewClosure()
+
+    $act.syncColumnWidths = {
+        $widths = @($lvUsageHeaders.View.Columns | ForEach-Object { [double]$_.Width })
+        $walk = $null
+        $walk = {
+            param($items)
+            foreach ($treeItem in @($items)) {
+                if (-not $treeItem) { continue }
+                if ($treeItem.Header -is [System.Windows.Controls.Grid]) {
+                    $rowGrid = $treeItem.Header
+                    for ($ci = 0; $ci -lt [Math]::Min(4, $rowGrid.ColumnDefinitions.Count); $ci++) {
+                        $rowGrid.ColumnDefinitions[$ci].Width = [System.Windows.GridLength]::new([Math]::Max(24, $widths[$ci]))
+                    }
+                }
+                if ($treeItem.Items.Count -gt 0) { & $walk $treeItem.Items }
+            }
+        }.GetNewClosure()
+        & $walk $tvUsage.Items
+    }.GetNewClosure()
 
     $act.makeItem = {
         param($Node, [bool]$Flat)
 
         $item = [System.Windows.Controls.TreeViewItem]::new()
         $grid = [System.Windows.Controls.Grid]::new()
-        foreach ($width in @(-1, 95, 80, 75)) {
+        foreach ($width in @($lvUsageHeaders.View.Columns | ForEach-Object { [double]$_.Width })) {
             $column = [System.Windows.Controls.ColumnDefinition]::new()
-            if ($width -lt 0) { $column.Width = [System.Windows.GridLength]::new(1, [System.Windows.GridUnitType]::Star) }
-            else { $column.Width = [System.Windows.GridLength]::new([double]$width) }
+            $column.Width = [System.Windows.GridLength]::new([Math]::Max(24, [double]$width))
             [void]$grid.ColumnDefinitions.Add($column)
         }
 
@@ -62853,7 +62933,14 @@ function Show-WmtDiskUsageAnalyzer {
     $act.populate = {
         param($Container, $Node, [int]$From)
 
-        $list = $Node.ChildrenFor(($model.Mode -eq 'folders'))
+        $list = @($Node.ChildrenFor(($model.Mode -eq 'folders')))
+        $descending = [bool]$model.SortDescending
+        switch ([string]$model.SortColumn) {
+            'name'  { $list = @($list | Sort-Object -Property @{ Expression = { [string]$_.Name }; Descending = $descending }, @{ Expression = { [bool]$_.IsDir }; Descending = $true }) }
+            'size'  { $list = @($list | Sort-Object -Property @{ Expression = { [long]$_.Bytes }; Descending = $descending }, @{ Expression = { [string]$_.Name }; Descending = $false }) }
+            'share' { $list = @($list | Sort-Object -Property @{ Expression = { [long]$_.Bytes }; Descending = $descending }, @{ Expression = { [string]$_.Name }; Descending = $false }) }
+            'items' { $list = @($list | Sort-Object -Property @{ Expression = { [long]$_.Files }; Descending = $descending }, @{ Expression = { [string]$_.Name }; Descending = $false }) }
+        }
         if ($From -le 0) { $Container.Items.Clear() }
         else {
             # Drop the "Show next ..." row that asked for this chunk.
@@ -62916,8 +63003,17 @@ function Show-WmtDiskUsageAnalyzer {
             $tvUsage.Items.Clear()
             if (-not $model.Current) {
                 $txtCount.Text = ''
+                $txtFolderSummary.Text = ''
                 return
             }
+
+            # Summarize only the immediate children shown at the selected folder level.
+            $directChildren = @($model.Current.Children)
+            $fileCount = [int64](@($directChildren | Where-Object { -not [bool]$_.IsDir }).Count)
+            $folderCount = [int64](@($directChildren | Where-Object { [bool]$_.IsDir }).Count)
+            $directBytes = [double](($directChildren | Measure-Object -Property Bytes -Sum).Sum)
+            $txtFolderSummary.Text = ('{0:N0} files  ·  {1:N0} folders  ·  {2}' -f
+                $fileCount, $folderCount, (ConvertTo-WmtDiskUsageSize $directBytes))
 
             $filterText = ([string]$txtFilter.Text).Trim()
             $mode = [string]$model.Mode
@@ -62933,11 +63029,17 @@ function Show-WmtDiskUsageAnalyzer {
                     $hits = @($largest | Select-Object -First ([int]$model.FlatLimit))
                     $txtCount.Text = ('{0:N0} largest file(s) in this folder' -f $largest.Count)
                 }
+                switch ([string]$model.SortColumn) {
+                    'name'  { $hits = @($hits | Sort-Object -Property @{ Expression = { [string]$_.Name }; Descending = [bool]$model.SortDescending }) }
+                    'size'  { $hits = @($hits | Sort-Object -Property @{ Expression = { [long]$_.Bytes }; Descending = [bool]$model.SortDescending }) }
+                    'share' { $hits = @($hits | Sort-Object -Property @{ Expression = { [long]$_.Bytes }; Descending = [bool]$model.SortDescending }) }
+                    'items' { $hits = @($hits | Sort-Object -Property @{ Expression = { [long]$_.Files }; Descending = [bool]$model.SortDescending }) }
+                }
                 foreach ($hit in $hits) { [void]$tvUsage.Items.Add((& $call 'makeItem' $hit $true)) }
             }
             else {
                 & $call 'populate' $tvUsage $model.Current 0
-                $txtCount.Text = ('{0:N0} item(s) in this folder' -f $model.Current.ChildrenFor(($mode -eq 'folders')).Length)
+                $txtCount.Text = ''
             }
         }
         finally { $model.Restore = $null }
@@ -63326,6 +63428,35 @@ function Show-WmtDiskUsageAnalyzer {
                 $model.Mode = $mode
                 & $call 'rebuildTree' $true
             }.GetNewClosure())))
+
+    # Sorting is handled by the native GridViewColumnHeader controls generated
+    # by the ListView, exactly as on the Package Updates page.
+    $lvUsageHeaders.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
+        [System.Windows.RoutedEventHandler]{
+            param($sender, $args)
+            $header = Get-WmtVisualAncestor -Element $args.OriginalSource -AncestorType ([System.Windows.Controls.GridViewColumnHeader])
+            if (-not $header -or -not $header.Column) { return }
+            $columnIndex = [int]$lvUsageHeaders.View.Columns.IndexOf($header.Column)
+            $sortKeys = @('name', 'size', 'share', 'items')
+            if ($columnIndex -ge 0 -and $columnIndex -lt $sortKeys.Count) {
+                & $call 'sortRows' $sortKeys[$columnIndex]
+            }
+        }.GetNewClosure(), $true)
+    & $call 'updateSortHeaders'
+    & $call 'syncColumnWidths'
+
+    # Keep every tree row aligned when the user drags a native header gripper.
+    $columnDescriptor = [System.ComponentModel.DependencyPropertyDescriptor]::FromProperty(
+        [System.Windows.Controls.GridViewColumn]::WidthProperty,
+        [System.Windows.Controls.GridViewColumn])
+    foreach ($gridColumn in $lvUsageHeaders.View.Columns) {
+        $columnDescriptor.AddValueChanged($gridColumn, [EventHandler]{
+            & $call 'syncColumnWidths'
+        }.GetNewClosure())
+    }
+    $lvUsageHeaders.Add_SizeChanged((& $guard 'header size' ({
+        & $call 'syncColumnWidths'
+    }.GetNewClosure())))
 
     $txtFilter.Add_TextChanged((& $guard 'filter text' ({
                 $filterTimer.Stop()
