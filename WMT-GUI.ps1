@@ -63468,8 +63468,8 @@ function Show-WmtDiskUsageAnalyzer {
     # by the ListView, exactly as on the Package Updates page.
     $lvUsageHeaders.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent,
         [System.Windows.RoutedEventHandler]{
-            param($sender, $args)
-            $header = Get-WmtVisualAncestor -Element $args.OriginalSource -AncestorType ([System.Windows.Controls.GridViewColumnHeader])
+            param($s, $a)
+            $header = Get-WmtVisualAncestor -Element $a.OriginalSource -AncestorType ([System.Windows.Controls.GridViewColumnHeader])
             if (-not $header -or -not $header.Column) { return }
             $columnIndex = [int]$lvUsageHeaders.View.Columns.IndexOf($header.Column)
             $sortKeys = @('name', 'size', 'share', 'items')
