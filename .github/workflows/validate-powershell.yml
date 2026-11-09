@@ -195,6 +195,24 @@ jobs:
               $rendererText -notmatch 'Choose one Windows Update behavior') {
               throw 'Windows Update presets must render as one merged Quick Find entry.'
           }
+          $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
+          foreach ($controlName in @('btnPowerBatterySaverOff', 'btnPowerBatterySaver20', 'btnPowerBatterySaver50',
+                                     'btnPerfServicesManual', 'btnPerfServicesRevert')) {
+              if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
+                  throw "Quick Find preset group is missing $controlName."
+              }
+          }
+          if ($rendererText -notmatch 'BatterySaverPreset' -or
+              $rendererText -notmatch 'ServicePreset' -or
+              $rendererText -notmatch 'not represent reversible profiles') {
+              throw 'Battery and service presets must render as grouped entries with honest state labels.'
+          }
+          if ($source -notmatch 'Add-SearchIndexEntry\s+"btnPowerBatterySaverOff"\s+"Battery Saver Behavior"\s+"btnTabTweaks"\s+"BatterySaverPreset"' -or
+              $source -match 'Add-SearchIndexEntry\s+"btnPowerBatterySaver(20|50)"' -or
+              $source -notmatch 'Add-SearchIndexEntry\s+"btnPerfServicesManual"\s+"Service Optimization"\s+"btnTabTweaks"\s+"ServicePreset"' -or
+              $source -match 'Add-SearchIndexEntry\s+"btn(PerfServicesRevert|SvcOptimize|SvcRestore)"') {
+              throw 'Battery and service options must each have one merged Quick Find entry.'
+          }
           foreach ($functionName in @('Get-WmtWindowsUpdatePresetState', 'Get-WmtRegistrySnapshotValue', 'Test-WmtRegistrySnapshotHasValue', 'Set-WmtWindowsUpdatePresetState')) {
               $functionAst = $ast.Find({
                   param($node)
@@ -258,7 +276,79 @@ jobs:
               -not $script:WmtQuickFindWindowsUpdateProxies[2].Proxy.IsEnabled) {
               throw 'Quick Find did not gray only the active Windows Update preset button.'
           }
-          $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
+          $batteryStateAst = $ast.Find({
+              param($node)
+              $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $node.Name -eq 'Set-WmtBatterySaverPresetState'
+          }, $true)
+          if (-not $batteryStateAst) { throw 'Missing battery saver preset state updater.' }
+          Invoke-Expression $batteryStateAst.Extent.Text
+          $script:ciBatteryButtons = @{
+              btnPowerBatterySaverOff = [pscustomobject]@{ IsEnabled = $true }
+              btnPowerBatterySaver20 = [pscustomobject]@{ IsEnabled = $true }
+              btnPowerBatterySaver50 = [pscustomobject]@{ IsEnabled = $true }
+          }
+          function Get-Ctrl([string]$Name) {
+              if ($script:ciPresetButtons.ContainsKey($Name)) { return $script:ciPresetButtons[$Name] }
+              return $script:ciBatteryButtons[$Name]
+          }
+          $script:WmtQuickFindBatterySaverProxies = [System.Collections.ArrayList]::new()
+          foreach ($preset in @(
+              @{ Button = 'btnPowerBatterySaverOff'; Threshold = '0' }
+              @{ Button = 'btnPowerBatterySaver20'; Threshold = '20' }
+              @{ Button = 'btnPowerBatterySaver50'; Threshold = '50' }
+          )) {
+              [void]$script:WmtQuickFindBatterySaverProxies.Add([pscustomobject]@{
+                  Proxy = [pscustomobject]@{ IsEnabled = $true }
+                  Target = $script:ciBatteryButtons[$preset.Button]
+                  ButtonName = $preset.Button
+              })
+          }
+          Set-WmtBatterySaverPresetState -Threshold 20
+          if ($script:ciBatteryButtons.btnPowerBatterySaver20.IsEnabled -or
+              -not $script:ciBatteryButtons.btnPowerBatterySaverOff.IsEnabled -or
+              -not $script:ciBatteryButtons.btnPowerBatterySaver50.IsEnabled -or
+              $script:WmtQuickFindBatterySaverProxies[1].Proxy.IsEnabled -or
+              -not $script:WmtQuickFindBatterySaverProxies[0].Proxy.IsEnabled -or
+              -not $script:WmtQuickFindBatterySaverProxies[2].Proxy.IsEnabled) {
+              throw 'Battery saver 20% detection did not disable only its active native and Quick Find options.'
+          }
+          foreach ($threshold in @(0, 50)) {
+              Set-WmtBatterySaverPresetState -Threshold $threshold
+              $activeIndex = if ($threshold -eq 0) { 0 } else { 2 }
+              $buttonNames = @('btnPowerBatterySaverOff', 'btnPowerBatterySaver20', 'btnPowerBatterySaver50')
+              foreach ($index in 0..2) {
+                  $expectedEnabled = ($index -ne $activeIndex)
+                  if ([bool]$script:ciBatteryButtons[$buttonNames[$index]].IsEnabled -ne $expectedEnabled -or
+                      [bool]$script:WmtQuickFindBatterySaverProxies[$index].Proxy.IsEnabled -ne $expectedEnabled) {
+                      throw "Battery saver threshold $threshold did not gray only its active option."
+                  }
+              }
+          }
+          foreach ($threshold in @($null, 30)) {
+              Set-WmtBatterySaverPresetState -Threshold $threshold
+              if (@($script:ciBatteryButtons.Values | Where-Object { -not $_.IsEnabled }).Count -ne 0 -or
+                  @($script:WmtQuickFindBatterySaverProxies | Where-Object { -not $_.Proxy.IsEnabled }).Count -ne 0) {
+                  throw 'Unknown or custom battery thresholds must leave all preset choices available.'
+              }
+          }
+          $serviceActionAst = $ast.Find({
+              param($node)
+              $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $node.Name -eq 'Test-WmtServiceStartupActionAvailable'
+          }, $true)
+          if (-not $serviceActionAst) { throw 'Missing service startup action state helper.' }
+          Invoke-Expression $serviceActionAst.Extent.Text
+          if (Test-WmtServiceStartupActionAvailable -SelectedRows @() -StartupType 'Automatic') {
+              throw 'Service startup actions must be unavailable with no selected service.'
+          }
+          if (Test-WmtServiceStartupActionAvailable -SelectedRows @(@{ StartType = 'Automatic' }) -StartupType 'Automatic') {
+              throw 'The matching service startup action must be disabled.'
+          }
+          if (-not (Test-WmtServiceStartupActionAvailable -SelectedRows @(@{ StartType = 'Manual' }) -StartupType 'Automatic') -or
+              -not (Test-WmtServiceStartupActionAvailable -SelectedRows @(@{ StartType = 'Automatic' }, @{ StartType = 'Manual' }) -StartupType 'Automatic')) {
+              throw 'Service startup actions must remain available for differing or mixed selected states.'
+          }
           if ($source -notmatch 'Add-SearchIndexEntry\s+"btnWUDefault"\s+"Windows Update Behavior"\s+"btnTabTweaks"\s+"WindowsUpdatePreset"' -or
               $source -match 'Add-SearchIndexEntry\s+"btnWUSecurity"' -or
               $source -match 'Add-SearchIndexEntry\s+"btnWUDisable"') {

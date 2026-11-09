@@ -32827,6 +32827,16 @@ function Add-GridContextMenu {
     }
 }
 
+function Test-WmtServiceStartupActionAvailable {
+    param([object[]]$SelectedRows, [string]$StartupType)
+    $rows = @($SelectedRows)
+    if ($rows.Count -eq 0) { return $false }
+    foreach ($row in $rows) {
+        if ($null -eq $row -or [string]$row['StartType'] -ne $StartupType) { return $true }
+    }
+    return $false
+}
+
 function Invoke-StartupTabLoad {
     param([string]$TabName, [bool]$Force = $false)
     if (-not $Force -and $tabLoaded.ContainsKey($TabName) -and $tabLoaded[$TabName]) { return }
@@ -32899,6 +32909,7 @@ function Invoke-StartupTabLoad {
                         -Columns @("Name", "DisplayName", "StartType", "State") `
                         -SearchColumns @("Name", "DisplayName", "StartType", "State") `
                         -Widths @{ DisplayName = "56*"; Name = "24*"; StartType = "10*"; State = "10*" }
+                    if ($serviceStartupState.UpdateButtons) { & $serviceStartupState.UpdateButtons }
                 }
             }
             $loadWarnings = @()
@@ -33289,6 +33300,7 @@ $winTab = New-StartupPage "Windows"
 $taskTab = New-StartupPage "Scheduled Tasks"
 $ctxTab = New-StartupPage "Context Menu"
 $svcTab = New-StartupPage "Services"
+$serviceStartupState = @{ UpdateButtons = $null }
 
 $fnSetTabButtonActive = ${function:Set-TabButtonActive}.GetNewClosure()
 $fnUpdateStartupTabFilter = ${function:Update-StartupTabFilter}.GetNewClosure()
@@ -33386,6 +33398,7 @@ $invokeServiceStartupAction = {
         $result = @($results | Where-Object { $_ -and $_.PSObject.Properties['SucceededNames'] } | Select-Object -Last 1)[0]
         if (-not $result) { return }
         foreach ($row in $rows) { if (@($result.SucceededNames) -contains [string]$row['Name']) { $row['StartType'] = $StartupType } }
+        if ($serviceStartupState.UpdateButtons) { & $serviceStartupState.UpdateButtons }
         if (@($result.Failures).Count -gt 0) {
             Show-WmtMessageBox -Owner $dialog -Message (@($result.Failures) -join "`r`n") -Title "Services" -Image Warning | Out-Null
         }
@@ -33517,6 +33530,20 @@ $btnSvcManual = New-StartupButton $svcTab.Buttons "Manual" "Primary"
 $btnSvcDisable = New-StartupButton $svcTab.Buttons "Disable" "Warning"
 $btnSvcDelete = New-StartupButton $svcTab.Buttons "Delete" "Danger"
 Add-GridContextMenu -TabObj $svcTab -Buttons @($btnSvcRefresh, $btnSvcDetails, $btnSvcConsole, $btnSvcEnable, $btnSvcManual, $btnSvcDisable, $btnSvcDelete)
+$serviceStartupState.UpdateButtons = {
+    $selected = @(Get-WmtDataGridSelectedRows -DataGrid $svcTab.Grid)
+    foreach ($action in @(
+        @{ Button = $btnSvcEnable; Type = "Automatic" }
+        @{ Button = $btnSvcManual; Type = "Manual" }
+        @{ Button = $btnSvcDisable; Type = "Disabled" }
+    )) {
+        $action.Button.IsEnabled = Test-WmtServiceStartupActionAvailable -SelectedRows $selected -StartupType $action.Type
+    }
+}.GetNewClosure()
+$svcTab.Grid.Add_SelectionChanged({
+    if ($serviceStartupState.UpdateButtons) { & $serviceStartupState.UpdateButtons }
+}.GetNewClosure())
+& $serviceStartupState.UpdateButtons
 
 $btnWinRefresh.Add_Click({ & $fnInvokeStartupTabLoad "Windows" $true }.GetNewClosure())
 $btnWinDetails.Add_Click({ & $fnShowStartupRowDetails $winTab "Windows Startup Details" }.GetNewClosure())
@@ -38645,6 +38672,28 @@ foreach ($record in @($script:WmtQuickFindWindowsUpdateProxies)) {
 try { Update-WmtQuickFindStateLabels } catch {}
 }
 
+function Set-WmtBatterySaverPresetState {
+param($Threshold)
+
+$script:WmtBatterySaverThreshold = if ($null -eq $Threshold) { $null } else { [string]$Threshold }
+$activeButton = switch ([string]$script:WmtBatterySaverThreshold) {
+    "0" { "btnPowerBatterySaverOff" }
+    "20" { "btnPowerBatterySaver20" }
+    "50" { "btnPowerBatterySaver50" }
+    default { "" }
+}
+foreach ($buttonName in @("btnPowerBatterySaverOff", "btnPowerBatterySaver20", "btnPowerBatterySaver50")) {
+    $button = Get-Ctrl $buttonName
+    if ($button) { $button.IsEnabled = [string]::IsNullOrEmpty($activeButton) -or $buttonName -ne $activeButton }
+}
+foreach ($record in @($script:WmtQuickFindBatterySaverProxies)) {
+    if (-not $record -or -not $record.Proxy -or -not $record.Target) { continue }
+    $record.Proxy.IsEnabled = [bool]($record.Target.IsEnabled -and
+        ([string]::IsNullOrEmpty($activeButton) -or $record.ButtonName -ne $activeButton))
+}
+try { Update-WmtQuickFindStateLabels } catch {}
+}
+
 function Update-TweakButtonStates {
 # Re-entry guard: prevent concurrent execution on UI thread (e.g. user clicks Tweaks tab rapidly)
 if ($script:TweakStatesUpdating) { return }
@@ -39437,9 +39486,7 @@ try {
 
     $batteryThreshold = $nrd["BatterySaverThreshold"]
     if ($null -eq $batteryThreshold) { try { $batteryThreshold = Get-WmtPowerSettingIndex "SUB_ENERGYSAVER" "ESBATTTHRESHOLD" "DC" } catch {} }
-    if ($null -ne $batteryThreshold) {
-        & $setButtonEnabled "btnPowerBatterySaverOff" ($batteryThreshold -ne 0); & $setButtonEnabled "btnPowerBatterySaver20" ($batteryThreshold -ne 20); & $setButtonEnabled "btnPowerBatterySaver50" ($batteryThreshold -ne 50)
-    }
+    Set-WmtBatterySaverPresetState -Threshold $batteryThreshold
     $usbAc = $nrd["UsbSuspendAC"]; $usbDc = $nrd["UsbSuspendDC"]
     if ($null -eq $usbAc -or $null -eq $usbDc) {
         try { $usbSub2 = "2a737441-1930-4402-8d77-b2bebba308a3"; $usbSet2 = "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"; if ($null -eq $usbAc) { $usbAc = Get-WmtPowerSettingIndex $usbSub2 $usbSet2 "AC" }; if ($null -eq $usbDc) { $usbDc = Get-WmtPowerSettingIndex $usbSub2 $usbSet2 "DC" } } catch {}
@@ -41676,6 +41723,8 @@ $script:WmtQuickFindStateLabels = @{}
 $script:WmtQuickFindMouseProxies = @{}
 $script:WmtQuickFindWindowsUpdateProxies = [System.Collections.ArrayList]::new()
 $script:WmtWindowsUpdatePresetState = "Unknown"
+$script:WmtQuickFindBatterySaverProxies = [System.Collections.ArrayList]::new()
+$script:WmtBatterySaverThreshold = $null
 $script:WmtQuickFindRenderedReadiness = @{}
 function Sync-WmtQuickFindMouseProxies {
     foreach ($name in @($script:WmtQuickFindMouseProxies.Keys)) {
@@ -41722,6 +41771,24 @@ function Update-WmtQuickFindStateLabels {
                     else { "Current Windows Update behavior: Unknown / custom" }
                 }
             }
+            continue
+        }
+        if ($name -eq "__BatterySaverPreset") {
+            if (-not $script:TweakStatesReady) {
+                $label.Text = "Current battery saver threshold: Checking..."
+            }
+            else {
+                $label.Text = switch ([string]$script:WmtBatterySaverThreshold) {
+                    "0" { "Current battery saver threshold: Off" }
+                    "20" { "Current battery saver threshold: 20%" }
+                    "50" { "Current battery saver threshold: 50%" }
+                    default { "Current battery saver threshold: Unknown / custom" }
+                }
+            }
+            continue
+        }
+        if ($name -eq "__ServicePreset") {
+            $label.Text = "Current service preset: Unknown / custom; service changes are not reversible profiles."
             continue
         }
         if ($name -eq "btnToggleSearchDisplay") {
@@ -42032,6 +42099,8 @@ function Update-WmtQuickFindResults {
     $script:WmtQuickFindMouseProxies.Clear()
     if (-not $script:WmtQuickFindWindowsUpdateProxies) { $script:WmtQuickFindWindowsUpdateProxies = [System.Collections.ArrayList]::new() }
     $script:WmtQuickFindWindowsUpdateProxies.Clear()
+    if (-not $script:WmtQuickFindBatterySaverProxies) { $script:WmtQuickFindBatterySaverProxies = [System.Collections.ArrayList]::new() }
+    $script:WmtQuickFindBatterySaverProxies.Clear()
     $script:WmtQuickFindRenderedReadiness.Clear()
     $query = ([string]$txtGlobalSearch.Text).Trim()
     if (-not $query -or $query -eq $script:QuickFindPlaceholder) {
@@ -42070,6 +42139,10 @@ function Update-WmtQuickFindResults {
             $entry.Description = "Choose slow, default, or fast cursor speed."
         } elseif ($entry.Item.Group -eq "WindowsUpdatePreset") {
             $entry.Description = "Choose one Windows Update behavior: Default, Security Only, or Disable All."
+        } elseif ($entry.Item.Group -eq "BatterySaverPreset") {
+            $entry.Description = "Choose one battery saver threshold: Off, 20%, or 50%."
+        } elseif ($entry.Item.Group -eq "ServicePreset") {
+            $entry.Description = "Choose a service optimization action. These actions change different service sets and do not represent reversible profiles."
         } else {
             $entry.Description = $liveTooltip
         }
@@ -42140,11 +42213,14 @@ function Update-WmtQuickFindResults {
             }
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
             $isWindowsUpdatePresetGroup = ($entry.Item.Group -eq "WindowsUpdatePreset")
+            $isBatterySaverPresetGroup = ($entry.Item.Group -eq "BatterySaverPreset")
+            $isServicePresetGroup = ($entry.Item.Group -eq "ServicePreset")
             $isSettingsAction = ([string]$entry.Item.Button.Name -in @(
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
             $isRestartExplorerAction = ([string]$entry.Item.Button.Name -eq "btnPowerUserRestartExplorer")
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isWindowsUpdatePresetGroup) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and
+                -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $stateLabel = [System.Windows.Controls.TextBlock]::new()
                 $stateLabel.FontSize = 12
                 $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
@@ -42161,11 +42237,29 @@ function Update-WmtQuickFindResults {
                 $script:WmtQuickFindStateLabels["__WindowsUpdatePreset"] = $stateLabel
                 [void]$body.Children.Add($stateLabel)
             }
+            elseif ($isBatterySaverPresetGroup) {
+                $stateLabel = [System.Windows.Controls.TextBlock]::new()
+                $stateLabel.FontSize = 12
+                $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
+                $stateLabel.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, "TextSecondary")
+                $script:WmtQuickFindStateLabels["__BatterySaverPreset"] = $stateLabel
+                [void]$body.Children.Add($stateLabel)
+            }
+            elseif ($isServicePresetGroup) {
+                $stateLabel = [System.Windows.Controls.TextBlock]::new()
+                $stateLabel.FontSize = 12
+                $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
+                $stateLabel.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, "TextSecondary")
+                $script:WmtQuickFindStateLabels["__ServicePreset"] = $stateLabel
+                [void]$body.Children.Add($stateLabel)
+            }
             # Reparent the actual original Button, retaining its existing handlers,
             # state, styling, icon, and dynamic label. This is not a proxy/auto-click.
             $original = $entry.Item.Button
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
             $isWindowsUpdatePresetGroup = ($entry.Item.Group -eq "WindowsUpdatePreset")
+            $isBatterySaverPresetGroup = ($entry.Item.Group -eq "BatterySaverPreset")
+            $isServicePresetGroup = ($entry.Item.Group -eq "ServicePreset")
             $isSettingsAction = ([string]$original.Name -in @(
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
@@ -42176,7 +42270,8 @@ function Update-WmtQuickFindResults {
                     # Missing speed data affects state text, not action availability.
                     $tweakReady = [bool]$script:TweakStatesReady
                 }
-                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isWindowsUpdatePresetGroup) {
+                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isWindowsUpdatePresetGroup -or
+                        $isBatterySaverPresetGroup -or $isServicePresetGroup) {
                     # These controls perform actions and do not have toggle-state readiness.
                     $tweakReady = [bool]$original.IsEnabled
                 }
@@ -42197,7 +42292,8 @@ function Update-WmtQuickFindResults {
                     }
                 }
             }
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isWindowsUpdatePresetGroup) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and
+                -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $readinessName = if ($isMouseSpeedGroup) { "__MouseSpeed" } else { [string]$original.Name }
                 $script:WmtQuickFindRenderedReadiness[$readinessName] = [bool]$tweakReady
             }
@@ -42232,6 +42328,65 @@ function Update-WmtQuickFindResults {
                         Target = $presetTarget
                         State = $presetState
                     })
+                    $proxy.Add_Click({
+                        param($searchButton, $searchEventArgs)
+                        $nativeButton = $searchButton.Tag
+                        if ($nativeButton -and $nativeButton.IsEnabled) {
+                            $nativeButton.RaiseEvent([System.Windows.RoutedEventArgs]::new(
+                                [System.Windows.Controls.Button]::ClickEvent))
+                        }
+                    })
+                    [void]$body.Children.Add($proxy)
+                }
+            }
+            elseif ($isBatterySaverPresetGroup) {
+                $hosted = $true
+                foreach ($presetButtonName in @(
+                    "btnPowerBatterySaverOff", "btnPowerBatterySaver20", "btnPowerBatterySaver50"
+                )) {
+                    $presetTarget = $window.FindName($presetButtonName)
+                    if (-not $presetTarget) { $presetTarget = Get-Ctrl $presetButtonName }
+                    if (-not $presetTarget -or $presetTarget -isnot [System.Windows.Controls.Button]) { continue }
+                    $proxy = [System.Windows.Controls.Button]::new()
+                    $proxy.Content = $presetTarget.Content
+                    $proxy.Style = $presetTarget.Style
+                    $proxy.HorizontalAlignment = "Left"
+                    $proxy.MinWidth = 118
+                    $proxy.Margin = [System.Windows.Thickness]::new(0,4,8,0)
+                    $proxy.ToolTip = $presetTarget.ToolTip
+                    $proxy.Tag = $presetTarget
+                    $proxy.IsEnabled = [bool]$presetTarget.IsEnabled
+                    [void]$script:WmtQuickFindBatterySaverProxies.Add([pscustomobject]@{
+                        Proxy = $proxy
+                        Target = $presetTarget
+                        ButtonName = $presetButtonName
+                    })
+                    $proxy.Add_Click({
+                        param($searchButton, $searchEventArgs)
+                        $nativeButton = $searchButton.Tag
+                        if ($nativeButton -and $nativeButton.IsEnabled) {
+                            $nativeButton.RaiseEvent([System.Windows.RoutedEventArgs]::new(
+                                [System.Windows.Controls.Button]::ClickEvent))
+                        }
+                    })
+                    [void]$body.Children.Add($proxy)
+                }
+            }
+            elseif ($isServicePresetGroup) {
+                $hosted = $true
+                foreach ($serviceButtonName in @("btnPerfServicesManual", "btnPerfServicesRevert")) {
+                    $serviceTarget = $window.FindName($serviceButtonName)
+                    if (-not $serviceTarget) { $serviceTarget = Get-Ctrl $serviceButtonName }
+                    if (-not $serviceTarget -or $serviceTarget -isnot [System.Windows.Controls.Button]) { continue }
+                    $proxy = [System.Windows.Controls.Button]::new()
+                    $proxy.Content = $serviceTarget.Content
+                    $proxy.Style = $serviceTarget.Style
+                    $proxy.HorizontalAlignment = "Left"
+                    $proxy.MinWidth = 118
+                    $proxy.Margin = [System.Windows.Thickness]::new(0,4,8,0)
+                    $proxy.ToolTip = $serviceTarget.ToolTip
+                    $proxy.Tag = $serviceTarget
+                    $proxy.IsEnabled = [bool]$serviceTarget.IsEnabled
                     $proxy.Add_Click({
                         param($searchButton, $searchEventArgs)
                         $nativeButton = $searchButton.Tag
@@ -42488,16 +42643,13 @@ $searchIndexDeferTimer.Add_Tick({
 
     # 11. Common Tweaks
     # --- MISSING SEARCH ENTRIES (original WMT buttons) ---
-    Add-SearchIndexEntry "btnPerfServicesManual" "Services to Manual" "btnTabTweaks"
-    Add-SearchIndexEntry "btnPerfServicesRevert" "Revert Services" "btnTabTweaks"
+    Add-SearchIndexEntry "btnPerfServicesManual" "Service Optimization" "btnTabTweaks" "ServicePreset" "optimize services performance startup manual set services to manual restore revert service defaults"
     Add-SearchIndexEntry "btnToggleHibernate" "Hibernation Toggle" "btnTabTweaks"
-    Add-SearchIndexEntry "btnToggleSuperfetch" "Superfetch Toggle" "btnTabTweaks"
+    Add-SearchIndexEntry "btnToggleSuperfetch" "Superfetch Toggle" "btnTabTweaks" "" "SysMain service startup disabled automatic manual"
     Add-SearchIndexEntry "btnToggleMemCompress" "Memory Compression" "btnTabTweaks"
     Add-SearchIndexEntry "btnTogglePagefile" "Pagefile Virtual Memory Toggle" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleHags" "HAGS GPU Scheduling" "btnTabTweaks"
-    Add-SearchIndexEntry "btnPowerBatterySaverOff" "Battery Saver Off" "btnTabTweaks"
-    Add-SearchIndexEntry "btnPowerBatterySaver20" "Battery Saver 20%" "btnTabTweaks"
-    Add-SearchIndexEntry "btnPowerBatterySaver50" "Battery Saver 50%" "btnTabTweaks"
+    Add-SearchIndexEntry "btnPowerBatterySaverOff" "Battery Saver Behavior" "btnTabTweaks" "BatterySaverPreset" "battery saver off disable 0 20 50 threshold percent"
     Add-SearchIndexEntry "btnTogglePcie" "PCIe Power Savings" "btnTabTweaks"
     Add-SearchIndexEntry "btnAppxLoad" "Load Appx Apps" "btnTabTweaks"
     Add-SearchIndexEntry "btnAppxRemoveSel" "Remove Selected Apps" "btnTabTweaks"
@@ -42510,7 +42662,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnFeatTelnet" "Telnet Client" "btnTabTweaks"
     Add-SearchIndexEntry "btnFeatIIS" "IIS Web Server" "btnTabTweaks"
     Add-SearchIndexEntry "btnFeatLegacy" "Legacy Media Player" "btnTabTweaks"
-    Add-SearchIndexEntry "btnSvcView" "View Services" "btnTabTweaks"
+    Add-SearchIndexEntry "btnSvcView" "View Services" "btnTabTweaks" "" "manage services service startup enable auto automatic manual disable selected service"
     Add-SearchIndexEntry "btnTasksRestore" "Restore Tasks" "btnTabTweaks"
     Add-SearchIndexEntry "btnTasksView" "View Tasks" "btnTabTweaks"
     Add-SearchIndexEntry "btnWUDefault" "Windows Update Behavior" "btnTabTweaks" "WindowsUpdatePreset" "default security only disable all updates feature updates"
@@ -42533,7 +42685,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnToggleTailored" "Tailored Experiences" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleActivity" "Activity History" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleAppLaunch" "App Launch Tracking" "btnTabTweaks"
-    Add-SearchIndexEntry "btnToggleSearchIndex" "Search Indexing" "btnTabTweaks"
+    Add-SearchIndexEntry "btnToggleSearchIndex" "Search Indexing" "btnTabTweaks" "" "WSearch Windows Search service startup automatic manual indexing"
     Add-SearchIndexEntry "btnSearchIndexOptions" "Index Options" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleGameCapture" "Game Capture" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleFso" "Fullscreen Optimizations" "btnTabTweaks"
@@ -42550,8 +42702,6 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnSecurityCfaOpen" "Controlled Folder Access" "btnTabTweaks"
     Add-SearchIndexEntry "btnDevSettings" "Developer Settings" "btnTabTweaks"
 
-    Add-SearchIndexEntry "btnSvcOptimize" "Optimize System Services" "btnTabTweaks"
-    Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
     Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
     Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
     # --- NEW TWEAK SEARCH ENTRIES ---
@@ -42565,7 +42715,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnTogglePaintAI" "Paint AI" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleNotepadAI" "Notepad AI" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleFindMyDevice" "Find My Device" "btnTabTweaks"
-    Add-SearchIndexEntry "btnToggleLocationSvc" "Location Services" "btnTabTweaks"
+    Add-SearchIndexEntry "btnToggleLocationSvc" "Location Services" "btnTabTweaks" "" "Location service enable disable"
     Add-SearchIndexEntry "btnToggleModernStandby" "Modern Standby Networking" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleDeviceAutoApp" "Device Auto-App Download" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleEndTask" "End Task on Taskbar" "btnTabTweaks"
