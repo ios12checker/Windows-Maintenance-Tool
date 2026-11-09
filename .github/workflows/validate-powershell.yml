@@ -170,6 +170,22 @@ jobs:
               if (-not $functionAst) { throw "Missing Quick Find function: $name" }
               Invoke-Expression $functionAst.Extent.Text
           }
+          $rendererAst = $ast.Find({
+              param($node)
+              $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $node.Name -eq 'Update-WmtQuickFindResults'
+          }, $true)
+          if (-not $rendererAst) { throw 'Missing Quick Find result renderer.' }
+          $rendererText = $rendererAst.Extent.Text
+          foreach ($controlName in @('btnDisplaySettings', 'btnSoundSettings', 'btnKeyboardSettings', 'btnA11ySettings')) {
+              if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
+                  throw "Quick Find must treat $controlName as a direct Settings action."
+              }
+          }
+          if ($rendererText -notmatch '\$isSettingsAction\s+-or\s+\$isRestartExplorerAction' -or
+              $rendererText -notmatch '-not\s+\$isSettingsAction') {
+              throw 'Quick Find Settings actions must bypass Tweaks loading/state fallbacks and host the original button.'
+          }
           function Write-GuiLog { param([string]$Message) Write-Host $Message }
           $script:WmtQuickFindMovedButtons = [System.Collections.ArrayList]::new()
           $nativePage = [System.Windows.Controls.Grid]::new()

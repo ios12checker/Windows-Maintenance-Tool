@@ -42052,9 +42052,11 @@ function Update-WmtQuickFindResults {
                 [void]$body.Children.Add($description)
             }
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
-            $isMouseSettingsAction = ([string]$entry.Item.Button.Name -eq "btnMouseSettings")
+            $isSettingsAction = ([string]$entry.Item.Button.Name -in @(
+                "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
+            ))
             $isRestartExplorerAction = ([string]$entry.Item.Button.Name -eq "btnPowerUserRestartExplorer")
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isMouseSettingsAction -and -not $isRestartExplorerAction) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction) {
                 $stateLabel = [System.Windows.Controls.TextBlock]::new()
                 $stateLabel.FontSize = 12
                 $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
@@ -42067,7 +42069,9 @@ function Update-WmtQuickFindResults {
             # state, styling, icon, and dynamic label. This is not a proxy/auto-click.
             $original = $entry.Item.Button
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
-            $isMouseSettingsAction = ([string]$original.Name -eq "btnMouseSettings")
+            $isSettingsAction = ([string]$original.Name -in @(
+                "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
+            ))
             $isRestartExplorerAction = ([string]$original.Name -eq "btnPowerUserRestartExplorer")
             $tweakReady = $true
             if ($entry.Item.Tab -eq "btnTabTweaks") {
@@ -42075,7 +42079,7 @@ function Update-WmtQuickFindResults {
                     # Missing speed data affects state text, not action availability.
                     $tweakReady = [bool]$script:TweakStatesReady
                 }
-                elseif ($isMouseSettingsAction -or $isRestartExplorerAction) {
+                elseif ($isSettingsAction -or $isRestartExplorerAction) {
                     # These controls perform actions and do not have toggle-state readiness.
                     $tweakReady = [bool]$original.IsEnabled
                 }
@@ -42096,7 +42100,7 @@ function Update-WmtQuickFindResults {
                     }
                 }
             }
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isMouseSettingsAction -and -not $isRestartExplorerAction) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction) {
                 $readinessName = if ($isMouseSpeedGroup) { "__MouseSpeed" } else { [string]$original.Name }
                 $script:WmtQuickFindRenderedReadiness[$readinessName] = [bool]$tweakReady
             }
@@ -42319,8 +42323,8 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexNavigationEntry "Enable Debug Logs" "btnDebugMode" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Disable Debug Logs" "btnDebugMode" "btnTabSupport"
     Add-SearchIndexEntry "btnRememberWindowSizes" "Remember Window Sizes" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Disable Remember Window Sizes" "btnRememberWindowSizes" "btnTabSupport"
-    Add-SearchIndexNavigationEntry "Enable Remember Window Sizes" "btnRememberWindowSizes" "btnTabSupport"
+    Add-SearchIndexNavigationEntry "Remember Window Sizes On" "btnRememberWindowSizes" "btnTabSupport"
+    Add-SearchIndexNavigationEntry "Remember Window Sizes Off" "btnRememberWindowSizes" "btnTabSupport"
     Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport"
     Add-SearchIndexNavigationEntry "Disable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Enable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
