@@ -38578,6 +38578,73 @@ else {
 $script:TweakStatesDebounceTimer.Start()
 }
 
+function Get-WmtWindowsUpdatePresetState {
+param(
+    [System.Collections.IDictionary]$RegistryCache,
+    [System.Collections.IDictionary]$ServiceData
+)
+
+$updatePath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate"
+$autoPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU"
+if (-not $RegistryCache -or -not $RegistryCache.Contains($updatePath) -or
+    -not $RegistryCache.Contains($autoPath) -or -not $ServiceData -or
+    -not $ServiceData.Contains("WuauservStartType") -or
+    -not $ServiceData.Contains("WuauservStatus")) {
+    return "Unknown"
+}
+
+$updateValues = $RegistryCache[$updatePath]
+$autoValues = $RegistryCache[$autoPath]
+$hasNoAutoUpdate = Test-WmtRegistrySnapshotHasValue -Item $autoValues -Name "NoAutoUpdate"
+$hasDeferFeatureUpdates = Test-WmtRegistrySnapshotHasValue -Item $updateValues -Name "DeferFeatureUpdates"
+$hasFeatureDeferralDays = Test-WmtRegistrySnapshotHasValue -Item $updateValues -Name "DeferFeatureUpdatesPeriodInDays"
+$hasQualityDeferral = Test-WmtRegistrySnapshotHasValue -Item $updateValues -Name "DeferQualityUpdates"
+$noAutoUpdate = if ($hasNoAutoUpdate) { ConvertTo-Int (Get-WmtRegistrySnapshotValue -Item $autoValues -Name "NoAutoUpdate") -1 } else { $null }
+$deferFeatureUpdates = if ($hasDeferFeatureUpdates) { ConvertTo-Int (Get-WmtRegistrySnapshotValue -Item $updateValues -Name "DeferFeatureUpdates") -1 } else { $null }
+$featureDeferralDays = if ($hasFeatureDeferralDays) { ConvertTo-Int (Get-WmtRegistrySnapshotValue -Item $updateValues -Name "DeferFeatureUpdatesPeriodInDays") -1 } else { $null }
+$serviceType = [string]$ServiceData["WuauservStartType"]
+$serviceStatus = [string]$ServiceData["WuauservStatus"]
+$serviceRunningAndAutomatic = ($serviceType -eq "Automatic" -and $serviceStatus -eq "Running")
+
+if ($hasNoAutoUpdate -and $noAutoUpdate -eq 1 -and $serviceType -eq "Disabled" -and $serviceStatus -eq "Stopped") {
+    return "Disabled"
+}
+if ($hasNoAutoUpdate -and $noAutoUpdate -eq 0 -and
+    $hasDeferFeatureUpdates -and $deferFeatureUpdates -eq 1 -and
+    $hasFeatureDeferralDays -and $featureDeferralDays -eq 365 -and
+    $serviceRunningAndAutomatic) {
+    return "SecurityOnly"
+}
+if (-not $hasNoAutoUpdate -and -not $hasDeferFeatureUpdates -and
+    -not $hasFeatureDeferralDays -and -not $hasQualityDeferral -and
+    $serviceRunningAndAutomatic) {
+    return "Default"
+}
+return "Unknown"
+}
+
+function Set-WmtWindowsUpdatePresetState {
+param([ValidateSet("Default", "SecurityOnly", "Disabled", "Unknown")][string]$State)
+
+$script:WmtWindowsUpdatePresetState = $State
+$activeButton = switch ($State) {
+    "Default" { "btnWUDefault" }
+    "SecurityOnly" { "btnWUSecurity" }
+    "Disabled" { "btnWUDisable" }
+    default { "" }
+}
+foreach ($buttonName in @("btnWUDefault", "btnWUSecurity", "btnWUDisable")) {
+    $button = Get-Ctrl $buttonName
+    if ($button) { $button.IsEnabled = [string]::IsNullOrEmpty($activeButton) -or $buttonName -ne $activeButton }
+}
+foreach ($record in @($script:WmtQuickFindWindowsUpdateProxies)) {
+    if (-not $record -or -not $record.Proxy -or -not $record.Target) { continue }
+    $record.Proxy.IsEnabled = [bool]($record.Target.IsEnabled -and
+        ([string]::IsNullOrEmpty($activeButton) -or $record.State -ne $State))
+}
+try { Update-WmtQuickFindStateLabels } catch {}
+}
+
 function Update-TweakButtonStates {
 # Re-entry guard: prevent concurrent execution on UI thread (e.g. user clicks Tweaks tab rapidly)
 if ($script:TweakStatesUpdating) { return }
@@ -38638,6 +38705,8 @@ try {
         $button = Get-Ctrl $Name
         if ($button) { $button.IsEnabled = [bool]$Enabled }
     }
+
+    Set-WmtWindowsUpdatePresetState -State (Get-WmtWindowsUpdatePresetState -RegistryCache $regCache -ServiceData $nrd)
 
     $h = & $getRegValue "HKLM:\SYSTEM\CurrentControlSet\Control\GraphicsDrivers" "HwSchMode"
     if ($null -ne $h) {
@@ -41605,6 +41674,8 @@ $script:WmtQuickFindMovedButtons = [System.Collections.ArrayList]::new()
 $script:WmtQuickFindUpdating = $false
 $script:WmtQuickFindStateLabels = @{}
 $script:WmtQuickFindMouseProxies = @{}
+$script:WmtQuickFindWindowsUpdateProxies = [System.Collections.ArrayList]::new()
+$script:WmtWindowsUpdatePresetState = "Unknown"
 $script:WmtQuickFindRenderedReadiness = @{}
 function Sync-WmtQuickFindMouseProxies {
     foreach ($name in @($script:WmtQuickFindMouseProxies.Keys)) {
@@ -41638,6 +41709,18 @@ function Update-WmtQuickFindStateLabels {
                     default { "Custom ($speed)" }
                 }
                 $label.Text = "Current cursor speed: $speedLabel"
+            }
+            continue
+        }
+        if ($name -eq "__WindowsUpdatePreset") {
+            $label.Text = switch ([string]$script:WmtWindowsUpdatePresetState) {
+                "Default" { "Current Windows Update behavior: Default" }
+                "SecurityOnly" { "Current Windows Update behavior: Security Only" }
+                "Disabled" { "Current Windows Update behavior: Disabled" }
+                default {
+                    if (-not $script:TweakStatesReady) { "Current Windows Update behavior: Checking..." }
+                    else { "Current Windows Update behavior: Unknown / custom" }
+                }
             }
             continue
         }
@@ -41947,6 +42030,8 @@ function Update-WmtQuickFindResults {
     $script:WmtQuickFindStateLabels.Clear()
     if (-not $script:WmtQuickFindMouseProxies) { $script:WmtQuickFindMouseProxies = @{} }
     $script:WmtQuickFindMouseProxies.Clear()
+    if (-not $script:WmtQuickFindWindowsUpdateProxies) { $script:WmtQuickFindWindowsUpdateProxies = [System.Collections.ArrayList]::new() }
+    $script:WmtQuickFindWindowsUpdateProxies.Clear()
     $script:WmtQuickFindRenderedReadiness.Clear()
     $query = ([string]$txtGlobalSearch.Text).Trim()
     if (-not $query -or $query -eq $script:QuickFindPlaceholder) {
@@ -42068,6 +42153,14 @@ function Update-WmtQuickFindResults {
                 $script:WmtQuickFindStateLabels[$stateName] = $stateLabel
                 [void]$body.Children.Add($stateLabel)
             }
+            elseif ($isWindowsUpdatePresetGroup) {
+                $stateLabel = [System.Windows.Controls.TextBlock]::new()
+                $stateLabel.FontSize = 12
+                $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
+                $stateLabel.SetResourceReference([System.Windows.Controls.TextBlock]::ForegroundProperty, "TextSecondary")
+                $script:WmtQuickFindStateLabels["__WindowsUpdatePreset"] = $stateLabel
+                [void]$body.Children.Add($stateLabel)
+            }
             # Reparent the actual original Button, retaining its existing handlers,
             # state, styling, icon, and dynamic label. This is not a proxy/auto-click.
             $original = $entry.Item.Button
@@ -42127,7 +42220,18 @@ function Update-WmtQuickFindResults {
                     $proxy.Margin = [System.Windows.Thickness]::new(0,4,8,0)
                     $proxy.ToolTip = $presetTarget.ToolTip
                     $proxy.Tag = $presetTarget
-                    $proxy.IsEnabled = [bool]$presetTarget.IsEnabled
+                    $presetState = switch ($presetButtonName) {
+                        "btnWUDefault" { "Default" }
+                        "btnWUSecurity" { "SecurityOnly" }
+                        "btnWUDisable" { "Disabled" }
+                    }
+                    $proxy.IsEnabled = [bool]($presetTarget.IsEnabled -and
+                        $script:WmtWindowsUpdatePresetState -ne $presetState)
+                    [void]$script:WmtQuickFindWindowsUpdateProxies.Add([pscustomobject]@{
+                        Proxy = $proxy
+                        Target = $presetTarget
+                        State = $presetState
+                    })
                     $proxy.Add_Click({
                         param($searchButton, $searchEventArgs)
                         $nativeButton = $searchButton.Tag
@@ -64910,14 +65014,20 @@ function Invoke-WmtWindowsUpdatePreset {
         [Parameter(Mandatory = $true)][string]$Message,
         [Parameter(Mandatory = $true)][object[]]$RegistryChanges,
         [Parameter(Mandatory = $true)][ValidateSet('Automatic', 'Manual', 'Disabled')][string]$StartupType,
-        [Parameter(Mandatory = $true)][bool]$Running
+        [Parameter(Mandatory = $true)][bool]$Running,
+        [Parameter(Mandatory = $true)][ValidateSet('Default', 'SecurityOnly', 'Disabled')][string]$PresetState
     )
 
     $arguments = [object[]]::new(3)
     $arguments[0] = ConvertTo-Json -InputObject @($RegistryChanges) -Depth 4 -Compress
     $arguments[1] = $StartupType
     $arguments[2] = $Running
-    Invoke-WmtUiBackgroundCommand -Name $Name -Msg $Message -ArgumentList $arguments -Sb {
+    $stateAfterApply = $PresetState
+    $completed = {
+        param($results)
+        Set-WmtWindowsUpdatePresetState -State $stateAfterApply
+    }.GetNewClosure()
+    Invoke-WmtUiBackgroundCommand -Name $Name -Msg $Message -ArgumentList $arguments -OnComplete $completed -Sb {
         param([string]$ChangesJson, [string]$DesiredStartupType, [bool]$DesiredRunning)
 
         $changes = @(ConvertFrom-Json -InputObject $ChangesJson -ErrorAction Stop)
@@ -65062,7 +65172,7 @@ if ($btnWUDefault) { $btnWUDefault.Add_Click({
         @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name='DeferFeatureUpdatesPeriodInDays'; Action='Remove' },
         @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name='DeferQualityUpdates'; Action='Remove' }
     )
-    Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateDefault' -Message 'Applying default Windows Update settings...' -RegistryChanges $changes -StartupType Automatic -Running $true
+    Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateDefault' -Message 'Applying default Windows Update settings...' -RegistryChanges $changes -StartupType Automatic -Running $true -PresetState Default
 }) }
 
 if ($btnWUSecurity) { $btnWUSecurity.Add_Click({
@@ -65071,7 +65181,7 @@ if ($btnWUSecurity) { $btnWUSecurity.Add_Click({
         @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; Name='DeferFeatureUpdatesPeriodInDays'; Action='Set'; Value=365; Kind='DWord' },
         @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name='NoAutoUpdate'; Action='Set'; Value=0; Kind='DWord' }
     )
-    Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateSecurity' -Message 'Applying security-only update settings...' -RegistryChanges $changes -StartupType Automatic -Running $true
+    Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateSecurity' -Message 'Applying security-only update settings...' -RegistryChanges $changes -StartupType Automatic -Running $true -PresetState SecurityOnly
 }) }
 
 if ($btnWUDisable) { $btnWUDisable.Add_Click({
@@ -65079,7 +65189,7 @@ if ($btnWUDisable) { $btnWUDisable.Add_Click({
         $changes = @(
             @{ Path='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'; Name='NoAutoUpdate'; Action='Set'; Value=1; Kind='DWord' }
         )
-        Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateDisable' -Message 'Disabling Windows Update...' -RegistryChanges $changes -StartupType Disabled -Running $false
+        Invoke-WmtWindowsUpdatePreset -Name 'WindowsUpdateDisable' -Message 'Disabling Windows Update...' -RegistryChanges $changes -StartupType Disabled -Running $false -PresetState Disabled
     }
 }) }
 
@@ -70153,6 +70263,8 @@ catch {
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceInstall\Settings",
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeliveryOptimization\Config",
             "HKLM:\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings",
+            "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate",
+            "HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU",
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\LogonSound",
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Sudo",
             "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DeviceManager",
@@ -70318,6 +70430,15 @@ catch {
             $ws = Get-Service "WSearch" -ErrorAction SilentlyContinue
             $nonRegData["WSearchStartType"] = if ($ws) { $ws.StartType } else { $null }
         } catch { $nonRegData["WSearchStartType"] = $null }
+
+        try {
+            $wu = Get-Service "wuauserv" -ErrorAction Stop
+            $nonRegData["WuauservStartType"] = if ($wu) { [string]$wu.StartType } else { $null }
+            $nonRegData["WuauservStatus"] = if ($wu) { [string]$wu.Status } else { $null }
+        } catch {
+            $nonRegData["WuauservStartType"] = $null
+            $nonRegData["WuauservStatus"] = $null
+        }
 
         # Get-MMAgent (CIM — very slow on low-end hardware)
         try {

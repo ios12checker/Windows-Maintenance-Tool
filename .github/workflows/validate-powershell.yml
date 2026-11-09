@@ -195,6 +195,69 @@ jobs:
               $rendererText -notmatch 'Choose one Windows Update behavior') {
               throw 'Windows Update presets must render as one merged Quick Find entry.'
           }
+          foreach ($functionName in @('Get-WmtWindowsUpdatePresetState', 'Get-WmtRegistrySnapshotValue', 'Test-WmtRegistrySnapshotHasValue', 'Set-WmtWindowsUpdatePresetState')) {
+              $functionAst = $ast.Find({
+                  param($node)
+                  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                      $node.Name -eq $functionName
+              }, $true)
+              if (-not $functionAst) { throw "Missing Windows Update state function: $functionName" }
+              Invoke-Expression $functionAst.Extent.Text
+          }
+          function ConvertTo-Int { param($Value, $Default = 0); try { return [int]$Value } catch { return $Default } }
+          $updatePath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+          $autoPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+          $service = @{ WuauservStartType = 'Automatic'; WuauservStatus = 'Running' }
+          $registry = @{ $updatePath = @{}; $autoPath = @{} }
+          if ((Get-WmtWindowsUpdatePresetState $registry $service) -ne 'Default') {
+              throw 'The default Windows Update state was not detected.'
+          }
+          $registry[$updatePath] = @{ DeferFeatureUpdates = 1; DeferFeatureUpdatesPeriodInDays = 365 }
+          $registry[$autoPath] = @{ NoAutoUpdate = 0 }
+          if ((Get-WmtWindowsUpdatePresetState $registry $service) -ne 'SecurityOnly') {
+              throw 'The security-only Windows Update state was not detected.'
+          }
+          $registry[$autoPath] = @{ NoAutoUpdate = 1 }
+          $service.WuauservStartType = 'Disabled'
+          $service.WuauservStatus = 'Stopped'
+          if ((Get-WmtWindowsUpdatePresetState $registry $service) -ne 'Disabled') {
+              throw 'The disabled Windows Update state was not detected.'
+          }
+          $service.WuauservStartType = 'Automatic'
+          $service.WuauservStatus = 'Running'
+          if ((Get-WmtWindowsUpdatePresetState $registry $service) -ne 'Unknown') {
+              throw 'A conflicting Windows Update configuration must not be reported as a known preset.'
+          }
+          $script:ciPresetButtons = @{
+              btnWUDefault = [pscustomobject]@{ IsEnabled = $true }
+              btnWUSecurity = [pscustomobject]@{ IsEnabled = $true }
+              btnWUDisable = [pscustomobject]@{ IsEnabled = $true }
+          }
+          function Get-Ctrl([string]$Name) { return $script:ciPresetButtons[$Name] }
+          function Update-WmtQuickFindStateLabels {}
+          $script:WmtQuickFindWindowsUpdateProxies = [System.Collections.ArrayList]::new()
+          foreach ($preset in @(
+              @{ Button = 'btnWUDefault'; State = 'Default' }
+              @{ Button = 'btnWUSecurity'; State = 'SecurityOnly' }
+              @{ Button = 'btnWUDisable'; State = 'Disabled' }
+          )) {
+              [void]$script:WmtQuickFindWindowsUpdateProxies.Add([pscustomobject]@{
+                  Proxy = [pscustomobject]@{ IsEnabled = $true }
+                  Target = $script:ciPresetButtons[$preset.Button]
+                  State = $preset.State
+              })
+          }
+          Set-WmtWindowsUpdatePresetState -State 'SecurityOnly'
+          if ($script:ciPresetButtons.btnWUSecurity.IsEnabled -or
+              -not $script:ciPresetButtons.btnWUDefault.IsEnabled -or
+              -not $script:ciPresetButtons.btnWUDisable.IsEnabled) {
+              throw 'The current Windows Update preset button was not the only disabled preset.'
+          }
+          if ($script:WmtQuickFindWindowsUpdateProxies[1].Proxy.IsEnabled -or
+              -not $script:WmtQuickFindWindowsUpdateProxies[0].Proxy.IsEnabled -or
+              -not $script:WmtQuickFindWindowsUpdateProxies[2].Proxy.IsEnabled) {
+              throw 'Quick Find did not gray only the active Windows Update preset button.'
+          }
           $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
           if ($source -notmatch 'Add-SearchIndexEntry\s+"btnWUDefault"\s+"Windows Update Behavior"\s+"btnTabTweaks"\s+"WindowsUpdatePreset"' -or
               $source -match 'Add-SearchIndexEntry\s+"btnWUSecurity"' -or
