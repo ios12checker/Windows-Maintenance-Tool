@@ -177,6 +177,7 @@ jobs:
           }, $true)
           if (-not $rendererAst) { throw 'Missing Quick Find result renderer.' }
           $rendererText = $rendererAst.Extent.Text
+          $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
           foreach ($controlName in @('btnDisplaySettings', 'btnSoundSettings', 'btnKeyboardSettings', 'btnA11ySettings')) {
               if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
                   throw "Quick Find must treat $controlName as a direct Settings action."
@@ -185,6 +186,11 @@ jobs:
           if ($rendererText -notmatch '\$isSettingsAction\s+-or\s+\$isRestartExplorerAction' -or
               $rendererText -notmatch '-not\s+\$isSettingsAction') {
               throw 'Quick Find Settings actions must bypass Tweaks loading/state fallbacks and host the original button.'
+          }
+          if ($rendererText -notmatch '\$isServiceViewAction\s*=\s*\(\[string\]\$original\.Name\s+-eq\s+"btnSvcView"\)' -or
+              $rendererText -notmatch '\$isRestartExplorerAction\s+-or\s+\$isServiceViewAction' -or
+              $source -notmatch 'Add-SearchIndexEntry\s+"btnSvcView"\s+"View Services"\s+"btnTabTweaks"') {
+              throw 'View Services must be hosted as a direct Quick Find action without waiting for tweak-state readiness.'
           }
           foreach ($controlName in @('btnWUDefault', 'btnWUSecurity', 'btnWUDisable')) {
               if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
@@ -195,7 +201,6 @@ jobs:
               $rendererText -notmatch 'Choose one Windows Update behavior') {
               throw 'Windows Update presets must render as one merged Quick Find entry.'
           }
-          $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
           foreach ($controlName in @('btnPowerBatterySaverOff', 'btnPowerBatterySaver20', 'btnPowerBatterySaver50',
                                      'btnPerfServicesManual', 'btnPerfServicesRevert')) {
               if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {

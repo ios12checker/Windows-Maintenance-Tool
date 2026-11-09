@@ -42219,7 +42219,8 @@ function Update-WmtQuickFindResults {
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
             $isRestartExplorerAction = ([string]$entry.Item.Button.Name -eq "btnPowerUserRestartExplorer")
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and
+            $isServiceViewAction = ([string]$entry.Item.Button.Name -eq "btnSvcView")
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isServiceViewAction -and
                 -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $stateLabel = [System.Windows.Controls.TextBlock]::new()
                 $stateLabel.FontSize = 12
@@ -42264,13 +42265,14 @@ function Update-WmtQuickFindResults {
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
             $isRestartExplorerAction = ([string]$original.Name -eq "btnPowerUserRestartExplorer")
+            $isServiceViewAction = ([string]$original.Name -eq "btnSvcView")
             $tweakReady = $true
             if ($entry.Item.Tab -eq "btnTabTweaks") {
                 if ($isMouseSpeedGroup) {
                     # Missing speed data affects state text, not action availability.
                     $tweakReady = [bool]$script:TweakStatesReady
                 }
-                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isWindowsUpdatePresetGroup -or
+                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isServiceViewAction -or $isWindowsUpdatePresetGroup -or
                         $isBatterySaverPresetGroup -or $isServicePresetGroup) {
                     # These controls perform actions and do not have toggle-state readiness.
                     $tweakReady = [bool]$original.IsEnabled
@@ -42292,7 +42294,7 @@ function Update-WmtQuickFindResults {
                     }
                 }
             }
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isServiceViewAction -and
                 -not $isWindowsUpdatePresetGroup -and -not $isBatterySaverPresetGroup -and -not $isServicePresetGroup) {
                 $readinessName = if ($isMouseSpeedGroup) { "__MouseSpeed" } else { [string]$original.Name }
                 $script:WmtQuickFindRenderedReadiness[$readinessName] = [bool]$tweakReady
