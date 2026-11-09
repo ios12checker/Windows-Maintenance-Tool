@@ -35304,10 +35304,8 @@ catch { & $failed $_ }
                         </Border>
                         <StackPanel Grid.Column="1">
                             <TextBlock Text="Power &amp; Performance" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
-                            <TextBlock Text="Services, hibernation, battery saver, USB/PCIe power" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
+                            <TextBlock Text="Hibernation, battery saver, USB/PCIe power" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
-                                <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
                                 <Button Name="btnToggleHibernate" Content="Disable Hibernation" Style="{StaticResource ActionBtn}" ToolTip="Toggle hibernation. When enabled (blue), hibernation is off and hiberfil.sys is deleted."/>
                                 <Button Name="btnToggleSuperfetch" Content="Disable Superfetch" Style="{StaticResource ActionBtn}" ToolTip="Toggle SysMain (Superfetch) service. When enabled (blue), Superfetch is disabled."/>
                                 <Button Name="btnToggleMemCompress" Content="Disable Mem Compression" Style="{StaticResource ActionBtn}" ToolTip="Toggle Windows memory compression. Compresses inactive RAM pages to free physical memory."/>
@@ -35397,8 +35395,8 @@ catch { & $failed $_ }
                             <TextBlock Text="Services Management" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource TextPrimary}"/>
                             <TextBlock Text="Optimize, restore, or view Windows services" FontSize="11" Foreground="{DynamicResource TextMuted}" Margin="0,2,0,8"/>
                             <WrapPanel>
-                                <Button Name="btnSvcOptimize" Content="Optimize Services" Style="{StaticResource PositiveBtn}" ToolTip="Set 100+ non-essential Windows services to Manual startup. Significantly improves boot time and reduces background resource usage."/>
-                                <Button Name="btnSvcRestore" Content="Restore Defaults" Style="{StaticResource WarningBtn}" ToolTip="Restore ALL services to their original Windows default settings. Use this if you experience system issues after optimization."/>
+                                <Button Name="btnPerfServicesManual" Content="Services to Manual" Style="{StaticResource ActionBtn}" ToolTip="Optimize 100+ Windows services by setting them to Manual startup. Improves boot time and reduces background RAM usage."/>
+                                <Button Name="btnPerfServicesRevert" Content="Revert Services" Style="{StaticResource WarningBtn}" ToolTip="Restore all services to their default startup type (Automatic/Manual/Disabled). Use this if you experience issues after optimization."/>
                                 <Button Name="btnSvcView" Content="View Services" Style="{StaticResource ActionBtn}" ToolTip="Open a grid view of all Windows services showing their current startup type and status. Useful for manual troubleshooting."/>
                             </WrapPanel>
                         </StackPanel>
@@ -39604,8 +39602,6 @@ $btnFeatQuickAssist = Get-Ctrl "btnFeatQuickAssist"
 $btnFeatXPS = Get-Ctrl "btnFeatXPS"
 $btnFeatTIFF = Get-Ctrl "btnFeatTIFF"
 
-$btnSvcOptimize = Get-Ctrl "btnSvcOptimize"
-$btnSvcRestore = Get-Ctrl "btnSvcRestore"
 $btnSvcView = Get-Ctrl "btnSvcView"
 
 $btnTasksDisableTelemetry = Get-Ctrl "btnTasksDisableTelemetry"
@@ -42859,7 +42855,6 @@ $searchIndexDeferTimer.Add_Tick({
         btnStartWithWindows = "startup launch boot login automatically sign in"
         btnPerfServicesManual = "performance speed faster responsive background services debloat pc computer cpu processor high"
         btnPerfServicesRevert = "restore revert default services startup types"
-        btnSvcOptimize = "performance speed faster responsive background services debloat pc computer cpu processor high"
         btnPerfUltimatePower = "performance speed power plan cpu gaming pc computer"
         btnToggleHibernate = "sleep hibernate power disk space fast startup"
         btnTogglePagefile = "virtual memory paging file ram low memory swap"
@@ -65087,9 +65082,6 @@ Invoke-WmtUiBackgroundCommand -Name ("Feature_" + $FeatureName) -Msg "Toggling $
 }
 
 # --- SERVICES MANAGEMENT ---
-if ($btnSvcOptimize) { $btnSvcOptimize.Add_Click({ $btnPerfServicesManual.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }) }
-if ($btnSvcRestore) { $btnSvcRestore.Add_Click({ $btnPerfServicesRevert.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent))) }) }
-
 if ($btnSvcView) { $btnSvcView.Add_Click({ Show-StartupManager -DefaultTab "Services" }) }
 
 # --- SCHEDULED TASKS WITH REVERT ---

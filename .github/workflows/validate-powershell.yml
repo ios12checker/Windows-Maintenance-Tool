@@ -226,6 +226,20 @@ jobs:
               $rendererText -notmatch 'not represent reversible profiles') {
               throw 'Battery and service presets must render as grouped entries with honest state labels.'
           }
+          $performanceStart = $source.IndexOf('<!-- PERFORMANCE -->')
+          $serviceStart = $source.IndexOf('<!-- SERVICES MANAGEMENT -->')
+          $tasksStart = $source.IndexOf('<!-- SCHEDULED TASKS -->')
+          if ($performanceStart -lt 0 -or $serviceStart -le $performanceStart -or $tasksStart -le $serviceStart) {
+              throw 'Could not locate Power and Services Management card boundaries.'
+          }
+          $performanceCard = $source.Substring($performanceStart, $serviceStart - $performanceStart)
+          $serviceCard = $source.Substring($serviceStart, $tasksStart - $serviceStart)
+          if ($performanceCard -match 'btnPerfServices(Manual|Revert)' -or
+              $serviceCard -notmatch 'btnPerfServicesManual' -or
+              $serviceCard -notmatch 'btnPerfServicesRevert' -or
+              $source -match 'btnSvc(Optimize|Restore)') {
+              throw 'Service optimization and revert buttons must live only in the Services Management card.'
+          }
           if ($source -notmatch 'Add-SearchIndexEntry\s+"btnPowerBatterySaverOff"\s+"Battery Saver Behavior"\s+"btnTabTweaks"\s+"BatterySaverPreset"' -or
               $source -match 'Add-SearchIndexEntry\s+"btnPowerBatterySaver(20|50)"' -or
               $source -notmatch 'Add-SearchIndexEntry\s+"btnPerfServicesManual"\s+"Service Optimization"\s+"btnTabTweaks"\s+"ServicePreset"' -or
@@ -467,7 +481,7 @@ jobs:
               @{ Query = 'printer'; Label = 'Remove Print'; Search = $searchAliasesByButton.btnToggleRemovePrint; Expected = $true },
               @{ Query = 'app updates'; Label = 'Update All Apps'; Search = $searchAliasesByButton.btnWingetUpdateAll; Expected = $true },
               @{ Query = 'search packages'; Label = 'Search Winget Packages'; Search = $searchAliasesByButton.txtWingetSearch; Expected = $true },
-              @{ Query = 'speed up pc'; Label = 'Optimize System Services'; Search = $searchAliasesByButton.btnSvcOptimize; Expected = $true },
+              @{ Query = 'speed up pc'; Label = 'Service Optimization'; Search = $searchAliasesByButton.btnPerfServicesManual; Expected = $true },
               @{ Query = 'enable dark mode'; Label = 'Dark Mode'; Search = $searchAliasesByButton.btnToggleDarkMode; Expected = $true },
               @{ Query = 'windows update default'; Label = 'Windows Update Behavior'; Search = 'default security only disable all updates feature updates'; Expected = $true },
               @{ Query = 'windows update security only'; Label = 'Windows Update Behavior'; Search = 'default security only disable all updates feature updates'; Expected = $true },
