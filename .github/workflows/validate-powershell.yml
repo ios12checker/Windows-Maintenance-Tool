@@ -2800,6 +2800,7 @@ jobs:
               $s.CleanerRemoteCheckMinutes = 31
               $s.CleanerAutoCleanMinutes = 47
               $s.DebugMode = $true
+              $s.RememberSubwindowBounds = $false
               $s.SubwindowBounds = @{
                   DiskUsageAnalyzer = @{ Width = 1300; Height = 900; WindowState = "Maximized" }
                   GhostDevices = @{ Width = 1000; Height = 700; WindowState = "Normal" }
@@ -2816,6 +2817,9 @@ jobs:
               }
               if (-not (Get-WmtDebugMode -Settings $loaded)) {
                   throw "DebugMode did not survive the first save/reload."
+              }
+              if ($loaded.RememberSubwindowBounds -ne $false) {
+                  throw "RememberSubwindowBounds did not survive the first save/reload."
               }
               if ($loaded.SubwindowBounds.DiskUsageAnalyzer.Width -ne 1300 -or
                   $loaded.SubwindowBounds.GhostDevices.Height -ne 700 -or
@@ -2850,6 +2854,7 @@ jobs:
               }
               if ($again.Theme -ne "light") { throw "Unrelated Theme setting was not persisted." }
               if (-not (Get-WmtDebugMode -Settings $again)) { throw "Unrelated settings save reset DebugMode." }
+              if ($again.RememberSubwindowBounds -ne $false) { throw "Unrelated settings save reset RememberSubwindowBounds." }
 
               # Corrupt the primary file. Get-WmtSettings should archive it and
               # recover the previous known-good generation from .bak.
@@ -3958,6 +3963,7 @@ jobs:
           $body = $helper.Body.Extent.Text
           Set-Item -Path 'Function:script:Register-WmtSubwindowBounds' -Value ([scriptblock]::Create($body.Substring(1, $body.Length - 2)))
           $script:ciSettings = @{
+              RememberSubwindowBounds = $true
               SubwindowBounds = @{
                   DiskUsageAnalyzer = @{ Width = 1200; Height = 800; WindowState = 'Normal' }
                   GhostDevices = @{ Width = 900; Height = 600; WindowState = 'Maximized' }
@@ -3983,6 +3989,7 @@ jobs:
               $script:ciSaveCount++
           }
           function Write-GuiLog([string]$Message) { Write-Host $Message }
+          function Get-WmtRememberSubwindowBounds { param($Settings); if (-not $Settings) { $Settings = Get-WmtSettings }; return [bool](Get-WmtSettingsMember -Settings $Settings -Name 'RememberSubwindowBounds' -Default $true) }
           function Test-WmtFiniteDouble($Value) {
               try {
                   $number = [double]$Value
@@ -4025,6 +4032,14 @@ jobs:
           $maximized.RestoreBounds = [pscustomobject]@{ Width = 950; Height = 650 }
           $maximized.ClosedHandler.Invoke()
           Assert-Wmt ($script:ciSettings.SubwindowBounds.MaximizedTool.WindowState -eq 'Maximized' -and $script:ciSettings.SubwindowBounds.MaximizedTool.Width -eq 950 -and $script:ciSettings.SubwindowBounds.MaximizedTool.Height -eq 650) 'closing a maximized subtool saves its state and normal restore size'
+          $script:ciSettings.RememberSubwindowBounds = $false
+          $disabled = New-TestWindow 'Ghost Devices'
+          $disabled.Width = 750; $disabled.Height = 550
+          Register-WmtSubwindowBounds $disabled
+          Assert-Wmt ($disabled.Width -eq 750 -and $disabled.Height -eq 550) 'disabling size memory skips restoration'
+          $saveCountBeforeDisabledClose = $script:ciSaveCount
+          $disabled.ClosedHandler.Invoke()
+          Assert-Wmt ($script:ciSaveCount -eq $saveCountBeforeDisabledClose) 'disabling size memory skips saving on close'
           $fixed = New-TestWindow 'Fixed Dialog' ([System.Windows.ResizeMode]::NoResize)
           Register-WmtSubwindowBounds -Dialog $fixed
           Assert-Wmt ($null -eq $fixed.ClosedHandler) 'fixed-size dialogs do not register a size persistence handler'

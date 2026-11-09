@@ -5674,9 +5674,10 @@ $subwindowKey = [regex]::Replace([string]$Dialog.Title, '[^A-Za-z0-9]', '')
 if ([string]::IsNullOrWhiteSpace($subwindowKey)) { return }
 
 $settings = Get-WmtSettings
+$rememberBounds = Get-WmtRememberSubwindowBounds -Settings $settings
 $allBounds = Get-WmtSettingsMember -Settings $settings -Name 'SubwindowBounds' -Default $null
 $savedBounds = Get-WmtSettingsMember -Settings $allBounds -Name $subwindowKey -Default $null
-if ($savedBounds) {
+if ($rememberBounds -and $savedBounds) {
     try {
         $savedWidth = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Width' -Default 0)
         $savedHeight = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Height' -Default 0)
@@ -5698,6 +5699,7 @@ if ($savedBounds) {
 
 $saveSubwindowBounds = {
     try {
+        if (-not (Get-WmtRememberSubwindowBounds)) { return }
         $windowState = $Dialog.WindowState
         if ($windowState -notin @([System.Windows.WindowState]::Normal, [System.Windows.WindowState]::Maximized)) { return }
         $current = Get-WmtSettings
@@ -9418,6 +9420,7 @@ try {
         UpdateAutoInstallEnabled   = [bool](Get-WmtUpdateAutoInstallEnabled -Settings $Settings)
         RunInTrayOnClose           = [bool](Get-WmtRunInTrayOnClose -Settings $Settings)
         ReduceRamInTray            = [bool](Get-WmtReduceRamInTray -Settings $Settings)
+        RememberSubwindowBounds    = [bool](Get-WmtRememberSubwindowBounds -Settings $Settings)
         DisableBackgroundJobs      = [bool](Get-WmtDisableBackgroundJobs -Settings $Settings)
         DebugMode                  = ConvertTo-WmtSettingsBoolean (Get-WmtSettingsMember -Settings $Settings -Name "DebugMode" -Default $false) $false
         UpdateScansDisabled        = [bool](Get-WmtUpdateScansDisabled -Settings $Settings)
@@ -9490,6 +9493,7 @@ $defaults = @{
     UpdateAutoInstallEnabled   = $false
     RunInTrayOnClose           = $false
     ReduceRamInTray            = $true
+    RememberSubwindowBounds    = $true
     DisableBackgroundJobs      = $false
     DebugMode                  = $false
     UpdateScansDisabled         = $false
@@ -9609,6 +9613,7 @@ if ($json) {
         if ($json.PSObject.Properties["UpdateAutoInstallEnabled"]) { $defaults.UpdateAutoInstallEnabled = ConvertTo-WmtSettingsBoolean $json.UpdateAutoInstallEnabled $false }
         if ($json.PSObject.Properties["RunInTrayOnClose"]) { $defaults.RunInTrayOnClose = ConvertTo-WmtSettingsBoolean $json.RunInTrayOnClose $false }
         if ($json.PSObject.Properties["ReduceRamInTray"]) { $defaults.ReduceRamInTray = ConvertTo-WmtSettingsBoolean $json.ReduceRamInTray $true }
+        if ($json.PSObject.Properties["RememberSubwindowBounds"]) { $defaults.RememberSubwindowBounds = ConvertTo-WmtSettingsBoolean $json.RememberSubwindowBounds $true }
         if ($json.PSObject.Properties["DisableBackgroundJobs"]) { $defaults.DisableBackgroundJobs = ConvertTo-WmtSettingsBoolean $json.DisableBackgroundJobs $false }
         if ($json.PSObject.Properties["DebugMode"]) { $defaults.DebugMode = ConvertTo-WmtSettingsBoolean $json.DebugMode $false }
         if ($json.PSObject.Properties["UpdateScansDisabled"]) { $defaults.UpdateScansDisabled = ConvertTo-WmtSettingsBoolean $json.UpdateScansDisabled $false }
@@ -10226,6 +10231,30 @@ try {
 catch {}
 
 return $true
+}
+
+function Get-WmtRememberSubwindowBounds {
+param($Settings)
+
+if (-not $Settings) { $Settings = Get-WmtSettings }
+return (ConvertTo-WmtSettingsBoolean (Get-WmtSettingsMember -Settings $Settings -Name "RememberSubwindowBounds" -Default $true) $true)
+}
+
+function Set-WmtRememberSubwindowBounds {
+param([bool]$Enabled)
+
+$settings = Get-WmtSettings
+if ($settings -is [System.Collections.IDictionary]) {
+    $settings["RememberSubwindowBounds"] = $Enabled
+}
+elseif ($settings.PSObject.Properties["RememberSubwindowBounds"]) {
+    $settings.RememberSubwindowBounds = $Enabled
+}
+else {
+    $settings | Add-Member -MemberType NoteProperty -Name "RememberSubwindowBounds" -Value $Enabled -Force
+}
+Save-WmtSettings -Settings $settings
+return $Enabled
 }
 
 function Set-WmtReduceRamInTray {
@@ -36630,6 +36659,7 @@ catch { & $failed $_ }
                             <Button Name="btnDisableBgJobs" Content="Bg Jobs: On" Style="{StaticResource ActionBtn}" Height="32" MinWidth="130" Margin="0,0,8,8" ToolTip="Background auto-refresh ENABLED. My Device info and Tweaks states load automatically. Click to disable."/>
                             <Button Name="btnDisableUpdateScans" Content="Update Scans: On" Style="{StaticResource ActionBtn}" Height="32" MinWidth="150" Margin="0,0,8,8" ToolTip="Disable all automatic and tray-triggered update scans. Manual scans will still work. Click to toggle."/>
                             <Button Name="btnDebugMode" Content="Debug Logs: Off" Style="{StaticResource ActionBtn}" Height="32" MinWidth="135" Margin="0,0,8,8" ToolTip="Extra internal diagnostic error logging is disabled. Click to enable additional WMT troubleshooting logs."/>
+                            <Button Name="btnRememberWindowSizes" Content="Remember Window Sizes: On" Style="{StaticResource ActionBtn}" Height="32" MinWidth="210" Margin="0,0,8,8" ToolTip="Remember and restore sizes and maximized states for resizable tool windows."/>
                             <Button Name="btnToggleTheme" Content="Toggle Theme" Style="{StaticResource ActionBtn}" Height="32" MinWidth="112" Margin="0,0,8,8" ToolTip="Switch between dark and light theme"/>
                         </WrapPanel>
                     </HeaderedContentControl>
@@ -39784,6 +39814,7 @@ $btnSupportDiscord = Get-Ctrl "btnSupportDiscord"
 $btnSupportIssue = Get-Ctrl "btnSupportIssue"
 $btnToggleTheme = Get-Ctrl "btnToggleTheme"
 $btnDebugMode = Get-Ctrl "btnDebugMode"
+$btnRememberWindowSizes = Get-Ctrl "btnRememberWindowSizes"
 $btnStartWithWindows = Get-Ctrl "btnStartWithWindows"
 $btnLaunchMinimized = Get-Ctrl "btnLaunchMinimized"
 $btnNavDownloads = Get-Ctrl "btnNavDownloads"
@@ -42287,6 +42318,9 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnDebugMode"          "Debug Logs"                      "btnTabSupport"
     Add-SearchIndexNavigationEntry "Enable Debug Logs" "btnDebugMode" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Disable Debug Logs" "btnDebugMode" "btnTabSupport"
+    Add-SearchIndexEntry "btnRememberWindowSizes" "Remember Window Sizes" "btnTabSupport"
+    Add-SearchIndexNavigationEntry "Disable Remember Window Sizes" "btnRememberWindowSizes" "btnTabSupport"
+    Add-SearchIndexNavigationEntry "Enable Remember Window Sizes" "btnRememberWindowSizes" "btnTabSupport"
     Add-SearchIndexEntry "btnDisableUpdateScans"  "Update Scans"                    "btnTabSupport"
     Add-SearchIndexNavigationEntry "Disable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
     Add-SearchIndexNavigationEntry "Enable Update Scans" "btnDisableUpdateScans" "btnTabSupport"
@@ -64261,6 +64295,33 @@ $btnDebugMode.Add_Click({
         else {
             Write-GuiLog "Debug diagnostic logging disabled."
         }
+    })
+}
+
+# ── Resizable Subwindow Bounds Toggle ──
+$btnRememberWindowSizes = Get-Ctrl "btnRememberWindowSizes"
+if ($btnRememberWindowSizes) {
+function Update-WmtRememberWindowSizesButton {
+    $btn = Get-Ctrl "btnRememberWindowSizes"
+    if (-not $btn) { return }
+
+    $enabled = Get-WmtRememberSubwindowBounds
+    Update-WmtTweakToggle `
+        -Button $btn `
+        -IsOn $enabled `
+        -OnLabel "Remember Window Sizes: On" `
+        -OffLabel "Remember Window Sizes: Off" `
+        -Description "When enabled, resizable tool windows remember their size and maximized state between sessions."
+}
+
+Update-WmtRememberWindowSizesButton
+
+$btnRememberWindowSizes.Add_Click({
+        $currentlyEnabled = Get-WmtRememberSubwindowBounds
+        $newEnabled = Set-WmtRememberSubwindowBounds -Enabled (-not $currentlyEnabled)
+        Update-WmtRememberWindowSizesButton
+        $status = if ($newEnabled) { "enabled" } else { "disabled" }
+        Write-GuiLog "Remembering resizable tool window sizes $status."
     })
 }
 
