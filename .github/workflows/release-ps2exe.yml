@@ -83,7 +83,6 @@ jobs:
         shell: powershell
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF -ne 'refs/heads/Main') {
