@@ -354,10 +354,16 @@ jobs:
           $serviceActionAst = $ast.Find({
               param($node)
               $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
-                  $node.Name -eq 'Test-WmtServiceStartupActionAvailable'
+                  $node.Name -in @('Test-WmtServiceStartupActionAvailable', 'global:Test-WmtServiceStartupActionAvailable')
           }, $true)
           if (-not $serviceActionAst) { throw 'Missing service startup action state helper.' }
           Invoke-Expression $serviceActionAst.Extent.Text
+          $serviceActionCallback = {
+              Test-WmtServiceStartupActionAvailable -SelectedRows @(@{ StartType = 'Manual' }) -StartupType 'Automatic'
+          }.GetNewClosure()
+          if (-not (& $serviceActionCallback)) {
+              throw 'Startup Manager service action callbacks must resolve the shared state helper.'
+          }
           if (Test-WmtServiceStartupActionAvailable -SelectedRows @() -StartupType 'Automatic') {
               throw 'Service startup actions must be unavailable with no selected service.'
           }

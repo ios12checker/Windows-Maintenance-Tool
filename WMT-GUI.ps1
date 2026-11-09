@@ -32827,7 +32827,7 @@ function Add-GridContextMenu {
     }
 }
 
-function Test-WmtServiceStartupActionAvailable {
+function global:Test-WmtServiceStartupActionAvailable {
     param([object[]]$SelectedRows, [string]$StartupType)
     $rows = @($SelectedRows)
     if ($rows.Count -eq 0) { return $false }
