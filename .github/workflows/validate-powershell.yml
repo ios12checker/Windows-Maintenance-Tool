@@ -2800,6 +2800,10 @@ jobs:
               $s.CleanerRemoteCheckMinutes = 31
               $s.CleanerAutoCleanMinutes = 47
               $s.DebugMode = $true
+              $s.SubwindowBounds = @{
+                  DiskUsageAnalyzer = @{ Width = 1300; Height = 900; WindowState = "Maximized" }
+                  GhostDevices = @{ Width = 1000; Height = 700; WindowState = "Normal" }
+              }
               Save-WmtSettings -Settings $s
 
               $script:WmtSettingsCache = $null
@@ -2812,6 +2816,12 @@ jobs:
               }
               if (-not (Get-WmtDebugMode -Settings $loaded)) {
                   throw "DebugMode did not survive the first save/reload."
+              }
+              if ($loaded.SubwindowBounds.DiskUsageAnalyzer.Width -ne 1300 -or
+                  $loaded.SubwindowBounds.GhostDevices.Height -ne 700 -or
+                  $loaded.SubwindowBounds.DiskUsageAnalyzer.WindowState -ne "Maximized" -or
+                  $loaded.SubwindowBounds.GhostDevices.WindowState -ne "Normal") {
+                  throw "Resizable subwindow bounds did not survive the first save/reload."
               }
 
               # Regression guard for the original bug: an unrelated setting save
@@ -2832,6 +2842,11 @@ jobs:
                   $again.CleanerRemoteCheckMinutes -ne 31 -or
                   $again.CleanerAutoCleanMinutes -ne 47) {
                   throw "Unrelated settings save reset cleaner intervals."
+              }
+              if ($again.SubwindowBounds.DiskUsageAnalyzer.Width -ne 1300 -or
+                  $again.SubwindowBounds.GhostDevices.Height -ne 700 -or
+                  $again.SubwindowBounds.DiskUsageAnalyzer.WindowState -ne "Maximized") {
+                  throw "Unrelated settings save reset resizable subwindow bounds."
               }
               if ($again.Theme -ne "light") { throw "Unrelated Theme setting was not persisted." }
               if (-not (Get-WmtDebugMode -Settings $again)) { throw "Unrelated settings save reset DebugMode." }
@@ -3918,6 +3933,106 @@ jobs:
 
           }
           Write-Host "Disk Usage Analyzer tests passed: $script:passed assertions."
+
+      - name: Test resizable subwindow bounds and state persistence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName PresentationFramework
+          $script:passed = 0
+          function Assert-Wmt([bool]$Condition, [string]$Message) {
+              if (-not $Condition) { throw "FAILED: $Message" }
+              $script:passed++
+              Write-Host "PASS: $Message"
+          }
+          $tokens = $null; $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path (Get-Location).Path 'WMT-GUI.ps1'), [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count) { throw "WMT must parse before subwindow-size tests: $($parseErrors[0].Message)" }
+          $helper = $ast.Find({
+                  param($node)
+                  $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                      $node.Name -eq 'Register-WmtSubwindowBounds'
+              }, $true)
+          if (-not $helper) { throw 'Register-WmtSubwindowBounds was not found in WMT-GUI.ps1.' }
+          $body = $helper.Body.Extent.Text
+          Set-Item -Path 'Function:script:Register-WmtSubwindowBounds' -Value ([scriptblock]::Create($body.Substring(1, $body.Length - 2)))
+          $script:ciSettings = @{
+              SubwindowBounds = @{
+                  DiskUsageAnalyzer = @{ Width = 1200; Height = 800; WindowState = 'Normal' }
+                  GhostDevices = @{ Width = 900; Height = 600; WindowState = 'Maximized' }
+                  KeepExisting = @{ Width = 700; Height = 500 }
+              }
+          }
+          $script:ciSaveCount = 0
+          function Get-WmtSettings { return $script:ciSettings }
+          function Get-WmtSettingsMember {
+              param($Settings, [string]$Name, $Default)
+              if ($null -eq $Settings) { return $Default }
+              if ($Settings -is [System.Collections.IDictionary]) {
+                  if ($Settings.Contains($Name)) { return $Settings[$Name] }
+                  return $Default
+              }
+              $property = $Settings.PSObject.Properties[$Name]
+              if ($property) { return $property.Value }
+              return $Default
+          }
+          function Save-WmtSettings {
+              param($Settings)
+              $script:ciSettings = $Settings
+              $script:ciSaveCount++
+          }
+          function Write-GuiLog([string]$Message) { Write-Host $Message }
+          function Test-WmtFiniteDouble($Value) {
+              try {
+                  $number = [double]$Value
+                  return (-not [double]::IsNaN($number) -and -not [double]::IsInfinity($number))
+              } catch { return $false }
+          }
+          function New-TestWindow([string]$Title, [System.Windows.ResizeMode]$ResizeMode = [System.Windows.ResizeMode]::CanResize) {
+              $window = [pscustomobject]@{
+                  Title = $Title
+                  ResizeMode = $ResizeMode
+                  MinWidth = 400
+                  MinHeight = 300
+                  Width = 750
+                  Height = 550
+                  ActualWidth = 1100
+                  ActualHeight = 700
+                  WindowState = [System.Windows.WindowState]::Normal
+                  RestoreBounds = [pscustomobject]@{ Width = 820; Height = 620 }
+                  ClosedHandler = $null
+              }
+              $window | Add-Member -MemberType ScriptMethod -Name Add_Closed -Value { param($handler) $this.ClosedHandler = $handler }
+              return $window
+          }
+          $analyzer = New-TestWindow 'Disk Usage Analyzer'
+          Register-WmtSubwindowBounds -Dialog $analyzer
+          Assert-Wmt ($analyzer.Width -eq 1200 -and $analyzer.Height -eq 800) 'Disk Usage Analyzer restores its saved size'
+          Assert-Wmt ($null -ne $analyzer.ClosedHandler) 'resizable analyzer registers its close handler'
+          $otherTool = New-TestWindow 'Ghost Devices'
+          Register-WmtSubwindowBounds -Dialog $otherTool
+          Assert-Wmt ($otherTool.Width -eq 900 -and $otherTool.Height -eq 600) 'another resizable subtool restores its own saved size'
+          Assert-Wmt ($otherTool.WindowState -eq [System.Windows.WindowState]::Maximized) 'a subtool restores its saved maximized state'
+          $analyzer.ActualWidth = 1300; $analyzer.ActualHeight = 850
+          $analyzer.ClosedHandler.Invoke()
+          Assert-Wmt ($script:ciSaveCount -eq 1 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Width -eq 1300 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Height -eq 850 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.WindowState -eq 'Normal') 'closing a normal subtool saves its latest dimensions and state'
+          Assert-Wmt ($script:ciSettings.SubwindowBounds.GhostDevices.Width -eq 900 -and $script:ciSettings.SubwindowBounds.KeepExisting.Width -eq 700) 'saving one subtool preserves other saved sizes'
+          $maximized = New-TestWindow 'Maximized Tool'
+          $script:ciSettings.SubwindowBounds.MaximizedTool = @{ Width = 800; Height = 600; WindowState = 'Normal' }
+          Register-WmtSubwindowBounds -Dialog $maximized
+          $maximized.WindowState = [System.Windows.WindowState]::Maximized
+          $maximized.RestoreBounds = [pscustomobject]@{ Width = 950; Height = 650 }
+          $maximized.ClosedHandler.Invoke()
+          Assert-Wmt ($script:ciSettings.SubwindowBounds.MaximizedTool.WindowState -eq 'Maximized' -and $script:ciSettings.SubwindowBounds.MaximizedTool.Width -eq 950 -and $script:ciSettings.SubwindowBounds.MaximizedTool.Height -eq 650) 'closing a maximized subtool saves its state and normal restore size'
+          $fixed = New-TestWindow 'Fixed Dialog' ([System.Windows.ResizeMode]::NoResize)
+          Register-WmtSubwindowBounds -Dialog $fixed
+          Assert-Wmt ($null -eq $fixed.ClosedHandler) 'fixed-size dialogs do not register a size persistence handler'
+          $script:ciSettings.SubwindowBounds.InvalidSize = @{ Width = 100; Height = 100 }
+          $invalid = New-TestWindow 'Invalid Size'
+          Register-WmtSubwindowBounds -Dialog $invalid
+          Assert-Wmt ($invalid.Width -eq 750 -and $invalid.Height -eq 550) 'saved dimensions below the dialog minimum are ignored'
+          Write-Host "Subwindow bounds and state tests passed: $script:passed assertions."
 
   runtime-safety:
     name: Runtime and implementation safety contracts (${{ matrix.os }})

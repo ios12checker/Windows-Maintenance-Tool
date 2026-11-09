@@ -5666,6 +5666,83 @@ finally {
 }
 }
 
+function Register-WmtSubwindowBounds {
+param([Parameter(Mandatory = $true)]$Dialog)
+
+if ($Dialog.ResizeMode -eq [System.Windows.ResizeMode]::NoResize) { return }
+$subwindowKey = [regex]::Replace([string]$Dialog.Title, '[^A-Za-z0-9]', '')
+if ([string]::IsNullOrWhiteSpace($subwindowKey)) { return }
+
+$settings = Get-WmtSettings
+$allBounds = Get-WmtSettingsMember -Settings $settings -Name 'SubwindowBounds' -Default $null
+$savedBounds = Get-WmtSettingsMember -Settings $allBounds -Name $subwindowKey -Default $null
+if ($savedBounds) {
+    try {
+        $savedWidth = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Width' -Default 0)
+        $savedHeight = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Height' -Default 0)
+        if ($savedWidth -ge [double]$Dialog.MinWidth -and $savedHeight -ge [double]$Dialog.MinHeight -and
+            $savedWidth -le [System.Windows.SystemParameters]::VirtualScreenWidth -and
+            $savedHeight -le [System.Windows.SystemParameters]::VirtualScreenHeight) {
+            $Dialog.Width = $savedWidth
+            $Dialog.Height = $savedHeight
+        }
+        $savedWindowState = [string](Get-WmtSettingsMember -Settings $savedBounds -Name 'WindowState' -Default 'Normal')
+        if ($savedWindowState -eq 'Maximized') {
+            $Dialog.WindowState = [System.Windows.WindowState]::Maximized
+        }
+    }
+    catch {
+        Write-GuiLog ("[Window] Ignoring invalid saved size for {0}: {1}" -f $subwindowKey, $_.Exception.Message)
+    }
+}
+
+$saveSubwindowBounds = {
+    try {
+        $windowState = $Dialog.WindowState
+        if ($windowState -notin @([System.Windows.WindowState]::Normal, [System.Windows.WindowState]::Maximized)) { return }
+        $current = Get-WmtSettings
+        $existing = Get-WmtSettingsMember -Settings $current -Name 'SubwindowBounds' -Default @{}
+        $copy = @{}
+        if ($existing -is [System.Collections.IDictionary]) {
+            foreach ($key in $existing.Keys) { $copy[[string]$key] = $existing[$key] }
+        } elseif ($existing) {
+            foreach ($property in $existing.PSObject.Properties) { $copy[$property.Name] = $property.Value }
+        }
+        $savedEntry = Get-WmtSettingsMember -Settings $existing -Name $subwindowKey -Default $null
+        $entry = @{}
+        $savedWidth = Get-WmtSettingsMember -Settings $savedEntry -Name 'Width' -Default $null
+        $savedHeight = Get-WmtSettingsMember -Settings $savedEntry -Name 'Height' -Default $null
+        if ((Test-WmtFiniteDouble $savedWidth) -and (Test-WmtFiniteDouble $savedHeight)) {
+            $entry.Width = [double]$savedWidth
+            $entry.Height = [double]$savedHeight
+        }
+
+        $bounds = if ($windowState -eq [System.Windows.WindowState]::Maximized) {
+            $Dialog.RestoreBounds
+        } else {
+            $null
+        }
+        $width = if ($bounds) { [double]$bounds.Width } else { [double]$Dialog.ActualWidth }
+        $height = if ($bounds) { [double]$bounds.Height } else { [double]$Dialog.ActualHeight }
+        if ($width -ge [double]$Dialog.MinWidth -and $height -ge [double]$Dialog.MinHeight -and
+            $width -le [System.Windows.SystemParameters]::VirtualScreenWidth -and
+            $height -le [System.Windows.SystemParameters]::VirtualScreenHeight) {
+            $entry.Width = $width
+            $entry.Height = $height
+        }
+        $entry.WindowState = $windowState.ToString()
+        $copy[$subwindowKey] = $entry
+        if ($current -is [System.Collections.IDictionary]) { $current['SubwindowBounds'] = $copy }
+        else { $current | Add-Member -MemberType NoteProperty -Name 'SubwindowBounds' -Value $copy -Force }
+        Save-WmtSettings -Settings $current
+    }
+    catch {
+        Write-GuiLog ("[Window] Could not save size for {0}: {1}" -f $subwindowKey, $_.Exception.Message)
+    }
+}.GetNewClosure()
+[void]$Dialog.Add_Closed($saveSubwindowBounds)
+}
+
 function New-WmtWindowFromFullXaml {
 param(
     [Parameter(Mandatory = $true)]$Xaml,
@@ -5707,47 +5784,7 @@ if ($script:ThemePalettes -and $script:ThemePalettes.Count -gt 0) {
     Set-WmtNativeWindowTheme -Window $dialog
 }
 
-# Persist resizable WMT subwindow dimensions by a stable key derived from the
-# window title. This is shared by Disk Analyzer and other XAML-backed dialogs.
-try {
-    $subwindowKey = [regex]::Replace([string]$dialog.Title, '[^A-Za-z0-9]', '')
-    if ($subwindowKey -eq 'DiskUsageAnalyzer' -and $dialog.ResizeMode -ne [System.Windows.ResizeMode]::NoResize) {
-        $settings = Get-WmtSettings
-        $allBounds = Get-WmtSettingsMember -Settings $settings -Name 'SubwindowBounds' -Default $null
-        $savedBounds = Get-WmtSettingsMember -Settings $allBounds -Name $subwindowKey -Default $null
-        if ($savedBounds) {
-            $savedWidth = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Width' -Default 0)
-            $savedHeight = [double](Get-WmtSettingsMember -Settings $savedBounds -Name 'Height' -Default 0)
-            if ($savedWidth -ge [double]$dialog.MinWidth -and $savedHeight -ge [double]$dialog.MinHeight -and
-                $savedWidth -le [System.Windows.SystemParameters]::VirtualScreenWidth -and
-                $savedHeight -le [System.Windows.SystemParameters]::VirtualScreenHeight) {
-                $dialog.Width = $savedWidth
-                $dialog.Height = $savedHeight
-            }
-        }
-        $saveSubwindowBounds = {
-            try {
-                if ($dialog.WindowState -ne [System.Windows.WindowState]::Normal) { return }
-                $width = [double]$dialog.ActualWidth
-                $height = [double]$dialog.ActualHeight
-                if ($width -lt [double]$dialog.MinWidth -or $height -lt [double]$dialog.MinHeight) { return }
-                $current = Get-WmtSettings
-                $existing = Get-WmtSettingsMember -Settings $current -Name 'SubwindowBounds' -Default @{}
-                $copy = @{}
-                if ($existing -is [System.Collections.IDictionary]) {
-                    foreach ($key in $existing.Keys) { $copy[[string]$key] = $existing[$key] }
-                } elseif ($existing) {
-                    foreach ($property in $existing.PSObject.Properties) { $copy[$property.Name] = $property.Value }
-                }
-                $copy[$subwindowKey] = @{ Width = $width; Height = $height }
-                if ($current -is [System.Collections.IDictionary]) { $current['SubwindowBounds'] = $copy }
-                else { $current | Add-Member -MemberType NoteProperty -Name 'SubwindowBounds' -Value $copy -Force }
-                Save-WmtSettings -Settings $current
-            } catch {}
-        }.GetNewClosure()
-        [void]$dialog.Add_Closed($saveSubwindowBounds)
-    }
-} catch {}
+Register-WmtSubwindowBounds -Dialog $dialog
 
 return $dialog
 }
@@ -9483,6 +9520,7 @@ $defaults = @{
         Width  = 1280
         Height = 820
     }
+    SubwindowBounds            = @{}
 }
 
 $json = $null
@@ -9681,6 +9719,24 @@ if ($json) {
                     Height = [double]$bh
                 }
             }
+        }
+        if ($json.PSObject.Properties["SubwindowBounds"] -and $json.SubwindowBounds) {
+            $loadedSubwindowBounds = @{}
+            foreach ($subwindow in @($json.SubwindowBounds.PSObject.Properties)) {
+                if ($subwindow.Name -notmatch '^[A-Za-z0-9]+$' -or -not $subwindow.Value) { continue }
+                $subwindowWidth = Get-WmtSettingsMember -Settings $subwindow.Value -Name 'Width' -Default $null
+                $subwindowHeight = Get-WmtSettingsMember -Settings $subwindow.Value -Name 'Height' -Default $null
+                $subwindowState = [string](Get-WmtSettingsMember -Settings $subwindow.Value -Name 'WindowState' -Default 'Normal')
+                if ($subwindowState -notin @('Normal', 'Maximized')) { $subwindowState = 'Normal' }
+                $loadedBounds = @{ WindowState = $subwindowState }
+                if ((Test-WmtFiniteDouble $subwindowWidth) -and (Test-WmtFiniteDouble $subwindowHeight) -and
+                    [double]$subwindowWidth -gt 0 -and [double]$subwindowHeight -gt 0) {
+                    $loadedBounds.Width = [double]$subwindowWidth
+                    $loadedBounds.Height = [double]$subwindowHeight
+                }
+                $loadedSubwindowBounds[$subwindow.Name] = $loadedBounds
+            }
+            $defaults.SubwindowBounds = $loadedSubwindowBounds
         }
     }
     catch {
