@@ -41983,6 +41983,8 @@ function Update-WmtQuickFindResults {
         } catch {}
         if ($entry.Item.Group -eq "MouseSpeed") {
             $entry.Description = "Choose slow, default, or fast cursor speed."
+        } elseif ($entry.Item.Group -eq "WindowsUpdatePreset") {
+            $entry.Description = "Choose one Windows Update behavior: Default, Security Only, or Disable All."
         } else {
             $entry.Description = $liveTooltip
         }
@@ -42052,11 +42054,12 @@ function Update-WmtQuickFindResults {
                 [void]$body.Children.Add($description)
             }
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
+            $isWindowsUpdatePresetGroup = ($entry.Item.Group -eq "WindowsUpdatePreset")
             $isSettingsAction = ([string]$entry.Item.Button.Name -in @(
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
             $isRestartExplorerAction = ([string]$entry.Item.Button.Name -eq "btnPowerUserRestartExplorer")
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isWindowsUpdatePresetGroup) {
                 $stateLabel = [System.Windows.Controls.TextBlock]::new()
                 $stateLabel.FontSize = 12
                 $stateLabel.Margin = [System.Windows.Thickness]::new(0,7,0,5)
@@ -42069,6 +42072,7 @@ function Update-WmtQuickFindResults {
             # state, styling, icon, and dynamic label. This is not a proxy/auto-click.
             $original = $entry.Item.Button
             $isMouseSpeedGroup = ($entry.Item.Group -eq "MouseSpeed")
+            $isWindowsUpdatePresetGroup = ($entry.Item.Group -eq "WindowsUpdatePreset")
             $isSettingsAction = ([string]$original.Name -in @(
                 "btnMouseSettings", "btnSoundSettings", "btnDisplaySettings", "btnKeyboardSettings", "btnA11ySettings"
             ))
@@ -42079,7 +42083,7 @@ function Update-WmtQuickFindResults {
                     # Missing speed data affects state text, not action availability.
                     $tweakReady = [bool]$script:TweakStatesReady
                 }
-                elseif ($isSettingsAction -or $isRestartExplorerAction) {
+                elseif ($isSettingsAction -or $isRestartExplorerAction -or $isWindowsUpdatePresetGroup) {
                     # These controls perform actions and do not have toggle-state readiness.
                     $tweakReady = [bool]$original.IsEnabled
                 }
@@ -42100,7 +42104,7 @@ function Update-WmtQuickFindResults {
                     }
                 }
             }
-            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction) {
+            if ($entry.Item.Tab -eq "btnTabTweaks" -and -not $isSettingsAction -and -not $isRestartExplorerAction -and -not $isWindowsUpdatePresetGroup) {
                 $readinessName = if ($isMouseSpeedGroup) { "__MouseSpeed" } else { [string]$original.Name }
                 $script:WmtQuickFindRenderedReadiness[$readinessName] = [bool]$tweakReady
             }
@@ -42109,7 +42113,33 @@ function Update-WmtQuickFindResults {
                        ($original.Name -notin @("btnShowCatalog", "btnShowLibrary", "btnBackToUpdates")) -and
                        $tweakReady
             $hosted = $false
-            if ($isMouseSpeedGroup) {
+            if ($isWindowsUpdatePresetGroup) {
+                $hosted = $true
+                foreach ($presetButtonName in @("btnWUDefault", "btnWUSecurity", "btnWUDisable")) {
+                    $presetTarget = $window.FindName($presetButtonName)
+                    if (-not $presetTarget) { $presetTarget = Get-Ctrl $presetButtonName }
+                    if (-not $presetTarget -or $presetTarget -isnot [System.Windows.Controls.Button]) { continue }
+                    $proxy = [System.Windows.Controls.Button]::new()
+                    $proxy.Content = $presetTarget.Content
+                    $proxy.Style = $presetTarget.Style
+                    $proxy.HorizontalAlignment = "Left"
+                    $proxy.MinWidth = 118
+                    $proxy.Margin = [System.Windows.Thickness]::new(0,4,8,0)
+                    $proxy.ToolTip = $presetTarget.ToolTip
+                    $proxy.Tag = $presetTarget
+                    $proxy.IsEnabled = [bool]$presetTarget.IsEnabled
+                    $proxy.Add_Click({
+                        param($searchButton, $searchEventArgs)
+                        $nativeButton = $searchButton.Tag
+                        if ($nativeButton -and $nativeButton.IsEnabled) {
+                            $nativeButton.RaiseEvent([System.Windows.RoutedEventArgs]::new(
+                                [System.Windows.Controls.Button]::ClickEvent))
+                        }
+                    })
+                    [void]$body.Children.Add($proxy)
+                }
+            }
+            elseif ($isMouseSpeedGroup) {
                 # Keep native speed buttons in their original panel and proxy their
                 # existing click handlers into this single cursor-speed card.
                 $hosted = $true
@@ -42379,8 +42409,7 @@ $searchIndexDeferTimer.Add_Tick({
     Add-SearchIndexEntry "btnSvcView" "View Services" "btnTabTweaks"
     Add-SearchIndexEntry "btnTasksRestore" "Restore Tasks" "btnTabTweaks"
     Add-SearchIndexEntry "btnTasksView" "View Tasks" "btnTabTweaks"
-    Add-SearchIndexEntry "btnWUDefault" "Windows Update Default" "btnTabTweaks"
-    Add-SearchIndexEntry "btnWUSecurity" "Windows Update Security Only" "btnTabTweaks"
+    Add-SearchIndexEntry "btnWUDefault" "Windows Update Behavior" "btnTabTweaks" "WindowsUpdatePreset" "default security only disable all updates feature updates"
     Add-SearchIndexEntry "btnToggleTaskbarAlign" "Taskbar Alignment" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleClockFormat" "Clock Format" "btnTabTweaks"
     Add-SearchIndexEntry "btnToggleClockSecs" "Clock Seconds" "btnTabTweaks"
@@ -42419,7 +42448,6 @@ $searchIndexDeferTimer.Add_Tick({
 
     Add-SearchIndexEntry "btnSvcOptimize" "Optimize System Services" "btnTabTweaks"
     Add-SearchIndexEntry "btnSvcRestore" "Restore Default Services" "btnTabTweaks"
-    Add-SearchIndexEntry "btnWUDisable" "Disable Windows Updates" "btnTabTweaks"
     Add-SearchIndexEntry "btnPerfUltimatePower" "Enable Ultimate Performance Plan" "btnTabTweaks"
     Add-SearchIndexEntry "btnTasksDisableTelemetry" "Disable Telemetry Tasks" "btnTabTweaks"
     # --- NEW TWEAK SEARCH ENTRIES ---

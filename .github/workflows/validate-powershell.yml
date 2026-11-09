@@ -186,6 +186,21 @@ jobs:
               $rendererText -notmatch '-not\s+\$isSettingsAction') {
               throw 'Quick Find Settings actions must bypass Tweaks loading/state fallbacks and host the original button.'
           }
+          foreach ($controlName in @('btnWUDefault', 'btnWUSecurity', 'btnWUDisable')) {
+              if ($rendererText -notmatch [regex]::Escape('"' + $controlName + '"')) {
+                  throw "Windows Update preset group is missing $controlName."
+              }
+          }
+          if ($rendererText -notmatch 'WindowsUpdatePreset' -or
+              $rendererText -notmatch 'Choose one Windows Update behavior') {
+              throw 'Windows Update presets must render as one merged Quick Find entry.'
+          }
+          $source = Get-Content -LiteralPath '.\\WMT-GUI.ps1' -Raw
+          if ($source -notmatch 'Add-SearchIndexEntry\s+"btnWUDefault"\s+"Windows Update Behavior"\s+"btnTabTweaks"\s+"WindowsUpdatePreset"' -or
+              $source -match 'Add-SearchIndexEntry\s+"btnWUSecurity"' -or
+              $source -match 'Add-SearchIndexEntry\s+"btnWUDisable"') {
+              throw 'Windows Update presets must have one merged Quick Find entry, not separate entries.'
+          }
           function Write-GuiLog { param([string]$Message) Write-Host $Message }
           $script:WmtQuickFindMovedButtons = [System.Collections.ArrayList]::new()
           $nativePage = [System.Windows.Controls.Grid]::new()
@@ -276,6 +291,9 @@ jobs:
               @{ Query = 'search packages'; Label = 'Search Winget Packages'; Search = $searchAliasesByButton.txtWingetSearch; Expected = $true },
               @{ Query = 'speed up pc'; Label = 'Optimize System Services'; Search = $searchAliasesByButton.btnSvcOptimize; Expected = $true },
               @{ Query = 'enable dark mode'; Label = 'Dark Mode'; Search = $searchAliasesByButton.btnToggleDarkMode; Expected = $true },
+              @{ Query = 'windows update default'; Label = 'Windows Update Behavior'; Search = 'default security only disable all updates feature updates'; Expected = $true },
+              @{ Query = 'windows update security only'; Label = 'Windows Update Behavior'; Search = 'default security only disable all updates feature updates'; Expected = $true },
+              @{ Query = 'disable windows update'; Label = 'Windows Update Behavior'; Search = 'default security only disable all updates feature updates'; Expected = $true },
               @{ Query = 'hide file extensions'; Label = 'File Extensions'; Search = 'hide show file extension extensions filename suffix known file types'; Expected = $true },
               @{ Query = 'wifi printer'; Label = 'Restart Wi-Fi Adapter'; Search = $searchAliasesByButton.btnResetWifi; Expected = $false }
           )
