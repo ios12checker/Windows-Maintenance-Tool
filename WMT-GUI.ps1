@@ -62110,8 +62110,8 @@ function Show-WmtDiskUsageAnalyzer {
         <Style TargetType="{x:Type TabItem}">
             <Setter Property="Background" Value="{DynamicResource BgPanel}"/>
             <Setter Property="Foreground" Value="{DynamicResource TextSecondary}"/>
-            <Setter Property="BorderBrush" Value="{DynamicResource BorderBrush}"/>
-            <Setter Property="BorderThickness" Value="1,1,1,0"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Padding" Value="18,7"/>
             <Setter Property="Margin" Value="0,0,2,0"/>
             <Setter Property="FontWeight" Value="SemiBold"/>
@@ -62137,7 +62137,8 @@ function Show-WmtDiskUsageAnalyzer {
                             </Trigger>
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource BgElevated}"/>
-                                <Setter TargetName="Bd" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                                <Setter TargetName="Bd" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="Bd" Property="BorderThickness" Value="0"/>
                                 <Setter Property="Foreground" Value="{DynamicResource TextPrimary}"/>
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
@@ -62262,7 +62263,7 @@ function Show-WmtDiskUsageAnalyzer {
                        Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,5,0,0"/>
         </StackPanel>
 
-        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,10">
+        <Border Grid.Row="1" Background="{DynamicResource BgPanel}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="0" Padding="12" Margin="0,0,0,10">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -62303,7 +62304,7 @@ function Show-WmtDiskUsageAnalyzer {
                        Foreground="{DynamicResource Accent}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
         </Grid>
 
-        <Border Grid.Row="3" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1" CornerRadius="6" Padding="2">
+        <Border Grid.Row="3" Background="{DynamicResource BgPanel}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="0" Padding="2">
             <Grid>
                 <Canvas Name="cvTreemap" ClipToBounds="True" Background="Transparent"/>
                 <TextBlock Name="txtTreemapHint" Text="The space map appears here after a scan."
@@ -63312,7 +63313,31 @@ function Show-WmtDiskUsageAnalyzer {
     # through $call. Note: a SelectionChanged raised by a ComboBox inside the tab
     # bubbles up to the TabControl, so no tab-level SelectionChanged handler is
     # registered; one would also run for the view/drive combo boxes.
-    Connect-WmtPathPicker -TextBox $txtPath -BrowseButton $btnBrowse -Description 'Select a folder to analyze' -Owner $dialog
+    # Disk Analyzer browse: selecting a folder immediately starts a fresh scan.
+    # Keep the drive selector synchronized with the selected folder's volume.
+    $btnBrowse.Add_Click((& $guard 'Browse folder' ({
+                $initial = ([string]$txtPath.Text).Trim()
+                while (-not [string]::IsNullOrWhiteSpace($initial) -and -not (Test-Path -LiteralPath $initial -PathType Container)) {
+                    try { $parent = [System.IO.Path]::GetDirectoryName($initial) } catch { $parent = '' }
+                    if ($parent -eq $initial) { break }
+                    $initial = $parent
+                }
+                if ([string]::IsNullOrWhiteSpace($initial)) { $initial = $env:USERPROFILE }
+                $chosen = Select-WmtExplorerFolder -Description 'Select a folder to analyze' -InitialDirectory $initial -Owner $dialog
+                if (-not [string]::IsNullOrWhiteSpace([string]$chosen)) {
+                    $root = [System.IO.Path]::GetPathRoot([string]$chosen)
+                    for ($i = 0; $i -lt $cmbDrive.Items.Count; $i++) {
+                        if ([string]$cmbDrive.Items[$i].Tag -ieq $root) {
+                            $cmbDrive.SelectedIndex = $i
+                            break
+                        }
+                    }
+                    # SelectionChanged on the drive combo updates the path box,
+                    # so restore the exact browsed folder after synchronizing it.
+                    $txtPath.Text = [string]$chosen
+                    & $call 'startScan' ([string]$chosen).Trim() ''
+                }
+            }.GetNewClosure())))
 
     foreach ($drive in @(Get-WmtDiskUsageDriveChoices)) {
         $driveItem = [System.Windows.Controls.ComboBoxItem]::new()
@@ -63326,6 +63351,16 @@ function Show-WmtDiskUsageAnalyzer {
         else { $InitialPath = $env:USERPROFILE }
     }
     $txtPath.Text = $InitialPath
+
+    # The default drive is C:, regardless of the machine's system-drive setting.
+    # Browsing to a folder on another volume updates this selection.
+    $defaultDrive = 'C:\'
+    for ($i = 0; $i -lt $cmbDrive.Items.Count; $i++) {
+        if ([string]$cmbDrive.Items[$i].Tag -ieq $defaultDrive) {
+            $cmbDrive.SelectedIndex = $i
+            break
+        }
+    }
 
     $renderTimer.Add_Tick((& $guard 'treemap redraw' ({
                 $renderTimer.Stop()
