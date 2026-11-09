@@ -4222,11 +4222,23 @@ jobs:
           $script:ciSettings = @{
               RememberSubwindowBounds = $true
               SubwindowBounds = @{
-                  DiskUsageAnalyzer = @{ Width = 1200; Height = 800; WindowState = 'Normal' }
-                  GhostDevices = @{ Width = 900; Height = 600; WindowState = 'Maximized' }
+                  DiskUsageAnalyzer = @{
+                      Width = [Math]::Min(1200, [System.Windows.SystemParameters]::VirtualScreenWidth)
+                      Height = [Math]::Min(800, [System.Windows.SystemParameters]::VirtualScreenHeight)
+                      WindowState = 'Normal'
+                  }
+                  GhostDevices = @{
+                      Width = [Math]::Min(900, [System.Windows.SystemParameters]::VirtualScreenWidth)
+                      Height = [Math]::Min(600, [System.Windows.SystemParameters]::VirtualScreenHeight)
+                      WindowState = 'Maximized'
+                  }
                   KeepExisting = @{ Width = 700; Height = 500 }
               }
           }
+          $analyzerSavedWidth = [double]$script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Width
+          $analyzerSavedHeight = [double]$script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Height
+          $otherSavedWidth = [double]$script:ciSettings.SubwindowBounds.GhostDevices.Width
+          $otherSavedHeight = [double]$script:ciSettings.SubwindowBounds.GhostDevices.Height
           $script:ciSaveCount = 0
           function Get-WmtSettings { return $script:ciSettings }
           function Get-WmtSettingsMember {
@@ -4272,23 +4284,29 @@ jobs:
           }
           $analyzer = New-TestWindow 'Disk Usage Analyzer'
           Register-WmtSubwindowBounds -Dialog $analyzer
-          Assert-Wmt ($analyzer.Width -eq 1200 -and $analyzer.Height -eq 800) 'Disk Usage Analyzer restores its saved size'
+          Assert-Wmt ($analyzer.Width -eq $analyzerSavedWidth -and $analyzer.Height -eq $analyzerSavedHeight) 'Disk Usage Analyzer restores its saved size'
           Assert-Wmt ($null -ne $analyzer.ClosedHandler) 'resizable analyzer registers its close handler'
           $otherTool = New-TestWindow 'Ghost Devices'
           Register-WmtSubwindowBounds -Dialog $otherTool
-          Assert-Wmt ($otherTool.Width -eq 900 -and $otherTool.Height -eq 600) 'another resizable subtool restores its own saved size'
+          Assert-Wmt ($otherTool.Width -eq $otherSavedWidth -and $otherTool.Height -eq $otherSavedHeight) 'another resizable subtool restores its own saved size'
           Assert-Wmt ($otherTool.WindowState -eq [System.Windows.WindowState]::Maximized) 'a subtool restores its saved maximized state'
-          $analyzer.ActualWidth = 1300; $analyzer.ActualHeight = 850
+          $analyzerActualWidth = [Math]::Min($analyzerSavedWidth + 100, [System.Windows.SystemParameters]::VirtualScreenWidth)
+          $analyzerActualHeight = [Math]::Min($analyzerSavedHeight + 50, [System.Windows.SystemParameters]::VirtualScreenHeight)
+          $analyzer.ActualWidth = $analyzerActualWidth; $analyzer.ActualHeight = $analyzerActualHeight
           $analyzer.ClosedHandler.Invoke()
-          Assert-Wmt ($script:ciSaveCount -eq 1 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Width -eq 1300 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Height -eq 850 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.WindowState -eq 'Normal') 'closing a normal subtool saves its latest dimensions and state'
-          Assert-Wmt ($script:ciSettings.SubwindowBounds.GhostDevices.Width -eq 900 -and $script:ciSettings.SubwindowBounds.KeepExisting.Width -eq 700) 'saving one subtool preserves other saved sizes'
+          Assert-Wmt ($script:ciSaveCount -eq 1 -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Width -eq $analyzerActualWidth -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.Height -eq $analyzerActualHeight -and $script:ciSettings.SubwindowBounds.DiskUsageAnalyzer.WindowState -eq 'Normal') 'closing a normal subtool saves its latest dimensions and state'
+          Assert-Wmt ($script:ciSettings.SubwindowBounds.GhostDevices.Width -eq $otherSavedWidth -and $script:ciSettings.SubwindowBounds.KeepExisting.Width -eq 700) 'saving one subtool preserves other saved sizes'
           $maximized = New-TestWindow 'Maximized Tool'
-          $script:ciSettings.SubwindowBounds.MaximizedTool = @{ Width = 800; Height = 600; WindowState = 'Normal' }
+          $maximizedSavedWidth = [Math]::Min(800, [System.Windows.SystemParameters]::VirtualScreenWidth)
+          $maximizedSavedHeight = [Math]::Min(600, [System.Windows.SystemParameters]::VirtualScreenHeight)
+          $maximizedRestoreWidth = [Math]::Min($maximizedSavedWidth + 100, [System.Windows.SystemParameters]::VirtualScreenWidth)
+          $maximizedRestoreHeight = [Math]::Min($maximizedSavedHeight + 50, [System.Windows.SystemParameters]::VirtualScreenHeight)
+          $script:ciSettings.SubwindowBounds.MaximizedTool = @{ Width = $maximizedSavedWidth; Height = $maximizedSavedHeight; WindowState = 'Normal' }
           Register-WmtSubwindowBounds -Dialog $maximized
           $maximized.WindowState = [System.Windows.WindowState]::Maximized
-          $maximized.RestoreBounds = [pscustomobject]@{ Width = 950; Height = 650 }
+          $maximized.RestoreBounds = [pscustomobject]@{ Width = $maximizedRestoreWidth; Height = $maximizedRestoreHeight }
           $maximized.ClosedHandler.Invoke()
-          Assert-Wmt ($script:ciSettings.SubwindowBounds.MaximizedTool.WindowState -eq 'Maximized' -and $script:ciSettings.SubwindowBounds.MaximizedTool.Width -eq 950 -and $script:ciSettings.SubwindowBounds.MaximizedTool.Height -eq 650) 'closing a maximized subtool saves its state and normal restore size'
+          Assert-Wmt ($script:ciSettings.SubwindowBounds.MaximizedTool.WindowState -eq 'Maximized' -and $script:ciSettings.SubwindowBounds.MaximizedTool.Width -eq $maximizedRestoreWidth -and $script:ciSettings.SubwindowBounds.MaximizedTool.Height -eq $maximizedRestoreHeight) 'closing a maximized subtool saves its state and normal restore size'
           $script:ciSettings.RememberSubwindowBounds = $false
           $disabled = New-TestWindow 'Ghost Devices'
           $disabled.Width = 750; $disabled.Height = 550
