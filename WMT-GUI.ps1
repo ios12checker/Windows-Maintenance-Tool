@@ -34463,6 +34463,7 @@ return $null
 function Update-WmtPagefileButtonState {
 param($Enabled, [switch]$RefreshCache)
 $button = Get-Ctrl 'btnTogglePagefile'
+$myDeviceButton = Get-Ctrl 'btnMyDevicePagefile'
 if ($RefreshCache) {
     Clear-WmtRegCache @('HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management')
     if (-not $script:TweakNonRegDataCache) { $script:TweakNonRegDataCache = @{} }
@@ -34478,10 +34479,14 @@ if ($Enabled -is [bool]) {
     Update-WmtTweakToggle $button $Enabled 'Pagefile Enabled' 'Pagefile Disabled'
 }
 else {
-    if ($script:TweakCurrentStates -and $script:TweakCurrentStates.Contains('btnTogglePagefile')) { $script:TweakCurrentStates.Remove('btnTogglePagefile') }
-    $button.Content = 'Pagefile status unknown'
-    $button.Style = ($window.FindResource('ActionBtn') -as [Windows.Style])
-    $button.ToolTip = 'Pagefile configuration could not be read. Click to check again in the background. Restart Windows after changing the pagefile.'
+    foreach ($pagefileButton in @($button, $myDeviceButton)) {
+        if (-not $pagefileButton) { continue }
+        if ($script:TweakCurrentStates) { [void]$script:TweakCurrentStates.Remove([string]$pagefileButton.Name) }
+        if ($script:TweakCurrentUnknownStates) { [void]$script:TweakCurrentUnknownStates.Remove([string]$pagefileButton.Name) }
+        $pagefileButton.Content = 'Pagefile status unknown'
+        $pagefileButton.Style = ($window.FindResource('ActionBtn') -as [Windows.Style])
+        $pagefileButton.ToolTip = 'Pagefile configuration could not be read. Click to check again in the background. Restart Windows after changing the pagefile.'
+    }
 }
 }
 
@@ -36178,6 +36183,11 @@ catch { & $failed $_ }
                                                     <TextBlock x:Name="txtPowerElectrical" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18" Text="Electrical: Loading..."/>
                                                         <Button Name="btnMyDeviceUltimatePower" Content="Ultimate" Style="{StaticResource PositiveBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Enable the Ultimate Performance power plan"/>
                                                         <Button Name="btnMyDeviceHibernateToggle" Content="Hibernate Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle hibernation on/off. Blue = hibernation disabled. Gray = hibernation enabled."/>
+                                                        <Button Name="btnMyDeviceBatterySaverOff" Content="Saver Off" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Set battery saver threshold to 0 percent."/>
+                                                        <Button Name="btnMyDeviceBatterySaver20" Content="Saver 20%" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Set battery saver threshold to 20 percent."/>
+                                                        <Button Name="btnMyDeviceBatterySaver50" Content="Saver 50%" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Set battery saver threshold to 50 percent."/>
+                                                        <Button Name="btnMyDeviceUsbSuspend" Content="USB Suspend" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Enable or disable USB selective suspend for the active power plan."/>
+                                                        <Button Name="btnMyDevicePcie" Content="PCIe Power Savings" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Set PCI Express link state power management to moderate savings or turn it off."/>
                                                     </StackPanel>
                                                 </Grid>
                                             </Border>
@@ -36192,6 +36202,7 @@ catch { & $failed $_ }
                                                     <TextBlock x:Name="txtDeviceRAM" FontSize="13" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0" LineHeight="18"/>
                                                         <Button Name="btnMyDeviceCleanRAM" Content="Clean RAM" Style="{StaticResource ActionBtn}" Margin="0,10,0,0" HorizontalAlignment="Stretch" ToolTip="Empty process working sets and collect managed memory"/>
                                                         <Button Name="btnMyDeviceMemCompressToggle" Content="MC Toggle" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Toggle Windows memory compression. Blue = compression disabled. Gray = compression enabled."/>
+                                                        <Button Name="btnMyDevicePagefile" Content="Pagefile status unknown" Style="{StaticResource ActionBtn}" Margin="0,4,0,0" HorizontalAlignment="Stretch" ToolTip="Pagefile configuration is loading. Keeping it enabled is recommended for committed memory and Windows crash dumps. Restart Windows after changing it."/>
                                                     </StackPanel>
                                                 </Grid>
                                             </Border>
@@ -37773,12 +37784,18 @@ return $null
 # contradictory entries and importing would click both members and flip the
 # tweak straight back to its previous state.
 $script:TweakToggleSiblingNames = @{
+"btnTogglePagefile"           = "btnMyDevicePagefile"
+"btnMyDevicePagefile"         = "btnTogglePagefile"
 "btnToggleHags"                = "btnMyDeviceHagsToggle"
 "btnToggleMemCompress"         = "btnMyDeviceMemCompressToggle"
 "btnToggleHibernate"           = "btnMyDeviceHibernateToggle"
 "btnMyDeviceHagsToggle"        = "btnToggleHags"
 "btnMyDeviceMemCompressToggle" = "btnToggleMemCompress"
 "btnMyDeviceHibernateToggle"   = "btnToggleHibernate"
+"btnToggleUsbSuspend"          = "btnMyDeviceUsbSuspend"
+"btnMyDeviceUsbSuspend"        = "btnToggleUsbSuspend"
+"btnTogglePcie"                = "btnMyDevicePcie"
+"btnMyDevicePcie"              = "btnTogglePcie"
 }
 # The My Device side of each pair. These buttons are pure delegates of their
 # Tweaks-page twin (clicking one re-raises the twin's Click), so the import
@@ -37787,9 +37804,12 @@ $script:TweakToggleSiblingNames = @{
 # above is bidirectional and must not be used to decide which side is the
 # mirror.
 $script:TweakToggleMirrorNames = @(
+    "btnMyDevicePagefile",
     "btnMyDeviceHagsToggle",
     "btnMyDeviceMemCompressToggle",
-    "btnMyDeviceHibernateToggle"
+    "btnMyDeviceHibernateToggle",
+    "btnMyDeviceUsbSuspend",
+    "btnMyDevicePcie"
 )
 $script:TweakToggleSyncing = $false
 
@@ -70086,6 +70106,12 @@ btnMyDeviceHostsAdBlock      = "btnHostsUpdate"
 btnMyDeviceRouteView         = "btnRouteView"
 btnMyDeviceUltimatePower     = "btnPerfUltimatePower"
 btnMyDeviceHibernateToggle   = "btnToggleHibernate"
+btnMyDeviceBatterySaverOff   = "btnPowerBatterySaverOff"
+btnMyDeviceBatterySaver20    = "btnPowerBatterySaver20"
+btnMyDeviceBatterySaver50    = "btnPowerBatterySaver50"
+btnMyDeviceUsbSuspend        = "btnToggleUsbSuspend"
+btnMyDevicePcie              = "btnTogglePcie"
+btnMyDevicePagefile          = "btnTogglePagefile"
 btnMyDeviceMemCompressToggle = "btnToggleMemCompress"
 btnMyDeviceHagsToggle        = "btnToggleHags"
 btnMyDeviceDriverReport      = "btnDrvReport"

@@ -240,6 +240,36 @@ jobs:
               $source -match 'btnSvc(Optimize|Restore)') {
               throw 'Service optimization and revert buttons must live only in the Services Management card.'
           }
+          $batteryCardStart = $source.IndexOf('Text="Battery / Power"')
+          $memoryCardStart = $source.IndexOf('Text="Memory (RAM)"')
+          $gpuCardStart = $source.IndexOf('Text="Graphics (GPU)"')
+          $pagefilePosition = $source.IndexOf('Name="btnMyDevicePagefile"')
+          if ($batteryCardStart -lt 0 -or $memoryCardStart -le $batteryCardStart -or
+              $gpuCardStart -le $memoryCardStart -or
+              $pagefilePosition -le $memoryCardStart -or $pagefilePosition -ge $gpuCardStart) {
+              throw 'The My Device pagefile shortcut must be in the Memory card.'
+          }
+          foreach ($controlName in @(
+              'btnMyDeviceBatterySaverOff', 'btnMyDeviceBatterySaver20', 'btnMyDeviceBatterySaver50',
+              'btnMyDeviceUsbSuspend', 'btnMyDevicePcie'
+          )) {
+              $controlPosition = $source.IndexOf('Name="' + $controlName + '"')
+              if ($controlPosition -le $batteryCardStart -or $controlPosition -ge $memoryCardStart) {
+                  throw "$controlName must be in the My Device Battery / Power card."
+              }
+          }
+          foreach ($shortcut in @(
+              'btnMyDevicePagefile          = "btnTogglePagefile"',
+              'btnMyDeviceBatterySaverOff   = "btnPowerBatterySaverOff"',
+              'btnMyDeviceBatterySaver20    = "btnPowerBatterySaver20"',
+              'btnMyDeviceBatterySaver50    = "btnPowerBatterySaver50"',
+              'btnMyDeviceUsbSuspend        = "btnToggleUsbSuspend"',
+              'btnMyDevicePcie              = "btnTogglePcie"'
+          )) {
+              if ($source -notmatch [regex]::Escape($shortcut)) {
+                  throw "Missing My Device shortcut mapping: $shortcut"
+              }
+          }
           if ($source -notmatch 'Add-SearchIndexEntry\s+"btnPowerBatterySaverOff"\s+"Battery Saver Behavior"\s+"btnTabTweaks"\s+"BatterySaverPreset"' -or
               $source -match 'Add-SearchIndexEntry\s+"btnPowerBatterySaver(20|50)"' -or
               $source -notmatch 'Add-SearchIndexEntry\s+"btnPerfServicesManual"\s+"Service Optimization"\s+"btnTabTweaks"\s+"ServicePreset"' -or
