@@ -19,7 +19,7 @@ on:
       push_chocolatey:
         description: "Push a Chocolatey package update after the release (requires CHOCOLATEY_API_KEY)"
         required: false
-        default: false
+        default: true
         type: boolean
 
 permissions:
@@ -84,34 +84,10 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
-          CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:GITHUB_REF -ne 'refs/heads/Main') {
               throw "Stable releases must be dispatched from Main; got $env:GITHUB_REF."
-          }
-          if (${{ inputs.submit_winget }} -and [string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
-              throw "WINGET_TOKEN is required because submit_winget was enabled."
-          }
-          if (${{ inputs.submit_winget }}) {
-              $wingetVersion = $env:RELEASE_TAG.TrimStart("v")
-              $wingetVersionPath = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Chaython/WindowsMaintenanceTool/$wingetVersion?ref=master"
-              try {
-                  Invoke-RestMethod -Uri $wingetVersionPath -Headers @{
-                      "User-Agent" = "Windows-Maintenance-Tool-release"
-                      Accept = "application/vnd.github+json"
-                  } -TimeoutSec 15 | Out-Null
-                  throw "WinGet already has a manifest for version $wingetVersion; increase AppVersion before publishing."
-              }
-              catch {
-                  if ($_.Exception.Message -like "WinGet already has a manifest for version*") { throw }
-                  $statusCode = $null
-                  try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
-                  if ($statusCode -ne 404) { throw }
-              }
-          }
-          if (${{ inputs.push_chocolatey }} -and [string]::IsNullOrWhiteSpace($env:CHOCOLATEY_API_KEY)) {
-              throw "CHOCOLATEY_API_KEY is required because push_chocolatey was enabled."
           }
 
           $existingTag = & git ls-remote --refs origin "refs/tags/$env:RELEASE_TAG"
@@ -372,7 +348,24 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
-              throw "WINGET_TOKEN is required because submit_winget was enabled."
+              throw "WINGET_TOKEN is required because submit_winget was enabled. Chocolatey publication is running independently."
+          }
+
+          # Provider-specific validation belongs in this job so a WinGet
+          # configuration or submission failure cannot cancel Chocolatey.
+          $wingetVersionPath = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Chaython/WindowsMaintenanceTool/$env:RELEASE_VERSION?ref=master"
+          try {
+              Invoke-RestMethod -Uri $wingetVersionPath -Headers @{
+                  "User-Agent" = "Windows-Maintenance-Tool-release"
+                  Accept = "application/vnd.github+json"
+              } -TimeoutSec 15 | Out-Null
+              throw "WinGet already has a manifest for version $env:RELEASE_VERSION; increase AppVersion before publishing."
+          }
+          catch {
+              if ($_.Exception.Message -like "WinGet already has a manifest for version*") { throw }
+              $statusCode = $null
+              try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($statusCode -ne 404) { throw }
           }
 
           $manifestApi = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Chaython/WindowsMaintenanceTool?ref=master"
