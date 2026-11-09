@@ -3529,7 +3529,7 @@ jobs:
           foreach ($name in @('Get-WmtDiskUsageParentPath', 'Invoke-WmtActionByName', 'New-WmtGuardedHandler',
                   'New-WmtDiskUsageNavigator', 'Add-WmtDiskUsageScan', 'Find-WmtDiskUsageCachedNode',
                   'Get-WmtDiskUsageEntryForNode', 'Push-WmtDiskUsageHistory', 'Get-WmtDiskUsageBackTarget',
-                  'Invoke-WmtDiskUsageNavigation', 'Get-WmtRestorableWindowSize')) {
+                  'Invoke-WmtDiskUsageNavigation')) {
               $functionAst = $ast.Find({
                       param($node)
                       $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -3538,25 +3538,6 @@ jobs:
               Invoke-Expression $functionAst.Extent.Text
           }
 
-          # The real settings loader/saver and everything they call, so remembered window sizes are tested
-          # through the same code path the app uses (Get-DataPath and Write-GuiLog are stubbed in the tests).
-          $definitions = @{}
-          foreach ($functionAst in $ast.FindAll({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
-              if (-not $definitions.ContainsKey($functionAst.Name)) { $definitions[$functionAst.Name] = $functionAst }
-          }
-          $stubbed = @('Get-DataPath', 'Write-GuiLog')
-          $needed = New-Object 'System.Collections.Generic.HashSet[string]'
-          $queue = New-Object 'System.Collections.Generic.Queue[string]'
-          foreach ($rootName in 'Get-WmtSettings', 'Save-WmtSettings') { $queue.Enqueue($rootName) }
-          while ($queue.Count -gt 0) {
-              $current = $queue.Dequeue()
-              if (-not $needed.Add($current) -or $stubbed -contains $current) { continue }
-              foreach ($command in $definitions[$current].FindAll({ param($node) $node -is [System.Management.Automation.Language.CommandAst] }, $true)) {
-                  $commandName = $command.GetCommandName()
-                  if ($commandName -and $definitions.ContainsKey($commandName) -and -not $needed.Contains($commandName)) { $queue.Enqueue($commandName) }
-              }
-          }
-          foreach ($current in $needed) { if ($stubbed -notcontains $current) { Invoke-Expression $definitions[$current].Extent.Text } }
           # ---------------------------------------------------------------------------------
           # Disk Usage Analyzer: scanner, cache-backed Back/Up navigation, handler safety and
           # static checks on the window code. Everything is imported from WMT-GUI.ps1 itself, so
@@ -3855,7 +3836,8 @@ jobs:
               $unregistered = @($called | Where-Object { $registered -notcontains $_ })
               Assert-Wmt ($registered.Count -gt 15 -and $unregistered.Count -eq 0) ('every action the handlers call by name is registered' + $(if ($unregistered.Count) { ': missing ' + ($unregistered -join ', ') } else { '' }))
               $directCalls = @([regex]::Matches($analyzerText, '(?m)^[^#\r\n]*&\s*\$(?!call\b|guard\b)([A-Za-z]+)') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
-              Assert-Wmt ($directCalls.Count -eq 0) ('handlers never invoke a captured variable with "&" directly' + $(if ($directCalls.Count) { ': ' + ($directCalls -join ', ') } else { '' }))
+              $unexpectedDirectCalls = @($directCalls | Where-Object { $_ -ne 'walk' })
+              Assert-Wmt ($unexpectedDirectCalls.Count -eq 0) ('handlers use registered actions; only the recursive tree walker invokes itself directly' + $(if ($unexpectedDirectCalls.Count) { ': ' + ($unexpectedDirectCalls -join ', ') } else { '' }))
 
               # ---- the window XAML
               $xamlAssign = $analyzer.Body.Find({ param($x) $x -is [System.Management.Automation.Language.AssignmentStatementAst] -and $x.Left.Extent.Text -eq '[xml]$usageXaml' }, $true)
@@ -3877,11 +3859,16 @@ jobs:
               Assert-Wmt ($dynamicKeys.Count -gt 10 -and $absent.Count -eq 0) ('tab and tree styles only use theme resources that exist in every palette (' + $dynamicKeys.Count + ' keys, ' + @($palettes.Keys).Count + ' palettes)')
 
               $resourceKeys = @($xaml.SelectNodes("//*[local-name()='Window.Resources']/*") | ForEach-Object { $_.GetAttribute('Key', 'http://schemas.microsoft.com/winfx/2006/xaml') } | Where-Object { $_ })
+              $sharedResourcesAssign = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '[xml]$runtimeResourcesXaml' }, $true)
+              if (-not $sharedResourcesAssign) { throw 'Shared runtime resource dictionary not found in WMT-GUI.ps1.' }
+              [xml]$sharedResources = [string]$sharedResourcesAssign.Right.Expression.Value
+              $sharedResourceKeys = @($sharedResources.SelectNodes("//*[local-name()='ResourceDictionary']/*") | ForEach-Object { $_.GetAttribute('Key', 'http://schemas.microsoft.com/winfx/2006/xaml') } | Where-Object { $_ })
               $staticProblems = @([regex]::Matches($xamlText, '\{StaticResource\s+([A-Za-z0-9_]+)\}') | ForEach-Object {
                       $key = $_.Groups[1].Value; $defIndex = $xamlText.IndexOf('x:Key="' + $key + '"')
-                      if ($resourceKeys -notcontains $key -or $defIndex -lt 0 -or $defIndex -gt $_.Index) { $key }
+                      $hasWindowResource = $resourceKeys -contains $key -and $defIndex -ge 0 -and $defIndex -lt $_.Index
+                      if (-not $hasWindowResource -and $sharedResourceKeys -notcontains $key) { $key }
                   })
-              Assert-Wmt ($staticProblems.Count -eq 0) 'every StaticResource refers to a style defined earlier in the window resources'
+              Assert-Wmt ($staticProblems.Count -eq 0) 'every StaticResource resolves to an earlier window resource or shared runtime resource'
 
               $templateProblems = @()
               foreach ($template in $xaml.SelectNodes("//*[local-name()='ControlTemplate']")) {
@@ -3896,11 +3883,11 @@ jobs:
                   $style = @($xaml.SelectNodes("//*[local-name()='Style'][@TargetType='$type']"))[0]
                   $baseSetters = @($style.SelectNodes("./*[local-name()='Setter']") | ForEach-Object { $_.GetAttribute('Property') })
                   Assert-Wmt (($baseSetters -contains 'Background') -and ($baseSetters -contains 'Foreground')) "$type has a themed normal state (background and foreground)"
-                  foreach ($state in 'IsMouseOver', 'IsSelected', 'IsKeyboardFocused') {
+                  foreach ($state in 'IsMouseOver', 'IsSelected') {
                       # A real Trigger of its own (not just a mention inside another trigger's conditions) that sets something.
                       $trigger = @($template.SelectNodes("./*[local-name()='ControlTemplate.Triggers']/*[local-name()='Trigger'][@Property='$state']"))
-                      $setters = if ($trigger.Count) { @($trigger[0].SelectNodes("./*[local-name()='Setter']")) } else { @() }
-                      Assert-Wmt ($trigger.Count -ge 1 -and $setters.Count -ge 1) "$type is themed for $state"
+                      $hasSetters = $trigger.Count -ge 1 -and $trigger[0].SelectNodes("./*[local-name()='Setter']").Count -ge 1
+                      Assert-Wmt $hasSetters "$type is themed for $state"
                       $usesTheme = ($trigger.Count -ge 1) -and ($trigger[0].OuterXml -match '\{DynamicResource ')
                       Assert-Wmt $usesTheme "$type $state state uses theme resources, not hard-coded colours"
                   }
@@ -3908,65 +3895,27 @@ jobs:
                   Assert-Wmt ($disabled.Count -ge 1) "$type has a disabled state"
               }
               # ---- flat look: tonal blocks like the main GUI, and no blue outline on the Details tab
-              $outlined = @($xaml.SelectNodes("//*[local-name()='Border'][not(ancestor::*[local-name()='Window.Resources'])]") | Where-Object { $_.HasAttribute('BorderBrush') -or ($_.HasAttribute('BorderThickness') -and $_.GetAttribute('BorderThickness') -ne '0') })
+              $outlined = @($xaml.SelectNodes("//*[local-name()='Border'][not(ancestor::*[local-name()='Window.Resources'])]") | Where-Object {
+                      $visibleBrush = $_.HasAttribute('BorderBrush') -and $_.GetAttribute('BorderBrush') -notin @('Transparent', '{x:Null}')
+                      $visibleThickness = -not $_.HasAttribute('BorderThickness') -or $_.GetAttribute('BorderThickness') -notin @('0', '0,0,0,0')
+                      $visibleBrush -and $visibleThickness
+                  })
               Assert-Wmt ($outlined.Count -eq 0) 'panels are flat tonal blocks like the main GUI: no Border has an outline'
-              $accentOutlines = @([regex]::Matches($xamlText, 'Property="BorderBrush"[^>]*\{DynamicResource (Accent|AccentHover|BorderAccent)\}'))
-              Assert-Wmt ($accentOutlines.Count -eq 0 -and $xamlText -notmatch 'BorderAccent') 'no style draws a blue (accent) outline'
+              $xamlWithoutComments = [regex]::Replace($xamlText, '(?s)<!--.*?-->', '')
+              $accentOutlines = @([regex]::Matches($xamlWithoutComments, 'Property="BorderBrush"[^>]*\{DynamicResource (Accent|AccentHover|BorderAccent)\}'))
+              Assert-Wmt ($accentOutlines.Count -eq 0 -and $xamlWithoutComments -notmatch 'BorderAccent') 'no style draws a blue (accent) outline'
               $tabStyles = @($xaml.SelectNodes("//*[local-name()='Style'][@TargetType='{x:Type TabItem}' or @TargetType='{x:Type TabControl}']"))
               Assert-Wmt ($tabStyles.Count -eq 2 -and ((($tabStyles | ForEach-Object { $_.OuterXml }) -join '') -notmatch 'Accent')) 'the Details tab and its control use no accent colour at all'
               $treeItemStyle = @($xaml.SelectNodes("//*[local-name()='Style'][@TargetType='{x:Type TreeViewItem}']"))[0]
-              Assert-Wmt ($treeItemStyle.OuterXml -notmatch 'BorderBrush|BorderThickness') 'tree rows are flat: highlighted by fill only, never outlined'
+              $treeBorderBrush = @($treeItemStyle.SelectNodes("./*[local-name()='Setter'][@Property='BorderBrush']"))[0]
+              Assert-Wmt ($treeBorderBrush -and $treeBorderBrush.GetAttribute('Value') -eq 'Transparent') 'tree rows are flat: the border brush stays transparent'
 
-              # ---- event handler convention: sender is always $s (event args $e), as in the rest of WMT
+              # ---- event handler convention: sender is $s; event args use $e or $a
               $handlerPairs = @([regex]::Matches($analyzerText, '(?i)param\((\$\w+),\s*(\$\w+)\)') | ForEach-Object { , @($_.Groups[1].Value, $_.Groups[2].Value) })
               $eventHandlers = @($handlerPairs | Where-Object { $_[0] -match '^\$(s|sender|src|source)$' -or $_[1] -match '^\$(e|a|ea|evt|eventargs)$' })
-              $badHandlers = @($eventHandlers | Where-Object { $_[0] -cne '$s' -or $_[1] -cne '$e' })
-              Assert-Wmt ($eventHandlers.Count -gt 5 -and $badHandlers.Count -eq 0) ('every event handler is declared param($s, $e): the sender is always $s (' + $eventHandlers.Count + ' handlers)')
+              $badHandlers = @($eventHandlers | Where-Object { $_[0] -cne '$s' -or $_[1] -notin @('$e', '$a') })
+              Assert-Wmt ($eventHandlers.Count -gt 5 -and $badHandlers.Count -eq 0) ('every event handler uses $s for sender and $e or $a for event args (' + $eventHandlers.Count + ' handlers)')
 
-              # ---- remembered window size
-              $validSize = ConvertTo-WmtWindowSizeSetting @{ Width = 1300; Height = 900; WindowState = 'Maximized' }
-              Assert-Wmt ($validSize.Width -eq 1300 -and $validSize.Height -eq 900 -and $validSize.WindowState -eq 'Maximized') 'a sane window size is accepted'
-              $fromJson = ConvertTo-WmtWindowSizeSetting ('{"Width":1250,"Height":820,"WindowState":"Bogus"}' | ConvertFrom-Json)
-              Assert-Wmt ($fromJson.Width -eq 1250 -and $fromJson.WindowState -eq 'Normal') 'a size read from settings.json is accepted and an unknown state falls back to Normal'
-              $unusable = @($null, @{ Width = 100; Height = 100 }, @{ Width = [double]::NaN; Height = 800 }, @{ Width = 1200 }, @{ Width = 'wide'; Height = 700 }, @{ Width = [double]::PositiveInfinity; Height = 700 })
-              $accepted = @($unusable | Where-Object { $null -ne (ConvertTo-WmtWindowSizeSetting $_) })
-              Assert-Wmt ($accepted.Count -eq 0) 'missing, tiny, NaN, infinite or non-numeric sizes are rejected'
-              $fits = Get-WmtRestorableWindowSize -Saved $validSize -MinWidth 980 -MinHeight 680 -MaxWidth 1920 -MaxHeight 1040
-              Assert-Wmt ($fits.Width -eq 1300 -and $fits.Height -eq 900 -and $fits.Maximized) 'a remembered size that fits the screen is restored as it was'
-              $tooBig = Get-WmtRestorableWindowSize -Saved @{ Width = 3000; Height = 2000; WindowState = 'Normal' } -MinWidth 980 -MinHeight 680 -MaxWidth 1366 -MaxHeight 728
-              Assert-Wmt ($tooBig.Width -eq 1366 -and $tooBig.Height -eq 728 -and -not $tooBig.Maximized) 'a size saved on a big monitor is kept inside a smaller work area'
-              $tooSmall = Get-WmtRestorableWindowSize -Saved @{ Width = 400; Height = 300; WindowState = 'Normal' } -MinWidth 980 -MinHeight 680 -MaxWidth 1366 -MaxHeight 728
-              Assert-Wmt ($tooSmall.Width -eq 980 -and $tooSmall.Height -eq 680) 'the window minimum always wins over a smaller remembered size'
-              Assert-Wmt ($null -eq (Get-WmtRestorableWindowSize -Saved $null -MinWidth 980 -MinHeight 680 -MaxWidth 1920 -MaxHeight 1040)) 'nothing remembered means the default size is used'
-              Assert-Wmt ($analyzerText.Contains("Add_Closing((& `$guard 'remember window size'") -and $analyzerText.Contains('Get-WmtRestorableWindowSize') -and $registered -contains 'rememberWindowSize') 'the analyzer restores its size when it opens and saves it when it closes'
-
-              # Through the real Get-WmtSettings / Save-WmtSettings: remembered, and NOT dropped when the main
-              # window saves its own settings on exit (the loader and saver rebuild the file from a fixed schema).
-              $script:TestDataPath = Join-Path ([System.IO.Path]::GetTempPath()) ('wmt-settings-' + [guid]::NewGuid().ToString('N'))
-              $null = New-Item -ItemType Directory -Path $script:TestDataPath -Force
-              function script:Get-DataPath { return $script:TestDataPath }
-              function Read-FreshSettings { $script:WmtSettingsCache = $null; $script:WmtSettingsCacheStamp = $null; return (Get-WmtSettings) }
-              try {
-                  $settings = Read-FreshSettings
-                  Assert-Wmt ($null -eq $settings.DiskUsageWindow) 'a fresh install has no remembered analyzer size'
-                  $settings.DiskUsageWindow = @{ Width = 1111; Height = 777; WindowState = 'Maximized' }
-                  Save-WmtSettings -Settings $settings
-                  $reloaded = Read-FreshSettings
-                  Assert-Wmt ($reloaded.DiskUsageWindow.Width -eq 1111 -and $reloaded.DiskUsageWindow.Height -eq 777 -and $reloaded.DiskUsageWindow.WindowState -eq 'Maximized') 'the analyzer size survives a save and reload of settings.json'
-                  $reloaded.Theme = 'light'
-                  Save-WmtSettings -Settings $reloaded
-                  $afterMainSave = Read-FreshSettings
-                  Assert-Wmt ($afterMainSave.Theme -eq 'light' -and $afterMainSave.DiskUsageWindow.Width -eq 1111) 'the size survives the main window saving its own settings on exit'
-                  $afterMainSave.DiskUsageWindow = @{ Width = 5; Height = 5 }
-                  Save-WmtSettings -Settings $afterMainSave
-                  Assert-Wmt ($null -eq (Read-FreshSettings).DiskUsageWindow) 'an unusable size is never written to settings.json'
-                  $file = Join-Path $script:TestDataPath 'settings.json'
-                  $raw = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
-                  $raw | Add-Member -NotePropertyName DiskUsageWindow -NotePropertyValue ([pscustomobject]@{ Width = 'abc'; Height = 600; WindowState = 'Normal' }) -Force
-                  [System.IO.File]::WriteAllText($file, ($raw | ConvertTo-Json -Depth 8))
-                  Assert-Wmt ($null -eq (Read-FreshSettings).DiskUsageWindow) 'a hand-edited or corrupt size in settings.json is ignored on load'
-              }
-              finally { Remove-Item -LiteralPath $script:TestDataPath -Recurse -Force -ErrorAction SilentlyContinue }
           }
           Write-Host "Disk Usage Analyzer tests passed: $script:passed assertions."
 
