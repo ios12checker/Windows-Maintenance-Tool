@@ -3013,6 +3013,7 @@ jobs:
               "Get-WmtUpdateAutoInstallEnabled",
               "Get-WmtRunInTrayOnClose",
               "Get-WmtReduceRamInTray",
+              "Get-WmtRememberSubwindowBounds",
               "Get-WmtDisableBackgroundJobs",
               "Get-WmtDebugMode",
               "Get-WmtUpdateScansDisabled",
