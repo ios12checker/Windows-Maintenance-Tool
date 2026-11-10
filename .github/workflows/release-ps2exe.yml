@@ -383,11 +383,128 @@ jobs:
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile ".\wingetcreate.exe" -UseBasicParsing
           $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
 
-          & ".\wingetcreate.exe" update Chaython.WindowsMaintenanceTool --urls "$installerUrl|x64" --version $env:RELEASE_VERSION --submit --no-open
+          $manifestOutput = Join-Path $env:RUNNER_TEMP "wmt-winget-manifest"
+          New-Item -ItemType Directory -Path $manifestOutput -Force | Out-Null
+
+          & ".\wingetcreate.exe" update Chaython.WindowsMaintenanceTool --urls "$installerUrl|x64" --version $env:RELEASE_VERSION --out $manifestOutput --submit --no-open
           if ($LASTEXITCODE -ne 0) {
               throw "WingetCreate submission failed with exit code $LASTEXITCODE."
           }
 
+      - name: Validate manifest, test local installation, and complete PR checklist
+        shell: powershell
+        env:
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestOutput = Join-Path $env:RUNNER_TEMP "wmt-winget-manifest"
+          if (-not (Test-Path -LiteralPath $manifestOutput -PathType Container)) {
+              throw "WingetCreate did not save its generated manifests to $manifestOutput."
+          }
+
+          $yamlFiles = @(Get-ChildItem -LiteralPath $manifestOutput -Filter "*.yaml" -File -Recurse)
+          if ($yamlFiles.Count -ne 3) {
+              throw "Expected exactly three YAML files for one WinGet manifest version; found $($yamlFiles.Count)."
+          }
+          $manifestDirs = @($yamlFiles | Select-Object -ExpandProperty DirectoryName -Unique)
+          if ($manifestDirs.Count -ne 1) {
+              throw "Generated manifest YAML files are not all in one version directory."
+          }
+          $manifestDir = $manifestDirs[0]
+          $expectedFiles = @(
+              "Chaython.WindowsMaintenanceTool.yaml",
+              "Chaython.WindowsMaintenanceTool.locale.en-US.yaml",
+              "Chaython.WindowsMaintenanceTool.installer.yaml"
+          )
+          foreach ($name in $expectedFiles) {
+              if (-not (Test-Path -LiteralPath (Join-Path $manifestDir $name) -PathType Leaf)) {
+                  throw "Generated manifest is missing expected file: $name"
+              }
+          }
+
+          if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+              throw "winget.exe is unavailable; cannot truthfully mark local validation and installation as tested."
+          }
+          Write-Host "Validating generated WinGet manifest..."
+          & winget.exe validate --manifest $manifestDir
+          if ($LASTEXITCODE -ne 0) { throw "winget validate failed with exit code $LASTEXITCODE." }
+
+          Write-Host "Enabling local manifest installation..."
+          & winget.exe settings --enable LocalManifestFiles
+          if ($LASTEXITCODE -ne 0) { throw "Could not enable LocalManifestFiles (exit code $LASTEXITCODE)." }
+
+          Write-Host "Testing installation from the generated local manifest..."
+          & winget.exe install --manifest $manifestDir --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "Local manifest installation failed with exit code $LASTEXITCODE." }
+
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+              throw "WINGET_TOKEN is unavailable; cannot update the submitted WinGet PR checklist."
+          }
+          $headers = @{
+              Authorization = "Bearer $env:WINGET_CREATE_GITHUB_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+              "User-Agent" = "Windows-Maintenance-Tool-release"
+          }
+          $pullsUri = "https://api.github.com/repos/microsoft/winget-pkgs/pulls?state=open&per_page=100&sort=created&direction=desc"
+          $pulls = Invoke-RestMethod -Uri $pullsUri -Headers $headers -TimeoutSec 30
+          $expectedTitle = "New version: Chaython.WindowsMaintenanceTool version $env:RELEASE_VERSION"
+          $matchingPulls = @($pulls | Where-Object {
+              $_.title -eq $expectedTitle -and
+              $_.user.login -eq "Chaython" -and
+              $_.head.repo.full_name -eq "Chaython/winget-pkgs"
+          })
+          if ($matchingPulls.Count -ne 1) {
+              throw "Expected one open WinGet PR titled '$expectedTitle' from Chaython/winget-pkgs; found $($matchingPulls.Count)."
+          }
+          $pr = $matchingPulls[0]
+
+          $otherMatchingPulls = @($pulls | Where-Object {
+              $_.number -ne $pr.number -and
+              $_.title -like "New version: Chaython.WindowsMaintenanceTool version *"
+          })
+          if ($otherMatchingPulls.Count -gt 0) {
+              throw "Another open WinGet PR for this package was found; refusing to claim the duplicate check passed."
+          }
+
+          # Wait briefly for Microsoft's CLA bot. Never mark the CLA item unless it passes.
+          $claSucceeded = $false
+          $checkRunsUri = "https://api.github.com/repos/microsoft/winget-pkgs/commits/$($pr.head.sha)/check-runs?per_page=100"
+          for ($attempt = 0; $attempt -lt 18; $attempt++) {
+              try {
+                  $checkRuns = Invoke-RestMethod -Uri $checkRunsUri -Headers $headers -TimeoutSec 30
+                  $claRun = @($checkRuns.check_runs | Where-Object { $_.name -match "^(license/cla|CLA)$" } | Select-Object -First 1)
+                  if ($claRun.Count -gt 0 -and $claRun[0].conclusion -eq "success") {
+                      $claSucceeded = $true
+                      break
+                  }
+                  if ($claRun.Count -gt 0 -and $claRun[0].conclusion -eq "failure") { break }
+              }
+              catch { Write-Warning "Could not read CLA status yet: $($_.Exception.Message)" }
+              Start-Sleep -Seconds 10
+          }
+
+          $body = [string]$pr.body
+          $body = $body.Replace("- [ ] Linked to an issue (if applicable)", "- [x] Linked to an issue (if applicable) — no related issue applies to this release.")
+          $body = $body.Replace("  <!-- Example: Resolves #[Issue Number] -->", "")
+          $body = $body.Replace("  - Resolves #[Issue Number]", "")
+          $body = $body.Replace("- [ ] Checked that there aren't other [pull requests]", "- [x] Checked that there aren't other [pull requests]")
+          $body = $body.Replace("- [ ] This PR only modifies one (1) manifest", "- [x] This PR only modifies one (1) manifest")
+          $body = $body.Replace("- [ ] Validated manifest locally with", "- [x] Validated manifest locally with")
+          $body = $body.Replace("- [ ] Tested manifest locally with", "- [x] Tested manifest locally with")
+          $body = $body.Replace("- [ ] Manifest conforms to the", "- [x] Manifest conforms to the")
+          if ($claSucceeded) {
+              $body = $body.Replace("- [ ] Signed the [Contributor License Agreement]", "- [x] Signed the [Contributor License Agreement]")
+          }
+          else {
+              Write-Warning "Microsoft's CLA check has not succeeded; leaving that checkbox unchecked."
+          }
+
+          $patchBody = @{ body = $body } | ConvertTo-Json -Depth 5
+          $updateUri = "https://api.github.com/repos/microsoft/winget-pkgs/pulls/$($pr.number)"
+          Invoke-RestMethod -Method Patch -Uri $updateUri -Headers $headers -ContentType "application/json" -Body $patchBody -TimeoutSec 30 | Out-Null
+          Write-Host "Updated WinGet PR checklist: https://github.com/microsoft/winget-pkgs/pull/$($pr.number)"
   push-chocolatey:
     needs: build-release
     if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_chocolatey }}
