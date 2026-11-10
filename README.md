@@ -14,183 +14,6 @@ Windows Maintenance Tool (WMT) is an all-in-one Windows 10/11 maintenance GUI fo
 
 WMT is designed for technicians, power users, and everyday users who want visible status, searchable tools, confirmation prompts, backups where appropriate, and background work that avoids freezing the WPF interface.
 
-<details>
-<summary><b>False positive / antivirus reporting links</b></summary>
-
-If your antivirus reports WMT as a PUP or false positive, submit the file to the antivirus vendor for review and whitelist your trusted local copy if appropriate. WMT is open source, and antivirus false positives should be reported to the antivirus vendor rather than opened as WMT bug reports.
-
-| Antivirus vendor | Submission link or email | Notes |
-| :--- | :--- | :--- |
-| **Avast** | [Avast False Positive Form](https://www.avast.com/en-us/false-positive-file-form.php) | Web form for file or URL submission. |
-| **AVG** | [AVG False Positive Form](https://www.avg.com/en-us/false-positive-file-form) | AVG and Avast share engines, but use their respective forms. |
-| **Avira** | [Avira Analysis Submit](https://analysis.avira.com/en/submit) | Requires an account/login. |
-| **Bitdefender** | [Bitdefender Submission Portal](https://www.bitdefender.com/submit/) | You can also contact Bitdefender sample submission support. |
-| **ClamAV** | [ClamAV False Positives](http://www.clamav.net/reports/fp) | Open-source engine used by many secondary providers. |
-| **ESET** | `samples@eset.com` | Follow ESET's sample-submission instructions. |
-| **F-Secure** | [F-Secure Sample Submit](https://www.f-secure.com/en/web/labs_global/submit-a-sample) | Include details that the detection is believed to be a false positive. |
-| **Kaspersky** | [Kaspersky OpenTip](https://opentip.kaspersky.com/) | Analyze the file and submit it for review. |
-| **Malwarebytes** | [Malwarebytes Forums](https://forums.malwarebytes.com/forum/122-false-positives/) | False-positive reports are handled through their forums. |
-| **McAfee** | `virus_research@mcafee.com` | Follow McAfee's sample-submission instructions. |
-| **Microsoft Defender** | [Microsoft Security Intelligence](https://www.microsoft.com/en-us/wdsi/filesubmission) | Select the appropriate developer/software submission option. |
-| **Norton / Symantec** | [Symantec Submit Form](https://symsubmit.symantec.com/) | Choose the incorrect-detection workflow. |
-| **Sophos** | [Sophos Sample Submission](https://secure2.sophos.com/en-us/support/submit-a-sample.aspx) | Explain that you believe the file is a false positive. |
-| **Trend Micro** | [Detection Re-evaluation](https://www.trendmicro.com/en_us/about/legal/detection-reevaluation.html) | Provide the requested file/hash details. |
-
-VirusTotal maintains a broader vendor contact directory here: https://docs.virustotal.com/docs/false-positive-contacts
-</details>
-
-## Download channels
-
-**Stable releases:** [Versioned GitHub releases](https://github.com/Chaython/Windows-Maintenance-Tool/releases/latest) are published manually. Only those stable releases are eligible for optional WinGet/Chocolatey updates.
-
-**Rolling prerelease:** [Latest Main preview](https://github.com/Chaython/Windows-Maintenance-Tool/releases/tag/rolling) is built automatically on pushes to Main after the executable passes the build syntax check, SHA-256 hashing and GitHub/Sigstore provenance verification. The rolling tag and its download assets are replaced with the newest successful build; **the URL remains the same but the file bytes can change**. This channel is for testing, not package-manager distribution.
-
-Both newly published channels include WindowsMaintenanceTool.exe, WindowsMaintenanceTool.exe.sha256, and WindowsMaintenanceTool.exe.sigstore.json. The rolling release notes identify the exact source commit and SHA-256. Download the EXE and bundle together, and use the documented attestation verification below. Neither channel is Authenticode-signed; verify downloads with the provenance steps below.
-
-## Verify release provenance (Sigstore / GitHub Attestations)
-
-Newly published stable and rolling EXE releases produced by the **Build PS2EXE Release** GitHub Actions workflow include a `WindowsMaintenanceTool.exe.sigstore.json` attestation bundle and a SHA-256 checksum. The build workflow uses GitHub's public Sigstore integration to issue a short-lived signing certificate, attest the built executable, and verify its provenance before publishing. Existing releases built before this change do **not** have this attestation.
-
-Install the [GitHub CLI](https://cli.github.com/) and download both `WindowsMaintenanceTool.exe` and `WindowsMaintenanceTool.exe.sigstore.json` from the *same* new release. Then run this in PowerShell from the download directory:
-
-```powershell
-gh attestation verify .\WindowsMaintenanceTool.exe `
-  --repo Chaython/Windows-Maintenance-Tool `
-  --bundle .\WindowsMaintenanceTool.exe.sigstore.json `
-  --signer-workflow Chaython/Windows-Maintenance-Tool/.github/workflows/release-ps2exe.yml
-```
-
-Alternatively, with internet access, `gh attestation verify .\WindowsMaintenanceTool.exe --repo Chaython/Windows-Maintenance-Tool` retrieves the attestation from GitHub. Use the `--source-digest <commit-sha>` flag to pin verification to a specific expected source commit, which is required by the release workflow's own verification.
-
-**An attestation verifies the provenance and integrity of the downloaded bytes; it is not Authenticode code signing.** Windows SmartScreen and Defender do not treat it as a trusted EXE publisher signature, and it does not guarantee an antivirus detection will be cleared. Verify the source and download and review security warnings rather than bypassing them automatically.
-
-## Highlights
-
-- Modern searchable GUI with persistent dark/light themes, tray support, start-with-Windows, and start-minimized controls.
-- Updates panel covering Windows/package managers, language ecosystems, PowerShell tooling, Steam, Epic/Legendary, and GOG/GOGDL.
-- Per-provider update, package-search, library-search, and metadata controls where supported.
-- Custom per-package PowerShell updater commands with placeholders for package metadata.
-- Unified game/software library with Steam, Epic/Legendary, GOG, and package-provider integration, including owned-title install flows and installed-state recovery.
-- Rebuilt Drivers page that inventories third-party Driver Store packages and classifies in-use, old/superseded, unattached, and inactive packages.
-- Advanced cleanup with internal rules, Winapp2, Winapp3, BleachBit CleanerML, preview/analyze mode, configurable cache/update refresh intervals, and optional automatic cleanup.
-- Compact Compression utility for folders and drives with persistent tracking, skip lists, change-aware recompression, and scheduled auto-recompression that can run without the WMT window being open.
-- WinDirStat-style **Disk Usage Analyzer** in Utilities and under My Device > Storage Drives: background scan, interactive treemap, a single **Details** tab with a themed folder tree that reaches every scanned folder and subfolder, **Back**/**Up** navigation that reuses the scan in memory instead of rescanning, right-click file actions, file-type legend, export, and Recycle Bin cleanup.
-- Firewall Manager with background rule loading, cached details, and fast protocol/port preloading through the Windows Firewall COM/.NET path with fallback behavior.
-- Background runspace/process infrastructure for long-running scans, DISM, networking, service, driver, package, and other operations so the GUI remains responsive.
-- Safety-focused registry cleanup, backups/revert paths, review-only findings, confirmation prompts, and detailed activity logging.
-- PS2EXE release builds plus validation/release workflows, with optional release submission paths for WinGet and Chocolatey.
-
-## Screenshot
-
-<img width="1902" height="1024" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/d26382d7-a218-456c-86f0-a53209e51a72" /> 
-
-
-<details open>
-<summary><strong>What's new in v6.9 (October 2026)</strong></summary>
-
-v6.9 focuses on startup responsiveness, lower background resource use, and compiled-app theming.
-
-- Improved native title-bar colors and theme handling for the compiled EXE.
-- Bounded background runspace concurrency and lowered worker thread priority to keep the interface responsive during scans.
-- Open runspace pools on demand and defer hidden-page warm-up so startup work does not compete with initial interaction.
-- Release parsed PyPI catalog data after processing to reduce retained memory.
-
-This is the **source version on `Main`**; the release executable and package-manager manifests are updated only when a new release is built and published.
-
-</details>
-
-<details>
-<summary><strong>What's new in v6.8 (October 2026)</strong></summary>
-
-v6.8 updated WMT's software catalogue, game import/recovery, system tweaks, driver maintenance, package logging, and background-operation safety.
-
-### Software catalogue and game libraries
-
-- Added **Locate / Import** for existing Steam, Epic/Legendary, and GOG/GOGDL games. Steam imports use registered libraries and existing manifests or Steam's own verification flow; WMT does not fabricate Steam manifests. Legendary verifies its imported install path, and GOGDL validates the game's manifest/app ID before WMT records an installed path.
-- Keep Locate / Import on the catalogue action bar, position it next to Install, and make the Updates navigation more direct. Library totals and the **Include Fab** toggle now sit in the catalogue header to free up the bottom toolbar.
-- Preserve installed-game and provider-cache state when refreshing catalogues, including local Legendary metadata fallback and GOG install-tracking recovery where supported.
-
-### Installer, catalogue, and import reliability
-
-- **Installer timeout safety:** preserve `TimedOut` and `TerminationFailed` fields on nonzero visible-installer results. Do not quietly normalize a failed installer into an ordinary exit-code-only result; stop follow-on package work when native termination cannot be confirmed.
-- **Bound background library work:** catalogue library scans now have a **2-minute** watchdog, library cache builds a **30-minute** watchdog, and Locate / Import a **121-minute** watchdog around the existing 120-minute provider-process limit.
-- Report timeout or worker-monitor failures in the UI and activity log, request asynchronous PowerShell cleanup, and avoid blocking the WPF dispatcher while stopping background work. Import controls stay guarded while an overdue worker is being stopped.
-- Added PowerShell CI regression checks for these timeout and error-handling paths.
-
-### Drivers and Windows tweaks
-
-- Retained fast disconnected/ghost-device enumeration but moved it off the WPF thread to a background worker. Connected-device checks still run before removal, and the full-width review dialog is retained.
-- Improved the layout of the old-driver cleanup, driver export, and driver backup/restore dialogs, including more consistent edge-to-edge lists and controls.
-- **Preload driver inventory on startup**, after initial system checks. Package enumeration and the slower device/service usage check run in separate background phases, with deferred runspace retries.
-- **Reuse the completed Drivers inventory in Clean Old Drivers**, including protections for service/filter drivers; no redundant `pnputil` enumeration just to open cleanup. After removals, update the cached rows in place and recheck only device usage when necessary. Deletion still verifies live usage.
-- Added a **Windows pagefile** configuration tweak with detection of current settings, safe saved-state restoration, rollback/error handling, and handling for empty `REG_MULTI_SZ` values. Pagefile changes may require a restart before they take effect.
-
-### Logging, shortcuts, and release security
-
-- Improved package-install transcripts, including captured output from child processes launched by custom PowerShell/CMD installer commands and more readable CLIXML/UTF-16 error output.
-- Added lightweight **F5**, **Ctrl+F**, and **Ctrl+Shift+F** context-sensitive shortcuts, and restored the one-time update scan on launch without rescanning merely because the Updates tab is opened.
-- Prepared **GitHub/Sigstore artifact attestations** and release provenance verification. Releases are not Authenticode-signed, and an attestation does not remove SmartScreen or antivirus warnings.
-- Expanded Windows PowerShell syntax and smoke/regression checks around the ghost scanner, pagefile, driver dialogs, process output, and timeouts.
-
-</details>
-
-<details>
-<summary><strong>What's new in v6.7</strong></summary>
-
-v6.7 is a broad maintenance and reliability update focused on background execution, automation, package/game providers, cleanup, compression, memory usage, and UI responsiveness.
-
-- Added a full **Epic / Legendary install flow** to Your Library. Owned Epic titles can now be installed with a selectable library root, optional game-folder override, platform, download-worker count, shared-memory limit, owned DLC selection, and Legendary's optional file-reordering mode.
-- Added Legendary credential and metadata preflight. WMT checks the local saved-login state, validates Epic access before install when possible, offers to open Legendary authentication when credentials are missing/invalid, and can fall back to cached metadata when live metadata is unavailable.
-- Hardened Legendary install tracking and destination handling with duplicate/pending-install guards, longer-running install support, improved final-path resolution, clearer destination reporting, and post-install **desktop / Start menu shortcut** creation.
-- Reworked Legendary library refresh and recovery around Legendary's local installed-game JSON. WMT merges installed state and install paths with owned/cached metadata, preserves known-good library data when live Epic metadata is unavailable, recovers stale/missing installed folders for library actions, and rebuilds provider caches during an explicit library refresh.
-- Added a full **GOG / GOGDL install flow** to Your Library. Owned GOG games can now be installed with a selectable install root, language, build/version, individual owned DLCs, and configurable download-worker count.
-- Added persistent GOGDL install tracking so WMT can distinguish **Owned**, **Downloading**, and **Installed** titles, prevent duplicate downloads, resolve completed install paths from GOGDL manifests, and better handle repair/relaunch scenarios.
-- Improved GOGDL authentication/path discovery, including compatible Heroic GOG authentication fallback, language validation, install-path resolution, themed install UI, and lower-memory defaults.
-- Added optional post-install **desktop shortcuts and Start menu entries** for both Legendary and GOGDL installs.
-- Added portable **Legendary** and **GOGDL** provider-binary update checks to the normal Updates flow.
-- Added the **Compact Compression** tracker with persistent folder/drive history, automatic recompression, custom schedules, change detection, per-target state/results, and optional skip lists for already-compressed or poor-compression file formats.
-- Added Windows Task Scheduler integration for Compact recompression so scheduled compression can run even when WMT itself is closed.
-- Hardened Compact tracker persistence, including automatic recovery/repair when stale ACLs on the ProgramData tracker block WMT from reading or updating it.
-- Added a **Disk Usage Analyzer** (WinDirStat-style) to Utilities and My Device > Storage Drives: recursive background scan that keeps the full folder tree in memory, squarified treemap, a single **Details** tab with a hierarchical folder tree (every folder and subfolder, filtering across the whole scan), **Back**/**Up** and folder drill-down served from the cached scan (only **Scan** reads the disk), right-click file actions, report export, open-location, and Recycle Bin cleanup. The window is flat and borderless like the main window, tab and tree styling use WMT theme resources for normal, hover, selected, and focused states, and resizable XAML subwindows remember their size and maximized state between sessions; this can be disabled from the Support tab. Every analyzer event handler is guarded so an error is reported in the status line instead of reaching the WPF dispatcher.
-- Added configurable cleaner **local cache refresh**, **upstream definition checks**, and **automatic cleaning** intervals.
-- Automatic cleaning uses only explicitly saved cleaner selections and runs in a separate hidden worker process while WMT is open or hidden in the tray; overlapping runs are prevented and the global **BG Jobs** toggle disables new cleaner background work.
-- Added **Show Enabled** filtering and substantial cleaner worker/poller race, closure, startup, cancellation, and completion-state hardening.
-- Restored aggressive **Reduce RAM while hidden in tray** behavior and now releases large reloadable CleanerML, Winapp2, Winapp3, game-library, and related caches while hidden.
-- Reworked settings persistence with safer value copying, atomic writes, backup recovery, corrupt-file preservation, external-edit cache invalidation, cleaner interval persistence, and persistent debug/verbose logging state.
-- Reworked shared background execution, runspace pools, process running, polling, cancellation, Steam parsing, provider startup, BitLocker/Winget preflight handling, and driver operations to move more blocking work off the WPF thread.
-- Added atomic provider/library cache writes and preserves known-good caches when a refresh unexpectedly returns no useful data.
-- Hardened Steam ownership detection so Steam-installed games are less likely to appear as duplicate or unknown-version Winget updates.
-- Added UTF-8 Steam manifest handling so registered, trademarked, and accented titles render correctly.
-- Added per-package **custom updater commands** for pending update rows, including `{id}`, `{name}`, `{source}`, `{version}`, and `{available}` placeholders.
-- Improved Firewall Manager background loading and bulk protocol/port preloading using persistent-store `Get-NetFirewallPortFilter` data, while retaining lazy/fallback detail loading.
-- Expanded and themed the system-tray context menu with direct shortcuts to Updates, System Health, Cleanup, Drivers, Utilities, and theme switching.
-- Added tweak configuration **Export JSON / Import JSON** support and fixed Tweaks loading-overlay state leaking onto other tabs.
-- Fixed AppX selection theming, Updates status-text overlap, Firewall Manager action alignment, tray theme-state text, and several other UI consistency issues. ComboBox/dropdown hover and selection colors now follow the same theme inversion as list views, including the GOGDL/Legendary installer dialogs, and folder-selection flows use the Explorer-style picker.
-- Expanded registry-cleaner handling for BAM/DAM and `PendingFileRenameOperations`, including safer pair-preserving rewrites and review-only handling where automatic changes are unsafe.
-- Invalid Microsoft Defender exclusions now use the supported Defender API (`Remove-MpPreference`) with result verification instead of attempting direct deletion of protected Defender registry values.
-- Fixed self-update script-path resolution when WMT is launched directly through PowerShell, resolving **#161**.
-- Expanded PowerShell CI from syntax parsing into regression/smoke testing for settings persistence/recovery, cleaner worker state, closure hazards, and shared runspace helper loading.
-- Improved the PS2EXE release workflow with SHA-256 generation, safer release existence checks, GitHub release asset replacement, and optional WinGet/Chocolatey publishing when the required package entries/secrets are available.
-- Refreshed and reorganized the README for v6.7, including updated screenshots, troubleshooting, safety notes, community/sponsor links, and release/development documentation.
-
-</details>
-
-## Keyboard Shortcuts
-
-The main WMT window supports a few familiar, context-sensitive shortcuts:
-
-| Shortcut | Action |
-| --- | --- |
-| **F5** | Refresh the visible Updates, Drivers, Firewall, or Your Library view, if its refresh action is enabled. |
-| **Ctrl+F** | Focus the search field for the visible Updates, Drivers, Firewall, or Your Library view (or Quick Find elsewhere). When the activity log has focus, search the log instead. |
-| **Ctrl+Shift+F** | Focus global Quick Find. |
-
-F5 on Updates is an explicit package scan: merely visiting the Updates tab does **not** trigger a scan. Refresh shortcuts reuse the corresponding on-screen actions and respect disabled controls. Other pages do not run a refresh action on F5.
-
-### Quick Find
-
-Quick Find is in the left sidebar above the navigation buttons (without an extra Navigation heading). Typing a tool name or related description opens the **Find Tools** page in the main workspace. Related tools are dynamically grouped by section and presented using the **actual WPF buttons** from their existing pages, including current labels, icons, enabled states, and original click handlers. Clicking these buttons performs their normal action **immediately**, just as on the original page; review sensitive operations before clicking. The original control is restored to its exact place when the search changes, the user switches tabs, the window closes, or Quick Find is hidden. Controls that depend on their original page context (such as catalogue navigation or non-button search fields), along with disabled controls and tools inside hidden subsections, instead offer **Open section**. The Software Catalog and Your Game Library results navigate into the correct sub-view. Broad searches display up to 40 matching controls to limit WPF layout work, with a short debounce during typing. Clearing the query removes the result cards; navigation stays available while searching. Automated Windows smoke tests exercise button relocation, original click handlers, inherited state, and restoration.
-
 ## Core Features
 
 <details>
@@ -244,6 +67,21 @@ Quick Find is in the left sidebar above the navigation buttons (without an extra
 - Run CHKDSK tools.
 - Repair Windows Update components and reset update services.
 - Long-running repair operations use background workers where practical to reduce WPF-thread stalls.
+
+</details>
+
+<details>
+<summary><strong>Disk Analyzer</strong></summary>
+
+- Analyze selected folders or drives with a recursive background scan while keeping the WPF interface responsive.
+- Explore disk usage through an interactive, squarified treemap and a hierarchical folder tree containing the scanned folders and subfolders.
+- Select a treemap area to navigate to or expand its corresponding folder; double-click entries to open their location in File Explorer.
+- Use the Details view to browse the full scanned hierarchy, filter results, sort columns, and resize columns using the native, continuous ListView-style headers.
+- Navigate with Back and Up using the in-memory scan results; only starting a new scan reads the selected location from disk.
+- Browse to a folder to select it and automatically start scanning. The drive indicator follows the selected folder's drive, defaulting to C: when no other drive is selected.
+- Use the themed context menu for supported file and folder actions, including opening locations, copying paths, opening terminals, viewing Properties, refreshing, expanding/collapsing, and deleting with confirmation.
+- Review file-type usage, inspect immediate-folder file/folder counts, and export scan reports.
+- Open the analyzer from **Utilities** or **My Device > Storage Drives**.
 
 </details>
 
@@ -522,6 +360,25 @@ WMT stores generated data next to the script in its local `data` folder.
 - `.github/workflows/release-ps2exe.yml` automatically publishes a rolling prerelease from `Main`, and separately supports manual versioned releases, both with Sigstore attestations.
 - Release tooling includes optional WinGet submission and Chocolatey package publication paths when the required secrets/package entries are available.
 - Long-running GUI operations are increasingly routed through shared runspace/process/polling infrastructure to keep the main WPF dispatcher responsive.
+
+</details>
+
+<details>
+<summary><strong>Keyboard Shortcuts & Quick Find</strong></summary>
+
+The main WMT window supports a few familiar, context-sensitive shortcuts:
+
+| Shortcut | Action |
+| --- | --- |
+| **F5** | Refresh the visible Updates, Drivers, Firewall, or Your Library view, if its refresh action is enabled. |
+| **Ctrl+F** | Focus the search field for the visible Updates, Drivers, Firewall, or Your Library view (or Quick Find elsewhere). When the activity log has focus, search the log instead. |
+| **Ctrl+Shift+F** | Focus global Quick Find. |
+
+F5 on Updates is an explicit package scan: merely visiting the Updates tab does **not** trigger a scan. Refresh shortcuts reuse the corresponding on-screen actions and respect disabled controls. Other pages do not run a refresh action on F5.
+
+### Quick Find
+
+Quick Find is in the left sidebar above the navigation buttons (without an extra Navigation heading). Typing a tool name or related description opens the **Find Tools** page in the main workspace. Related tools are dynamically grouped by section and presented using the **actual WPF buttons** from their existing pages, including current labels, icons, enabled states, and original click handlers. Clicking these buttons performs their normal action **immediately**, just as on the original page; review sensitive operations before clicking. The original control is restored to its exact place when the search changes, the user switches tabs, the window closes, or Quick Find is hidden. Controls that depend on their original page context (such as catalogue navigation or non-button search fields), along with disabled controls and tools inside hidden subsections, instead offer **Open section**. The Software Catalog and Your Game Library results navigate into the correct sub-view. Broad searches display up to 40 matching controls to limit WPF layout work, with a short debounce during typing. Clearing the query removes the result cards; navigation stays available while searching. Automated Windows smoke tests exercise button relocation, original click handlers, inherited state, and restoration.
 
 </details>
 
