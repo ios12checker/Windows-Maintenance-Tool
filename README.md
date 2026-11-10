@@ -14,6 +14,79 @@ Windows Maintenance Tool (WMT) is an all-in-one Windows 10/11 maintenance GUI fo
 
 WMT is designed for technicians, power users, and everyday users who want visible status, searchable tools, confirmation prompts, backups where appropriate, and background work that avoids freezing the WPF interface.
 
+
+
+<details>
+<summary><b>False positive / antivirus reporting links</b></summary>
+
+If your antivirus reports WMT as a PUP or false positive, submit the file to the antivirus vendor for review and whitelist your trusted local copy if appropriate. WMT is open source, and antivirus false positives should be reported to the antivirus vendor rather than opened as WMT bug reports.
+
+| Antivirus vendor | Submission link or email | Notes |
+| :--- | :--- | :--- |
+| **Avast** | [Avast False Positive Form](https://www.avast.com/en-us/false-positive-file-form.php) | Web form for file or URL submission. |
+| **AVG** | [AVG False Positive Form](https://www.avg.com/en-us/false-positive-file-form) | AVG and Avast share engines, but use their respective forms. |
+| **Avira** | [Avira Analysis Submit](https://analysis.avira.com/en/submit) | Requires an account/login. |
+| **Bitdefender** | [Bitdefender Submission Portal](https://www.bitdefender.com/submit/) | You can also contact Bitdefender sample submission support. |
+| **ClamAV** | [ClamAV False Positives](http://www.clamav.net/reports/fp) | Open-source engine used by many secondary providers. |
+| **ESET** | `samples@eset.com` | Follow ESET's sample-submission instructions. |
+| **F-Secure** | [F-Secure Sample Submit](https://www.f-secure.com/en/web/labs_global/submit-a-sample) | Include details that the detection is believed to be a false positive. |
+| **Kaspersky** | [Kaspersky OpenTip](https://opentip.kaspersky.com/) | Analyze the file and submit it for review. |
+| **Malwarebytes** | [Malwarebytes Forums](https://forums.malwarebytes.com/forum/122-false-positives/) | False-positive reports are handled through their forums. |
+| **McAfee** | `virus_research@mcafee.com` | Follow McAfee sample submission instructions. |
+| **Microsoft Defender** | [Microsoft Security Intelligence](https://www.microsoft.com/en-us/wdsi/filesubmission) | Select the appropriate developer/software submission option. |
+| **Norton / Symantec** | [Symantec Submit Form](https://symsubmit.symantec.com/) | Choose the incorrect-detection workflow. |
+| **Sophos** | [Sophos Sample Submission](https://secure2.sophos.com/en-us/support/submit-a-sample.aspx) | Explain that you believe the detection is a false positive. |
+| **Trend Micro** | [Detection Re-evaluation](https://www.trendmicro.com/en_us/about/legal/detection-reevaluation.html) | Provide the requested file/hash details. |
+
+VirusTotal maintains a broader vendor contact directory here: https://docs.virustotal.com/docs/false-positive-contacts
+</details>
+
+## Download channels
+
+**Stable releases:** [Versioned GitHub releases](https://github.com/Chaython/Windows-Maintenance-Tool/releases/latest) are published manually. Only those stable releases are eligible for optional WinGet/Chocolatey updates.
+
+**Rolling prerelease:** [Latest Main preview](https://github.com/Chaython/Windows-Maintenance-Tool/releases/tag/rolling) is built automatically on pushes to Main after the executable passes the build syntax check, SHA-256 hashing and GitHub/Sigstore provenance verification. The rolling tag and its download assets are replaced with the newest successful build; **the URL remains the same but the file bytes can change**. This channel is for testing, not package-manager distribution.
+
+Both newly published channels include WindowsMaintenanceTool.exe, WindowsMaintenanceTool.exe.sha256, and WindowsMaintenanceTool.exe.sigstore.json. The rolling release notes identify the exact source commit and SHA-256. Download the EXE and bundle together, and use the documented attestation verification below. Neither channel is Authenticode-signed; verify downloads with the provenance steps below.
+
+## Verify release provenance (Sigstore / GitHub Attestations)
+
+Newly published stable and rolling EXE releases produced by the **Build PS2EXE Release** GitHub Actions workflow include a `WindowsMaintenanceTool.exe.sigstore.json` attestation bundle and a SHA-256 checksum. The build workflow uses GitHub's public Sigstore integration to issue a short-lived signing certificate, attest the built executable, and verify its provenance before publishing. Existing releases built before this change do **not** have this attestation.
+
+Install the [GitHub CLI](https://cli.github.com/) and download both `WindowsMaintenanceTool.exe` and `WindowsMaintenanceTool.exe.sigstore.json` from the *same* new release. Then run this in PowerShell from the download directory:
+
+```powershell
+gh attestation verify .\WindowsMaintenanceTool.exe `
+  --repo Chaython/Windows-Maintenance-Tool `
+  --bundle .\WindowsMaintenanceTool.exe.sigstore.json `
+  --signer-workflow Chaython/Windows-Maintenance-Tool/.github/workflows/release-ps2exe.yml
+```
+
+Alternatively, with internet access, `gh attestation verify .\WindowsMaintenanceTool.exe --repo Chaython/Windows-Maintenance-Tool` retrieves the attestation from GitHub. Use the `--source-digest <commit-sha>` flag to pin verification to a specific expected source commit, which is required by the release workflow's own verification.
+
+**An attestation verifies the provenance and integrity of the downloaded bytes; it is not Authenticode code signing.** Windows SmartScreen and Defender do not treat it as a trusted EXE publisher signature, and it does not guarantee an antivirus detection will be cleared. Verify the source and download and review security warnings rather than bypassing them automatically.
+
+## Highlights
+
+- Modern searchable GUI with persistent dark/light themes, tray support, start-with-Windows, and start-minimized controls.
+- Updates panel covering Windows/package managers, language ecosystems, PowerShell tooling, Steam, Epic/Legendary, and GOG/GOGDL.
+- Per-provider update, package-search, library-search, and metadata controls where supported.
+- Custom per-package PowerShell updater commands with placeholders for package metadata.
+- Unified game/software library with Steam, Epic/Legendary, GOG, and package-provider integration, including owned-title install flows and installed-state recovery.
+- Rebuilt Drivers page that inventories third-party Driver Store packages and classifies in-use, old/superseded, unattached, and inactive packages.
+- Advanced cleanup with internal rules, Winapp2, Winapp3, BleachBit CleanerML, preview/analyze mode, configurable cache/update refresh intervals, and optional automatic cleanup.
+- Compact Compression utility for folders and drives with persistent tracking, skip lists, change-aware recompression, and scheduled auto-recompression that can run without the WMT window being open.
+- WinDirStat-style **Disk Usage Analyzer** in Utilities and under My Device > Storage Drives: background scan, interactive treemap, a single **Details** tab with a themed folder tree that reaches every scanned folder and subfolder, **Back**/**Up** navigation that reuses the scan in memory instead of rescanning, right-click file actions, file-type legend, export, and Recycle Bin cleanup.
+- Firewall Manager with background rule loading, cached details, and fast protocol/port preloading through the Windows Firewall COM/.NET path with fallback behavior.
+- Background runspace/process infrastructure for long-running scans, DISM, networking, service, driver, package, and other operations so the GUI remains responsive.
+- Safety-focused registry cleanup, backups/revert paths, review-only findings, confirmation prompts, and detailed activity logging.
+- PS2EXE release builds plus validation/release workflows, with optional release submission paths for WinGet and Chocolatey.
+
+## Screenshot
+
+<img width="1902" height="1024" alt="Screenshot of the credits page." src="https://github.com/user-attachments/assets/d26382d7-a218-456c-86f0-a53209e51a72" />
+
+
 ## Core Features
 
 <details>
