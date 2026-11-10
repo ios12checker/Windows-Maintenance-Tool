@@ -487,7 +487,7 @@ jobs:
 
           $body = [string]$pr.body
           $body = $body.Replace("- [ ] Linked to an issue (if applicable)", "- [x] Linked to an issue (if applicable) — no related issue applies to this release.")
-          $body = $body.Replace("  <!-- Example: Resolves #[Issue Number] -->", "")
+          $body = [regex]::Replace($body, '(?m)^\\s*<!-- Example: Resolves #[^>]+ -->\\r?\\n', '')
           $body = $body.Replace("  - Resolves #[Issue Number]", "")
           $body = $body.Replace("- [ ] Checked that there aren't other [pull requests]", "- [x] Checked that there aren't other [pull requests]")
           $body = $body.Replace("- [ ] This PR only modifies one (1) manifest", "- [x] This PR only modifies one (1) manifest")
