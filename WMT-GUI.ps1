@@ -9095,15 +9095,68 @@ $patchJson = ConvertTo-Json -InputObject $Patch -Depth 8 -Compress
 $listOperationsJson = ConvertTo-Json -InputObject @($ListOperations) -Depth 8 -Compress
 $mutexName = $script:WmtSettingsWriteMutexName
 $userOnComplete = $OnComplete
+$operationId = $Name
+$uiDispatcher = $null
+try { $uiDispatcher = [System.Windows.Threading.Dispatcher]::CurrentDispatcher } catch {}
 $completed = {
     param($results)
-    $saved = @($results | Where-Object { $_ -and $_.PSObject.Properties['SettingsStamp'] -and $_.PSObject.Properties['Settings'] } | Select-Object -Last 1)[0]
-    if (-not $saved) { throw "Settings save completed without returning the saved settings state." }
-    $script:WmtSettingsCache = Copy-WmtSettings -Settings $saved.Settings
-    $script:WmtSettingsCacheStamp = [string]$saved.SettingsStamp
-    if (-not [string]::IsNullOrWhiteSpace([string]$saved.Message)) { Write-GuiLog ([string]$saved.Message) }
-    else { Write-GuiLog "Done." }
-    if ($userOnComplete) { & $userOnComplete $results }
+
+    # This callback is delivered by the shared WPF DispatcherTimer. Refuse to
+    # touch WPF-bound state from a worker thread if that delivery contract ever changes.
+    if ($uiDispatcher -and -not $uiDispatcher.CheckAccess()) {
+        try { Write-GuiLog "[$operationId] Completion rejected: callback was not on the WPF dispatcher." } catch {}
+        return
+    }
+
+    Write-GuiLog "[$operationId] Completion stage: validating persisted settings result."
+    $saved = @(
+        $results | Where-Object {
+            $_ -and
+            $_.PSObject.Properties['SettingsStamp'] -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.SettingsStamp) -and
+            $_.PSObject.Properties['Settings'] -and
+            $null -ne $_.Settings
+        } | Select-Object -Last 1
+    )[0]
+    if (-not $saved) {
+        Write-GuiLog "[$operationId] Completion validation failed; settings cache and success state were not updated."
+        try { if ($OnError) { & $OnError ([System.Exception]::new("Settings save completed without returning a validated persisted settings result.")) } } catch {}
+        return
+    }
+
+    # The worker writes and validates settings.json before it returns this result.
+    # Only now update the in-memory cache and report the save as successful.
+    try {
+        $cacheCopy = Copy-WmtSettings -Settings $saved.Settings
+        if ($null -eq $cacheCopy) { throw "Could not copy the persisted settings into the settings cache." }
+        $script:WmtSettingsCache = $cacheCopy
+        $script:WmtSettingsCacheStamp = [string]$saved.SettingsStamp
+        Write-GuiLog "[$operationId] Completion stage: settings persisted and cache updated."
+    }
+    catch {
+        # Disk persistence already succeeded. Cache maintenance must not turn
+        # that successful disk write into a failed save.
+        try { Write-GuiLog "[$operationId] Settings file was saved, but cache refresh failed: $($_.Exception.Message)" } catch {}
+    }
+
+    try {
+        if (-not [string]::IsNullOrWhiteSpace([string]$saved.Message)) { Write-GuiLog "[$operationId] $([string]$saved.Message)" }
+        else { Write-GuiLog "[$operationId] Settings save confirmed." }
+    }
+    catch {}
+
+    if ($userOnComplete) {
+        try {
+            Write-GuiLog "[$operationId] Completion stage: running post-save UI callback."
+            & $userOnComplete $results
+            Write-GuiLog "[$operationId] Completion stage: post-save UI callback finished."
+        }
+        catch {
+            # The settings file is already saved. A close/refresh/UI callback
+            # failure is diagnostic only and must never invoke the save error path.
+            try { Write-GuiLog "[$operationId] Post-save UI callback failed after successful persistence: $($_.Exception.Message)" } catch {}
+        }
+    }
 }.GetNewClosure()
 
 $arguments = [object[]]::new(5)
@@ -9112,7 +9165,14 @@ $arguments[1] = $baselineJson
 $arguments[2] = $patchJson
 $arguments[3] = $listOperationsJson
 $arguments[4] = $mutexName
-Invoke-WmtUiBackgroundCommand -Name $Name -Msg $Message -ArgumentList $arguments -SuppressResultLog -OnComplete $completed -OnError $OnError -Sb {
+Write-GuiLog "[$operationId] Save stage: queued settings persistence operation."
+$saveError = {
+    param($errorRecord)
+    $message = if ($errorRecord -and $errorRecord.Exception) { $errorRecord.Exception.Message } else { [string]$errorRecord }
+    try { Write-GuiLog "[$operationId] Save stage failed: $message" } catch {}
+    if ($OnError) { & $OnError $errorRecord }
+}.GetNewClosure()
+Invoke-WmtUiBackgroundCommand -Name $Name -Msg $Message -ArgumentList $arguments -SuppressResultLog -OnComplete $completed -OnError $saveError -Sb {
     param([string]$Path, [string]$BaselineJson, [string]$PatchJson, [string]$ListOperationsJson, [string]$WriteMutexName)
 
     $mutex = $null
@@ -9201,10 +9261,24 @@ Invoke-WmtUiBackgroundCommand -Name $Name -Msg $Message -ArgumentList $arguments
             $tempPath = $null
         }
 
+        # Verify the destination file itself after the atomic replacement/move.
+        # Do not report success based only on a valid temporary file or an
+        # in-memory settings object.
+        if (-not [System.IO.File]::Exists($Path)) {
+            throw "settings.json was not present after the save operation."
+        }
+        $persistedJson = [System.IO.File]::ReadAllText($Path)
+        if ([string]::IsNullOrWhiteSpace($persistedJson)) {
+            throw "settings.json is empty after the save operation."
+        }
+        $persistedSettings = ConvertFrom-Json -InputObject $persistedJson -ErrorAction Stop
+        if ($null -eq $persistedSettings) {
+            throw "settings.json could not be read back after the save operation."
+        }
         $fileInfo = [System.IO.FileInfo]::new($Path)
         [pscustomobject]@{
-            Message = "Settings saved."
-            Settings = $settings
+            Message = "Settings saved and verified on disk."
+            Settings = $persistedSettings
             SettingsStamp = "$($fileInfo.Length):$($fileInfo.LastWriteTimeUtc.Ticks)"
         }
     }
@@ -9413,6 +9487,7 @@ try {
         RegistryScan               = (Get-WmtSettingsMember -Settings $Settings -Name "RegistryScan" -Default @{})
         WingetIgnore               = @(Get-WmtSettingsMember -Settings $Settings -Name "WingetIgnore" -Default @("228980"))
         WingetIncludeUnknown       = [bool](Get-WmtWingetIncludeUnknown -Settings $Settings)
+        HideCrossProviderDuplicates = [bool](Get-WmtSettingsMember -Settings $Settings -Name "HideCrossProviderDuplicates" -Default $false)
         CustomUpdateCommands       = @(Get-WmtCustomUpdateCommands -Settings $Settings)
         UpdateAutoScanMinutes      = [Math]::Max(0, (ConvertTo-Int (Get-WmtUpdateAutoScanMinutes -Settings $Settings) 0))
         UpdateNotificationsEnabled = [bool](Get-WmtUpdateNotificationsEnabled -Settings $Settings)
@@ -9454,15 +9529,29 @@ try {
     $json = $saveObj | ConvertTo-Json -Depth 8
     Write-WmtSettingsFileAtomic -Path $path -Json $json
 
-    # Cache only after disk persistence succeeds, and cache the normalized form
-    # that was actually written rather than the caller's possibly malformed input.
-    $script:WmtSettingsCache = Copy-WmtSettings -Settings $saveObj
+    # Verify the destination file, not merely the temporary file, before
+    # updating the cache or reporting success to callers.
+    if (-not [System.IO.File]::Exists($path)) { throw "settings.json was not present after the save operation." }
+    $persistedJson = [System.IO.File]::ReadAllText($path)
+    if ([string]::IsNullOrWhiteSpace($persistedJson)) { throw "settings.json is empty after the save operation." }
+    $persistedSettings = ConvertFrom-Json -InputObject $persistedJson -ErrorAction Stop
+    if ($null -eq $persistedSettings) { throw "settings.json could not be read back after the save operation." }
+    foreach ($requiredName in @('TempCleanup','CleanerAutoCleanMinutes','CleanerLocalRefreshMinutes','CleanerRemoteCheckMinutes')) {
+        if (-not $persistedSettings.PSObject.Properties[$requiredName]) {
+            throw "settings.json is missing the required '$requiredName' setting after save."
+        }
+    }
+
+    # Cache only after disk persistence and read-back validation succeed.
+    $script:WmtSettingsCache = Copy-WmtSettings -Settings $persistedSettings
     $script:WmtSettingsCacheStamp = Get-WmtSettingsFileStamp -Path $path
+    return $true
 }
 catch {
     # A failed write must not make memory claim a setting was persisted.
     try { Write-GuiLog "Settings save failed: $($_.Exception.Message)" } catch {}
     Write-Warning "Failed to save settings: $($_.Exception.Message)"
+    return $false
 }
 }
 
@@ -9486,6 +9575,7 @@ $defaults = @{
     RegistryScan               = @{}
     WingetIgnore               = @("228980") # Filter false positive updates for Steamworks Redist
     WingetIncludeUnknown       = $true
+    HideCrossProviderDuplicates = $false
     CustomUpdateCommands       = @()
     UpdateAutoScanMinutes      = 0
     UpdateNotificationsEnabled = $true
@@ -9588,6 +9678,7 @@ if ($json) {
             $defaults.WingetIgnore = $clean.ToArray()
         }
         if ($json.PSObject.Properties["WingetIncludeUnknown"]) { $defaults.WingetIncludeUnknown = ConvertTo-WmtSettingsBoolean $json.WingetIncludeUnknown $true }
+        if ($json.PSObject.Properties["HideCrossProviderDuplicates"]) { $defaults.HideCrossProviderDuplicates = ConvertTo-WmtSettingsBoolean $json.HideCrossProviderDuplicates $false }
         if ($json.PSObject.Properties["CustomUpdateCommands"]) {
             $customUpdateCommands = New-Object System.Collections.Generic.List[object]
             foreach ($entry in @($json.CustomUpdateCommands)) {
@@ -16561,7 +16652,13 @@ $dialog.Add_Activated({ & $loadCommunityRulesIfEnabled }.GetNewClosure())
 if ($chkToggleWinapp2) { $chkToggleWinapp2.Add_Click({
         $toggleState.Winapp2 = -not $toggleState.Winapp2
         $currentSettings.LoadWinapp2 = $toggleState.Winapp2
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.Winapp2 = -not $toggleState.Winapp2
+            $currentSettings.LoadWinapp2 = $toggleState.Winapp2
+            & $setCleanerToggle $chkToggleWinapp2 $toggleState.Winapp2
+            $lblStatus.Text = "Could not save Winapp2 setting. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkToggleWinapp2 $toggleState.Winapp2
         $iniPath = Join-Path (Get-DataPath) "winapp2.ini"
         $forceDownload = $toggleState.Winapp2 -and (-not (Test-Path $iniPath))
@@ -16571,7 +16668,13 @@ if ($chkToggleWinapp2) { $chkToggleWinapp2.Add_Click({
 if ($chkToggleCleanerML) { $chkToggleCleanerML.Add_Click({
         $toggleState.CleanerML = -not $toggleState.CleanerML
         $currentSettings.LoadCleanerML = $toggleState.CleanerML
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.CleanerML = -not $toggleState.CleanerML
+            $currentSettings.LoadCleanerML = $toggleState.CleanerML
+            & $setCleanerToggle $chkToggleCleanerML $toggleState.CleanerML
+            $lblStatus.Text = "Could not save CleanerML setting. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkToggleCleanerML $toggleState.CleanerML
         $cachePath = Join-Path (Get-DataPath) "cleanerml_cache.json"
         $forceDownload = $toggleState.CleanerML -and ((Get-WmtBleachBitCleanerXmlDirectories).Count -eq 0) -and (-not (Test-Path $cachePath))
@@ -16581,7 +16684,13 @@ if ($chkToggleCleanerML) { $chkToggleCleanerML.Add_Click({
 if ($chkToggleCleanerMLPending) { $chkToggleCleanerMLPending.Add_Click({
         $toggleState.CleanerMLPending = -not $toggleState.CleanerMLPending
         $currentSettings.LoadCleanerMLPending = $toggleState.CleanerMLPending
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.CleanerMLPending = -not $toggleState.CleanerMLPending
+            $currentSettings.LoadCleanerMLPending = $toggleState.CleanerMLPending
+            & $setCleanerToggle $chkToggleCleanerMLPending $toggleState.CleanerMLPending
+            $lblStatus.Text = "Could not save pending CleanerML setting. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkToggleCleanerMLPending $toggleState.CleanerMLPending
         & $loadExternalCleanerRules
     }.GetNewClosure()) }
@@ -16589,7 +16698,13 @@ if ($chkToggleCleanerMLPending) { $chkToggleCleanerMLPending.Add_Click({
 if ($chkToggleWinapp3) { $chkToggleWinapp3.Add_Click({
         $toggleState.Winapp3 = -not $toggleState.Winapp3
         $currentSettings.LoadWinapp3 = $toggleState.Winapp3
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.Winapp3 = -not $toggleState.Winapp3
+            $currentSettings.LoadWinapp3 = $toggleState.Winapp3
+            & $setCleanerToggle $chkToggleWinapp3 $toggleState.Winapp3
+            $lblStatus.Text = "Could not save Winapp3 setting. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkToggleWinapp3 $toggleState.Winapp3
         try {
             if ($toggleState.Winapp3) {
@@ -16616,7 +16731,13 @@ if ($chkToggleWinapp3) { $chkToggleWinapp3.Add_Click({
 if ($chkSkipDownloads) { $chkSkipDownloads.Add_Click({
         $toggleState.SkipDownloads = -not $toggleState.SkipDownloads
         $currentSettings.SkipRuleDownloads = $toggleState.SkipDownloads
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.SkipDownloads = -not $toggleState.SkipDownloads
+            $currentSettings.SkipRuleDownloads = $toggleState.SkipDownloads
+            & $setCleanerToggle $chkSkipDownloads $toggleState.SkipDownloads
+            $lblStatus.Text = "Could not save Skip Downloads. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkSkipDownloads $toggleState.SkipDownloads
         & $loadExternalCleanerRules
     }.GetNewClosure()) }
@@ -16624,7 +16745,13 @@ if ($chkSkipDownloads) { $chkSkipDownloads.Add_Click({
 if ($chkCacheOnly) { $chkCacheOnly.Add_Click({
         $toggleState.CacheOnly = -not $toggleState.CacheOnly
         $currentSettings.CacheOnly = $toggleState.CacheOnly
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $toggleState.CacheOnly = -not $toggleState.CacheOnly
+            $currentSettings.CacheOnly = $toggleState.CacheOnly
+            & $setCleanerToggle $chkCacheOnly $toggleState.CacheOnly
+            $lblStatus.Text = "Could not save Cache Only. The previous value was restored."
+            return
+        }
         & $setCleanerToggle $chkCacheOnly $toggleState.CacheOnly
         & $loadExternalCleanerRules
     }.GetNewClosure()) }
@@ -16661,7 +16788,11 @@ if ($btnApplyCleanerIntervals) { $btnApplyCleanerIntervals.Add_Click({
         $currentSettings.LoadCleanerMLPending = $toggleState.CleanerMLPending
         $currentSettings.SkipRuleDownloads = $toggleState.SkipDownloads
         $currentSettings.CacheOnly = $toggleState.CacheOnly
-        Save-WmtSettings -Settings $currentSettings
+        if (-not (Save-WmtSettings -Settings $currentSettings)) {
+            $lblStatus.Text = "Could not save cleaner selections or intervals. Your changes were not applied."
+            Show-WmtMessageBox -Owner $dialog -Message "WMT could not verify that the Cleaner settings were saved. Check the WMT log and available disk space/permissions, then try again." -Title "Cleaner Settings Not Saved" -Image Error | Out-Null
+            return
+        }
 
         try { if (Get-Command Start-WmtCleanerDefinitionRefreshTimer -ErrorAction SilentlyContinue) { Start-WmtCleanerDefinitionRefreshTimer -ResetNextRun } } catch {}
         try { if (Get-Command Start-WmtCleanerAutoCleanTimer -ErrorAction SilentlyContinue) { Start-WmtCleanerAutoCleanTimer } } catch {}
@@ -16783,7 +16914,10 @@ $submitCleanupSelection = {
     $currentSettings.LoadWinapp3 = $toggleState.Winapp3
     $currentSettings.SkipRuleDownloads = $toggleState.SkipDownloads
     $currentSettings.CacheOnly = $toggleState.CacheOnly
-    Save-WmtSettings -Settings $currentSettings
+    if (-not (Save-WmtSettings -Settings $currentSettings)) {
+        Show-WmtMessageBox -Owner $dialog -Message "WMT could not verify that your cleaner selections were saved. The Cleaner will remain open and no cleanup will start." -Title "Cleaner Settings Not Saved" -Image Error | Out-Null
+        return
+    }
 
     $selectionState.Result = [PSCustomObject]@{
         Action = $Action
@@ -49319,7 +49453,7 @@ function Format-WmtProviderRowXaml {
     # Winget gets a 5th toggle: "Include unknown" (--include-unknown flag).
     $includeUnknownToggle = ""
     if ($key -eq "winget") {
-        $includeUnknownToggle = '<ToggleButton Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,8,0" Padding="10,3" MinWidth="80" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/>'
+        $includeUnknownToggle = '<StackPanel Orientation="Horizontal" Margin="30,6,0,0"><ToggleButton Name="chkIncludeUnknown" Content="Include unknown" Margin="0,0,8,0" Padding="10,3" MinWidth="80" ToolTip="Adds --include-unknown to winget scans. Only applies when Winget is enabled."/></StackPanel>'
     }
 
     # Windows Update gets an extra row of category toggle buttons.
@@ -49353,8 +49487,8 @@ function Format-WmtProviderRowXaml {
                     <ToggleButton Name="chk${key}Logs"       Content="Log files"  Margin="0,0,8,0" Padding="10,3" MinWidth="68" IsChecked="$logsIsChecked"       ToolTip="Allow WMT to request and keep persistent diagnostic/install log files for this provider. On-screen Activity Log messages are unaffected; providers may still keep mandatory internal logs."/>
                     <ToggleButton Name="chk${key}Headless"   Content="Headless: inherit"   Margin="0,0,8,0" Padding="10,3" MinWidth="112" IsThreeState="True" IsChecked="$headlessIsChecked"   ToolTip="Three-state setting: On = force headless, Off = force interactive, inherit = use the global Headless setting. Requires Scan."/>
                     <ToggleButton Name="chk${key}AutoUpdate" Content="Auto-update: inherit" Margin="0,0,8,0" Padding="10,3" MinWidth="126" IsThreeState="True" IsChecked="$autoIsChecked"       ToolTip="Three-state setting: On = force auto-update, Off = disable it, inherit = use the global Auto-install setting. Requires Scan."/>
-                    $includeUnknownToggle
                 </StackPanel>
+                $includeUnknownToggle
                 $wuCategorySection
             </StackPanel>
         </Border>
@@ -49417,7 +49551,7 @@ foreach ($p in $providerDefinitions) {
         <Border Background="{DynamicResource BgElevated}" BorderThickness="0" CornerRadius="10" Padding="12" Margin="0,0,0,14"
                 ToolTip="Configure automatic update scans, installation behavior, and background operation.">
             <Grid>
-                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                 <Grid.ColumnDefinitions><ColumnDefinition Width="150"/><ColumnDefinition Width="220"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                 <TextBlock Text="Auto scan" FontWeight="Bold" Grid.Row="0" Grid.Column="0"/>
                 <ComboBox Name="cmbAutoScanInterval" Grid.Row="0" Grid.Column="1" Height="28" Width="210" HorizontalAlignment="Left" SelectedValuePath="Tag">
@@ -49442,7 +49576,9 @@ foreach ($p in $providerDefinitions) {
                           ToolTip="Hide CLI, PowerShell, and cmd update windows. Providers that require their own GUI, including Steam validation and Microsoft Store GUI updates, can still appear."/>
                 <CheckBox Name="chkUpdateAutoInstall" Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3" Content="Automatically install available updates after scans" Margin="0,8,0,0"
                           ToolTip="After each completed scan, automatically update listed packages without confirmation. Packages known to risk an automatic restart are skipped."/>
-                <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
+                <CheckBox Name="chkHideCrossProviderDuplicates" Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="3" Content="Hide cross-provider duplicates" Margin="0,8,0,0"
+                          ToolTip="Only affects unknown-version Winget rows: hide a row when the same installed game is known to Steam, Legendary, or GOGDL. Off by default."/>
+                <TextBlock Grid.Row="6" Grid.Column="0" Grid.ColumnSpan="3" Margin="0,8,0,0"
                            Text="When update scans and background jobs are enabled, WMT scans once on launch even if the auto-scan interval is disabled. Scheduled scans run while open or hidden in the tray. Auto install may run after completed scans; restart-risk packages are skipped. Per-provider Headless / Auto-update options above override these global settings."
                            Foreground="{DynamicResource TextSecondary}" FontStyle="Italic" TextWrapping="Wrap"/>
             </Grid>
@@ -49469,6 +49605,7 @@ $chkReduceRamInTray = Get-WinCtrl "chkReduceRamInTray"
 $chkUpdateSilentInstall = Get-WinCtrl "chkUpdateSilentInstall"
 $chkUpdateAutoInstall = Get-WinCtrl "chkUpdateAutoInstall"
 $chkIncludeUnknown = Get-WinCtrl "chkIncludeUnknown"
+$chkHideCrossProviderDuplicates = Get-WinCtrl "chkHideCrossProviderDuplicates"
 $btnWuCatUpdates = Get-WinCtrl "btnWuCatUpdates"
 $btnWuCatOptional = Get-WinCtrl "btnWuCatOptional"
 $btnWuCatDriver = Get-WinCtrl "btnWuCatDriver"
@@ -50712,6 +50849,9 @@ if ($chkReduceRamInTray) { $chkReduceRamInTray.IsChecked = (Get-WmtReduceRamInTr
 if ($chkUpdateSilentInstall) { $chkUpdateSilentInstall.IsChecked = (Get-WmtUpdateSilentInstallEnabled -Settings $settings) }
 if ($chkUpdateAutoInstall) { $chkUpdateAutoInstall.IsChecked = (Get-WmtUpdateAutoInstallEnabled -Settings $settings) }
 $chkIncludeUnknown.IsChecked = (Get-WmtWingetIncludeUnknown -Settings $settings)
+if ($chkHideCrossProviderDuplicates) {
+    $chkHideCrossProviderDuplicates.IsChecked = [bool](Get-WmtSettingsMember -Settings $settings -Name "HideCrossProviderDuplicates" -Default $false)
+}
 
 # Load Windows Update category toggle states.
 $wuToggles = Get-WmtWuCategoryToggles -Settings $settings
@@ -51171,9 +51311,11 @@ foreach ($provider in $providerDefinitions) {
         $current.EnabledProviders = $newEnabled
         if ($current -is [System.Collections.IDictionary]) {
             $current["WingetIncludeUnknown"] = [bool]$chkIncludeUnknown.IsChecked
+            $current["HideCrossProviderDuplicates"] = [bool]$chkHideCrossProviderDuplicates.IsChecked
         }
         else {
             $current.WingetIncludeUnknown = [bool]$chkIncludeUnknown.IsChecked
+            $current.HideCrossProviderDuplicates = [bool]$chkHideCrossProviderDuplicates.IsChecked
         }
 
         # Save Windows Update category toggles.
@@ -51299,71 +51441,88 @@ foreach ($provider in $providerDefinitions) {
         $settingsPatch = $current
 
         # Invoke-WmtUiBackgroundCommand polls completion callbacks from its
-        # WPF DispatcherTimer, so this callback already runs on the UI thread.
-        # Capture the exact dialog instance and close it directly, as the
-        # working 6.8 implementation did. Do not marshal through Action,
-        # Dispatcher.Invoke, or a second script-block delegate.
+        # shared WPF DispatcherTimer. Capture the exact window, dispatcher,
+        # and controls used by the completion path; do not resolve them later
+        # through mutable outer-scope variables.
         $providerSettingsDialog = $win
+        $providerSettingsDispatcher = $win.Dispatcher
+        $providerSettingsOperationId = "ProviderSettings_" + [guid]::NewGuid().ToString("N")
+        $providerSettingsAutoScanEnabled = -not (Get-WmtUpdateScansDisabled -Settings $settingsPatch)
+        $providerSettingsRunInTray = Get-WmtRunInTrayOnClose -Settings $settingsPatch
         $settingsSaved = {
             param($results)
 
-            $saved = @(
-                $results |
-                    Where-Object {
+            $stage = 'ValidateResult'
+            try {
+                if ($providerSettingsDispatcher -and -not $providerSettingsDispatcher.CheckAccess()) {
+                    throw "Provider settings completion was not delivered on the WPF dispatcher."
+                }
+
+                Write-GuiLog "[$providerSettingsOperationId] Provider completion stage: validating save result."
+                $saved = @(
+                    $results | Where-Object {
                         $_ -and
                         $_.PSObject.Properties['SettingsStamp'] -and
-                        $_.PSObject.Properties['Settings']
-                    } |
-                    Select-Object -Last 1
-            )[0]
-
-            if (-not $saved) {
-                Write-GuiLog "[Providers] Save completion callback ran without a confirmed settings result; dialog left open."
-                throw "Settings save completed without returning the saved settings state."
-            }
-
-            try {
-                Write-GuiLog "[Providers] Settings saved; attempting to close provider settings dialog..."
-                if ($null -eq $providerSettingsDialog) {
-                    throw "Captured provider settings dialog reference is null."
+                        -not [string]::IsNullOrWhiteSpace([string]$_.SettingsStamp) -and
+                        $_.PSObject.Properties['Settings'] -and
+                        $null -ne $_.Settings
+                    } | Select-Object -Last 1
+                )[0]
+                if (-not $saved) {
+                    throw "Settings save completed without a validated persisted settings result."
                 }
 
-                if ($providerSettingsDialog.IsVisible) {
-                    $providerSettingsDialog.Close()
+                # The settings manager has already persisted settings.json and
+                # updated the in-memory cache before this callback is invoked.
+                # Closing and optional refreshes are independent post-save work.
+                $stage = 'CloseDialog'
+                try {
+                    Write-GuiLog "[$providerSettingsOperationId] Provider completion stage: closing dialog."
+                    if ($null -eq $providerSettingsDialog) {
+                        throw "Captured provider settings dialog reference is null."
+                    }
+                    if ($providerSettingsDialog.IsVisible) { $providerSettingsDialog.Close() }
+                    if ($providerSettingsDialog.IsVisible) {
+                        Write-GuiLog "[$providerSettingsOperationId] Settings saved; dialog close returned but window remains visible."
+                    }
+                    else {
+                        Write-GuiLog "[$providerSettingsOperationId] Provider settings dialog closed."
+                    }
+                }
+                catch {
+                    Write-GuiLog "[$providerSettingsOperationId] Settings saved successfully; dialog close failed: $($_.Exception.Message)"
                 }
 
-                if ($providerSettingsDialog.IsVisible) {
-                    Write-GuiLog "[Providers] Close() returned, but the provider settings dialog remains visible."
+                $stage = 'RefreshAutoScan'
+                try {
+                    if ($providerSettingsAutoScanEnabled) {
+                        Start-WmtUpdateAutoScanTimer -ResetNextRun
+                    }
+                    Write-GuiLog "[$providerSettingsOperationId] Provider completion stage: auto-scan refresh finished."
                 }
-                else {
-                    Write-GuiLog "[Providers] Provider settings dialog closed successfully."
+                catch {
+                    Write-GuiLog "[$providerSettingsOperationId] Settings saved successfully; optional auto-scan refresh failed: $($_.Exception.Message)"
                 }
+
+                $stage = 'RefreshTray'
+                try {
+                    if (-not $providerSettingsRunInTray) { Remove-WmtTrayIcon }
+                    Write-GuiLog "[$providerSettingsOperationId] Provider completion stage: tray refresh finished."
+                }
+                catch {
+                    Write-GuiLog "[$providerSettingsOperationId] Settings saved successfully; optional tray refresh failed: $($_.Exception.Message)"
+                }
+
+                Write-GuiLog "[$providerSettingsOperationId] Provider settings save flow completed; persistence remains successful regardless of optional UI refresh results."
             }
             catch {
-                Write-GuiLog "[Providers] Settings saved, but provider settings dialog close failed: $($_.Exception.Message)"
-                throw
-            }
-
-            # Refreshes are deliberately separate from the close operation.
-            try {
-                if (-not (Get-WmtUpdateScansDisabled -Settings $saved.Settings)) {
-                    Start-WmtUpdateAutoScanTimer -ResetNextRun
-                }
-            }
-            catch {
-                try { Write-GuiLog "[Providers] Settings saved, but auto-scan refresh failed: $($_.Exception.Message)" } catch {}
-            }
-
-            try {
-                if (-not (Get-WmtRunInTrayOnClose -Settings $saved.Settings)) {
-                    Remove-WmtTrayIcon
-                }
-            }
-            catch {
-                try { Write-GuiLog "[Providers] Settings saved, but tray refresh failed: $($_.Exception.Message)" } catch {}
+                # Validation/dispatcher problems are logged separately. Never
+                # report a save failure here unless persistence itself failed;
+                # the settings manager owns that error path.
+                try { Write-GuiLog "[$providerSettingsOperationId] Provider completion stage '$stage' failed after save completion: $($_.Exception.Message)" } catch {}
             }
         }.GetNewClosure()
-        Invoke-WmtSettingsPatchSave -Patch $settingsPatch -Name ("ProviderSettings_" + [guid]::NewGuid().ToString("N")) -Message 'Saving provider settings...' -OnComplete $settingsSaved -OnError {
+        Invoke-WmtSettingsPatchSave -Patch $settingsPatch -Name $providerSettingsOperationId -Message 'Saving provider settings...' -OnComplete $settingsSaved -OnError {
             param($errorRecord)
             $message = if ($errorRecord -and $errorRecord.Exception) { $errorRecord.Exception.Message } else { [string]$errorRecord }
             Show-WmtMessageBox -Owner $win -Message "Could not save provider settings:`n$message" -Title "Provider Settings" -Image Error | Out-Null
@@ -52424,13 +52583,11 @@ $script:ScanTimer.Add_Tick({
             if ($btnWingetUpdateAll) { $btnWingetUpdateAll.IsEnabled = $true }
             $btnWingetUpdateSel.IsEnabled = $true
 
-            # --include-unknown deliberately asks winget to surface packages whose
-            # installed version cannot be determined. Games installed by Steam can
-            # therefore appear as false winget "updates" (for example Unknown -> 1.0.0).
-            # If the Steam worker confirmed the same installed app name, suppress only
-            # that unknown-version winget row and leave normal winget updates untouched.
+            # --include-unknown can surface false updates for games owned by another
+            # provider. Suppression is optional and applies only to unresolved versions.
+            $hideCrossProviderDuplicates = [bool](Get-WmtSettingsMember -Settings $settings -Name "HideCrossProviderDuplicates" -Default $false)
             $providerOwnedWingetRowsSuppressed = 0
-            if ($script:WmtProviderOwnershipIndex -and $script:WmtProviderOwnershipIndex.Name.Count -gt 0) {
+            if ($hideCrossProviderDuplicates -and $script:WmtProviderOwnershipIndex -and $script:WmtProviderOwnershipIndex.Name.Count -gt 0) {
                 for ($rowIndex = $lstWinget.Items.Count - 1; $rowIndex -ge 0; $rowIndex--) {
                     $candidate = $lstWinget.Items[$rowIndex]
                     if (-not $candidate) { continue }
