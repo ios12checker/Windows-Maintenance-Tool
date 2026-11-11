@@ -51297,20 +51297,71 @@ foreach ($provider in $providerDefinitions) {
         }
 
         $settingsPatch = $current
-        $settingsCacheVariable = Get-Variable -Name WmtSettingsCache -Scope Script
-        $settingsStampVariable = Get-Variable -Name WmtSettingsCacheStamp -Scope Script
+
+        # Invoke-WmtUiBackgroundCommand polls completion callbacks from its
+        # WPF DispatcherTimer, so this callback already runs on the UI thread.
+        # Capture the exact dialog instance and close it directly, as the
+        # working 6.8 implementation did. Do not marshal through Action,
+        # Dispatcher.Invoke, or a second script-block delegate.
+        $providerSettingsDialog = $win
         $settingsSaved = {
             param($results)
-            $saved = @($results | Where-Object { $_ -and $_.PSObject.Properties['SettingsStamp'] } | Select-Object -Last 1)[0]
-            if (-not $saved) { return }
 
-            $settingsCacheVariable.Value = Copy-WmtSettings -Settings $saved.Settings
-            $settingsStampVariable.Value = [string]$saved.SettingsStamp
-            if (-not (Get-WmtUpdateScansDisabled -Settings $saved.Settings)) {
-                Start-WmtUpdateAutoScanTimer -ResetNextRun
+            $saved = @(
+                $results |
+                    Where-Object {
+                        $_ -and
+                        $_.PSObject.Properties['SettingsStamp'] -and
+                        $_.PSObject.Properties['Settings']
+                    } |
+                    Select-Object -Last 1
+            )[0]
+
+            if (-not $saved) {
+                Write-GuiLog "[Providers] Save completion callback ran without a confirmed settings result; dialog left open."
+                throw "Settings save completed without returning the saved settings state."
             }
-            if (-not (Get-WmtRunInTrayOnClose -Settings $saved.Settings)) { Remove-WmtTrayIcon }
-            $win.Close()
+
+            try {
+                Write-GuiLog "[Providers] Settings saved; attempting to close provider settings dialog..."
+                if ($null -eq $providerSettingsDialog) {
+                    throw "Captured provider settings dialog reference is null."
+                }
+
+                if ($providerSettingsDialog.IsVisible) {
+                    $providerSettingsDialog.Close()
+                }
+
+                if ($providerSettingsDialog.IsVisible) {
+                    Write-GuiLog "[Providers] Close() returned, but the provider settings dialog remains visible."
+                }
+                else {
+                    Write-GuiLog "[Providers] Provider settings dialog closed successfully."
+                }
+            }
+            catch {
+                Write-GuiLog "[Providers] Settings saved, but provider settings dialog close failed: $($_.Exception.Message)"
+                throw
+            }
+
+            # Refreshes are deliberately separate from the close operation.
+            try {
+                if (-not (Get-WmtUpdateScansDisabled -Settings $saved.Settings)) {
+                    Start-WmtUpdateAutoScanTimer -ResetNextRun
+                }
+            }
+            catch {
+                try { Write-GuiLog "[Providers] Settings saved, but auto-scan refresh failed: $($_.Exception.Message)" } catch {}
+            }
+
+            try {
+                if (-not (Get-WmtRunInTrayOnClose -Settings $saved.Settings)) {
+                    Remove-WmtTrayIcon
+                }
+            }
+            catch {
+                try { Write-GuiLog "[Providers] Settings saved, but tray refresh failed: $($_.Exception.Message)" } catch {}
+            }
         }.GetNewClosure()
         Invoke-WmtSettingsPatchSave -Patch $settingsPatch -Name ("ProviderSettings_" + [guid]::NewGuid().ToString("N")) -Message 'Saving provider settings...' -OnComplete $settingsSaved -OnError {
             param($errorRecord)
