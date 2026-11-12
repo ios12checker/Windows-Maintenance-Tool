@@ -46885,6 +46885,7 @@ exit /b %WMT_EXIT%
         $wingetArgsWithoutInstallerLog = $null
         $wingetUserCmdWithoutInstallerLog = $null
         $wingetTranscriptPath = ""
+        $wingetConsoleTranscriptPath = ""
         $wingetInstallerLogPath = ""
         $wingetRetryInstallerLogPath = ""
         $providerTranscriptPath = ""
@@ -46997,6 +46998,7 @@ exit /b %WMT_EXIT%
                     $diagnosticStem = if (-not [string]::IsNullOrWhiteSpace($providerDiagnosticStem)) { $providerDiagnosticStem } else { New-WmtPackageDiagnosticStem -PackageId ([string]$id) -ActionLabel $act }
                     $wingetTranscriptPath = if (-not [string]::IsNullOrWhiteSpace($providerTranscriptPath)) { $providerTranscriptPath } else { "$diagnosticStem-winget.log" }
                     $providerTranscriptPath = $wingetTranscriptPath
+                    $wingetConsoleTranscriptPath = "$diagnosticStem-winget-console.log"
                     $script:WmtActiveProviderTranscriptPath = $providerTranscriptPath
                     if ($act -in @("Install", "Update")) {
                         $wingetInstallerLogPath = "$diagnosticStem-installer.log"
@@ -47493,7 +47495,7 @@ exit /b %WMT_EXIT%
                         $visibleCommand = [string]$nativeCapture.Command
                         $customCaptureRunnerPath = [string]$nativeCapture.RunnerPath
                     }
-                    $visibleTranscriptPath = if ($isCustomUpdateCommand -or $srcKey -in @("winget", "legendary")) { "" } else { $providerTranscriptPath }
+                    $visibleTranscriptPath = if ($isCustomUpdateCommand -or $srcKey -eq "legendary") { "" } elseif ($srcKey -eq "winget") { $wingetConsoleTranscriptPath } else { $providerTranscriptPath }
                     $p = Invoke-VisibleCmd $visibleCommand "WMT $windowTag $act - $name" -HoldSeconds $holdSeconds -TranscriptPath $visibleTranscriptPath
 
                     # Preserve TimedOut and TerminationFailed on failed installers.
@@ -47522,6 +47524,9 @@ exit /b %WMT_EXIT%
 
                 if ($wingetArgs -and -not [string]::IsNullOrWhiteSpace($wingetTranscriptPath)) {
                     [void](Copy-WmtLatestWingetDiagnosticLog -DestinationPath $wingetTranscriptPath -Since $wingetAttemptStartedAt)
+                }
+                if (-not [string]::IsNullOrWhiteSpace($wingetConsoleTranscriptPath) -and (Test-Path -LiteralPath $wingetConsoleTranscriptPath -PathType Leaf)) {
+                    Write-Output "LOG:[Diagnostics] WinGet console output saved: $wingetConsoleTranscriptPath"
                 }
             }
             elseif ($wingetArgs) {
@@ -47587,7 +47592,7 @@ exit /b %WMT_EXIT%
                 $cmd = "winget $wingetArgs"
                 $userCmd = $wingetUserCmdWithoutInstallerLog
                 if ($useVisibleWindow) {
-                    $p = Invoke-VisibleCmd $cmd "WMT Winget Retry Without Installer Log - $name"
+                    $p = Invoke-VisibleCmd $cmd "WMT Winget Retry Without Installer Log - $name" -TranscriptPath $wingetConsoleTranscriptPath
                 }
                 else {
                     $p = Invoke-WingetLive $wingetArgs -TranscriptPath $wingetTranscriptPath
@@ -47605,7 +47610,7 @@ exit /b %WMT_EXIT%
                     if ($wingetArgs) {
                         if ($useVisibleWindow) {
                             $retryCmd = "winget $wingetArgs"
-                            $p = Invoke-VisibleCmd $retryCmd "WMT Winget Retry - $name"
+                            $p = Invoke-VisibleCmd $retryCmd "WMT Winget Retry - $name" -TranscriptPath $wingetConsoleTranscriptPath
                         }
                         else {
                             $p = Invoke-WingetLive $wingetArgs -TranscriptPath $wingetTranscriptPath

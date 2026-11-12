@@ -1474,6 +1474,13 @@ jobs:
           }, $true)
           if (-not $captureFunction) { throw 'Custom command native-output capture helper not found.' }
           Invoke-Expression $captureFunction.Extent.Text
+          $transcriptFunction = $ast.Find({
+              param($node)
+              $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+              $node.Name -eq 'ConvertTo-WmtTranscriptCommand'
+          }, $true)
+          if (-not $transcriptFunction) { throw 'Visible command transcript helper not found.' }
+          Invoke-Expression $transcriptFunction.Extent.Text
 
           # Execute the actual visible-command routing statements with an isolated
           # fake package instead of launching WMT or contacting a package server.
@@ -1503,6 +1510,7 @@ jobs:
               $encodedCustomCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childScript))
               $cmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand $encodedCustomCommand"
               $providerTranscriptPath = $logPath
+              $wingetConsoleTranscriptPath = "$logPath.console.log"
               $generatedRunnerFiles = New-Object 'System.Collections.Generic.List[string]'
               foreach ($provider in @('winget', 'legendary')) {
                   $srcKey = $provider
@@ -1514,7 +1522,12 @@ jobs:
                   $generatedRunnerFiles.Add($customCaptureRunnerPath)
                   $isCustomUpdateCommand = $false
                   Invoke-Expression $routeBlock
-                  if ($visibleCommand -ne $cmd -or $visibleTranscriptPath -ne '') {
+                  if ($provider -eq 'winget') {
+                      if ($visibleCommand -ne $cmd -or $visibleTranscriptPath -ne $wingetConsoleTranscriptPath) {
+                          throw 'Native WinGet console output is not routed to its separate transcript.'
+                      }
+                  }
+                  elseif ($visibleCommand -ne $cmd -or $visibleTranscriptPath -ne '') {
                       throw "Native $provider logging was changed and may duplicate output."
                   }
               }
@@ -1543,12 +1556,24 @@ jobs:
               if (([regex]::Matches($logged, 'WMT_CUSTOM_HOST_TEST')).Count -ne 1) {
                   throw 'Write-Host message was duplicated in the package log.'
               }
-              Write-Host 'PASS: Custom overrides produced human-readable stdout/stderr, warnings, errors and exit status.'
+
+              $wingetLogPath = "$logPath.winget"
+              $wingetCommand = "cmd.exe /d /c 'echo WMT_WINGET_OUT & echo WMT_WINGET_ERR 1>&2 & exit /b 9'"
+              $visibleWingetCommand = ConvertTo-WmtTranscriptCommand -Command $wingetCommand -TranscriptPath $wingetLogPath
+              & cmd.exe /d /c $visibleWingetCommand
+              if ($LASTEXITCODE -ne 9) { throw "Visible WinGet transcript lost the command exit code: $LASTEXITCODE" }
+              $wingetLogged = [IO.File]::ReadAllText($wingetLogPath)
+              foreach ($marker in @('WMT_WINGET_OUT', 'WMT_WINGET_ERR', 'EXIT: 9')) {
+                  if (-not $wingetLogged.Contains($marker)) { throw "Missing visible WinGet output: $marker" }
+              }
+              Write-Host 'PASS: visible provider transcripts captured output and preserved exit status.'
           }
           finally {
               foreach ($path in @($generatedRunnerFiles)) {
                   Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
               }
+              Remove-Item -LiteralPath "$logPath.winget" -Force -ErrorAction SilentlyContinue
+              Remove-Item -LiteralPath "$logPath.console.log" -Force -ErrorAction SilentlyContinue
               Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
           }
           # Exit explicitly after verifying the deliberately failing child process.
