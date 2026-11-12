@@ -60284,20 +60284,54 @@ $miDrvVirusTotal.Add_Click({
 })
 [void]$drvCtxMenu.Items.Add($miDrvVirusTotal)
 
+function Get-DriverCatalogSearchQuery {
+param($Row)
+if (-not $Row) { return "" }
+
+$inf = ([string]$Row.PublishedName).Trim().ToLowerInvariant()
+$usbHardwareId = ""
+if ($inf -and $script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($inf)) {
+    foreach ($device in @($script:DriverDeviceMap[$inf])) {
+        $deviceId = [string]$device.DeviceId
+        if ([string]::IsNullOrWhiteSpace($deviceId)) { continue }
+        try {
+            $idInfo = Get-WmtDeviceCompatibleIds -DeviceId $deviceId
+        } catch {
+            Write-GuiLog "[Drivers] Could not read hardware IDs for Microsoft Update Catalog search on $deviceId`: $($_.Exception.Message)"
+            continue
+        }
+        foreach ($hardwareId in @($idInfo.HardwareIDs)) {
+            $value = [string]$hardwareId
+            if ($value -match '(?i)^PCI\\VEN_(?<vendor>[0-9A-F]{4})&DEV_(?<device>[0-9A-F]{4})(?:&|$)') {
+                return "PCI\VEN_$($matches.vendor.ToUpperInvariant())&DEV_$($matches.device.ToUpperInvariant())"
+            }
+            if (-not $usbHardwareId -and $value -match '(?i)^USB\\VID_(?<vendor>[0-9A-F]{4})&PID_(?<device>[0-9A-F]{4})(?:&|$)') {
+                $usbHardwareId = "USB\VID_$($matches.vendor.ToUpperInvariant())&PID_$($matches.device.ToUpperInvariant())"
+            }
+        }
+    }
+}
+if ($usbHardwareId) { return $usbHardwareId }
+
+$provider = ([string]$Row.Provider).Trim()
+$class = ([string]$Row.Class).Trim()
+if ($provider -and $class) { return "$provider $class" }
+if ($provider) { return $provider }
+if ($class) { return $class }
+return ""
+}
+
 $miDrvCatalog = New-Object System.Windows.Controls.MenuItem
 $miDrvCatalog.Header = "Search Microsoft Update Catalog"
-$miDrvCatalog.ToolTip = "Search catalog.update.microsoft.com for this driver's original INF name — Microsoft's safe, signed driver source. Falls back to 'Provider Class' when the INF name is unknown."
+$miDrvCatalog.ToolTip = "Search catalog.update.microsoft.com by the bound device's vendor/device hardware ID (for example PCI\VEN_10EC&DEV_8125). Falls back to provider/class; INF filenames are not searched."
 $miDrvCatalog.Add_Click({
     $sel = @($lstDrivers.SelectedItems)
     if ($sel.Count -ne 1) { return }
     $row = $sel[0]
-    $query = ([string]$row.OriginalName).Trim()
-    if ([string]::IsNullOrWhiteSpace($query) -or $query -eq "(unknown)") {
-        $provider = ([string]$row.Provider).Trim()
-        $class = ([string]$row.Class).Trim()
-        if ($provider -and $class) { $query = "$provider $class" }
-        elseif ($provider) { $query = $provider }
-        else { $query = [string]$row.PublishedName }
+    $query = Get-DriverCatalogSearchQuery -Row $row
+    if ([string]::IsNullOrWhiteSpace($query)) {
+        Show-WmtMessageBox -Message "No device vendor/device hardware ID or provider/class information is available for this driver." -Title "Microsoft Update Catalog Search" -Image Information | Out-Null
+        return
     }
     Write-GuiLog "[Drivers] Searching Microsoft Update Catalog for '$query'"
     Open-DriverWebLookup -Url ("https://www.catalog.update.microsoft.com/Search.aspx?q=" + [Uri]::EscapeDataString($query))
