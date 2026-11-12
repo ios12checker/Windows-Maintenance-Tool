@@ -58887,6 +58887,381 @@ Invoke-WmtUiBackgroundCommand -Name ("DriverUsageLive_" + [guid]::NewGuid().ToSt
 } -ArgumentList $inf, $provider, $originalName -TimeoutMs 60000 -OnComplete $queryDone -OnError $queryError | Out-Null
 }
 
+# --- PICK COMPATIBLE DRIVER FOR AN ACTIVE DEVICE ---
+# Mirrors Windows' "Let me pick from a list of available drivers on my computer"
+# but exposes the version/provider/date/class/signer info WMT's driver store
+# already knows, so the user can actually compare candidates before switching.
+
+function Get-WmtDeviceCompatibleIds {
+param(
+    [Parameter(Mandatory = $true)][string]$DeviceId
+)
+# Reads the device's HardwareIDs + CompatibleIDs from the PnP enum registry so
+# we can label which staged driver packages claim to be compatible with it.
+$id = [string]$DeviceId
+if ([string]::IsNullOrWhiteSpace($id)) { return @{} }
+# DeviceId looks like "PCI\VEN_....\4&....&0&...". The enum branch is everything
+# up to the last "\".
+$lastBackslash = $id.LastIndexOf('\')
+if ($lastBackslash -lt 0) { return @{} }
+$enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\" + $id.Substring(0, $lastBackslash)
+$result = @{ HardwareIDs = @(); CompatibleIDs = @() }
+try {
+    foreach ($prop in @("HardwareID", "CompatibleID")) {
+        $vals = @(Get-ItemProperty -LiteralPath $enumPath -Name $prop -ErrorAction SilentlyContinue)
+        if ($vals) {
+            $raw = $vals[$prop]
+            if ($null -ne $raw) {
+                $arr = @($raw)
+                $key = $prop -replace 'ID$', 'IDs'
+                $result[$key] = @($arr | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+            }
+        }
+    }
+}
+catch { return $result }
+return $result
+}
+
+function Test-WmtInfCompatibleWithIds {
+param(
+    [Parameter(Mandatory = $true)][string]$InfPath,
+    [string[]]$CompatibleIds
+)
+if (@($CompatibleIds).Count -eq 0) { return $false }
+try {
+    $section = ""
+    $inCompatible = $false
+    foreach ($line in @(Get-Content -LiteralPath $InfPath -ErrorAction Stop)) {
+        $t = $line.Trim()
+        if ($t.Length -eq 0 -or $t.StartsWith(";")) { continue }
+        if ($t.StartsWith("[") -and $t.EndsWith("]")) {
+            $section = $t.Trim("[", "]")
+            $inCompatible = ($section -ieq "CompatibleIDs")
+            continue
+        }
+        if ($inCompatible) {
+            $eq = $t.IndexOf("=")
+            if ($eq -ge 1) {
+                $val = $t.Substring($eq + 1).Trim().Trim('"')
+                foreach ($cid in @($CompatibleIds)) {
+                    if ([string]$val -eq $cid) { return $true }
+                }
+            }
+        }
+    }
+}
+catch { return $false }
+return $false
+}
+
+function Invoke-WmtInstallDriverOnDevice {
+# Stages a specific INF into the driver store (pnputil /add-driver; idempotent if
+# already present) then rebinds the device to it via Update-PnpDevice. Mirrors
+# Windows' "Let me pick from a list of available drivers on my computer." Returns
+# Success/ExitCode/Output.
+param(
+    [Parameter(Mandatory = $true)][string]$DeviceId,
+    [Parameter(Mandatory = $true)][string]$InfFullPath
+)
+if ([string]::IsNullOrWhiteSpace($DeviceId) -or [string]::IsNullOrWhiteSpace($InfFullPath)) {
+    return [PSCustomObject]@{ Success = $false; ExitCode = -1; Output = "DeviceId and InfFullPath are required." }
+}
+if (-not (Test-Path -LiteralPath $InfFullPath -PathType Leaf)) {
+    return [PSCustomObject]@{ Success = $false; ExitCode = -1; Output = "INF not found: $InfFullPath" }
+}
+$exit = -1
+$out = [System.Collections.Generic.List[string]]::new()
+try {
+    $stage = @(& pnputil.exe /add-driver "$InfFullPath" 2>&1)
+    $exit = $LASTEXITCODE
+    foreach ($o in @($stage)) { [void]$out.Add([string]$o) }
+}
+catch {
+    [void]$out.Add($_.Exception.Message)
+}
+try {
+    $rebind = Update-PnpDevice -InstanceId $DeviceId -InstallDriver -Confirmed -ErrorAction Stop 2>&1
+    foreach ($o in @($rebind)) { [void]$out.Add([string]$o) }
+}
+catch {
+    [void]$out.Add($_.Exception.Message)
+    if ($exit -eq 0) { $exit = -1 }
+}
+return [PSCustomObject]@{ Success = ($exit -eq 0); ExitCode = $exit; Output = ($out -join "`n") }
+}
+
+function Show-WmtPickCompatibleDriverDialog {
+# "Let me pick from a list of available drivers on my computer" for one active
+# device: shows the bound device, its hardware/compatible IDs, and the third-party
+# driver packages staged in the driver store with version/provider/date/class/signer
+# info, then lets the user install a different compatible driver on that device.
+# Every WPF event handler is wrapped in try/catch so a null dereference cannot
+# become an unhandled dispatcher exception.
+param($Row)
+try {
+    if (-not $Row) { return }
+    $currentInf = [string]$Row.PublishedName
+    if ([string]::IsNullOrWhiteSpace($currentInf)) { return }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: currentInf=$currentInf"
+
+    # Resolve the target device. If the package binds several present devices, let the
+    # user choose; otherwise default to the only one.
+    $infKey = $currentInf.ToLowerInvariant()
+    $bound = @()
+    try {
+        if ($script:DriverUsageLoaded -and $script:DriverDeviceMap -and $script:DriverDeviceMap.ContainsKey($infKey)) {
+            $bound = @($script:DriverDeviceMap[$infKey])
+        }
+    } catch {
+        Write-GuiLog "[Drivers] Pick Compatible Driver: device map lookup failed: $($_.Exception.Message)"
+    }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: bound count=$($bound.Count)"
+    if ($bound.Count -eq 0) {
+        Show-WmtMessageBox -Message "No present device is currently bound to $currentInf.`n`nPick a compatible driver from Device Manager instead, or reload the Drivers page and retry." -Title "Pick Compatible Driver" -Image Warning | Out-Null
+        return
+    }
+    $targetDev = $bound[0]
+    Write-GuiLog "[Drivers] Pick Compatible Driver: targetDev=$($targetDev.Name) devId=$($targetDev.DeviceId)"
+    if ($bound.Count -gt 1) {
+        $devPick = @"
+<Grid Margin="18">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" Text="The driver is bound to several present devices. Choose the device to re-driver:" Margin="0,0,0,8" Foreground="{DynamicResource TextPrimary}"/>
+    <ListBox Name="lbDevices" Grid.Row="1" Height="220" DisplayMemberPath="Name" SelectedValuePath="DeviceId" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+    <TextBlock Grid.Row="2" Name="lblDevHint" Text="" Foreground="{DynamicResource TextMuted}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <Button Name="btnCancel" Content="Cancel" Width="92" Height="30" IsCancel="True"/>
+        <Button Name="btnOk" Content="OK" MinWidth="100" Height="30" IsDefault="True" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+    </StackPanel>
+</Grid>
+"@
+        $devDialog = New-WmtWindowFromXaml -Title "Choose Device" -ContentXaml $devPick -Width 560 -Height 420 -NoResize
+        $lb = $devDialog.FindName("lbDevices")
+        if (-not $lb) { Show-WmtMessageBox -Message "Failed to build the device picker dialog." -Title "Pick Compatible Driver" -Image Error | Out-Null; return }
+        $lblHint = $devDialog.FindName("lblDevHint")
+        if (-not $lblHint) { $lblHint = $null }
+        foreach ($d in $bound) { [void]$lb.Items.Add($d) }
+        $lb.SelectedIndex = 0
+        if ($lblHint) { $lblHint.Text = "$($bound.Count) present device(s) use this package. Select the one to re-driver, then click OK." }
+        $result = $null
+        $devDialog.Add_Closing({
+            try { if (-not $result) { $result = $false } } catch {}
+        }.GetNewClosure())
+        $btnOk = $devDialog.FindName("btnOk")
+        if (-not $btnOk) { Show-WmtMessageBox -Message "Failed to build the device picker dialog." -Title "Pick Compatible Driver" -Image Error | Out-Null; return }
+        $btnOk.Add_Click({
+            try {
+                $result = $true
+                $sel = $lb.SelectedItem
+                if (-not $sel) { $result = $false; return }
+                $targetDev = $sel
+                $devDialog.DialogResult = $true
+            } catch { Write-GuiLog "[Drivers] Device picker OK click failed: $($_.Exception.Message)" }
+        }).GetNewClosure()
+        $btnCancel = $devDialog.FindName("btnCancel")
+        if ($btnCancel) { $btnCancel.Add_Click({ try { $result = $false; $devDialog.DialogResult = $false } catch {} }.GetNewClosure()) }
+        try { $devDialog.ShowDialog() | Out-Null } catch { Write-GuiLog "[Drivers] Device picker ShowDialog failed: $($_.Exception.Message)" }
+        if (-not $result -or -not $targetDev) { return }
+    }
+    $devId = [string]$targetDev.DeviceId
+    $devName = if ([string]::IsNullOrWhiteSpace([string]$targetDev.Name)) { $devId } else { [string]$targetDev.Name }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: devId=$devId devName=$devName"
+
+    # Read the device's hardware + compatible IDs from the PnP enum registry.
+    Write-GuiLog "[Drivers] Pick Compatible Driver: querying compatible IDs for $devId"
+    $idInfo = Get-WmtDeviceCompatibleIds -DeviceId $devId
+    Write-GuiLog "[Drivers] Pick Compatible Driver: hwIds=$($idInfo.HardwareIDs.Count) compatIds=$($idInfo.CompatibleIDs.Count)"
+    $hwIds = @($idInfo.HardwareIDs)
+    $compatIds = @($idInfo.CompatibleIDs)
+    $idSummary = [System.Collections.Generic.List[string]]::new()
+    if ($hwIds.Count -gt 0) { [void]$idSummary.Add("Hardware IDs: $($hwIds -join ', ')") }
+    if ($compatIds.Count -gt 0) { [void]$idSummary.Add("Compatible IDs: $($compatIds -join ', ')") }
+
+    # Build candidate driver packages from the staged third-party store list,
+    # excluding the one already installed on the target device. Annotate each with
+    # version/date/provider/class/signer and a compatibility flag.
+    $cands = [System.Collections.Generic.List[object]]::new()
+    $driverPkgs = if ($script:DriverPackages) { @($script:DriverPackages) } else { @() }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: driverPkgs count=$($driverPkgs.Count)"
+    $candCount = 0
+    foreach ($pkg in $driverPkgs) {
+        if (-not $pkg) { continue }
+        $pInf = [string]$pkg.PublishedName
+        if ([string]::IsNullOrWhiteSpace($pInf) -or $pInf -eq $currentInf) { continue }
+        $infPath = Join-Path $env:SystemRoot ("INF\" + $pInf)
+        $compat = $false
+        if (Test-Path -LiteralPath $infPath -PathType Leaf) {
+            try {
+                $compat = Test-WmtInfCompatibleWithIds -InfPath $infPath -CompatibleIds $compatIds
+            } catch {
+                $dbgInf = [string]$pInf
+                Write-GuiLog ("[Drivers] Pick Compatible Driver: compat test failed for " + $dbgInf + ": " + $_.Exception.Message)
+            }
+        }
+        [void]$cands.Add([PSCustomObject]@{
+            PublishedName   = $pInf
+            OriginalName    = if ([string]::IsNullOrWhiteSpace([string]$pkg.OriginalName)) { "(unknown)" } else { [string]$pkg.OriginalName }
+            Provider        = [string]$pkg.Provider
+            Class           = [string]$pkg.Class
+            Signer          = [string]$pkg.Signer
+            Version         = [string]$pkg.DisplayVer
+            Date            = [string]$pkg.DisplayDate
+            Compatible      = if ($compat) { "Yes" } else { "No" }
+            _InfPath        = $infPath
+            _CompatibleBool = $compat
+        })
+        $candCount++
+    }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: candidates=$candCount"
+    # Sort compatible candidates first, then by provider, then driver name.
+    try {
+        $cands = @($cands | Sort-Object -Property @(
+            @{ Expression = '_CompatibleBool'; Descending = $true },
+            'Provider', 'OriginalName'
+        ))
+    } catch {
+        Write-GuiLog "[Drivers] Pick Compatible Driver: sort failed: $($_.Exception.Message)"
+    }
+    if ($cands.Count -eq 0) {
+        Show-WmtMessageBox -Message "No other third-party driver packages are staged in the driver store for this device.`n`nOnly the currently installed package ($currentInf) is available." -Title "Pick Compatible Driver" -Image Information | Out-Null
+        return
+    }
+
+    Write-GuiLog "[Drivers] Pick Compatible Driver: creating dialog"
+    $content = @"
+<Grid Margin="18">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <Border Grid.Row="0" Style="{DynamicResource CardStyle}" Padding="14,12" Margin="0,0,0,12">
+        <StackPanel>
+            <TextBlock Name="lblDevice" FontSize="15" FontWeight="SemiBold" TextWrapping="Wrap"/>
+            <TextBlock Name="lblDeviceId" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+            <TextBlock Name="lblCurrent" Foreground="{DynamicResource TextSecondary}" TextWrapping="Wrap" Margin="0,4,0,0"/>
+        </StackPanel>
+    </Border>
+    <Border Grid.Row="1" Style="{DynamicResource CardStyle}" Padding="14,12" Margin="0,0,0,12">
+        <TextBlock Name="lblIds" TextWrapping="Wrap" Foreground="{DynamicResource TextSecondary}"/>
+    </Border>
+    <DataGrid Name="dgCandidates" Grid.Row="2" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
+              AlternationCount="2" BorderThickness="0" SelectionMode="Single" Background="{DynamicResource BgPanel}"/>
+    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
+        <Button Name="btnClose" Content="Close" Width="94" Height="30" IsCancel="True"/>
+        <Button Name="btnUse" Content="Use this driver" MinWidth="140" Height="32" Margin="0,0,10,0"
+                Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+    </StackPanel>
+</Grid>
+"@
+    Write-GuiLog "[Drivers] Pick Compatible Driver: creating window from XAML"
+    try {
+        $dialog = New-WmtWindowFromXaml -Title "Pick Compatible Driver - $devName" -ContentXaml $content -Width 980 -Height 620 -MinWidth 760 -MinHeight 460
+    } catch {
+        Show-WmtMessageBox -Message "Failed to create the Pick Compatible Driver window: $($_.Exception.Message)" -Title "Pick Compatible Driver" -Image Error | Out-Null
+        return
+    }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: finding controls"
+    $lblDevice = $dialog.FindName("lblDevice")
+    Write-GuiLog "[Drivers] Pick Compatible Driver: lblDevice=$($null -eq $lblDevice)"
+    $lblDeviceId = $dialog.FindName("lblDeviceId")
+    $lblCurrent = $dialog.FindName("lblCurrent")
+    $lblIds = $dialog.FindName("lblIds")
+    $dg = $dialog.FindName("dgCandidates")
+    $btnUse = $dialog.FindName("btnUse")
+    $btnClose = $dialog.FindName("btnClose")
+    if (-not $lblDevice -or -not $lblDeviceId -or -not $lblCurrent -or -not $lblIds -or -not $dg -or -not $btnUse -or -not $btnClose) {
+        Show-WmtMessageBox -Message "Failed to build the Pick Compatible Driver dialog (a control was not found)." -Title "Pick Compatible Driver" -Image Error | Out-Null
+        return
+    }
+
+    Write-GuiLog "[Drivers] Pick Compatible Driver: setting text"
+    $lblDevice.Text = $devName
+    $lblDeviceId.Text = "Device ID: $devId"
+    $lblCurrent.Text = "Currently installed driver package: $currentInf  ($($Row.OriginalName))"
+    $idText = if ($idSummary.Count -gt 0) { ($idSummary -join "  |  ") } else { "No hardware/compatible IDs found in the registry." }
+    $lblIds.Text = $idText
+
+    Write-GuiLog "[Drivers] Pick Compatible Driver: setting items source"
+    $dg.ItemsSource = $cands
+    try {
+        Set-WmtDataGridColumns -DataGrid $dg -Columns @("Compatible", "Provider", "OriginalName", "Version", "Date", "Class", "Signer", "PublishedName") -Widths @{ Compatible = 80; Provider = 150; OriginalName = 220; Version = 100; Date = 100; Class = 120; Signer = 140; PublishedName = 130 }
+    } catch {
+        Write-GuiLog "[Drivers] Set-WmtDataGridColumns failed: $($_.Exception.Message)"
+    }
+
+    $state = @{ Chosen = $null }
+    $dg.Add_SelectionChanged({
+        try {
+            $state.Chosen = $dg.SelectedItem
+            $btnUse.IsEnabled = ($null -ne $state.Chosen)
+        } catch { Write-GuiLog "[Drivers] Candidate grid SelectionChanged failed: $($_.Exception.Message)" }
+    }).GetNewClosure()
+    try { $btnUse.IsEnabled = ($null -ne $dg.SelectedItem) } catch {}
+
+    $btnClose.Add_Click({
+        try { $dialog.Close() } catch { Write-GuiLog "[Drivers] Close button click failed: $($_.Exception.Message)" }
+    }).GetNewClosure()
+    $btnUse.Add_Click({
+        try {
+            $chosen = $state.Chosen
+            if (-not $chosen) { return }
+            $selInf = [string]$chosen.PublishedName
+            $selPath = [string]$chosen._InfPath
+            $dialog.Close()
+            $warn = "Install driver package '$selInf' on device '$devName'?`n`nThis stages the INF (pnputil /add-driver) and rebinds the device to it (Update-PnpDevice). The device may restart or briefly stop working.`n`nDevice: $devId`nPackage: $selInf"
+            $choice = Show-WmtMessageBox -Message $warn -Title "Install Driver" -Button YesNo -Image Question
+            if ($choice -ne [System.Windows.MessageBoxResult]::Yes) {
+                return
+            }
+            $installDone = {
+                param($results)
+                try {
+                    $r = @($results | Where-Object { $_ -and $_.PSObject.Properties["Success"] } | Select-Object -Last 1)
+                    if (-not $r) {
+                        Show-WmtMessageBox -Message "The install command returned no result." -Title "Install Driver" -Image Error | Out-Null
+                        return
+                    }
+                    if ([bool]$r.Success) {
+                        Show-WmtMessageBox -Message "Driver '$selInf' installed on '$devName'.`n`n$([string]$r.Output)" -Title "Driver Installed" -Image Information | Out-Null
+                        Write-GuiLog "[Drivers] Installed $selInf on $devId."
+                        Start-DriverListLoad -Force
+                    }
+                    else {
+                        Show-WmtMessageBox -Message "Failed to install '$selInf' on '$devName':`n`n$([string]$r.Output)" -Title "Install Driver" -Image Error | Out-Null
+                        Write-GuiLog "[Drivers] Install of $selInf on $devId failed: $([string]$r.Output)"
+                    }
+                } catch {
+                    Write-GuiLog "[Drivers] Install completion callback failed: $($_.Exception.Message)"
+                }
+            }.GetNewClosure()
+            try {
+                Invoke-WmtUiBackgroundCommand -Name ("InstallDriver_" + [guid]::NewGuid().ToString("N")) -Msg "Installing $selInf on $devName..." -SuppressResultLog -Sb {
+                    param($devId, $infPath)
+                    Invoke-WmtInstallDriverOnDevice -DeviceId $devId -InfFullPath $infPath
+                } -ArgumentList $devId, $selPath -OnComplete $installDone | Out-Null
+            } catch {
+                Write-GuiLog "[Drivers] Invoke-WmtUiBackgroundCommand (install) failed: $($_.Exception.Message)"
+                Show-WmtMessageBox -Message "Failed to start the driver install: $($_.Exception.Message)" -Title "Install Driver" -Image Error | Out-Null
+            }
+        } catch {
+            Write-GuiLog "[Drivers] Use this driver click failed: $($_.Exception.Message)"
+        }
+    }).GetNewClosure()
+    Write-GuiLog "[Drivers] Pick Compatible Driver: showing dialog"
+    try { $dialog.ShowDialog() | Out-Null } catch { Write-GuiLog "ERROR: Pick Compatible Driver dialog ShowDialog failed: $($_.Exception.Message)" }
+} catch {
+    Write-GuiLog "ERROR: Pick Compatible Driver dialog failed: $($_.Exception.Message)"
+    }
+}
+
 function Copy-DriverSelectionToClipboard {
 param([object[]]$Rows)
 $targets = @($Rows | Where-Object { $null -ne $_ })
@@ -59431,6 +59806,15 @@ $miDrvDevices.Add_Click({
 })
 [void]$drvCtxMenu.Items.Add($miDrvDevices)
 
+$miDrvPick = New-Object System.Windows.Controls.MenuItem
+$miDrvPick.Header = "Pick Compatible Driver for Device..."
+$miDrvPick.ToolTip = "Installs a different third-party driver package from the driver store on this device (Windows' 'let me pick from compatible' with version/provider/date/class/signer info)."
+$miDrvPick.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-WmtPickCompatibleDriverDialog -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvPick)
+
 # Per-device Enable/Disable entries are inserted flat into this menu on every
 # open (see Add_Opened below) — NOT as a WPF submenu, because the shared flat
 # MenuItem template has no popup part and a submenu under it silently never
@@ -59585,6 +59969,7 @@ $drvCtxMenu.Add_Opened({
     $miDrvDetails.IsEnabled = ($sel.Count -eq 1)
     $miDrvOpenInf.IsEnabled = ($sel.Count -eq 1)
     $miDrvDevices.IsEnabled = ($sel.Count -eq 1)
+    $miDrvPick.IsEnabled = ($sel.Count -eq 1 -and [string]$sel[0].Status -eq "In Use")
     $miDrvCopyName.IsEnabled = ($sel.Count -ge 1)
     $miDrvCopyInf.IsEnabled = ($sel.Count -ge 1)
     $miDrvCopyTable.IsEnabled = ($sel.Count -ge 1)
