@@ -59049,25 +59049,24 @@ try {
         foreach ($d in $bound) { [void]$lb.Items.Add($d) }
         $lb.SelectedIndex = 0
         if ($lblHint) { $lblHint.Text = "$($bound.Count) present device(s) use this package. Select the one to re-driver, then click OK." }
-        $result = $null
-        $devDialog.Add_Closing({
-            try { if (-not $result) { $result = $false } } catch {}
-        }.GetNewClosure())
+        $deviceChoice = @{ Accepted = $false; Device = $null }
         $btnOk = $devDialog.FindName("btnOk")
         if (-not $btnOk) { Show-WmtMessageBox -Message "Failed to build the device picker dialog." -Title "Pick Compatible Driver" -Image Error | Out-Null; return }
-        $btnOk.Add_Click({
+        $deviceOkClick = {
             try {
-                $result = $true
                 $sel = $lb.SelectedItem
-                if (-not $sel) { $result = $false; return }
-                $targetDev = $sel
+                if (-not $sel) { return }
+                $deviceChoice.Device = $sel
+                $deviceChoice.Accepted = $true
                 $devDialog.DialogResult = $true
             } catch { Write-GuiLog "[Drivers] Device picker OK click failed: $($_.Exception.Message)" }
-        }).GetNewClosure()
+        }.GetNewClosure()
+        $btnOk.Add_Click($deviceOkClick)
         $btnCancel = $devDialog.FindName("btnCancel")
-        if ($btnCancel) { $btnCancel.Add_Click({ try { $result = $false; $devDialog.DialogResult = $false } catch {} }.GetNewClosure()) }
+        if ($btnCancel) { $btnCancel.Add_Click({ try { $devDialog.DialogResult = $false } catch {} }.GetNewClosure()) }
         try { $devDialog.ShowDialog() | Out-Null } catch { Write-GuiLog "[Drivers] Device picker ShowDialog failed: $($_.Exception.Message)" }
-        if (-not $result -or -not $targetDev) { return }
+        if (-not $deviceChoice.Accepted -or -not $deviceChoice.Device) { return }
+        $targetDev = $deviceChoice.Device
     }
     $devId = [string]$targetDev.DeviceId
     $devName = if ([string]::IsNullOrWhiteSpace([string]$targetDev.Name)) { $devId } else { [string]$targetDev.Name }
