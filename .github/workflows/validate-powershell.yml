@@ -1016,6 +1016,17 @@ jobs:
           function Get-Content {
               [CmdletBinding()]
               param([string]$LiteralPath)
+              'AddService = ,2'
+          }
+          $nullDriver = Get-WmtDriverCleanupUsage -PublishedName 'oem17.inf'
+          if (-not $nullDriver.Succeeded -or
+              $nullDriver.InUseInfs -notcontains 'oem17.inf' -or
+              $nullDriver.RegisteredServices.Count -ne 0) {
+              throw 'The NULL driver declaration was treated as an unresolved service or lost device-use protection.'
+          }
+          function Get-Content {
+              [CmdletBinding()]
+              param([string]$LiteralPath)
               'AddService = %UnresolvedSvcName%, 0x2, UnknownService'
           }
           $rejected = $false
@@ -1029,7 +1040,7 @@ jobs:
           $rejected = $false
           try { $null = Get-WmtDriverCleanupUsage -PublishedName 'oem17.inf' } catch { $rejected = $true }
           if (-not $rejected) { throw 'A missing INF was treated as safe.' }
-          Write-Host 'PASS: active driver services protected; unresolved and missing INF identities fail closed.'
+          Write-Host 'PASS: active services protected; NULL drivers recognized; unresolved and missing INF identities fail closed.'
 
       - name: Smoke test driver usage worker fails on incomplete service inventory
         shell: powershell
@@ -1073,6 +1084,36 @@ jobs:
               param([string]$LiteralPath)
               [PSCustomObject]@{ LastWriteTimeUtc = [DateTime]::UtcNow }
           }
+          function Get-Content {
+              [CmdletBinding()]
+              param([string]$LiteralPath)
+              'AddService = ,2'
+          }
+          $nullDriver = & $worker @('oem5.inf') @{}
+          if (-not $nullDriver.Success -or
+              $nullDriver.Services.ContainsKey('oem5.inf') -or
+              -not $nullDriver.InfServiceCache['oem5.inf'].Verified) {
+              throw 'A NULL driver declaration was marked as an unresolved service.'
+          }
+          $unusedFunction = $ast.Find({
+              param($n)
+              $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $n.Name -eq 'Get-WmtUnusedDriverPackageRows'
+          }, $true)
+          if (-not $unusedFunction) { throw 'Unused driver candidate verification is missing.' }
+          Invoke-Expression $unusedFunction.Extent.Text
+          $script:DriverUsageLoaded = $true
+          $script:DriverDeviceMap = @{}
+          $script:DriverServiceMap = $nullDriver.Services
+          $script:DriverCacheLoaded = $true
+          $script:DriverCacheLoadedAt = Get-Date
+          $script:DriverCacheTtlSeconds = 600
+          $script:DriverPackages = @([PSCustomObject]@{ PublishedName = 'oem5.inf'; Status = 'Unattached' })
+          $unused = @(Get-WmtUnusedDriverPackageRows -PublishedNames @('oem5.inf') -CurrentInf 'oem41.inf')
+          if ($unused.Count -ne 1 -or $unused[0].PublishedName -ne 'oem5.inf') {
+              throw 'A NULL-driver package with no device or service binding was not eligible for the unused-package preview.'
+          }
+          Write-Host 'PASS: NULL-driver packages with no device or service binding are offered as unused.'
           function Get-Content {
               [CmdletBinding()]
               param([string]$LiteralPath)

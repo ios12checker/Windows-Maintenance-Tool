@@ -30046,6 +30046,8 @@ if ($PublishedName) {
     $serviceNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($line in @(Get-Content -LiteralPath $infPath -ErrorAction Stop)) {
         if ($line -notmatch '(?i)^\s*AddService\s*=') { continue }
+        # AddService=,2 explicitly selects the NULL driver; it does not name a service.
+        if ($line -match '(?i)^\s*AddService\s*=\s*,\s*(?:0x[0-9a-f]+|\d+)\s*(?:;.*)?$') { continue }
         if ($line -notmatch '(?i)^\s*AddService\s*=\s*"?(?<Service>[A-Za-z0-9_.-]+)"?\s*(?:,|;|$)') {
             # Do not guess at unresolved service-name macros or unknown INF forms.
             throw "Cannot verify service identity in $PublishedName (AddService directive)."
@@ -58415,6 +58417,8 @@ try {
             try {
                 foreach ($line in @(Get-Content -LiteralPath $infPath -ErrorAction Stop)) {
                     if ($line -notmatch '(?i)^\s*AddService\s*=') { continue }
+                    # A blank service name with numeric flags is a valid NULL-driver declaration.
+                    if ($line -match '(?i)^\s*AddService\s*=\s*,\s*(?:0x[0-9a-f]+|\d+)\s*(?:;.*)?$') { continue }
                     if ($line -match '(?i)^\s*AddService\s*=\s*"?([A-Za-z0-9_\.\-]+)"?\s*(,|$)') {
                         [void]$svcNames.Add($matches[1])
                     }
