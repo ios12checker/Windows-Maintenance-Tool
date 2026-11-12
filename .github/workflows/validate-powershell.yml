@@ -1145,7 +1145,19 @@ jobs:
           if (-not $fn) { throw 'Driver usage loader is missing.' }
           $workerMatch = [regex]::Match($fn.Extent.Text, '(?s)\$usageWorker\s*=\s*@''\r?\n(.*?)\r?\n''@')
           if (-not $workerMatch.Success) { throw 'Could not extract driver usage worker.' }
-          $worker = [scriptblock]::Create($workerMatch.Groups[1].Value)
+          foreach ($helperName in @('Get-WmtInfModelEntries','Get-WmtInfDeclaredHardwareIds')) {
+              $helper = $ast.Find({
+                  param($n)
+                  $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $helperName
+              }, $true)
+              if (-not $helper) { throw "Required model-ID helper is missing: $helperName" }
+              Invoke-Expression $helper.Extent.Text
+          }
+          $modelEntriesBody = ${function:Get-WmtInfModelEntries}.ToString()
+          $declaredHardwareIdsBody = ${function:Get-WmtInfDeclaredHardwareIds}.ToString()
+          $modelIdHelpers = "function Get-WmtInfModelEntries {`r`n$modelEntriesBody`r`n}`r`nfunction Get-WmtInfDeclaredHardwareIds {`r`n$declaredHardwareIdsBody`r`n}"
+          $workerSource = $workerMatch.Groups[1].Value.Replace('__MODEL_ID_HELPERS__', $modelIdHelpers)
+          $worker = [scriptblock]::Create($workerSource)
           function Get-CimInstance {
               [CmdletBinding()]
               param([string]$ClassName, [string[]]$Property)
