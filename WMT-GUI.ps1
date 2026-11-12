@@ -9077,6 +9077,18 @@ try {
 catch { return "<unknown>" }
 }
 
+function Set-WmtSettingsCacheFromPersistedState {
+param(
+    [Parameter(Mandatory = $true)]$Settings,
+    [Parameter(Mandatory = $true)][string]$SettingsStamp
+)
+
+$cacheCopy = Copy-WmtSettings -Settings $Settings
+if ($null -eq $cacheCopy) { throw "Could not copy the persisted settings into the settings cache." }
+$script:WmtSettingsCache = $cacheCopy
+$script:WmtSettingsCacheStamp = $SettingsStamp
+}
+
 function Invoke-WmtSettingsPatchSave {
 param(
     [Parameter(Mandatory = $true)][System.Collections.IDictionary]$Patch,
@@ -9127,10 +9139,7 @@ $completed = {
     # The worker writes and validates settings.json before it returns this result.
     # Only now update the in-memory cache and report the save as successful.
     try {
-        $cacheCopy = Copy-WmtSettings -Settings $saved.Settings
-        if ($null -eq $cacheCopy) { throw "Could not copy the persisted settings into the settings cache." }
-        $script:WmtSettingsCache = $cacheCopy
-        $script:WmtSettingsCacheStamp = [string]$saved.SettingsStamp
+        Set-WmtSettingsCacheFromPersistedState -Settings $saved.Settings -SettingsStamp ([string]$saved.SettingsStamp)
         Write-GuiLog "[$operationId] Completion stage: settings persisted and cache updated."
     }
     catch {
