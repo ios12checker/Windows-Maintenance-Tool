@@ -58889,8 +58889,7 @@ Invoke-WmtUiBackgroundCommand -Name ("DriverUsageLive_" + [guid]::NewGuid().ToSt
 
 # --- PICK COMPATIBLE DRIVER FOR AN ACTIVE DEVICE ---
 # Mirrors Windows' "Let me pick from a list of available drivers on my computer"
-# but exposes the version/provider/date/class/signer info WMT's driver store
-# already knows, so the user can actually compare candidates before switching.
+# and adds package metadata to the native compatible-driver choices.
 
 function Get-WmtDeviceCompatibleIds {
 param(
@@ -58899,60 +58898,348 @@ param(
 # Reads the device's HardwareIDs + CompatibleIDs from the PnP enum registry so
 # we can label which staged driver packages claim to be compatible with it.
 $id = [string]$DeviceId
-if ([string]::IsNullOrWhiteSpace($id)) { return @{} }
-# DeviceId looks like "PCI\VEN_....\4&....&0&...". The enum branch is everything
-# up to the last "\".
-$lastBackslash = $id.LastIndexOf('\')
-if ($lastBackslash -lt 0) { return @{} }
-$enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\" + $id.Substring(0, $lastBackslash)
 $result = @{ HardwareIDs = @(); CompatibleIDs = @() }
+if ([string]::IsNullOrWhiteSpace($id) -or $id.IndexOf('\') -lt 0) { return $result }
+# A PnP instance ID maps to the full device-instance subkey, not its parent bus key.
+$enumPath = "HKLM:\SYSTEM\CurrentControlSet\Enum\" + $id
 try {
-    foreach ($prop in @("HardwareID", "CompatibleID")) {
-        $vals = @(Get-ItemProperty -LiteralPath $enumPath -Name $prop -ErrorAction SilentlyContinue)
-        if ($vals) {
-            $raw = $vals[$prop]
-            if ($null -ne $raw) {
-                $arr = @($raw)
-                $key = $prop -replace 'ID$', 'IDs'
-                $result[$key] = @($arr | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-            }
+    $values = Get-ItemProperty -LiteralPath $enumPath -ErrorAction Stop
+    foreach ($prop in @("HardwareID", "CompatibleIDs")) {
+        $property = $values.PSObject.Properties[$prop]
+        if ($property -and $null -ne $property.Value) {
+            $key = if ($prop -eq "HardwareID") { "HardwareIDs" } else { "CompatibleIDs" }
+            $result[$key] = @($property.Value | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) })
         }
     }
 }
-catch { return $result }
+catch {
+    Write-GuiLog "[Drivers] Failed to read device IDs for $id`: $($_.Exception.Message)"
+}
 return $result
 }
 
-function Test-WmtInfCompatibleWithIds {
+function Get-WmtInfCompatibleModels {
 param(
     [Parameter(Mandatory = $true)][string]$InfPath,
-    [string[]]$CompatibleIds
+    [string[]]$HardwareIds = @(),
+    [string[]]$CompatibleIds = @()
 )
-if (@($CompatibleIds).Count -eq 0) { return $false }
+$deviceIds = @(
+    @($HardwareIds) + @($CompatibleIds) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+)
+if ($deviceIds.Count -eq 0) { return @() }
+
 try {
-    $section = ""
-    $inCompatible = $false
-    foreach ($line in @(Get-Content -LiteralPath $InfPath -ErrorAction Stop)) {
-        $t = $line.Trim()
-        if ($t.Length -eq 0 -or $t.StartsWith(";")) { continue }
-        if ($t.StartsWith("[") -and $t.EndsWith("]")) {
-            $section = $t.Trim("[", "]")
-            $inCompatible = ($section -ieq "CompatibleIDs")
+    $sections = @{}
+    $sectionName = ""
+    foreach ($rawLine in @(Get-Content -LiteralPath $InfPath -ErrorAction Stop)) {
+        $line = ($rawLine -split ';', 2)[0].Trim()
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        if ($line -match '^\[(?<name>[^\]]+)\]$') {
+            $sectionName = $matches.name.Trim()
+            if (-not $sections.ContainsKey($sectionName)) {
+                $sections[$sectionName] = [System.Collections.Generic.List[string]]::new()
+            }
             continue
         }
-        if ($inCompatible) {
-            $eq = $t.IndexOf("=")
-            if ($eq -ge 1) {
-                $val = $t.Substring($eq + 1).Trim().Trim('"')
-                foreach ($cid in @($CompatibleIds)) {
-                    if ([string]$val -eq $cid) { return $true }
-                }
-            }
+        if ($sectionName) {
+            [void]$sections[$sectionName].Add($line)
         }
     }
 }
-catch { return $false }
-return $false
+catch {
+    throw "Failed to read INF '$InfPath': $($_.Exception.Message)"
+}
+
+$strings = @{}
+$stringSections = @($sections.Keys | Where-Object { $_ -match '^Strings(?:\..+)?$' } |
+    Sort-Object @{ Expression = { if ($_ -ieq 'Strings') { 0 } else { 1 } } }, { $_ })
+foreach ($name in $stringSections) {
+    foreach ($line in $sections[$name]) {
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) { continue }
+        $key = $line.Substring(0, $eq).Trim()
+        $value = $line.Substring($eq + 1).Trim().Trim('"')
+        $strings[$key] = $value
+    }
+}
+
+$modelSections = [System.Collections.Generic.List[string]]::new()
+$modelSectionSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$architectureDecoration = switch -Regex ($architecture) {
+    '^AMD64$' { 'NTamd64'; break }
+    '^ARM64$' { 'NTarm64'; break }
+    '^ARM$'   { 'NTarm'; break }
+    '^x86$'   { 'NTx86'; break }
+    default   { '' }
+}
+foreach ($line in @($sections['Manufacturer'])) {
+    $eq = $line.IndexOf("=")
+    if ($eq -lt 1) { continue }
+    $fields = @($line.Substring($eq + 1).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
+    $baseSection = [string]$fields[0]
+    if ([string]::IsNullOrWhiteSpace($baseSection)) { continue }
+    if ($sections.ContainsKey($baseSection) -and $modelSectionSet.Add($baseSection)) {
+        [void]$modelSections.Add($baseSection)
+    }
+    foreach ($decoration in @($fields | Select-Object -Skip 1)) {
+        if ([string]::IsNullOrWhiteSpace($decoration)) { continue }
+        if ($decoration -match '^(?<arch>NT(?:amd64|arm64|arm|x86))(?:\.|$)' -and
+            $architectureDecoration -and $matches.arch -ine $architectureDecoration) {
+            continue
+        }
+        $decoratedSection = "$baseSection.$decoration"
+        if ($sections.ContainsKey($decoratedSection) -and $modelSectionSet.Add($decoratedSection)) {
+            [void]$modelSections.Add($decoratedSection)
+        }
+    }
+}
+
+$matchedModels = [System.Collections.Generic.List[object]]::new()
+$seenModels = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($name in $modelSections) {
+    foreach ($line in $sections[$name]) {
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) { continue }
+        $modelName = $line.Substring(0, $eq).Trim().Trim('"')
+        if ($modelName -match '^%(?<key>[^%]+)%$' -and $strings.ContainsKey($matches.key)) {
+            $modelName = [string]$strings[$matches.key]
+        }
+        $fields = @($line.Substring($eq + 1).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
+        if ($fields.Count -lt 2 -or [string]::IsNullOrWhiteSpace($modelName)) { continue }
+        $modelIds = @($fields | Select-Object -Skip 1 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+        $matchedId = $null
+        foreach ($deviceId in $deviceIds) {
+            foreach ($modelId in $modelIds) {
+                if ([string]$modelId -ieq [string]$deviceId) {
+                    $matchedId = [string]$deviceId
+                    break
+                }
+            }
+            if ($matchedId) { break }
+        }
+        if ($matchedId -and $seenModels.Add($modelName)) {
+            [void]$matchedModels.Add($modelName)
+        }
+    }
+}
+return $matchedModels.ToArray()
+}
+
+function ConvertTo-WmtDriverDateText {
+param([string]$Value)
+if ([string]::IsNullOrWhiteSpace($Value)) { return "" }
+$match = [regex]::Match($Value, '\d{1,4}[./\-]\d{1,2}[./\-]\d{1,4}')
+if (-not $match.Success) { return $Value.Trim() }
+$dateText = $match.Value
+$parsedDate = [DateTime]::MinValue
+foreach ($culture in @([Globalization.CultureInfo]::CurrentCulture, [Globalization.CultureInfo]::InvariantCulture)) {
+    if ([DateTime]::TryParse($dateText, $culture, [Globalization.DateTimeStyles]::AllowWhiteSpaces, [ref]$parsedDate)) {
+        return $parsedDate.ToString("yyyy-MM-dd", [Globalization.CultureInfo]::InvariantCulture)
+    }
+}
+return $dateText
+}
+
+function ConvertFrom-WmtDriverDateVersion {
+param([string]$Value)
+if ([string]::IsNullOrWhiteSpace($Value)) { return [PSCustomObject]@{ Date = ""; Version = "" } }
+$raw = $Value.Trim()
+$versionMatch = [regex]::Match($raw, '(?<version>\d+(?:\.\d+){1,3})\s*$')
+$version = if ($versionMatch.Success) { $versionMatch.Groups["version"].Value } else { "" }
+$dateText = if ($versionMatch.Success) { $raw.Substring(0, $versionMatch.Index).Trim().Trim(',', ';') } else { $raw }
+return [PSCustomObject]@{
+    Date    = ConvertTo-WmtDriverDateText -Value $dateText
+    Version = $version
+}
+}
+
+function Get-WmtInfDriverMetadata {
+param([Parameter(Mandatory = $true)][string]$InfPath)
+$metadata = [PSCustomObject]@{ Provider = ""; Class = ""; Date = ""; Version = ""; Signer = "" }
+if (-not (Test-Path -LiteralPath $InfPath -PathType Leaf)) { return $metadata }
+
+$sections = @{}
+$sectionName = ""
+$stringSectionOrder = [System.Collections.Generic.List[string]]::new()
+foreach ($rawLine in @(Get-Content -LiteralPath $InfPath -ErrorAction Stop)) {
+    $line = ($rawLine -split ';', 2)[0].Trim()
+    if ([string]::IsNullOrWhiteSpace($line)) { continue }
+    if ($line -match '^\[(?<name>[^\]]+)\]$') {
+        $sectionName = $matches.name.Trim()
+        if (-not $sections.ContainsKey($sectionName)) {
+            $sections[$sectionName] = [System.Collections.Generic.List[string]]::new()
+        }
+        if ($sectionName -ieq "Strings") { [void]$stringSectionOrder.Add("") }
+        elseif ($sectionName -match '(?i)^Strings\.([0-9A-F]{4})$') { [void]$stringSectionOrder.Add($matches[1].ToUpperInvariant()) }
+        continue
+    }
+    if ($sectionName) { [void]$sections[$sectionName].Add($line) }
+}
+
+$stringTables = @{}
+foreach ($name in $sections.Keys) {
+    $stringId = $null
+    if ($name -ieq "Strings") { $stringId = "" }
+    elseif ($name -match '(?i)^Strings\.([0-9A-F]{4})$') { $stringId = $matches[1].ToUpperInvariant() }
+    if ($null -eq $stringId) { continue }
+    $table = @{}
+    foreach ($line in $sections[$name]) {
+        $eq = $line.IndexOf("=")
+        if ($eq -lt 1) { continue }
+        $table[$line.Substring(0, $eq).Trim()] = $line.Substring($eq + 1).Trim().Trim('"')
+    }
+    $stringTables[$stringId] = $table
+}
+$strings = Select-WmtInfStringTable -Sections $stringTables -SectionOrder @($stringSectionOrder)
+
+$versionFields = @{}
+foreach ($line in @($sections["Version"])) {
+    $eq = $line.IndexOf("=")
+    if ($eq -lt 1) { continue }
+    $versionFields[$line.Substring(0, $eq).Trim()] = $line.Substring($eq + 1).Trim().Trim('"')
+}
+$metadata.Provider = Resolve-WmtInfToken -Raw ([string]$versionFields["Provider"]) -Strings $strings
+$metadata.Class = Resolve-WmtInfToken -Raw ([string]$versionFields["Class"]) -Strings $strings
+$driverVer = [string]$versionFields["DriverVer"]
+if ($driverVer) {
+    $dateVersion = ConvertFrom-WmtDriverDateVersion -Value $driverVer.Replace(',', ' ')
+    $metadata.Date = $dateVersion.Date
+    $metadata.Version = $dateVersion.Version
+}
+
+$catalogName = ""
+$architecture = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+$architectureDecoration = switch -Regex ($architecture) {
+    '^AMD64$' { 'NTamd64'; break }
+    '^ARM64$' { 'NTarm64'; break }
+    '^ARM$'   { 'NTarm'; break }
+    '^x86$'   { 'NTx86'; break }
+    default   { '' }
+}
+foreach ($key in $versionFields.Keys) {
+    if ($architectureDecoration -and $key -match "^CatalogFile\.$architectureDecoration(?:\.|$)") {
+        $catalogName = Resolve-WmtInfToken -Raw ([string]$versionFields[$key]) -Strings $strings
+        if ($catalogName) { break }
+    }
+}
+if (-not $catalogName) { $catalogName = Resolve-WmtInfToken -Raw ([string]$versionFields["CatalogFile"]) -Strings $strings }
+$catalogPath = if ($catalogName) { Join-Path (Split-Path -Parent $InfPath) $catalogName } else { "" }
+if ($catalogPath -and (Test-Path -LiteralPath $catalogPath -PathType Leaf)) {
+    try {
+        $signature = Get-AuthenticodeSignature -FilePath $catalogPath -ErrorAction Stop
+        if ($signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid -and $signature.SignerCertificate) {
+            $metadata.Signer = $signature.SignerCertificate.GetNameInfo([System.Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false)
+        }
+    } catch {
+        Write-GuiLog "[Drivers] INF catalog signer lookup failed for $catalogPath`: $($_.Exception.Message)"
+    }
+}
+return $metadata
+}
+
+function Get-WmtNativeCompatibleDrivers {
+param(
+    [Parameter(Mandatory = $true)][string]$DeviceId
+)
+if ([string]::IsNullOrWhiteSpace($DeviceId)) { throw "DeviceId is required." }
+$pnputilPath = Join-Path $env:SystemRoot "System32\pnputil.exe"
+$arguments = '/enum-devices /instanceid "' + $DeviceId.Replace('"', '') + '" /drivers'
+$result = Invoke-WmtProcess -FilePath $pnputilPath -Arguments $arguments -TimeoutMs 60000 -Encoding OEM -KillTree
+if ($result.TimedOut) { throw "pnputil compatible-driver query timed out for $DeviceId." }
+if ($result.TerminationFailed -or $result.OutputReadTimedOut) { throw "pnputil compatible-driver query did not finish cleanly for $DeviceId." }
+if (-not [string]::IsNullOrWhiteSpace([string]$result.Error)) { throw "pnputil compatible-driver query failed: $($result.Error)" }
+if ([int]$result.ExitCode -ne 0) { throw "pnputil compatible-driver query exited with code $($result.ExitCode)." }
+$outputText = ([string]$result.StdOut) + [Environment]::NewLine + ([string]$result.StdErr)
+
+$records = [System.Collections.Generic.List[object]]::new()
+$matchingSection = $false
+$record = $null
+foreach ($line in @($outputText -split '\r?\n')) {
+    if (-not $matchingSection) {
+        if ($line -match '^\s*Matching Drivers?\s*:\s*$') { $matchingSection = $true }
+        continue
+    }
+    if ($line -match '^\s*Driver Name\s*:\s*(?<value>.+?)\s*$') {
+        if ($record) { [void]$records.Add([PSCustomObject]$record) }
+        $record = @{
+            PublishedName = $matches.value.Trim()
+            Model         = ""
+            Provider      = ""
+            Date          = ""
+            Version       = ""
+            Signer        = ""
+        }
+        continue
+    }
+    if (-not $record) { continue }
+    if ($line -match '^\s*Driver Description\s*:\s*(?<value>.*?)\s*$') { $record.Model = $matches.value.Trim() }
+    elseif ($line -match '^\s*Driver Provider(?: Name)?\s*:\s*(?<value>.*?)\s*$') { $record.Provider = $matches.value.Trim() }
+    elseif ($line -match '^\s*Driver Date\s*(?:and|/)\s*Version\s*:\s*(?<value>.*?)\s*$') {
+        $dateVersion = ConvertFrom-WmtDriverDateVersion -Value $matches.value
+        if ($dateVersion.Date) { $record.Date = $dateVersion.Date }
+        if ($dateVersion.Version) { $record.Version = $dateVersion.Version }
+    }
+    elseif ($line -match '^\s*Driver Date\s*:\s*(?<value>.*?)\s*$') {
+        $dateVersion = ConvertFrom-WmtDriverDateVersion -Value $matches.value
+        if ($dateVersion.Date) { $record.Date = $dateVersion.Date }
+        if ($dateVersion.Version) { $record.Version = $dateVersion.Version }
+    }
+    elseif ($line -match '^\s*Driver Version\s*:\s*(?<value>.*?)\s*$') {
+        $dateVersion = ConvertFrom-WmtDriverDateVersion -Value $matches.value
+        if ($dateVersion.Date -and -not $record.Date) { $record.Date = $dateVersion.Date }
+        if ($dateVersion.Version) { $record.Version = $dateVersion.Version }
+        elseif (-not $record.Version) { $record.Version = $matches.value.Trim() }
+    }
+    elseif ($line -match '^\s*(?:Driver\s+)?Signer(?:\s+Name)?\s*:\s*(?<value>.*?)\s*$') { $record.Signer = $matches.value.Trim() }
+}
+if (-not $matchingSection) {
+    throw "pnputil did not return a Matching Drivers section for $DeviceId."
+}
+if ($record) { [void]$records.Add([PSCustomObject]$record) }
+return $records.ToArray()
+}
+
+function Get-WmtUnusedDriverPackageRows {
+param(
+    [string[]]$PublishedNames,
+    [string]$CurrentInf = ""
+)
+if (-not $script:DriverUsageLoaded -or $null -eq $script:DriverDeviceMap -or $null -eq $script:DriverServiceMap) {
+    throw "Driver usage must be successfully loaded before unused packages can be removed."
+}
+if (-not $script:DriverCacheLoaded -or $null -eq $script:DriverPackages) {
+    throw "The staged driver package inventory is not loaded."
+}
+$cacheFresh = $script:DriverCacheLoadedAt -and
+    $script:DriverCacheLoadedAt -ne [DateTime]::MinValue -and
+    $script:DriverCacheTtlSeconds -gt 0 -and
+    (((Get-Date) - $script:DriverCacheLoadedAt).TotalSeconds -lt $script:DriverCacheTtlSeconds)
+if (-not $cacheFresh) { throw "Driver usage data is stale. Reload the Drivers page before removing packages." }
+
+$packageByInf = @{}
+foreach ($package in @($script:DriverPackages)) {
+    if ($package.PublishedName) { $packageByInf[[string]$package.PublishedName] = $package }
+}
+$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$unused = [System.Collections.Generic.List[object]]::new()
+foreach ($publishedName in @($PublishedNames)) {
+    $inf = [System.IO.Path]::GetFileName([string]$publishedName)
+    if ($inf -notmatch '(?i)^oem\d+\.inf$' -or $inf -ieq $CurrentInf -or -not $seen.Add($inf)) { continue }
+    if (-not $packageByInf.ContainsKey($inf)) { continue }
+    $key = $inf.ToLowerInvariant()
+
+    $deviceUsed = $false
+    if ($script:DriverDeviceMap.ContainsKey($key) -and @($script:DriverDeviceMap[$key]).Count -gt 0) { $deviceUsed = $true }
+    $serviceUsed = $false
+    if ($script:DriverServiceMap.ContainsKey($key) -and @($script:DriverServiceMap[$key]).Count -gt 0) { $serviceUsed = $true }
+    $package = $packageByInf[$inf]
+    if ($deviceUsed -or $serviceUsed -or [string]$package.Status -eq "In Use") { continue }
+    [void]$unused.Add($package)
+}
+return $unused.ToArray()
 }
 
 function Invoke-WmtInstallDriverOnDevice {
@@ -58993,9 +59280,8 @@ return [PSCustomObject]@{ Success = ($exit -eq 0); ExitCode = $exit; Output = ($
 
 function Show-WmtPickCompatibleDriverDialog {
 # "Let me pick from a list of available drivers on my computer" for one active
-# device: shows the bound device, its hardware/compatible IDs, and the third-party
-# driver packages staged in the driver store with version/provider/date/class/signer
-# info, then lets the user install a different compatible driver on that device.
+# device: shows the bound device, its hardware/compatible IDs, and Windows' native
+# matching driver models with package version/provider/date/class/signer details.
 # Every WPF event handler is wrapped in try/catch so a null dereference cannot
 # become an unhandled dispatcher exception.
 param($Row)
@@ -59082,54 +59368,118 @@ try {
     if ($hwIds.Count -gt 0) { [void]$idSummary.Add("Hardware IDs: $($hwIds -join ', ')") }
     if ($compatIds.Count -gt 0) { [void]$idSummary.Add("Compatible IDs: $($compatIds -join ', ')") }
 
-    # Build candidate driver packages from the staged third-party store list,
-    # excluding the one already installed on the target device. Annotate each with
-    # version/date/provider/class/signer and a compatibility flag.
+    # Ask PnPUtil for Windows' actual matching-driver list. The Driver Store
+    # inventory used by the Drivers page intentionally omits inbox packages.
     $cands = [System.Collections.Generic.List[object]]::new()
     $driverPkgs = if ($script:DriverPackages) { @($script:DriverPackages) } else { @() }
     Write-GuiLog "[Drivers] Pick Compatible Driver: driverPkgs count=$($driverPkgs.Count)"
-    $candCount = 0
+    $packageByInf = @{}
     foreach ($pkg in $driverPkgs) {
-        if (-not $pkg) { continue }
-        $pInf = [string]$pkg.PublishedName
-        if ([string]::IsNullOrWhiteSpace($pInf) -or $pInf -eq $currentInf) { continue }
+        $publishedName = [string]$pkg.PublishedName
+        if (-not [string]::IsNullOrWhiteSpace($publishedName)) { $packageByInf[$publishedName] = $pkg }
+    }
+    try {
+        $nativeDrivers = @(Get-WmtNativeCompatibleDrivers -DeviceId $devId)
+    } catch {
+        Write-GuiLog "[Drivers] Native compatible-driver query failed: $($_.Exception.Message)"
+        Show-WmtMessageBox -Message "Windows could not enumerate compatible drivers for this device:`n`n$($_.Exception.Message)" -Title "Pick Compatible Driver" -Image Error | Out-Null
+        return
+    }
+    $candCount = 0
+    $seenCandidates = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($native in $nativeDrivers) {
+        if (-not $native) { continue }
+        $pInf = [System.IO.Path]::GetFileName([string]$native.PublishedName)
+        if ([string]::IsNullOrWhiteSpace($pInf)) { continue }
+        if ($pInf -notmatch '\.inf$') { $pInf += ".inf" }
         $infPath = Join-Path $env:SystemRoot ("INF\" + $pInf)
-        $compat = $false
+        $pkg = if ($packageByInf.ContainsKey($pInf)) { $packageByInf[$pInf] } else { $null }
+        $infMetadata = $null
+        $modelNameList = [System.Collections.Generic.List[string]]::new()
+        $seenModelNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        if (-not [string]::IsNullOrWhiteSpace([string]$native.Model) -and $seenModelNames.Add([string]$native.Model)) {
+            [void]$modelNameList.Add([string]$native.Model)
+        }
         if (Test-Path -LiteralPath $infPath -PathType Leaf) {
             try {
-                $compat = Test-WmtInfCompatibleWithIds -InfPath $infPath -CompatibleIds $compatIds
+                foreach ($infModel in @(Get-WmtInfCompatibleModels -InfPath $infPath -HardwareIds $hwIds -CompatibleIds $compatIds)) {
+                    $infModelName = [string]$infModel
+                    if (-not [string]::IsNullOrWhiteSpace($infModelName) -and $seenModelNames.Add($infModelName)) {
+                        [void]$modelNameList.Add($infModelName)
+                    }
+                }
             } catch {
-                $dbgInf = [string]$pInf
-                Write-GuiLog ("[Drivers] Pick Compatible Driver: compat test failed for " + $dbgInf + ": " + $_.Exception.Message)
+                Write-GuiLog "[Drivers] Pick Compatible Driver: model lookup failed for $pInf`: $($_.Exception.Message)"
+            }
+            try {
+                $infMetadata = Get-WmtInfDriverMetadata -InfPath $infPath
+            } catch {
+                Write-GuiLog "[Drivers] Pick Compatible Driver: metadata lookup failed for $pInf`: $($_.Exception.Message)"
             }
         }
-        [void]$cands.Add([PSCustomObject]@{
-            PublishedName   = $pInf
-            OriginalName    = if ([string]::IsNullOrWhiteSpace([string]$pkg.OriginalName)) { "(unknown)" } else { [string]$pkg.OriginalName }
-            Provider        = [string]$pkg.Provider
-            Class           = [string]$pkg.Class
-            Signer          = [string]$pkg.Signer
-            Version         = [string]$pkg.DisplayVer
-            Date            = [string]$pkg.DisplayDate
-            Compatible      = if ($compat) { "Yes" } else { "No" }
-            _InfPath        = $infPath
-            _CompatibleBool = $compat
-        })
-        $candCount++
+        $modelNames = $modelNameList.ToArray()
+        if ($modelNames.Count -eq 0) { $modelNames = @("[Model description unavailable]") }
+
+        $provider = [string]$native.Provider
+        if ([string]::IsNullOrWhiteSpace($provider) -or $provider -match '(?i)^(?:unknown|n/?a|not available)$') { $provider = if ($pkg) { [string]$pkg.Provider } else { "" } }
+        if (([string]::IsNullOrWhiteSpace($provider) -or $provider -match '(?i)^(?:unknown|n/?a|not available)$') -and $infMetadata) { $provider = [string]$infMetadata.Provider }
+        if ([string]::IsNullOrWhiteSpace($provider) -or $provider -match '(?i)^(?:unknown|n/?a|not available)$') { $provider = "Unknown" }
+
+        $signer = [string]$native.Signer
+        if ([string]::IsNullOrWhiteSpace($signer) -or $signer -match '(?i)^(?:unknown|n/?a|not available)$') { $signer = if ($pkg) { [string]$pkg.Signer } else { "" } }
+        if (([string]::IsNullOrWhiteSpace($signer) -or $signer -match '(?i)^(?:unknown|n/?a|not available)$') -and $infMetadata) { $signer = [string]$infMetadata.Signer }
+        if ([string]::IsNullOrWhiteSpace($signer) -or $signer -match '(?i)^(?:unknown|n/?a|not available)$') { $signer = "Unknown" }
+
+        $version = [string]$native.Version
+        if ([string]::IsNullOrWhiteSpace($version) -or $version -match '(?i)^(?:unknown|n/?a|not available)$') { $version = if ($pkg) { [string]$pkg.DisplayVer } else { "" } }
+        if (([string]::IsNullOrWhiteSpace($version) -or $version -match '(?i)^(?:unknown|n/?a|not available)$') -and $infMetadata) { $version = [string]$infMetadata.Version }
+        if ([string]::IsNullOrWhiteSpace($version) -or $version -match '(?i)^(?:unknown|n/?a|not available)$') { $version = "Unknown" }
+
+        $date = [string]$native.Date
+        if ([string]::IsNullOrWhiteSpace($date) -or $date -match '(?i)^(?:unknown|n/?a|not available)$') { $date = if ($pkg) { [string]$pkg.DisplayDate } else { "" } }
+        if (([string]::IsNullOrWhiteSpace($date) -or $date -match '(?i)^(?:unknown|n/?a|not available)$') -and $infMetadata) { $date = [string]$infMetadata.Date }
+        if ([string]::IsNullOrWhiteSpace($date) -or $date -match '(?i)^(?:unknown|n/?a|not available)$') { $date = "Unknown" }
+        else { $date = ConvertTo-WmtDriverDateText -Value $date }
+
+        $class = if ($pkg -and -not [string]::IsNullOrWhiteSpace([string]$pkg.Class) -and [string]$pkg.Class -ne "Unknown") {
+            [string]$pkg.Class
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$Row.Class)) {
+            [string]$Row.Class
+        } elseif ($infMetadata -and -not [string]::IsNullOrWhiteSpace([string]$infMetadata.Class)) {
+            [string]$infMetadata.Class
+        } else {
+            "Unknown"
+        }
+        foreach ($model in $modelNames) {
+            $candidateKey = "$pInf|$model"
+            if (-not $seenCandidates.Add($candidateKey)) { continue }
+            [void]$cands.Add([PSCustomObject]@{
+                Model           = [string]$model
+                Current         = if ($pInf -ieq $currentInf) { "Current" } else { "" }
+                PublishedName   = $pInf
+                OriginalName    = if ($pkg -and -not [string]::IsNullOrWhiteSpace([string]$pkg.OriginalName)) { [string]$pkg.OriginalName } else { $pInf }
+                Provider        = $provider
+                Class           = $class
+                Signer          = $signer
+                Version         = $version
+                Date            = $date
+                _InfPath        = $infPath
+            })
+            $candCount++
+        }
     }
     Write-GuiLog "[Drivers] Pick Compatible Driver: candidates=$candCount"
-    # Sort compatible candidates first, then by provider, then driver name.
-    try {
-        $cands = @($cands | Sort-Object -Property @(
-            @{ Expression = '_CompatibleBool'; Descending = $true },
-            'Provider', 'OriginalName'
-        ))
-    } catch {
-        Write-GuiLog "[Drivers] Pick Compatible Driver: sort failed: $($_.Exception.Message)"
-    }
     if ($cands.Count -eq 0) {
-        Show-WmtMessageBox -Message "No other third-party driver packages are staged in the driver store for this device.`n`nOnly the currently installed package ($currentInf) is available." -Title "Pick Compatible Driver" -Image Information | Out-Null
+        Show-WmtMessageBox -Message "Windows did not report any matching driver packages for this device." -Title "Pick Compatible Driver" -Image Information | Out-Null
         return
+    }
+    $removeUnusedPreview = @()
+    $removeUnusedCheckError = ""
+    try {
+        $removeUnusedPreview = @(Get-WmtUnusedDriverPackageRows -PublishedNames @($cands | ForEach-Object { [string]$_.PublishedName }) -CurrentInf $currentInf)
+    } catch {
+        $removeUnusedCheckError = $_.Exception.Message
+        Write-GuiLog "[Drivers] Pick Compatible Driver: unused-package check failed: $removeUnusedCheckError"
     }
 
     Write-GuiLog "[Drivers] Pick Compatible Driver: creating dialog"
@@ -59153,11 +59503,20 @@ try {
     </Border>
     <DataGrid Name="dgCandidates" Grid.Row="2" IsReadOnly="True" CanUserAddRows="False" CanUserDeleteRows="False"
               AlternationCount="2" BorderThickness="0" SelectionMode="Single" Background="{DynamicResource BgPanel}"/>
-    <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,8,0,0">
-        <Button Name="btnClose" Content="Close" Width="94" Height="30" IsCancel="True"/>
-        <Button Name="btnUse" Content="Use this driver" MinWidth="140" Height="32" Margin="0,0,10,0"
-                Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
-    </StackPanel>
+    <Grid Grid.Row="3" Margin="0,8,0,0">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Button Name="btnRemoveUnused" Grid.Column="0" Content="Remove unused packages" MinWidth="170" Height="32"
+                HorizontalAlignment="Left"
+                ToolTip="Only staged third-party packages confirmed unused by all present devices and services can be removed. Inbox drivers are excluded."/>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Name="btnClose" Content="Close" Width="94" Height="30" IsCancel="True"/>
+            <Button Name="btnUse" Content="Use this driver" MinWidth="140" Height="32" Margin="0,0,10,0"
+                    Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+        </StackPanel>
+    </Grid>
 </Grid>
 "@
     Write-GuiLog "[Drivers] Pick Compatible Driver: creating window from XAML"
@@ -59176,9 +59535,18 @@ try {
     $dg = $dialog.FindName("dgCandidates")
     $btnUse = $dialog.FindName("btnUse")
     $btnClose = $dialog.FindName("btnClose")
-    if (-not $lblDevice -or -not $lblDeviceId -or -not $lblCurrent -or -not $lblIds -or -not $dg -or -not $btnUse -or -not $btnClose) {
+    $btnRemoveUnused = $dialog.FindName("btnRemoveUnused")
+    if (-not $lblDevice -or -not $lblDeviceId -or -not $lblCurrent -or -not $lblIds -or -not $dg -or -not $btnUse -or -not $btnClose -or -not $btnRemoveUnused) {
         Show-WmtMessageBox -Message "Failed to build the Pick Compatible Driver dialog (a control was not found)." -Title "Pick Compatible Driver" -Image Error | Out-Null
         return
+    }
+    $btnRemoveUnused.IsEnabled = ($removeUnusedPreview.Count -gt 0)
+    if ($btnRemoveUnused.IsEnabled) {
+        $btnRemoveUnused.ToolTip = "Remove only third-party packages confirmed unused by all present devices and services. Inbox packages are excluded."
+    } elseif ($removeUnusedCheckError) {
+        $btnRemoveUnused.ToolTip = "Unavailable: $removeUnusedCheckError"
+    } else {
+        $btnRemoveUnused.ToolTip = "No compatible third-party packages are confirmed unused. Current, inbox, and device/service-bound packages are excluded."
     }
 
     Write-GuiLog "[Drivers] Pick Compatible Driver: setting text"
@@ -59191,24 +59559,42 @@ try {
     Write-GuiLog "[Drivers] Pick Compatible Driver: setting items source"
     $dg.ItemsSource = $cands
     try {
-        Set-WmtDataGridColumns -DataGrid $dg -Columns @("Compatible", "Provider", "OriginalName", "Version", "Date", "Class", "Signer", "PublishedName") -Widths @{ Compatible = 80; Provider = 150; OriginalName = 220; Version = 100; Date = 100; Class = 120; Signer = 140; PublishedName = 130 }
+        Set-WmtDataGridColumns -DataGrid $dg -Columns @("Model", "Current", "Provider", "OriginalName", "Version", "Date", "Class", "Signer", "PublishedName") -Widths @{ Model = 250; Current = 75; Provider = 130; OriginalName = 180; Version = 100; Date = 90; Class = 110; Signer = 150; PublishedName = 120 }
     } catch {
         Write-GuiLog "[Drivers] Set-WmtDataGridColumns failed: $($_.Exception.Message)"
     }
 
     $state = @{ Chosen = $null }
-    $dg.Add_SelectionChanged({
+    $selectionChanged = {
         try {
             $state.Chosen = $dg.SelectedItem
             $btnUse.IsEnabled = ($null -ne $state.Chosen)
         } catch { Write-GuiLog "[Drivers] Candidate grid SelectionChanged failed: $($_.Exception.Message)" }
-    }).GetNewClosure()
+    }.GetNewClosure()
+    $dg.Add_SelectionChanged($selectionChanged)
     try { $btnUse.IsEnabled = ($null -ne $dg.SelectedItem) } catch {}
 
-    $btnClose.Add_Click({
+    $closeClick = {
         try { $dialog.Close() } catch { Write-GuiLog "[Drivers] Close button click failed: $($_.Exception.Message)" }
-    }).GetNewClosure()
-    $btnUse.Add_Click({
+    }.GetNewClosure()
+    $btnClose.Add_Click($closeClick)
+    $removeUnusedClick = {
+        try {
+            $publishedNames = @($cands | ForEach-Object { [string]$_.PublishedName })
+            $unusedPackages = @(Get-WmtUnusedDriverPackageRows -PublishedNames $publishedNames -CurrentInf $currentInf)
+            if ($unusedPackages.Count -eq 0) {
+                Show-WmtMessageBox -Message "No compatible staged third-party packages are currently confirmed unused by all present devices and services." -Title "Remove Unused Packages" -Image Information | Out-Null
+                return
+            }
+            $dialog.Close()
+            Invoke-DriverPackageRemoval -Rows $unusedPackages -AllowForce:$false
+        } catch {
+            Write-GuiLog "[Drivers] Remove unused packages click failed: $($_.Exception.Message)"
+            Show-WmtMessageBox -Message "Could not remove unused driver packages:`n`n$($_.Exception.Message)" -Title "Remove Unused Packages" -Image Error | Out-Null
+        }
+    }.GetNewClosure()
+    $btnRemoveUnused.Add_Click($removeUnusedClick)
+    $useDriverClick = {
         try {
             $chosen = $state.Chosen
             if (-not $chosen) { return }
@@ -59253,7 +59639,8 @@ try {
         } catch {
             Write-GuiLog "[Drivers] Use this driver click failed: $($_.Exception.Message)"
         }
-    }).GetNewClosure()
+    }.GetNewClosure()
+    $btnUse.Add_Click($useDriverClick)
     Write-GuiLog "[Drivers] Pick Compatible Driver: showing dialog"
     try { $dialog.ShowDialog() | Out-Null } catch { Write-GuiLog "ERROR: Pick Compatible Driver dialog ShowDialog failed: $($_.Exception.Message)" }
 } catch {
@@ -59624,7 +60011,7 @@ Write-GuiLog "[Drivers] Removed $removedCount package(s) from the cached list; $
 }
 
 function Invoke-DriverPackageRemoval {
-param([object[]]$Rows)
+param([object[]]$Rows, [bool]$AllowForce = $true)
 $targets = @($Rows | Where-Object { $_ -and $_.PublishedName })
 if ($targets.Count -eq 0) { return }
 
@@ -59696,9 +60083,10 @@ $applyResults = {
 }.GetNewClosure()
 $applyResultsState.Callback = $applyResults
 
+$allowForceForResults = [bool]$AllowForce
 $done = {
     param($results)
-    & $applyResults $results $true
+    & $applyResults $results $allowForceForResults
 }.GetNewClosure()
 
 Invoke-WmtUiBackgroundCommand -Name ("DeleteDrivers_" + [guid]::NewGuid().ToString("N")) -Msg "Removing $($targetInfs.Count) driver package(s)..." -SuppressResultLog -Sb {
