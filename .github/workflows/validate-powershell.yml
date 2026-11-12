@@ -3300,7 +3300,8 @@ jobs:
               'Optimize-Volume', 'Register-DnsClient', 'Remove-AppxPackage', 'Remove-BitsTransfer',
               'Remove-NetFirewallRule', 'Remove-WindowsCapability', 'Restart-NetAdapter', 'Restart-Service',
               'Restore-Computer', 'Set-Acl', 'Set-CimInstance', 'Set-DnsClientServerAddress',
-              'Set-NetFirewallRule', 'Set-Service', 'Start-Service', 'Stop-Service'
+              'Set-NetFirewallRule', 'Set-Service', 'Start-Service', 'Stop-Service',
+              'Update-PnpDevice'
           )
 
           $missing = @{}
