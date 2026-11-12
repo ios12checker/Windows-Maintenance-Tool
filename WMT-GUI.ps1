@@ -59325,6 +59325,40 @@ foreach ($publishedName in @($PublishedNames)) {
 return $unused.ToArray()
 }
 
+function Get-WmtCompatibleDriverPackageNames {
+param(
+    [object[]]$DriverPackages,
+    [object[]]$NativeCandidates,
+    [string[]]$DeviceIds = @(),
+    [string]$CurrentInf = ""
+)
+$currentInfName = [System.IO.Path]::GetFileName($CurrentInf)
+$compatibleIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($deviceId in @($DeviceIds)) {
+    if (-not [string]::IsNullOrWhiteSpace([string]$deviceId)) { [void]$compatibleIds.Add([string]$deviceId) }
+}
+$publishedNames = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($candidate in @($NativeCandidates)) {
+    $publishedName = [System.IO.Path]::GetFileName([string]$candidate.PublishedName)
+    if ($publishedName -match '(?i)^oem\d+\.inf$' -and $publishedName -ine $currentInfName) {
+        [void]$publishedNames.Add($publishedName)
+    }
+}
+foreach ($package in @($DriverPackages)) {
+    $publishedName = [System.IO.Path]::GetFileName([string]$package.PublishedName)
+    if ($publishedName -notmatch '(?i)^oem\d+\.inf$' -or $publishedName -ieq $currentInfName -or $publishedNames.Contains($publishedName)) { continue }
+    $modelIds = $package.PSObject.Properties["DriverModelHardwareIds"]
+    if (-not $modelIds) { continue }
+    foreach ($modelId in @($modelIds.Value)) {
+        if ($compatibleIds.Contains([string]$modelId)) {
+            [void]$publishedNames.Add($publishedName)
+            break
+        }
+    }
+}
+return @($publishedNames | Sort-Object)
+}
+
 function Invoke-WmtInstallDriverOnDevice {
 # Stages a specific INF into the driver store (pnputil /add-driver; idempotent if
 # already present) then rebinds the device to it via Update-PnpDevice. Mirrors
@@ -59564,14 +59598,16 @@ try {
         Show-WmtMessageBox -Message "Windows did not report any matching driver packages for this device." -Title "Pick Compatible Driver" -Image Information | Out-Null
         return
     }
+    $removeUnusedPublishedNames = @(Get-WmtCompatibleDriverPackageNames -DriverPackages $driverPkgs -NativeCandidates $cands -DeviceIds (@($hwIds) + @($compatIds)) -CurrentInf $currentInf)
     $removeUnusedPreview = @()
     $removeUnusedCheckError = ""
     try {
-        $removeUnusedPreview = @(Get-WmtUnusedDriverPackageRows -PublishedNames @($cands | ForEach-Object { [string]$_.PublishedName }) -CurrentInf $currentInf)
+        $removeUnusedPreview = @(Get-WmtUnusedDriverPackageRows -PublishedNames $removeUnusedPublishedNames -CurrentInf $currentInf)
     } catch {
         $removeUnusedCheckError = $_.Exception.Message
         Write-GuiLog "[Drivers] Pick Compatible Driver: unused-package check failed: $removeUnusedCheckError"
     }
+    Write-GuiLog "[Drivers] Pick Compatible Driver: unused-removal candidates=$($removeUnusedPublishedNames.Count) confirmedUnused=$($removeUnusedPreview.Count)"
 
     Write-GuiLog "[Drivers] Pick Compatible Driver: creating dialog"
     $content = @"
@@ -59678,8 +59714,7 @@ try {
     $btnClose.Add_Click($closeClick)
     $removeUnusedClick = {
         try {
-            $publishedNames = @($cands | ForEach-Object { [string]$_.PublishedName })
-            $unusedPackages = @(Get-WmtUnusedDriverPackageRows -PublishedNames $publishedNames -CurrentInf $currentInf)
+            $unusedPackages = @(Get-WmtUnusedDriverPackageRows -PublishedNames $removeUnusedPublishedNames -CurrentInf $currentInf)
             if ($unusedPackages.Count -eq 0) {
                 Show-WmtMessageBox -Message "No compatible staged third-party packages are currently confirmed unused by all present devices and services." -Title "Remove Unused Packages" -Image Information | Out-Null
                 return
