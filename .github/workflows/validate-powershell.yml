@@ -975,6 +975,94 @@ jobs:
           Write-Host 'PASS: My Device queue survives worker failures without hot-loop retries.'
           Write-Host 'PASS: nonblocking feature startup, fail-closed state checks, safe callback scope and guarded feature buttons.'
 
+      - name: Smoke test model-ID driver supersedence
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = [IO.File]::ReadAllText((Resolve-Path '.\WMT-GUI.ps1').Path)
+          $tokens = $null; $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors.Message -join '; ') }
+          foreach ($name in @('Get-WmtInfModelEntries','Get-WmtInfDeclaredHardwareIds','Get-WmtInfCompatibleModels','Get-WmtDriverPackageGroupKey','Set-DriverRowProperty','Get-DriverDeviceListText','Set-DriverStatusFlags')) {
+              $fn = $ast.Find({
+                  param($n)
+                  $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq $name
+              }, $true)
+              if (-not $fn) { throw "Required driver function is missing: $name" }
+              Invoke-Expression $fn.Extent.Text
+          }
+          function Write-GuiLog { param([string]$Message) }
+          $cleanup = $ast.Find({
+              param($n)
+              $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Show-DriverCleanupDialog'
+          }, $true)
+          if (-not $cleanup -or $cleanup.Extent.Text -notmatch 'Group-Object -Property \{ Get-WmtDriverPackageGroupKey -Driver \$_ \}') {
+              throw 'Clean Old Drivers does not share model-ID supersedence grouping.'
+          }
+          $usageLoad = $ast.Find({
+              param($n)
+              $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Start-DriverUsageLoad'
+          }, $true)
+          if (-not $usageLoad -or $usageLoad.Extent.Text -notmatch 'Get-WmtInfDeclaredHardwareIds' -or
+              $usageLoad.Extent.Text -notmatch 'DriverModelHardwareIds' -or
+              $usageLoad.Extent.Text -notmatch 'ModelIdErrors') {
+              throw 'Driver model IDs are not parsed in the background usage scan.'
+          }
+          $tempRoot = Join-Path $env:TEMP ('wmt-driver-id-' + [Guid]::NewGuid().ToString('N'))
+          [void][IO.Directory]::CreateDirectory($tempRoot)
+          try {
+              $sameIdInf = Join-Path $tempRoot 'same-id.inf'
+              $otherIdInf = Join-Path $tempRoot 'partial-id.inf'
+              @'
+          [Version]
+          Signature="$Windows NT$"
+          [Manufacturer]
+          %Vendor%=Models,NTamd64.10.0
+          [Models.NTamd64.10.0]
+          %Model%=Install, SWC\AMDWIN-25.10
+          [Strings]
+          Vendor="AMD"
+          Model="AMD Windows Support"
+          '@ | Set-Content -LiteralPath $sameIdInf -Encoding Ascii
+              @'
+          [Version]
+          Signature="$Windows NT$"
+          [Manufacturer]
+          %Vendor%=Models,NTamd64.10.0
+          [Models.NTamd64.10.0]
+          %Model%=Install, SWC\AMDWIN-25.10, SWC\OTHER-1.0
+          [Strings]
+          Vendor="AMD"
+          Model="Other component"
+          '@ | Set-Content -LiteralPath $otherIdInf -Encoding Ascii
+              $modelIds = @(Get-WmtInfDeclaredHardwareIds -InfPath $sameIdInf)
+              $otherIds = @(Get-WmtInfDeclaredHardwareIds -InfPath $otherIdInf)
+              $models = @(Get-WmtInfCompatibleModels -InfPath $sameIdInf -HardwareIds @('SWC\AMDWIN-25.10'))
+              if ($modelIds.Count -ne 1 -or $modelIds[0] -ne 'SWC\AMDWIN-25.10' -or
+                  $otherIds.Count -ne 2 -or
+                  $models.Count -ne 1 -or $models[0] -ne 'AMD Windows Support') {
+                  throw 'INF model-ID parsing or compatible-model matching failed.'
+              }
+              $rows = @(
+                  [PSCustomObject]@{ PublishedName='oem22.inf'; OriginalName='amd-old.inf'; Provider='AMD'; Class='SoftwareComponent'; Version=[Version]'1.5.0.0'; DisplayVer='1.5.0.0'; SortDate=[DateTime]'2026-08-17'; DisplayDate='2026-08-17'; Status='Checking...'; StatusSort='4'; DriverModelHardwareIds=[string[]]$modelIds },
+                  [PSCustomObject]@{ PublishedName='oem24.inf'; OriginalName='amd-older.inf'; Provider='AMD'; Class='SoftwareComponent'; Version=[Version]'1.4.0.0'; DisplayVer='1.4.0.0'; SortDate=[DateTime]'2026-05-29'; DisplayDate='2026-05-29'; Status='Checking...'; StatusSort='4'; DriverModelHardwareIds=[string[]]$modelIds },
+                  [PSCustomObject]@{ PublishedName='oem41.inf'; OriginalName='amd-current.inf'; Provider='AMD'; Class='SoftwareComponent'; Version=[Version]'2.0.0.0'; DisplayVer='2.0.0.0'; SortDate=[DateTime]'2026-10-16'; DisplayDate='2026-10-16'; Status='Checking...'; StatusSort='4'; DriverModelHardwareIds=[string[]]$modelIds },
+                  [PSCustomObject]@{ PublishedName='oem55.inf'; OriginalName='other.inf'; Provider='AMD'; Class='SoftwareComponent'; Version=[Version]'1.0.0.0'; DisplayVer='1.0.0.0'; SortDate=[DateTime]'2026-10-01'; DisplayDate='2026-10-01'; Status='Checking...'; StatusSort='4'; DriverModelHardwareIds=[string[]]$otherIds }
+              )
+              $script:DriverUsageLoaded = $true
+              $script:DriverServiceMap = @{}
+              $script:DriverDeviceMap = @{ 'oem41.inf' = @([PSCustomObject]@{ Name='AMD Windows Support'; DeviceId='SWC\AMDWIN\INSTANCE'; State='OK'; Code=0 }) }
+              $script:DriverPackages = $rows
+              Set-DriverStatusFlags
+              if ($rows[0].Status -ne 'Old' -or $rows[1].Status -ne 'Old' -or
+                  $rows[2].Status -ne 'In Use' -or $rows[3].Status -ne 'Unattached') {
+                  throw ("Unexpected driver statuses: " + (@($rows | ForEach-Object { "$($_.PublishedName)=$($_.Status)" }) -join ', '))
+              }
+              Write-Host 'PASS: renamed INF packages with the exact same model IDs are Old; unrelated IDs remain Unattached.'
+          } finally {
+              Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Smoke test driver-service removal guard
         shell: powershell
         run: |
@@ -1134,6 +1222,60 @@ jobs:
               throw 'Service parse cache incorrectly marked unverified INF as safe.'
           }
           Write-Host 'PASS: unknown AddService names remain protected on fresh and cached scans.'
+
+      - name: Smoke test enabling unattached drivers on compatible devices
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = [IO.File]::ReadAllText((Resolve-Path '.\WMT-GUI.ps1').Path)
+          $tokens = $null; $errors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+          if ($errors.Count) { throw ($errors.Message -join '; ') }
+          $fn = $ast.Find({
+              param($n)
+              $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $n.Name -eq 'Get-DriverCompatibleDeviceTargets'
+          }, $true)
+          if (-not $fn) { throw 'Compatible-device discovery for unattached drivers is missing.' }
+          Invoke-Expression $fn.Extent.Text
+          function Test-Path {
+              [CmdletBinding()]
+              param([string]$LiteralPath, [string]$PathType)
+              return $true
+          }
+          function Get-WmtDeviceCompatibleIds {
+              param([string]$DeviceId)
+              @{ HardwareIDs = @('SWC\AMDWIN-25.10'); CompatibleIDs = @() }
+          }
+          function Get-WmtInfCompatibleModels {
+              param([string]$InfPath, [string[]]$HardwareIds, [string[]]$CompatibleIds)
+              if ($HardwareIds -contains 'SWC\AMDWIN-25.10') { return @('AMD-Windows Support Components') }
+              return @()
+          }
+          $device = [PSCustomObject]@{ DeviceId = 'SWC\AMDWIN\INSTANCE'; Name = 'AMD-Windows Support Components'; State = 'OK' }
+          $script:DriverUsageLoaded = $true
+          $script:DriverCacheLoadedAt = Get-Date
+          $script:DriverCacheTtlSeconds = 600
+          $script:DriverPackages = @(
+              [PSCustomObject]@{ PublishedName = 'oem41.inf'; Status = 'In Use' },
+              [PSCustomObject]@{ PublishedName = 'oem22.inf'; Status = 'Unattached' }
+          )
+          $script:DriverDeviceMap = @{ 'oem41.inf' = @($device) }
+          $targets = @(Get-DriverCompatibleDeviceTargets -Row $script:DriverPackages[1])
+          if ($targets.Count -ne 1 -or
+              $targets[0].DeviceId -ne $device.DeviceId -or
+              $targets[0].CurrentInf -ne 'oem41.inf') {
+              throw 'The unattached package did not discover its currently bound compatible device.'
+          }
+          $device.State = 'Problem'
+          if (@(Get-DriverCompatibleDeviceTargets -Row $script:DriverPackages[1]).Count -ne 0) {
+              throw 'A non-running device was offered for package activation.'
+          }
+          $script:DriverCacheLoadedAt = (Get-Date).AddMinutes(-20)
+          $rejected = $false
+          try { $null = Get-DriverCompatibleDeviceTargets -Row $script:DriverPackages[1] } catch { $rejected = $true }
+          if (-not $rejected) { throw 'Stale usage data was accepted for package activation.' }
+          Write-Host 'PASS: unattached package activation requires a compatible running device and fresh usage data.'
 
       - name: Smoke test fast ghost-device scan and full-width dialog
         shell: powershell

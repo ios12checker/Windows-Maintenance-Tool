@@ -30020,6 +30020,34 @@ foreach ($d in $drivers) {
 return @($drivers)
 }
 
+function Get-WmtDriverPackageGroupKey {
+param([Parameter(Mandatory = $true)][object]$Driver)
+$provider = ([string]$Driver.Provider).Trim().ToUpperInvariant()
+$class = ([string]$Driver.Class).Trim().ToUpperInvariant()
+$idsProperty = $Driver.PSObject.Properties["DriverModelHardwareIds"]
+if (-not $idsProperty) {
+    $ids = @()
+    $publishedName = [string]$Driver.PublishedName
+    if ($publishedName -match '^oem\d+\.inf$') {
+        $infPath = Join-Path $env:SystemRoot ("INF\" + $publishedName)
+        if (Test-Path -LiteralPath $infPath -PathType Leaf) {
+            try { $ids = @(Get-WmtInfDeclaredHardwareIds -InfPath $infPath) }
+            catch { Write-GuiLog "[Drivers] Could not inspect model IDs for $publishedName`: $($_.Exception.Message)" }
+        }
+    }
+    $Driver | Add-Member -MemberType NoteProperty -Name "DriverModelHardwareIds" -Value ([string[]]$ids) -Force
+}
+else { $ids = @($idsProperty.Value) }
+
+$normalizedIds = @($ids | ForEach-Object { ([string]$_).Trim().ToUpperInvariant() } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Sort-Object -Unique)
+if ($normalizedIds.Count -gt 0) {
+    return "ids|$provider|$class|$($normalizedIds -join ';')"
+}
+return "name|$(([string]$Driver.OriginalName).Trim().ToUpperInvariant())|$provider|$class"
+}
+
 function Get-WmtDriverCleanupUsage {
 param([string]$PublishedName = '')
 # A successful empty query is known usage; a failed query must never become [].
@@ -30230,7 +30258,9 @@ $inUseInfs = @($InUseInfs)
 
 $toDelete = @()
 $skippedInUse = 0
-# Missing identity metadata cannot prove that two packages replace each other.
+# Missing provider/class metadata cannot prove that two packages replace each
+# other. When available, exact model-ID sets let renamed OriginalName INFs be
+# compared without treating a partial hardware-ID overlap as supersedence.
 $knownDrivers = @($drivers | Where-Object {
     $_.PublishedName -match '^oem\d+\.inf$' -and
     $_.OriginalName -match '^[^\\/:*?"<>|%]+\.inf$' -and
@@ -30240,7 +30270,7 @@ $knownDrivers = @($drivers | Where-Object {
     $_.Provider -notmatch '^(Unknown|N/A)$|%' -and
     $_.Class -notmatch '^(Unknown|N/A)$|%'
 })
-foreach ($group in @($knownDrivers | Group-Object -Property OriginalName, Provider, Class)) {
+foreach ($group in @($knownDrivers | Group-Object -Property { Get-WmtDriverPackageGroupKey -Driver $_ })) {
     if ($group.Count -lt 2) { continue }
 
     # Rank the group: the in-use copy first (it must be kept), then the highest
@@ -57856,8 +57886,8 @@ $btnToggleDrvMeta.Add_Click({
 # (pnputil /enum-drivers) in the same list style as the Firewall / Updates
 # pages, and highlights rows by live status:
 #   In Use   - bound to at least one present, working device
-#   Old      - superseded duplicate copy (a newer version of the same driver
-#              is staged; exactly what "Clean Old" removes)
+#   Old      - superseded copy (a newer package with the same model-ID set is
+#              staged; exactly what "Clean Old" removes)
 #   Unattached - no device is currently attached to the package (the hardware
 #              may be switched off, disabled, disconnected, or only
 #              occasionally connected — NOT automatically safe to remove)
@@ -58144,11 +58174,13 @@ if ($script:DriverServiceMap) {
     }
 }
 
-# Old = not bound to any device, and the same original driver name has a
-# better copy staged. Ranking mirrors Clean Old Drivers: bound copy first,
+# Old = not bound to any device, and a package with the same model-ID set (or
+# the same validated OriginalName when IDs are unavailable) has a better copy
+# staged. Ranking mirrors Clean Old Drivers: bound copy first,
 # then highest driver VERSION, then newest date (NVIDIA ships newer builds
 # with older dates, so version must win).
-# Use exactly the same original INF/provider/class identity as cleanup preview.
+# Model-ID matching requires the exact declared ID set, provider, and class;
+# that catches vendor-renamed INFs without treating partial overlaps as replacements.
 foreach ($group in @($script:DriverPackages | Where-Object {
     # Match Clean Old Drivers' exact identity requirements: incomplete or
     # tokenized INF metadata cannot establish that two packages supersede.
@@ -58159,7 +58191,7 @@ foreach ($group in @($script:DriverPackages | Where-Object {
     $_.OriginalName -notmatch '^(Unknown|N/A)$|%' -and
     $_.Provider -notmatch '^(Unknown|N/A)$|%' -and
     $_.Class -notmatch '^(Unknown|N/A)$|%'
-} | Group-Object -Property OriginalName, Provider, Class)) {
+} | Group-Object -Property { Get-WmtDriverPackageGroupKey -Driver $_ })) {
     if ($group.Count -lt 2) { continue }
 
     $sorted = @($group.Group | Sort-Object -Property @(
@@ -58178,7 +58210,7 @@ foreach ($group in @($script:DriverPackages | Where-Object {
 
         Set-DriverRowProperty -Row $d -Name "Status" -Value "Old"
         Set-DriverRowProperty -Row $d -Name "StatusSort" -Value "1"
-        Set-DriverRowProperty -Row $d -Name "StatusTooltip" -Value ("Superseded by {0}  v{1}  {2}. This copy is a leftover duplicate in the Driver Store — 'Clean Old' removes exactly these." -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate)
+        Set-DriverRowProperty -Row $d -Name "StatusTooltip" -Value ("Superseded by {0}  v{1}  {2}. This package is older for the same model IDs; 'Clean Old' includes it in the removal preview." -f $kept.PublishedName, $kept.DisplayVer, $kept.DisplayDate)
     }
 }
 
@@ -58348,9 +58380,13 @@ if (-not $script:DriverLoadInProgress) { return }
 $script:DriverLoadPhase = "Usage"
 Set-DriverStatus "Driver packages loaded — checking device/service usage in background..." -Visible $true
 
+$infModelEntriesBody = ${function:Get-WmtInfModelEntries}.ToString()
+$declaredHardwareIdsBody = ${function:Get-WmtInfDeclaredHardwareIds}.ToString()
+$modelIdHelperFunctions = "function Get-WmtInfModelEntries {`r`n$infModelEntriesBody`r`n}`r`nfunction Get-WmtInfDeclaredHardwareIds {`r`n$declaredHardwareIdsBody`r`n}"
 $usageWorker = @'
 param($infs, $infSvcCache)
-$result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; InfServiceCache = $null; Error = "" }
+__MODEL_ID_HELPERS__
+$result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; InfServiceCache = $null; ModelIds = $null; ModelIdErrors = $null; Error = "" }
 try {
     $entityState = @{}
     foreach ($e in @(Get-CimInstance -ClassName Win32_PnPEntity -Property DeviceID,Name,Status,ConfigManagerErrorCode -ErrorAction Stop)) {
@@ -58389,6 +58425,8 @@ try {
     }
 
     $svcInfo = @{}
+    $modelIdsByInf = @{}
+    $modelIdErrors = @{}
     $svcCache = if ($infSvcCache) { $infSvcCache } else { @{} }
     $newSvcCache = @{}
     foreach ($infName in @($infs)) {
@@ -58399,6 +58437,11 @@ try {
             throw "Cannot verify driver service bindings for $infName : INF is missing."
         }
         $infLower = [string]$infName.ToLowerInvariant()
+        try { $modelIdsByInf[$infLower] = [string[]]@(Get-WmtInfDeclaredHardwareIds -InfPath $infPath) }
+        catch {
+            $modelIdsByInf[$infLower] = @()
+            $modelIdErrors[$infLower] = $_.Exception.Message
+        }
         $stamp = ""
         try { $stamp = (Get-Item -LiteralPath $infPath -ErrorAction Stop).LastWriteTimeUtc.Ticks.ToString() } catch {}
 
@@ -58450,13 +58493,14 @@ try {
         if ($present.Count -gt 0) { $svcInfo[$infLower] = $present }
     }
 
-    $result = [PSCustomObject]@{ Success = $true; Usage = $map; Services = $svcInfo; InfServiceCache = $newSvcCache; Error = "" }
+    $result = [PSCustomObject]@{ Success = $true; Usage = $map; Services = $svcInfo; InfServiceCache = $newSvcCache; ModelIds = $modelIdsByInf; ModelIdErrors = $modelIdErrors; Error = "" }
 }
 catch {
-    $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; InfServiceCache = $null; Error = $_.Exception.Message }
+    $result = [PSCustomObject]@{ Success = $false; Usage = $null; Services = $null; InfServiceCache = $null; ModelIds = $null; ModelIdErrors = $null; Error = $_.Exception.Message }
 }
 return $result
 '@
+$usageWorker = $usageWorker.Replace('__MODEL_ID_HELPERS__', $modelIdHelperFunctions)
 
 try {
     if (-not $script:DriverInfServiceCache) { $script:DriverInfServiceCache = @{} }
@@ -58517,6 +58561,19 @@ Register-WmtUiPollOperation -Name "DriverUsageLoad" -IntervalMs 200 -TimeoutMs 1
         $script:DriverDeviceMap = if ($result.Usage) { $result.Usage } else { @{} }
         $script:DriverServiceMap = if ($result.Services) { $result.Services } else { @{} }
         if ($result.InfServiceCache) { $script:DriverInfServiceCache = $result.InfServiceCache }
+        if ($result.ModelIds) {
+            foreach ($package in $script:DriverPackages) {
+                $infKey = ([string]$package.PublishedName).ToLowerInvariant()
+                if ($result.ModelIds.ContainsKey($infKey)) {
+                    Set-DriverRowProperty -Row $package -Name "DriverModelHardwareIds" -Value ([string[]]@($result.ModelIds[$infKey]))
+                }
+            }
+        }
+        if ($result.ModelIdErrors) {
+            foreach ($infKey in @($result.ModelIdErrors.Keys)) {
+                Write-GuiLog "[Drivers] Could not inspect model IDs for $infKey`: $($result.ModelIdErrors[$infKey])"
+            }
+        }
         $script:DriverUsageLoaded = $true
         $script:DriverCacheLoaded = $true
         $script:DriverCacheLoadedAt = Get-Date
@@ -58922,18 +58979,8 @@ catch {
 return $result
 }
 
-function Get-WmtInfCompatibleModels {
-param(
-    [Parameter(Mandatory = $true)][string]$InfPath,
-    [string[]]$HardwareIds = @(),
-    [string[]]$CompatibleIds = @()
-)
-$deviceIds = @(
-    @($HardwareIds) + @($CompatibleIds) |
-        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
-)
-if ($deviceIds.Count -eq 0) { return @() }
-
+function Get-WmtInfModelEntries {
+param([Parameter(Mandatory = $true)][string]$InfPath)
 try {
     $sections = @{}
     $sectionName = ""
@@ -59001,8 +59048,7 @@ foreach ($line in @($sections['Manufacturer'])) {
     }
 }
 
-$matchedModels = [System.Collections.Generic.List[object]]::new()
-$seenModels = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$modelEntries = [System.Collections.Generic.List[object]]::new()
 foreach ($name in $modelSections) {
     foreach ($line in $sections[$name]) {
         $eq = $line.IndexOf("=")
@@ -59012,21 +59058,54 @@ foreach ($name in $modelSections) {
             $modelName = [string]$strings[$matches.key]
         }
         $fields = @($line.Substring($eq + 1).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
-        if ($fields.Count -lt 2 -or [string]::IsNullOrWhiteSpace($modelName)) { continue }
+        if ($fields.Count -lt 2) { continue }
         $modelIds = @($fields | Select-Object -Skip 1 | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-        $matchedId = $null
-        foreach ($deviceId in $deviceIds) {
-            foreach ($modelId in $modelIds) {
-                if ([string]$modelId -ieq [string]$deviceId) {
-                    $matchedId = [string]$deviceId
-                    break
-                }
+        if ($modelIds.Count -eq 0) { continue }
+        [void]$modelEntries.Add([PSCustomObject]@{
+            ModelName = [string]$modelName
+            HardwareIds = [string[]]$modelIds
+        })
+    }
+}
+return $modelEntries.ToArray()
+}
+
+function Get-WmtInfDeclaredHardwareIds {
+param([Parameter(Mandatory = $true)][string]$InfPath)
+return @((Get-WmtInfModelEntries -InfPath $InfPath | ForEach-Object { $_.HardwareIds }) |
+    Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) } |
+    Sort-Object -Unique)
+}
+
+function Get-WmtInfCompatibleModels {
+param(
+    [Parameter(Mandatory = $true)][string]$InfPath,
+    [string[]]$HardwareIds = @(),
+    [string[]]$CompatibleIds = @()
+)
+$deviceIds = @(
+    @($HardwareIds) + @($CompatibleIds) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }
+)
+if ($deviceIds.Count -eq 0) { return @() }
+
+$matchedModels = [System.Collections.Generic.List[object]]::new()
+$seenModels = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($entry in @(Get-WmtInfModelEntries -InfPath $InfPath)) {
+    $modelName = [string]$entry.ModelName
+    if ([string]::IsNullOrWhiteSpace($modelName)) { continue }
+    $matchedId = $null
+    foreach ($deviceId in $deviceIds) {
+        foreach ($modelId in @($entry.HardwareIds)) {
+            if ([string]$modelId -ieq [string]$deviceId) {
+                $matchedId = [string]$deviceId
+                break
             }
-            if ($matchedId) { break }
         }
-        if ($matchedId -and $seenModels.Add($modelName)) {
-            [void]$matchedModels.Add($modelName)
-        }
+        if ($matchedId) { break }
+    }
+    if ($matchedId -and $seenModels.Add($modelName)) {
+        [void]$matchedModels.Add($modelName)
     }
 }
 return $matchedModels.ToArray()
@@ -59288,7 +59367,7 @@ function Show-WmtPickCompatibleDriverDialog {
 # matching driver models with package version/provider/date/class/signer details.
 # Every WPF event handler is wrapped in try/catch so a null dereference cannot
 # become an unhandled dispatcher exception.
-param($Row)
+param($Row, [string]$PreselectInf = "", [string]$PreselectedDeviceId = "")
 try {
     if (-not $Row) { return }
     $currentInf = [string]$Row.PublishedName
@@ -59312,8 +59391,16 @@ try {
         return
     }
     $targetDev = $bound[0]
+    if (-not [string]::IsNullOrWhiteSpace($PreselectedDeviceId)) {
+        $preselectedDevice = @($bound | Where-Object { [string]$_.DeviceId -ieq $PreselectedDeviceId } | Select-Object -First 1)
+        if ($preselectedDevice.Count -eq 0) {
+            Show-WmtMessageBox -Message "The selected device is no longer bound to $currentInf. Reload the Drivers page and retry." -Title "Pick Compatible Driver" -Image Warning | Out-Null
+            return
+        }
+        $targetDev = $preselectedDevice[0]
+    }
     Write-GuiLog "[Drivers] Pick Compatible Driver: targetDev=$($targetDev.Name) devId=$($targetDev.DeviceId)"
-    if ($bound.Count -gt 1) {
+    if ($bound.Count -gt 1 -and [string]::IsNullOrWhiteSpace($PreselectedDeviceId)) {
         $devPick = @"
 <Grid Margin="18">
     <Grid.RowDefinitions>
@@ -59576,7 +59663,14 @@ try {
         } catch { Write-GuiLog "[Drivers] Candidate grid SelectionChanged failed: $($_.Exception.Message)" }
     }.GetNewClosure()
     $dg.Add_SelectionChanged($selectionChanged)
-    try { $btnUse.IsEnabled = ($null -ne $dg.SelectedItem) } catch {}
+    if (-not [string]::IsNullOrWhiteSpace($PreselectInf)) {
+        $preselected = @($cands | Where-Object { [string]$_.PublishedName -ieq $PreselectInf } | Select-Object -First 1)
+        if ($preselected.Count -gt 0) { $dg.SelectedItem = $preselected[0] }
+    }
+    try {
+        $state.Chosen = $dg.SelectedItem
+        $btnUse.IsEnabled = ($null -ne $state.Chosen)
+    } catch {}
 
     $closeClick = {
         try { $dialog.Close() } catch { Write-GuiLog "[Drivers] Close button click failed: $($_.Exception.Message)" }
@@ -59650,6 +59744,123 @@ try {
 } catch {
     Write-GuiLog "ERROR: Pick Compatible Driver dialog failed: $($_.Exception.Message)"
     }
+}
+
+function Get-DriverCompatibleDeviceTargets {
+param($Row)
+if (-not $Row -or [string]::IsNullOrWhiteSpace([string]$Row.PublishedName)) {
+    throw "A staged driver package is required."
+}
+if (-not $script:DriverUsageLoaded -or -not $script:DriverDeviceMap) {
+    throw "Device usage must finish loading before compatible devices can be searched."
+}
+$cacheFresh = $script:DriverCacheLoadedAt -and
+    $script:DriverCacheLoadedAt -ne [DateTime]::MinValue -and
+    $script:DriverCacheTtlSeconds -gt 0 -and
+    (((Get-Date) - $script:DriverCacheLoadedAt).TotalSeconds -lt $script:DriverCacheTtlSeconds)
+if (-not $cacheFresh) { throw "Device usage data is stale. Reload the Drivers page before enabling a package." }
+
+$publishedName = [string]$Row.PublishedName
+if ($publishedName -notmatch '(?i)^oem\d+\.inf$') { throw "The selected package is not a staged third-party INF." }
+$infPath = Join-Path $env:SystemRoot ("INF\" + $publishedName)
+if (-not (Test-Path -LiteralPath $infPath -PathType Leaf)) { throw "Driver INF not found: $infPath" }
+
+$targets = [System.Collections.Generic.List[object]]::new()
+$seenDeviceIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+$inspectionErrors = [System.Collections.Generic.List[string]]::new()
+foreach ($entry in @($script:DriverDeviceMap.GetEnumerator())) {
+    $currentInf = [string]$entry.Key
+    if ($currentInf -ieq $publishedName) { continue }
+    $currentRow = @($script:DriverPackages | Where-Object { [string]$_.PublishedName -ieq $currentInf } | Select-Object -First 1)
+    if ($currentRow.Count -eq 0) { continue }
+    foreach ($device in @($entry.Value)) {
+        $deviceId = [string]$device.DeviceId
+        if ([string]::IsNullOrWhiteSpace($deviceId) -or [string]$device.State -ne "OK" -or -not $seenDeviceIds.Add($deviceId)) { continue }
+        try {
+            $idInfo = Get-WmtDeviceCompatibleIds -DeviceId $deviceId
+            $models = @(Get-WmtInfCompatibleModels -InfPath $infPath -HardwareIds @($idInfo.HardwareIDs) -CompatibleIds @($idInfo.CompatibleIDs))
+            if ($models.Count -eq 0) { continue }
+        }
+        catch {
+            $inspectionErrors.Add("$deviceId`: $($_.Exception.Message)")
+            Write-GuiLog "[Drivers] Compatible-device check failed for $publishedName on $deviceId`: $($_.Exception.Message)"
+            continue
+        }
+        $deviceName = if ([string]::IsNullOrWhiteSpace([string]$device.Name)) { $deviceId } else { [string]$device.Name }
+        [void]$targets.Add([PSCustomObject]@{
+            Label = "$deviceName — currently using $currentInf"
+            DeviceId = $deviceId
+            DeviceName = $deviceName
+            CurrentInf = $currentInf
+            CurrentRow = $currentRow[0]
+            Model = [string]$models[0]
+        })
+    }
+}
+if ($targets.Count -eq 0 -and $inspectionErrors.Count -gt 0) {
+    throw "Could not verify compatible devices:`n$($inspectionErrors -join "`n")"
+}
+return $targets.ToArray()
+}
+
+function Show-DriverEnableOnCompatibleDevice {
+param($Row)
+try {
+    $targets = @(Get-DriverCompatibleDeviceTargets -Row $Row)
+    if ($targets.Count -eq 0) {
+        Show-WmtMessageBox -Message "No currently running device in the loaded device list is compatible with $($Row.PublishedName). Reload the Drivers page and try again." -Title "Enable Driver on Device" -Image Information | Out-Null
+        return
+    }
+    $target = $targets[0]
+    if ($targets.Count -gt 1) {
+        $xaml = @"
+<Grid Margin="18">
+    <Grid.RowDefinitions>
+        <RowDefinition Height="Auto"/>
+        <RowDefinition Height="*"/>
+        <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" Text="Choose a compatible device. The next window lets you select and confirm the driver package." TextWrapping="Wrap" Margin="0,0,0,10" Foreground="{DynamicResource TextPrimary}"/>
+    <ListBox Name="lbTargets" Grid.Row="1" DisplayMemberPath="Label" MinHeight="150" Background="{DynamicResource BgPanel}" BorderBrush="{DynamicResource BorderBrush}" BorderThickness="1"/>
+    <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
+        <Button Name="btnCancel" Content="Cancel" Width="92" Height="30" IsCancel="True"/>
+        <Button Name="btnChoose" Content="Continue" MinWidth="100" Height="30" IsDefault="True" IsEnabled="False" Background="{DynamicResource Accent}" Foreground="{DynamicResource AccentText}"/>
+    </StackPanel>
+</Grid>
+"@
+        $deviceDialog = New-WmtWindowFromXaml -Title "Choose Compatible Device" -ContentXaml $xaml -Width 620 -Height 420 -NoResize
+        $list = $deviceDialog.FindName("lbTargets")
+        $btnChoose = $deviceDialog.FindName("btnChoose")
+        if (-not $list -or -not $btnChoose) { throw "Failed to build the compatible-device picker." }
+        foreach ($candidate in $targets) { [void]$list.Items.Add($candidate) }
+        $choice = @{ Target = $null; Accepted = $false }
+        $selectionChanged = {
+            try {
+                $choice.Target = $list.SelectedItem
+                $btnChoose.IsEnabled = ($null -ne $choice.Target)
+            } catch { Write-GuiLog "[Drivers] Compatible-device selection failed: $($_.Exception.Message)" }
+        }.GetNewClosure()
+        $list.Add_SelectionChanged($selectionChanged)
+        $chooseClick = {
+            try {
+                if (-not $choice.Target) { return }
+                $choice.Accepted = $true
+                $deviceDialog.DialogResult = $true
+            } catch { Write-GuiLog "[Drivers] Compatible-device selection click failed: $($_.Exception.Message)" }
+        }.GetNewClosure()
+        $btnChoose.Add_Click($chooseClick)
+        $btnCancel = $deviceDialog.FindName("btnCancel")
+        if ($btnCancel) { $btnCancel.Add_Click({ try { $deviceDialog.DialogResult = $false } catch {} }.GetNewClosure()) }
+        try { $deviceDialog.ShowDialog() | Out-Null } catch { Write-GuiLog "[Drivers] Compatible-device dialog failed: $($_.Exception.Message)" }
+        if (-not $choice.Accepted -or -not $choice.Target) { return }
+        $target = $choice.Target
+    }
+    Show-WmtPickCompatibleDriverDialog -Row $target.CurrentRow -PreselectInf ([string]$Row.PublishedName) -PreselectedDeviceId $target.DeviceId
+}
+catch {
+    Write-GuiLog "[Drivers] Enable on compatible device failed: $($_.Exception.Message)"
+    Show-WmtMessageBox -Message "Could not find a compatible device:`n`n$($_.Exception.Message)" -Title "Enable Driver on Device" -Image Error | Out-Null
+}
 }
 
 function Copy-DriverSelectionToClipboard {
@@ -60206,6 +60417,15 @@ $miDrvPick.Add_Click({
 })
 [void]$drvCtxMenu.Items.Add($miDrvPick)
 
+$miDrvEnable = New-Object System.Windows.Controls.MenuItem
+$miDrvEnable.Header = "Enable on Compatible Device..."
+$miDrvEnable.ToolTip = "Finds a currently running compatible device, then opens the driver picker. Installing requires a separate confirmation."
+$miDrvEnable.Add_Click({
+    $sel = @($lstDrivers.SelectedItems)
+    if ($sel.Count -eq 1) { Show-DriverEnableOnCompatibleDevice -Row $sel[0] }
+})
+[void]$drvCtxMenu.Items.Add($miDrvEnable)
+
 # Per-device Enable/Disable entries are inserted flat into this menu on every
 # open (see Add_Opened below) — NOT as a WPF submenu, because the shared flat
 # MenuItem template has no popup part and a submenu under it silently never
@@ -60395,6 +60615,7 @@ $drvCtxMenu.Add_Opened({
     $miDrvOpenInf.IsEnabled = ($sel.Count -eq 1)
     $miDrvDevices.IsEnabled = ($sel.Count -eq 1)
     $miDrvPick.IsEnabled = ($sel.Count -eq 1 -and [string]$sel[0].Status -eq "In Use")
+    $miDrvEnable.IsEnabled = ($sel.Count -eq 1 -and [string]$sel[0].Status -in @("Old", "Unattached") -and $script:DriverUsageLoaded)
     $miDrvCopyName.IsEnabled = ($sel.Count -ge 1)
     $miDrvCopyInf.IsEnabled = ($sel.Count -ge 1)
     $miDrvCopyTable.IsEnabled = ($sel.Count -ge 1)
