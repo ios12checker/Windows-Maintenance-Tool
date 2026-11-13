@@ -53008,6 +53008,43 @@ $btnWingetScan.Add_Click({
                     return $false
                 }
 
+                function ConvertFrom-WmtWingetUpgradeLine {
+                    param([string]$Line, [string]$SourceName)
+
+                    $parts = @(([string]$Line).Trim() -split '\s+')
+                    if ($parts.Count -lt 4) { return $null }
+
+                    $hasSourceColumn = $parts[-1] -eq "winget" -or $parts[-1] -eq "msstore"
+                    $availableIndex = $parts.Count - 1
+                    if ($hasSourceColumn) { $availableIndex-- }
+
+                    $versionEndIndex = $availableIndex - 1
+                    $idIndex = $versionEndIndex - 1
+                    $versionStartIndex = $versionEndIndex
+                    if ($idIndex -ge 0 -and $parts[$idIndex] -in @("<", ">", "<=", ">=")) {
+                        $versionStartIndex = $idIndex
+                        $idIndex--
+                    }
+
+                    $nameEndIndex = $idIndex - 1
+                    if ($idIndex -lt 1 -or $nameEndIndex -lt 0) { return $null }
+
+                    $name = ($parts[0..$nameEndIndex] -join " ")
+                    $id = [string]$parts[$idIndex]
+                    if ([string]::IsNullOrWhiteSpace($name) -or $id.Length -le 2 -or $id -match "^Id$") { return $null }
+
+                    $version = ($parts[$versionStartIndex..$versionEndIndex] -join " ")
+                    if ($version -match "^(?i)(unknown|inconnu)$") { $version = "?" }
+
+                    return [PSCustomObject]@{
+                        Source    = $SourceName
+                        Name      = $name
+                        Id        = $id
+                        Version   = $version
+                        Available = [string]$parts[$availableIndex]
+                    }
+                }
+
                 function Test-WingetScanNoticeLine {
                     param([string]$Text)
 
@@ -53092,28 +53129,9 @@ $btnWingetScan.Add_Click({
                             $line = $line.Trim()
                             if (Test-WingetScanNoticeLine $line) { continue }
 
-                            $parts = $line -split '\s+'
-                            $len = $parts.Count
-                            if ($len -ge 4) {
-                                $lastWord = $parts[-1]
-                                if ($len -ge 5 -and ($lastWord -eq "winget" -or $lastWord -eq "msstore")) {
-                                    $a = $parts[-2]
-                                    $v = $parts[-3]
-                                    $i = $parts[-4]
-                                    $n = ($parts[0..($len - 5)] -join " ")
-                                }
-                                else {
-                                    $a = $parts[-1]
-                                    $v = $parts[-2]
-                                    $i = $parts[-3]
-                                    $n = ($parts[0..($len - 4)] -join " ")
-                                }
-                                if ($n -and $i -and $i.Length -gt 2 -and $i -notmatch "^Id$") {
-                                    if (Test-Ignored $n $i) { continue }
-                                    if ($v -match "^(?i)(unknown|inconnu)$") { $v = "?" }
-                                    [PSCustomObject]@{ Source = $SourceName; Name = $n; Id = $i; Version = $v; Available = $a }
-                                }
-                            }
+                            $row = ConvertFrom-WmtWingetUpgradeLine -Line $line -SourceName $SourceName
+                            if (-not $row -or (Test-Ignored $row.Name $row.Id)) { continue }
+                            $row
                         }
                     }
                 }

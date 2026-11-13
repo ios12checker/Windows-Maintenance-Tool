@@ -80,6 +80,51 @@ jobs:
               throw "PowerShell syntax validation failed."
           }
 
+      - name: Smoke test WinGet comparator-version rows
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = [IO.File]::ReadAllText((Resolve-Path '.\WMT-GUI.ps1').Path)
+          $tokens = $null; $parseErrors = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseInput(
+              $source, [ref]$tokens, [ref]$parseErrors)
+          if ($parseErrors.Count) { throw 'WMT must parse before WinGet row tests.' }
+          $parserAst = $ast.Find({
+              param($node)
+              $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+                  $node.Name -eq 'ConvertFrom-WmtWingetUpgradeLine'
+          }, $true)
+          if (-not $parserAst) { throw 'Missing WinGet upgrade-row parser.' }
+          Invoke-Expression $parserAst.Extent.Text
+
+          $cases = @(
+              @{
+                  Line = 'Python Launcher Python.Launcher < 3.14.7 3.15.2 winget'
+                  Name = 'Python Launcher'; Id = 'Python.Launcher'; Version = '< 3.14.7'; Available = '3.15.2'
+              },
+              @{
+                  Line = 'Ubisoft Connect Ubisoft.Connect < 175.1.0.13416 175.1.0.13416 winget'
+                  Name = 'Ubisoft Connect'; Id = 'Ubisoft.Connect'; Version = '< 175.1.0.13416'; Available = '175.1.0.13416'
+              },
+              @{
+                  Line = 'Greater Than Demo Demo.Package > 1.0 2.0 winget'
+                  Name = 'Greater Than Demo'; Id = 'Demo.Package'; Version = '> 1.0'; Available = '2.0'
+              },
+              @{
+                  Line = 'Regular App Regular.Package 1.0 2.0 winget'
+                  Name = 'Regular App'; Id = 'Regular.Package'; Version = '1.0'; Available = '2.0'
+              }
+          )
+          foreach ($case in $cases) {
+              $row = ConvertFrom-WmtWingetUpgradeLine -Line $case.Line -SourceName 'winget'
+              foreach ($property in @('Name', 'Id', 'Version', 'Available')) {
+                  if (-not $row -or [string]$row.$property -cne [string]$case[$property]) {
+                      throw "WinGet row parse mismatch for '$($case.Line)' ($property)."
+                  }
+              }
+          }
+          Write-Host 'PASS: WinGet rows with < and > version markers preserve package names, IDs, and versions.'
+
       - name: Verify maintenance actions fail safely
         shell: powershell
         run: |
