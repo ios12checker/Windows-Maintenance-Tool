@@ -596,7 +596,7 @@ jobs:
           finally {
               Pop-Location
           }
-push-scoop:
+  push-scoop:
     needs: build-release
     if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_scoop }}
     runs-on: windows-latest
