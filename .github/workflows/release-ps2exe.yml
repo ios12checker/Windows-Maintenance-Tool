@@ -720,7 +720,7 @@ jobs:
           git -C $bucketRoot diff --check
           if ($LASTEXITCODE -ne 0) { throw "Scoop manifest contains whitespace errors." }
           git -C $bucketRoot add bucket/windows-maintenance-tool.json
-          git -C $bucketRoot commit -m "windows-maintenance-tool: Update to $($env:RELEASE_VERSION)"
+          git -C $bucketRoot commit -m "windows-maintenance-tool: Add version $($env:RELEASE_VERSION)"
           if ($LASTEXITCODE -ne 0) { throw "Could not commit the Scoop manifest." }
 
           git -C $bucketRoot push --force origin "HEAD:refs/heads/$branch"
