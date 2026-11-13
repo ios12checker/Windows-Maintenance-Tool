@@ -21,6 +21,11 @@ on:
         required: false
         default: true
         type: boolean
+      push_scoop:
+        description: "Submit a Scoop Extras update after the release (requires SCOOP_TOKEN)"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   actions: read
@@ -591,3 +596,121 @@ jobs:
           finally {
               Pop-Location
           }
+push-scoop:
+    needs: build-release
+    if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_scoop }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Prepare Scoop Extras manifest and branch
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.build-release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          RELEASE_SHA256: ${{ needs.build-release.outputs.release_sha256 }}
+          SCOOP_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+          GH_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:SCOOP_TOKEN)) {
+              throw "SCOOP_TOKEN is required because push_scoop was enabled. WinGet and Chocolatey publication run independently."
+          }
+
+          if ($env:RELEASE_VERSION -notmatch '^\d+(\.\d+){0,3}$') {
+              throw "Invalid Scoop release version: $env:RELEASE_VERSION"
+          }
+          if ($env:RELEASE_TAG -ne "v$($env:RELEASE_VERSION)") {
+              throw "Unexpected release tag '$env:RELEASE_TAG' for version '$env:RELEASE_VERSION'."
+          }
+          if ($env:RELEASE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
+              throw "The release SHA-256 output is missing or invalid."
+          }
+
+          $bucketRoot = Join-Path $env:RUNNER_TEMP "scoop-extras"
+          $branch = "wmt-update-v$($env:RELEASE_VERSION)"
+          $manifestPath = Join-Path $bucketRoot "bucket\windows-maintenance-tool.json"
+          $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
+
+          # Base the proposal on the official Extras master, and push only to
+          # Chaython's fork. This opens a normal upstream PR; it never writes
+          # directly to ScoopInstaller/Extras.
+          git clone --depth 1 "https://x-access-token:$($env:SCOOP_TOKEN)@github.com/Chaython/Extras.git" $bucketRoot
+          if ($LASTEXITCODE -ne 0) { throw "Could not clone Chaython/Extras. Check SCOOP_TOKEN access." }
+          git -C $bucketRoot remote add upstream https://github.com/ScoopInstaller/Extras.git
+          if ($LASTEXITCODE -ne 0) { throw "Could not configure the official Scoop Extras remote." }
+          git -C $bucketRoot fetch --depth 1 upstream master
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch official ScoopInstaller/Extras master." }
+          git -C $bucketRoot checkout -B $branch upstream/master
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the Scoop update branch from official Extras master." }
+
+          $manifest = [ordered]@{
+              version = $env:RELEASE_VERSION
+              description = "All-in-one Windows maintenance, repair, cleanup, update, and tuning GUI."
+              homepage = "https://github.com/$env:GITHUB_REPOSITORY"
+              license = "MIT"
+              architecture = @{
+                  "64bit" = @{
+                      url = $installerUrl
+                      hash = $env:RELEASE_SHA256.ToLowerInvariant()
+                  }
+              }
+              bin = @(
+                  @("WindowsMaintenanceTool.exe", "wmt")
+              )
+              shortcuts = @(
+                  @("WindowsMaintenanceTool.exe", "Windows Maintenance Tool")
+              )
+              checkver = "github"
+              autoupdate = @{
+                  architecture = @{
+                      "64bit" = @{
+                          url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v`$version/WindowsMaintenanceTool.exe"
+                      }
+                  }
+              }
+          }
+
+          $json = $manifest | ConvertTo-Json -Depth 10
+          [IO.File]::WriteAllText($manifestPath, ($json + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+
+          # Parse and validate the generated manifest before creating a branch.
+          $check = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($check.version -ne $env:RELEASE_VERSION -or
+              $check.architecture.'64bit'.url -ne $installerUrl -or
+              $check.architecture.'64bit'.hash -ne $env:RELEASE_SHA256.ToLowerInvariant()) {
+              throw "Generated Scoop manifest failed version, URL, or checksum validation."
+          }
+
+          git -C $bucketRoot diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Scoop manifest contains whitespace errors." }
+          git -C $bucketRoot add bucket/windows-maintenance-tool.json
+          git -C $bucketRoot commit -m "windows-maintenance-tool: Update to $($env:RELEASE_VERSION)"
+          if ($LASTEXITCODE -ne 0) { throw "Could not commit the Scoop manifest." }
+
+          git -C $bucketRoot push --force origin "HEAD:refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) { throw "Could not push the Scoop update branch to Chaython/Extras. Check SCOOP_TOKEN permissions." }
+
+          # Reuse an existing PR on reruns instead of creating duplicates.
+          $existingPr = gh pr list --repo ScoopInstaller/Extras --head "Chaython:$branch" --state open --json url --jq ".[0].url"
+          if ($LASTEXITCODE -ne 0) { throw "Could not check for an existing Scoop Extras pull request." }
+          if ([string]::IsNullOrWhiteSpace(($existingPr -join ""))) {
+              $body = @"
+          Updates the Windows Maintenance Tool Scoop manifest to **$($env:RELEASE_VERSION)**.
+
+          - Downloads the immutable GitHub release executable
+          - Pins the build's SHA-256 checksum
+          - Keeps the GitHub release checkver and versioned autoupdate URL
+          - Generated and JSON-validated by the WMT release workflow
+
+          Release: https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG
+          "@
+              gh pr create --repo ScoopInstaller/Extras --head "Chaython:$branch" --base master --title "windows-maintenance-tool: Update to $($env:RELEASE_VERSION)" --body $body
+              if ($LASTEXITCODE -ne 0) { throw "Could not open the ScoopInstaller/Extras pull request." }
+          }
+          else {
+              Write-Host "Scoop Extras pull request already exists: $existingPr"
+          }
+
