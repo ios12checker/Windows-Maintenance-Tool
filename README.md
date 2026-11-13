@@ -43,7 +43,7 @@ VirusTotal maintains a broader vendor contact directory here: https://docs.virus
 
 ## Download channels
 
-**Stable releases:** [Versioned GitHub releases](https://github.com/Chaython/Windows-Maintenance-Tool/releases/latest) are published manually. Only those stable releases are eligible for optional WinGet/Chocolatey updates.
+**Stable releases:** [Versioned GitHub releases](https://github.com/Chaython/Windows-Maintenance-Tool/releases/latest) are published manually. Only those stable releases are eligible for optional WinGet, Chocolatey, and Scoop Extras updates.
 
 **Rolling prerelease:** [Latest Main preview](https://github.com/Chaython/Windows-Maintenance-Tool/releases/tag/rolling) is built automatically on pushes to Main after the executable passes the build syntax check, SHA-256 hashing and GitHub/Sigstore provenance verification. The rolling tag and its download assets are replaced with the newest successful build; **the URL remains the same but the file bytes can change**. This channel is for testing, not package-manager distribution.
 
@@ -431,7 +431,7 @@ WMT stores generated data next to the script in its local `data` folder.
 
 - `.github/workflows/validate-powershell.yml` validates PowerShell syntax and can also be run manually.
 - `.github/workflows/release-ps2exe.yml` automatically publishes a rolling prerelease from `Main`, and separately supports manual versioned releases, both with Sigstore attestations.
-- Release tooling includes optional WinGet submission and Chocolatey package publication paths when the required secrets/package entries are available.
+- Release tooling includes optional WinGet submission, Chocolatey package publication, and Scoop Extras PR submission paths when the required secrets/package entries are available.
 - Long-running GUI operations are increasingly routed through shared runspace/process/polling infrastructure to keep the main WPF dispatcher responsive.
 
 </details>

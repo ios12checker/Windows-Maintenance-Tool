@@ -233,7 +233,8 @@ jobs:
           $assets = @(
               ".\dist\WindowsMaintenanceTool.exe",
               ".\dist\WindowsMaintenanceTool.exe.sha256",
-              ".\dist\WindowsMaintenanceTool.exe.sigstore.json"
+              ".\dist\WindowsMaintenanceTool.exe.sigstore.json",
+              ".\WMT-GUI.ps1"
           )
 
           # Keep the same download URLs while advancing the preview to this
@@ -292,7 +293,8 @@ jobs:
           $assets = @(
               ".\dist\WindowsMaintenanceTool.exe",
               ".\dist\WindowsMaintenanceTool.exe.sha256",
-              ".\dist\WindowsMaintenanceTool.exe.sigstore.json"
+              ".\dist\WindowsMaintenanceTool.exe.sigstore.json",
+              ".\WMT-GUI.ps1"
           )
 
           # Recheck immediately before publishing. The workflow concurrency group
