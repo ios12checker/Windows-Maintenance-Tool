@@ -59049,7 +59049,16 @@ $architectureDecoration = switch -Regex ($architecture) {
     '^x86$'   { 'NTx86'; break }
     default   { '' }
 }
-foreach ($line in @($sections['Manufacturer'])) {
+# Some valid INF packages (including extension/component-style packages)
+# do not declare a [Manufacturer] section. They simply have no model sections
+# to enumerate; treat that as an empty model-ID result rather than dereferencing
+# a null section entry.
+$manufacturerLines = @()
+if ($sections.ContainsKey('Manufacturer') -and $null -ne $sections['Manufacturer']) {
+    $manufacturerLines = @($sections['Manufacturer'] | Where-Object { $null -ne $_ })
+}
+foreach ($line in $manufacturerLines) {
+    if ([string]::IsNullOrWhiteSpace([string]$line)) { continue }
     $eq = $line.IndexOf("=")
     if ($eq -lt 1) { continue }
     $fields = @($line.Substring($eq + 1).Split(',') | ForEach-Object { $_.Trim().Trim('"') })
