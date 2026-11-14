@@ -3279,6 +3279,7 @@ jobs:
               "Write-WmtSettingsFileAtomic",
               "Copy-WmtSettingsValue",
               "Copy-WmtSettings",
+              "Get-WmtSettingsMapMember",
               "Save-WmtSettings",
               "Get-WmtSettings",
               "Get-WmtWingetIncludeUnknown",
@@ -3339,6 +3340,48 @@ jobs:
                   GhostDevices = @{ Width = 1000; Height = 700; WindowState = "Normal" }
               }
               Save-WmtSettings -Settings $s
+
+              # Regression guard: TempCleanup and RegistryScan are persisted as
+              # JSON objects. ConvertFrom-Json turns them into PSCustomObject,
+              # which supports neither ContainsKey() nor index assignment. The
+              # Cleaner and Registry Scan dialogs both read them by key and write
+              # them by key, so they must survive a save/reload cycle as
+              # hashtables or the dialogs silently stop working.
+              $s.TempCleanup["TempFiles"] = $true
+              $s.TempCleanup["RecycleBin"] = $false
+              $s.RegistryScan["SharedDLLs"] = $true
+              Save-WmtSettings -Settings $s
+
+              $script:WmtSettingsCache = $null
+              $script:WmtSettingsCacheStamp = $null
+              $reloadedMaps = Get-WmtSettings
+              if (-not ($reloadedMaps.TempCleanup -is [System.Collections.IDictionary])) {
+                  throw "TempCleanup was not normalized to a hashtable after a save/reload."
+              }
+              if (-not ($reloadedMaps.RegistryScan -is [System.Collections.IDictionary])) {
+                  throw "RegistryScan was not normalized to a hashtable after a save/reload."
+              }
+              if (-not $reloadedMaps.TempCleanup.Contains("TempFiles")) {
+                  throw "TempCleanup.Contains() failed after a save/reload."
+              }
+              if (-not $reloadedMaps.RegistryScan.Contains("SharedDLLs")) {
+                  throw "RegistryScan.Contains() failed after a save/reload."
+              }
+              if (-not [bool]$reloadedMaps.TempCleanup["TempFiles"]) {
+                  throw "TempCleanup selection did not survive a save/reload."
+              }
+              if ([bool]$reloadedMaps.TempCleanup["RecycleBin"]) {
+                  throw "TempCleanup deselection did not survive a save/reload."
+              }
+              if (-not [bool]$reloadedMaps.RegistryScan["SharedDLLs"]) {
+                  throw "RegistryScan selection did not survive a save/reload."
+              }
+              # The registry scan button writes back by key after the dialog
+              # renders; that write must not throw once settings came from disk.
+              $reloadedMaps.RegistryScan["SharedDLLs"] = $false
+              if ([bool]$reloadedMaps.RegistryScan["SharedDLLs"]) {
+                  throw "RegistryScan index assignment did not take effect after a save/reload."
+              }
 
               $script:WmtSettingsCache = $null
               $script:WmtSettingsCacheStamp = $null

@@ -9427,7 +9427,9 @@ if ($null -eq $Value) { return $null }
 if ($Value -is [string] -or $Value.GetType().IsValueType) { return $Value }
 
 if ($Value -is [System.Collections.IDictionary]) {
-    $copy = @{}
+    # Use an ordered dictionary so re-serializing settings.json does not reshuffle
+    # the keys on every save.
+    $copy = [ordered]@{}
     foreach ($key in @($Value.Keys)) {
         $copy[$key] = Copy-WmtSettingsValue -Value $Value[$key]
     }
@@ -9453,10 +9455,56 @@ if ($Value -is [System.Collections.IEnumerable]) {
 return $Value
 }
 
+function Get-WmtSettingsMapMember {
+# Returns a hashtable view of a JSON-object-shaped settings member.
+# settings.json is read with ConvertFrom-Json, which turns every JSON object into
+# a PSCustomObject. PSCustomObject supports neither ContainsKey() nor index
+# assignment ("Unable to index into an object of type PSObject"), so any member
+# that is read or written by key has to be normalized to a hashtable.
+param($Settings, [Parameter(Mandatory = $true)][string]$Name)
+$result = [ordered]@{}
+$raw = Get-WmtSettingsMember -Settings $Settings -Name $Name -Default $null
+if ($null -eq $raw) { return $result }
+try {
+    if ($raw -is [System.Collections.IDictionary]) {
+        foreach ($key in @($raw.Keys)) { $result[$key] = $raw[$key] }
+    } else {
+        foreach ($prop in @($raw.PSObject.Properties)) { $result[$prop.Name] = $prop.Value }
+    }
+}
+catch {}
+return $result
+}
+
 function Copy-WmtSettings {
 param($Settings)
 if ($null -eq $Settings) { return $null }
-return (Copy-WmtSettingsValue -Value $Settings)
+$copy = Copy-WmtSettingsValue -Value $Settings
+# TempCleanup and RegistryScan are persisted as JSON objects and are both read
+# (ContainsKey) and written (index assignment) by key. Normalize them back to
+# hashtables so the Cleaner and Registry Scan dialogs work after a save, not
+# just on a fresh install where the defaults are still hashtables.
+# This is intentionally self-contained: it must not depend on a helper that a
+# caller might not have loaded, or the invariant would be silently skipped.
+foreach ($member in @('TempCleanup', 'RegistryScan')) {
+    try {
+        if (-not (Test-WmtSettingsMember -Settings $copy -Name $member)) { continue }
+        $raw = Get-WmtSettingsMember -Settings $copy -Name $member -Default $null
+        if ($null -eq $raw) { continue }
+        $normalized = [ordered]@{}
+        if ($raw -is [System.Collections.IDictionary]) {
+            foreach ($key in @($raw.Keys)) { $normalized[$key] = $raw[$key] }
+        } else {
+            foreach ($prop in @($raw.PSObject.Properties)) { $normalized[$prop.Name] = $prop.Value }
+        }
+        if ($copy -is [System.Collections.IDictionary]) { $copy[$member] = $normalized }
+        else { $copy.$member = $normalized }
+    }
+    catch {
+        try { Write-Verbose "Failed to normalize settings member '$member': $($_.Exception.Message)" } catch {}
+    }
+}
+return $copy
 }
 
 function Save-WmtSettings {
@@ -9580,8 +9628,11 @@ if ($script:WmtSettingsCache) {
 
 # Default Structure
 $defaults = @{
-    TempCleanup                = @{}
-    RegistryScan               = @{}
+    # Ordered dictionaries keep the key order stable when settings.json is
+    # re-serialized. A plain hashtable reorders its keys, which would reshuffle
+    # settings.json on every save.
+    TempCleanup                = [ordered]@{}
+    RegistryScan               = [ordered]@{}
     WingetIgnore               = @("228980") # Filter false positive updates for Steamworks Redist
     WingetIncludeUnknown       = $true
     HideCrossProviderDuplicates = $false
@@ -15958,16 +16009,9 @@ return $selected.ToArray()
 
 function Show-WmtAdvancedCleanupSelectionWpf {
 $currentSettings = Get-WmtSettings
-# TempCleanup is saved as JSON and loaded as PSCustomObject, which lacks ContainsKey.
-# Convert to a hashtable so the rest of the function works uniformly.
-$savedStates = @{}
-if ($currentSettings.TempCleanup) {
-    if ($currentSettings.TempCleanup -is [System.Collections.IDictionary]) {
-        foreach ($key in $currentSettings.TempCleanup.Keys) { $savedStates[$key] = $currentSettings.TempCleanup[$key] }
-    } else {
-        foreach ($prop in $currentSettings.TempCleanup.PSObject.Properties) { $savedStates[$prop.Name] = $prop.Value }
-    }
-}
+# TempCleanup is persisted as a JSON object and loads as PSCustomObject, which
+# supports neither ContainsKey() nor index assignment. Use the hashtable view.
+$savedStates = Get-WmtSettingsMapMember -Settings $currentSettings -Name "TempCleanup"
 $isWinapp2Enabled = [bool]$currentSettings.LoadWinapp2
 $isCleanerMlEnabled = [bool]$currentSettings.LoadCleanerML
 $isCleanerMlPendingEnabled = [bool]$currentSettings.LoadCleanerMLPending
@@ -16522,7 +16566,7 @@ $RenderAllRules = {
             if ($prevStates.ContainsKey($itemKey)) {
                 $chk.IsChecked = [bool]$prevStates[$itemKey]
             }
-            elseif ($savedStates.ContainsKey($itemKey)) {
+            elseif ($savedStates.Contains($itemKey)) {
                 $chk.IsChecked = [bool]$savedStates[$itemKey]
             }
             elseif ($item.PSObject.Properties["DefaultChecked"]) {
@@ -19488,16 +19532,9 @@ if ($CleanerRefreshWorker) {
 function Show-RegScanSelection {
 # 1. LOAD SETTINGS
 $currentSettings = Get-WmtSettings
-# RegistryScan is saved as JSON and loaded as PSCustomObject, which lacks ContainsKey.
-# Convert to a hashtable so the rest of the function works uniformly.
-$savedStates = @{}
-if ($currentSettings.RegistryScan) {
-    if ($currentSettings.RegistryScan -is [System.Collections.IDictionary]) {
-        foreach ($key in $currentSettings.RegistryScan.Keys) { $savedStates[$key] = $currentSettings.RegistryScan[$key] }
-    } else {
-        foreach ($prop in $currentSettings.RegistryScan.PSObject.Properties) { $savedStates[$prop.Name] = $prop.Value }
-    }
-}
+# RegistryScan is persisted as a JSON object and loads as PSCustomObject, which
+# supports neither ContainsKey() nor index assignment. Use the hashtable view.
+$savedStates = Get-WmtSettingsMapMember -Settings $currentSettings -Name "RegistryScan"
 
 # --- Define Categories ---
 $categories = [ordered]@{
@@ -19628,7 +19665,7 @@ foreach ($key in $categories.Keys) {
     $chk = [System.Windows.Controls.CheckBox]::new()
     $chk.Content = $key
     $chk.Tag = $tag
-    $chk.IsChecked = if ($savedStates.ContainsKey($tag)) { [bool]$savedStates[$tag] } else { $true }
+    $chk.IsChecked = if ($savedStates.Contains($tag)) { [bool]$savedStates[$tag] } else { $true }
     [void]$pnlChecks.Children.Add($chk)
     [void]$chkBoxes.Add($chk)
 }
