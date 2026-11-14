@@ -9,6 +9,7 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = "Stop"
+$script:WmtPS2EXEVersion = "1.0.18"
 
 $script:WmtBuildScriptRoot = if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
     $PSScriptRoot
@@ -106,23 +107,33 @@ function Get-WmtPS2EXECommand {
     param([switch]$Install)
 
     $command = Get-Command Invoke-PS2EXE -ErrorAction SilentlyContinue
-    if ($command) {
+    if ($command -and $command.Module -and $command.Module.Version -eq [version]$script:WmtPS2EXEVersion) {
         return $command
     }
 
     if (-not $Install) {
+        if ($command) {
+            $foundVersion = if ($command.Module) { $command.Module.Version.ToString() } else { "unknown" }
+            throw "PS2EXE $script:WmtPS2EXEVersion is required, but Invoke-PS2EXE resolved to version $foundVersion. Install the pinned version or rerun this script with -InstallPS2EXE."
+        }
+
         throw "Invoke-PS2EXE was not found. Install PS2EXE first, or rerun this script with -InstallPS2EXE."
     }
 
-    Write-Host "Installing PS2EXE for the current user..."
+    Write-Host "Installing PS2EXE $script:WmtPS2EXEVersion for the current user..."
     if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
         Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
     }
 
-    Install-Module -Name ps2exe -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -Confirm:$false
-    Import-Module ps2exe -Force
+    Install-Module -Name ps2exe -RequiredVersion $script:WmtPS2EXEVersion -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -Confirm:$false
+    Import-Module -Name ps2exe -RequiredVersion $script:WmtPS2EXEVersion -Force
 
-    return (Get-Command Invoke-PS2EXE -ErrorAction Stop)
+    $command = Get-Command Invoke-PS2EXE -ErrorAction Stop
+    if (-not $command.Module -or $command.Module.Version -ne [version]$script:WmtPS2EXEVersion) {
+        throw "Could not load the required PS2EXE version $script:WmtPS2EXEVersion."
+    }
+
+    return $command
 }
 
 function Add-WmtPS2EXEValue {
@@ -254,11 +265,14 @@ $ps2exe = Get-WmtPS2EXECommand -Install:$InstallPS2EXE
 $availableParameters = @($ps2exe.Parameters.Keys)
 
 $minifiedInput = Remove-WmtCommentsFromScript -Path $resolvedInput
+$stagingOutput = Join-Path $outputDirectory (
+    "{0}.build-{1}.exe" -f [System.IO.Path]::GetFileNameWithoutExtension($resolvedOutput), [System.Guid]::NewGuid().ToString("N")
+)
 
 try {
     $invokeArguments = @{
         InputFile  = $minifiedInput
-        OutputFile = $resolvedOutput
+        OutputFile = $stagingOutput
     }
 
     Add-WmtPS2EXESwitch -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "NoConsole"
@@ -276,18 +290,40 @@ try {
     Add-WmtPS2EXEValue -Arguments $invokeArguments -AvailableParameters $availableParameters -Name "Version" -Value $fileVersion
 
     Write-Host "Building Windows Maintenance Tool v$appVersion..."
+    Write-Host "PS2EXE: $($ps2exe.Module.Version)"
     Write-Host "Source: $resolvedInput"
     Write-Host "Icon:   $resolvedIcon"
-    Write-Host "Output: $resolvedOutput"
+    Write-Host "Output: $stagingOutput"
     Invoke-PS2EXE @invokeArguments
 
-    if (-not (Test-Path -LiteralPath $resolvedOutput -PathType Leaf)) {
-        throw "Build finished, but the EXE was not created: $resolvedOutput"
+    if (-not (Test-Path -LiteralPath $stagingOutput -PathType Leaf)) {
+        throw "Build finished, but the staged EXE was not created: $stagingOutput"
+    }
+
+    $stagedFile = Get-Item -LiteralPath $stagingOutput
+    if ($stagedFile.Length -le 0) {
+        throw "Build produced an empty EXE: $stagingOutput"
+    }
+
+    $stagedVersion = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($stagingOutput).FileVersion
+    if ($stagedVersion -ne $fileVersion) {
+        throw "Build produced file version '$stagedVersion'; expected '$fileVersion'."
+    }
+
+    if (Test-Path -LiteralPath $resolvedOutput -PathType Leaf) {
+        [System.IO.File]::Replace($stagingOutput, $resolvedOutput, $null)
+    }
+    else {
+        Move-Item -LiteralPath $stagingOutput -Destination $resolvedOutput
     }
 
     Write-Host "Built: $resolvedOutput"
 }
 finally {
+    if (Test-Path -LiteralPath $stagingOutput -PathType Leaf) {
+        Remove-Item -LiteralPath $stagingOutput -Force
+    }
+
     if ($minifiedInput -ne $resolvedInput -and (Test-Path -LiteralPath $minifiedInput -PathType Leaf)) {
         Remove-Item -LiteralPath $minifiedInput -Force
     }

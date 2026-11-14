@@ -1,6 +1,9 @@
 name: Build PS2EXE Release
 
 on:
+  push:
+    branches:
+      - Main
   workflow_dispatch:
     inputs:
       prerelease:
@@ -14,18 +17,47 @@ on:
         default: true
         type: boolean
       push_chocolatey:
-        description: "Push a Chocolatey package update after the release"
+        description: "Push a Chocolatey package update after the release (requires CHOCOLATEY_API_KEY)"
         required: false
         default: true
         type: boolean
+      push_scoop:
+        description: "Submit a Scoop Extras update after the release (requires SCOOP_TOKEN and an approved Extras issue)"
+        required: false
+        default: true
+        type: boolean
+      scoop_issue:
+        description: "Approved open ScoopInstaller/Extras Package Request issue number (required when Scoop is enabled)"
+        required: false
+        default: ""
+        type: string
+      scoop_issue_approved:
+        description: "Confirm a Scoop maintainer approved the linked issue for this PR"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
+  actions: read
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+# Serialize rolling publication so old and new runs cannot overwrite each other.
+# A stale run also checks the Main HEAD immediately before publishing.
+concurrency:
+  group: wmt-ps2exe-${{ github.event_name == 'push' && 'rolling-main' || 'manual-release' }}
+  cancel-in-progress: false
 
 jobs:
   build-release:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
+    outputs:
+      release_version: ${{ steps.version.outputs.version }}
+      release_tag: ${{ steps.version.outputs.tag }}
+      release_sha256: ${{ steps.checksum.outputs.sha256 }}
 
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -40,18 +72,12 @@ jobs:
           git fetch --depth=1 origin "$env:GITHUB_SHA"
           git checkout --detach FETCH_HEAD
 
-      - name: Build EXE with PS2EXE
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          .\PS2EXE\Build-Exe.ps1 -InstallPS2EXE
-
-      - name: Read version and create checksum
+      - name: Read release version
         id: version
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          $source = Get-Content -LiteralPath ".\WMT-GUI.ps1" -Raw
+          $source = Get-Content -LiteralPath ".\\WMT-GUI.ps1" -Raw
           $match = [regex]::Match(
               $source,
               '(?im)^\s*(?:\$(?:script:|global:|private:)?AppVersion)\s*=\s*(["'']?)(v?\d+(?:\.\d+){0,3})\1\s*(?:$|[;#])'
@@ -62,23 +88,200 @@ jobs:
 
           $version = $match.Groups[2].Value.TrimStart("v")
           $tag = "v$version"
-          $exe = ".\dist\WindowsMaintenanceTool.exe"
-
-          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
-              throw "Expected build output was not created: $exe"
-          }
-
-          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  WindowsMaintenanceTool.exe" | Set-Content -LiteralPath ".\dist\WindowsMaintenanceTool.exe.sha256" -Encoding ascii
 
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
           Write-Host "Release version: $version"
-          Write-Host "SHA256: $hash"
 
-      - name: Create or update GitHub release
+      - name: Validate stable release source and version availability
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.prerelease }}
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:GITHUB_REF -ne 'refs/heads/Main') {
+              throw "Stable releases must be dispatched from Main; got $env:GITHUB_REF."
+          }
+
+          $existingTag = & git ls-remote --refs origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not check whether tag $env:RELEASE_TAG already exists."
+          }
+          if (-not [string]::IsNullOrWhiteSpace(($existingTag -join "`n"))) {
+              throw "Tag $env:RELEASE_TAG already exists. Published stable versions are immutable; increase AppVersion."
+          }
+
+          $releaseApi = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
+          $headers = @{
+              Authorization = "Bearer $env:GITHUB_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+              "User-Agent" = "Windows-Maintenance-Tool-release"
+          }
+          try {
+              Invoke-RestMethod -Uri $releaseApi -Headers $headers -UseBasicParsing -TimeoutSec 15 | Out-Null
+              throw "Release $env:RELEASE_TAG already exists. Published stable versions are immutable; increase AppVersion."
+          }
+          catch {
+              if ($_.Exception.Message -like "Release $env:RELEASE_TAG already exists.*") { throw }
+              $statusCode = $null
+              try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($statusCode -ne 404) { throw }
+          }
+
+      - name: Build EXE with PS2EXE
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\PS2EXE\Build-Exe.ps1 -InstallPS2EXE
+
+      - name: Calculate final release SHA-256
+        id: checksum
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = ".\\dist\\WindowsMaintenanceTool.exe"
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+              throw "Expected build output was not created: $exe"
+          }
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  WindowsMaintenanceTool.exe" | Set-Content -LiteralPath ".\\dist\\WindowsMaintenanceTool.exe.sha256" -Encoding ascii
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Final release SHA256: $hash"
+
+      # Sigstore signs the provenance statement for the exact executable.
+      # Artifact attestations do NOT provide Windows Authenticode signatures.
+      - name: Attest release executable
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/WindowsMaintenanceTool.exe
+
+      - name: Verify provenance and prepare Sigstore bundle
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ATTESTATION_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:ATTESTATION_BUNDLE) -or
+              -not (Test-Path -LiteralPath $env:ATTESTATION_BUNDLE -PathType Leaf)) {
+              throw "GitHub did not provide the Sigstore attestation bundle."
+          }
+
+          $binary = ".\\dist\\WindowsMaintenanceTool.exe"
+          $bundle = ".\\dist\\WindowsMaintenanceTool.exe.sigstore.json"
+          Copy-Item -LiteralPath $env:ATTESTATION_BUNDLE -Destination $bundle -Force
+
+          # Fail closed if the signature, artifact hash, workflow, or source
+          # commit does not match this release run.
+          $verificationArgs = @(
+              "attestation", "verify", $binary,
+              "--repo", $env:GITHUB_REPOSITORY,
+              "--bundle", $bundle,
+              "--signer-workflow", "$env:GITHUB_REPOSITORY/.github/workflows/release-ps2exe.yml",
+              "--source-digest", $env:GITHUB_SHA
+          )
+          & gh @verificationArgs
+          if ($LASTEXITCODE -ne 0) {
+              throw "Sigstore attestation verification failed; refusing to publish release."
+          }
+
+      # Rolling builds reuse the same parse-checked PS2EXE build, checksum and
+      # verified Sigstore provenance as the manually published stable releases.
+      - name: Publish rolling prerelease
+        if: github.event_name == 'push'
+        shell: powershell
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_SHA256: ${{ steps.checksum.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "rolling"
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $title = "WMT Rolling Preview ($shortSha)"
+
+          # A newer push may have arrived while this build was in progress.
+          # Never replace the rolling release with an already-outdated build.
+          $remoteMain = & git ls-remote origin "refs/heads/Main"
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($remoteMain)) {
+              throw "Could not check the current Main revision."
+          }
+          $currentHead = ($remoteMain -split '\s+')[0]
+          if ($currentHead -ne $env:GITHUB_SHA) {
+              Write-Host "Skipping stale rolling build $env:GITHUB_SHA; Main is now $currentHead."
+              exit 0
+          }
+
+          $notes = @"
+          Automated prerelease from Main, intended for testing. For regular installs use a versioned stable release.
+
+          Source commit: https://github.com/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA
+          Source version: $env:RELEASE_VERSION
+          SHA-256: $env:RELEASE_SHA256
+          Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID
+
+          The EXE, SHA-256 checksum and Sigstore provenance bundle are all from this build.
+          Verify: gh attestation verify .\WindowsMaintenanceTool.exe --repo $env:GITHUB_REPOSITORY --bundle .\WindowsMaintenanceTool.exe.sigstore.json --source-digest $env:GITHUB_SHA
+
+          This rolling preview is not Authenticode-signed and is not submitted to WinGet or Chocolatey.
+          "@
+          $notesPath = ".\dist\rolling-release-notes.md"
+          $notes | Set-Content -LiteralPath $notesPath -Encoding utf8
+
+          $assets = @(
+              ".\dist\WindowsMaintenanceTool.exe",
+              ".\dist\WindowsMaintenanceTool.exe.sha256",
+              ".\dist\WindowsMaintenanceTool.exe.sigstore.json",
+              ".\WMT-GUI.ps1"
+          )
+
+          # Keep the same download URLs while advancing the preview to this
+          # exact verified build. Versioned tags/releases are never touched.
+          & git tag -f $tag $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { throw "Failed to prepare rolling tag." }
+          & git push --force origin "refs/tags/rolling:refs/tags/rolling"
+          if ($LASTEXITCODE -ne 0) { throw "Failed to move rolling tag." }
+
+          $releaseApi = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $headers = @{
+              Authorization = "Bearer $env:GITHUB_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+              "User-Agent" = "Windows-Maintenance-Tool-rolling"
+          }
+          $releaseExists = $false
+          try {
+              Invoke-RestMethod -Uri $releaseApi -Headers $headers -UseBasicParsing -TimeoutSec 15 | Out-Null
+              $releaseExists = $true
+          }
+          catch {
+              $statusCode = $null
+              try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($statusCode -ne 404) { throw }
+          }
+
+          if ($releaseExists) {
+              & gh release upload $tag @assets --clobber --repo $env:GITHUB_REPOSITORY
+              if ($LASTEXITCODE -ne 0) { throw "Failed to replace rolling release assets." }
+              & gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes-file $notesPath --prerelease --latest=false
+              if ($LASTEXITCODE -ne 0) { throw "Failed to update rolling release metadata." }
+          }
+          else {
+              $createArgs = @(
+                  "release", "create", $tag,
+                  "--repo", $env:GITHUB_REPOSITORY,
+                  "--verify-tag", "--title", $title,
+                  "--notes-file", $notesPath,
+                  "--prerelease", "--latest=false"
+              ) + $assets
+              & gh @createArgs
+              if ($LASTEXITCODE -ne 0) { throw "Failed to create rolling prerelease." }
+          }
+
+      - name: Create immutable GitHub release
+        if: github.event_name == 'workflow_dispatch'
         shell: powershell
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
@@ -89,12 +292,22 @@ jobs:
 
           $assets = @(
               ".\dist\WindowsMaintenanceTool.exe",
-              ".\dist\WindowsMaintenanceTool.exe.sha256"
+              ".\dist\WindowsMaintenanceTool.exe.sha256",
+              ".\dist\WindowsMaintenanceTool.exe.sigstore.json",
+              ".\WMT-GUI.ps1"
           )
 
-          # Probe the Releases API instead of using "gh release view". On Windows
-          # PowerShell 5.1, native stderr from a missing release can become a terminating
-          # NativeCommandError when ErrorActionPreference is Stop, even when redirected.
+          # Recheck immediately before publishing. The workflow concurrency group
+          # serializes manual releases; this catches existing tags/releases and
+          # protects the immutable version invariant.
+          $existingTag = & git ls-remote --refs origin "refs/tags/$env:RELEASE_TAG"
+          if ($LASTEXITCODE -ne 0) {
+              throw "Could not check whether tag $env:RELEASE_TAG already exists."
+          }
+          if (-not [string]::IsNullOrWhiteSpace(($existingTag -join "`n"))) {
+              throw "Tag $env:RELEASE_TAG already exists. Refusing to publish or replace it."
+          }
+
           $releaseApi = "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$env:RELEASE_TAG"
           $headers = @{
               Authorization = "Bearer $env:GITHUB_TOKEN"
@@ -115,40 +328,60 @@ jobs:
           }
 
           if ($releaseExists) {
-              Write-Host "Release $env:RELEASE_TAG already exists; replacing its generated assets."
-              gh release upload $env:RELEASE_TAG @assets --clobber --repo $env:GITHUB_REPOSITORY
-              if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets." }
-          }
-          else {
-              $args = @(
-                  "release", "create", $env:RELEASE_TAG,
-                  "--repo", $env:GITHUB_REPOSITORY,
-                  "--target", $env:GITHUB_SHA,
-                  "--title", "Windows Maintenance Tool $env:RELEASE_TAG",
-                  "--generate-notes"
-              )
-              if ($env:PRERELEASE -eq "true") {
-                  $args += "--prerelease"
-              }
-              $args += $assets
-
-              & gh @args
-              if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release." }
+              throw "Release $env:RELEASE_TAG already exists. Refusing to replace its assets or metadata."
           }
 
+          $args = @(
+              "release", "create", $env:RELEASE_TAG,
+              "--repo", $env:GITHUB_REPOSITORY,
+              "--target", $env:GITHUB_SHA,
+              "--title", "Windows Maintenance Tool $env:RELEASE_TAG",
+              "--generate-notes",
+              "--notes", "This release is not Authenticode-signed. Verify its provenance with the instructions at https://github.com/$env:GITHUB_REPOSITORY#verify-release-provenance-sigstore--github-attestations"
+          )
+          if ($env:PRERELEASE -eq "true") {
+              $args += "--prerelease"
+          }
+          $args += $assets
+
+          & gh @args
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release." }
+  submit-winget:
+    needs: build-release
+    if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.submit_winget }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
       - name: Submit WinGet update
-        if: ${{ !inputs.prerelease && inputs.submit_winget }}
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.submit_winget }}
         shell: powershell
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_TAG: ${{ needs.build-release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
           WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
-              Write-Warning "WINGET_TOKEN is not configured; skipping WinGet submission."
-              exit 0
+              throw "WINGET_TOKEN is required because submit_winget was enabled. Chocolatey publication is running independently."
+          }
+
+          # Provider-specific validation belongs in this job so a WinGet
+          # configuration or submission failure cannot cancel Chocolatey.
+          $wingetVersionPath = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Chaython/WindowsMaintenanceTool/$env:RELEASE_VERSION?ref=master"
+          try {
+              Invoke-RestMethod -Uri $wingetVersionPath -Headers @{
+                  "User-Agent" = "Windows-Maintenance-Tool-release"
+                  Accept = "application/vnd.github+json"
+              } -TimeoutSec 15 | Out-Null
+              throw "WinGet already has a manifest for version $env:RELEASE_VERSION; increase AppVersion before publishing."
+          }
+          catch {
+              if ($_.Exception.Message -like "WinGet already has a manifest for version*") { throw }
+              $statusCode = $null
+              try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
+              if ($statusCode -ne 404) { throw }
           }
 
           $manifestApi = "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/c/Chaython/WindowsMaintenanceTool?ref=master"
@@ -159,8 +392,7 @@ jobs:
               $statusCode = $null
               try { $statusCode = [int]$_.Exception.Response.StatusCode } catch {}
               if ($statusCode -eq 404) {
-                  Write-Warning "Chaython.WindowsMaintenanceTool is not merged into winget-pkgs yet; skipping automated update."
-                  exit 0
+                  throw "Chaython.WindowsMaintenanceTool was not found in winget-pkgs; cannot submit an update."
               }
               throw
           }
@@ -168,25 +400,148 @@ jobs:
           Invoke-WebRequest -Uri "https://aka.ms/wingetcreate/latest" -OutFile ".\wingetcreate.exe" -UseBasicParsing
           $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
 
-          & ".\wingetcreate.exe" update Chaython.WindowsMaintenanceTool --urls "$installerUrl|x64" --version $env:RELEASE_VERSION --submit --no-open
+          $manifestOutput = Join-Path $env:RUNNER_TEMP "wmt-winget-manifest"
+          New-Item -ItemType Directory -Path $manifestOutput -Force | Out-Null
+
+          & ".\wingetcreate.exe" update Chaython.WindowsMaintenanceTool --urls "$installerUrl|x64" --version $env:RELEASE_VERSION --out $manifestOutput --submit --no-open
           if ($LASTEXITCODE -ne 0) {
               throw "WingetCreate submission failed with exit code $LASTEXITCODE."
           }
 
-      - name: Push Chocolatey update
-        if: ${{ !inputs.prerelease && inputs.push_chocolatey }}
+      - name: Validate manifest, test local installation, and complete PR checklist
         shell: powershell
         env:
-          RELEASE_TAG: ${{ steps.version.outputs.tag }}
-          RELEASE_VERSION: ${{ steps.version.outputs.version }}
-          RELEASE_SHA256: ${{ steps.version.outputs.sha256 }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $manifestOutput = Join-Path $env:RUNNER_TEMP "wmt-winget-manifest"
+          if (-not (Test-Path -LiteralPath $manifestOutput -PathType Container)) {
+              throw "WingetCreate did not save its generated manifests to $manifestOutput."
+          }
+
+          $yamlFiles = @(Get-ChildItem -LiteralPath $manifestOutput -Filter "*.yaml" -File -Recurse)
+          if ($yamlFiles.Count -ne 3) {
+              throw "Expected exactly three YAML files for one WinGet manifest version; found $($yamlFiles.Count)."
+          }
+          $manifestDirs = @($yamlFiles | Select-Object -ExpandProperty DirectoryName -Unique)
+          if ($manifestDirs.Count -ne 1) {
+              throw "Generated manifest YAML files are not all in one version directory."
+          }
+          $manifestDir = $manifestDirs[0]
+          $expectedFiles = @(
+              "Chaython.WindowsMaintenanceTool.yaml",
+              "Chaython.WindowsMaintenanceTool.locale.en-US.yaml",
+              "Chaython.WindowsMaintenanceTool.installer.yaml"
+          )
+          foreach ($name in $expectedFiles) {
+              if (-not (Test-Path -LiteralPath (Join-Path $manifestDir $name) -PathType Leaf)) {
+                  throw "Generated manifest is missing expected file: $name"
+              }
+          }
+
+          if (-not (Get-Command winget.exe -ErrorAction SilentlyContinue)) {
+              throw "winget.exe is unavailable; cannot truthfully mark local validation and installation as tested."
+          }
+          Write-Host "Validating generated WinGet manifest..."
+          & winget.exe validate --manifest $manifestDir
+          if ($LASTEXITCODE -ne 0) { throw "winget validate failed with exit code $LASTEXITCODE." }
+
+          Write-Host "Enabling local manifest installation..."
+          & winget.exe settings --enable LocalManifestFiles
+          if ($LASTEXITCODE -ne 0) { throw "Could not enable LocalManifestFiles (exit code $LASTEXITCODE)." }
+
+          Write-Host "Testing installation from the generated local manifest..."
+          & winget.exe install --manifest $manifestDir --silent --accept-package-agreements --accept-source-agreements --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "Local manifest installation failed with exit code $LASTEXITCODE." }
+
+          if ([string]::IsNullOrWhiteSpace($env:WINGET_CREATE_GITHUB_TOKEN)) {
+              throw "WINGET_TOKEN is unavailable; cannot update the submitted WinGet PR checklist."
+          }
+          $headers = @{
+              Authorization = "Bearer $env:WINGET_CREATE_GITHUB_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+              "User-Agent" = "Windows-Maintenance-Tool-release"
+          }
+          $pullsUri = "https://api.github.com/repos/microsoft/winget-pkgs/pulls?state=open&per_page=100&sort=created&direction=desc"
+          $pulls = Invoke-RestMethod -Uri $pullsUri -Headers $headers -TimeoutSec 30
+          $expectedTitle = "New version: Chaython.WindowsMaintenanceTool version $env:RELEASE_VERSION"
+          $matchingPulls = @($pulls | Where-Object {
+              $_.title -eq $expectedTitle -and
+              $_.user.login -eq "Chaython" -and
+              $_.head.repo.full_name -eq "Chaython/winget-pkgs"
+          })
+          if ($matchingPulls.Count -ne 1) {
+              throw "Expected one open WinGet PR titled '$expectedTitle' from Chaython/winget-pkgs; found $($matchingPulls.Count)."
+          }
+          $pr = $matchingPulls[0]
+
+          $otherMatchingPulls = @($pulls | Where-Object {
+              $_.number -ne $pr.number -and
+              $_.title -like "New version: Chaython.WindowsMaintenanceTool version *"
+          })
+          if ($otherMatchingPulls.Count -gt 0) {
+              throw "Another open WinGet PR for this package was found; refusing to claim the duplicate check passed."
+          }
+
+          # Wait briefly for Microsoft's CLA bot. Never mark the CLA item unless it passes.
+          $claSucceeded = $false
+          $checkRunsUri = "https://api.github.com/repos/microsoft/winget-pkgs/commits/$($pr.head.sha)/check-runs?per_page=100"
+          for ($attempt = 0; $attempt -lt 18; $attempt++) {
+              try {
+                  $checkRuns = Invoke-RestMethod -Uri $checkRunsUri -Headers $headers -TimeoutSec 30
+                  $claRun = @($checkRuns.check_runs | Where-Object { $_.name -match "^(license/cla|CLA)$" } | Select-Object -First 1)
+                  if ($claRun.Count -gt 0 -and $claRun[0].conclusion -eq "success") {
+                      $claSucceeded = $true
+                      break
+                  }
+                  if ($claRun.Count -gt 0 -and $claRun[0].conclusion -eq "failure") { break }
+              }
+              catch { Write-Warning "Could not read CLA status yet: $($_.Exception.Message)" }
+              Start-Sleep -Seconds 10
+          }
+
+          $body = [string]$pr.body
+          $body = $body.Replace("- [ ] Linked to an issue (if applicable)", "- [x] Linked to an issue (if applicable) — no related issue applies to this release.")
+          $body = [regex]::Replace($body, '(?m)^\\s*<!-- Example: Resolves #[^>]+ -->\\r?\\n', '')
+          $body = $body.Replace("  - Resolves #[Issue Number]", "")
+          $body = $body.Replace("- [ ] Checked that there aren't other [pull requests]", "- [x] Checked that there aren't other [pull requests]")
+          $body = $body.Replace("- [ ] This PR only modifies one (1) manifest", "- [x] This PR only modifies one (1) manifest")
+          $body = $body.Replace("- [ ] Validated manifest locally with", "- [x] Validated manifest locally with")
+          $body = $body.Replace("- [ ] Tested manifest locally with", "- [x] Tested manifest locally with")
+          $body = $body.Replace("- [ ] Manifest conforms to the", "- [x] Manifest conforms to the")
+          if ($claSucceeded) {
+              $body = $body.Replace("- [ ] Signed the [Contributor License Agreement]", "- [x] Signed the [Contributor License Agreement]")
+          }
+          else {
+              Write-Warning "Microsoft's CLA check has not succeeded; leaving that checkbox unchecked."
+          }
+
+          $patchBody = @{ body = $body } | ConvertTo-Json -Depth 5
+          $updateUri = "https://api.github.com/repos/microsoft/winget-pkgs/pulls/$($pr.number)"
+          Invoke-RestMethod -Method Patch -Uri $updateUri -Headers $headers -ContentType "application/json" -Body $patchBody -TimeoutSec 30 | Out-Null
+          Write-Host "Updated WinGet PR checklist: https://github.com/microsoft/winget-pkgs/pull/$($pr.number)"
+  push-chocolatey:
+    needs: build-release
+    if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_chocolatey }}
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Push Chocolatey update
+        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_chocolatey }}
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.build-release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          RELEASE_SHA256: ${{ needs.build-release.outputs.release_sha256 }}
           CHOCOLATEY_API_KEY: ${{ secrets.CHOCOLATEY_API_KEY }}
         run: |
           $ErrorActionPreference = "Stop"
 
           if ([string]::IsNullOrWhiteSpace($env:CHOCOLATEY_API_KEY)) {
-              Write-Warning "CHOCOLATEY_API_KEY is not configured; skipping Chocolatey submission."
-              exit 0
+              throw "CHOCOLATEY_API_KEY is required because push_chocolatey was enabled."
           }
 
           if (-not (Get-Command choco.exe -ErrorAction SilentlyContinue)) {
@@ -198,6 +553,7 @@ jobs:
           $chocoVersion = ($parts[0..2] -join ".")
           $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
           $releaseUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG"
+          $iconUrl = "https://raw.githack.com/$env:GITHUB_REPOSITORY/$env:RELEASE_TAG/PS2EXE/WMT.ico"
 
           $packageRoot = Join-Path $env:RUNNER_TEMP "wmt-chocolatey"
           $toolsDir = Join-Path $packageRoot "tools"
@@ -212,7 +568,9 @@ jobs:
               <title>Windows Maintenance Tool</title>
               <authors>Chaython</authors>
               <owners>Chaython</owners>
+              <copyright>Copyright (c) 2025-2026 ios12checker, Chaython Meredith</copyright>
               <projectUrl>https://github.com/Chaython/Windows-Maintenance-Tool</projectUrl>
+              <iconUrl>$iconUrl</iconUrl>
               <projectSourceUrl>https://github.com/Chaython/Windows-Maintenance-Tool</projectSourceUrl>
               <packageSourceUrl>https://github.com/Chaython/Windows-Maintenance-Tool</packageSourceUrl>
               <bugTrackerUrl>https://github.com/Chaython/Windows-Maintenance-Tool/issues</bugTrackerUrl>
@@ -249,4 +607,186 @@ jobs:
           }
           finally {
               Pop-Location
+          }
+  push-scoop:
+    needs: build-release
+    if: ${{ needs.build-release.result == 'success' && github.event_name == 'workflow_dispatch' && !inputs.prerelease && inputs.push_scoop }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Prepare Scoop Extras manifest and branch
+        shell: powershell
+        env:
+          RELEASE_TAG: ${{ needs.build-release.outputs.release_tag }}
+          RELEASE_VERSION: ${{ needs.build-release.outputs.release_version }}
+          RELEASE_SHA256: ${{ needs.build-release.outputs.release_sha256 }}
+          SCOOP_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+          GH_TOKEN: ${{ secrets.SCOOP_TOKEN }}
+          SCOOP_ISSUE: ${{ inputs.scoop_issue }}
+          SCOOP_ISSUE_APPROVED: ${{ inputs.scoop_issue_approved }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:SCOOP_TOKEN)) {
+              throw "SCOOP_TOKEN is required because push_scoop was enabled. WinGet and Chocolatey publication run independently."
+          }
+
+          if ($env:SCOOP_ISSUE_APPROVED -ne "true") {
+              throw "Confirm scoop_issue_approved only after a Scoop maintainer has approved the linked Package Request issue."
+          }
+          if ($env:SCOOP_ISSUE -notmatch '^\d+$') {
+              throw "Enter the approved Package Request issue number from ScoopInstaller/Extras in the scoop_issue workflow input."
+          }
+
+          $issueUri = "https://api.github.com/repos/ScoopInstaller/Extras/issues/$($env:SCOOP_ISSUE)"
+          $issueHeaders = @{
+              Authorization = "Bearer $env:SCOOP_TOKEN"
+              Accept = "application/vnd.github+json"
+              "X-GitHub-Api-Version" = "2022-11-28"
+              "User-Agent" = "Windows-Maintenance-Tool-Scoop-release"
+          }
+          try {
+              $scoopIssue = Invoke-RestMethod -Uri $issueUri -Headers $issueHeaders -TimeoutSec 20
+          }
+          catch {
+              throw "Could not retrieve ScoopInstaller/Extras issue #$($env:SCOOP_ISSUE): $($_.Exception.Message)"
+          }
+          if ($scoopIssue.state -ne "open" -or $scoopIssue.pull_request) {
+              throw "Scoop issue #$($env:SCOOP_ISSUE) must be an open issue, not a pull request."
+          }
+          $scoopIssueUrl = [string]$scoopIssue.html_url
+          if ([string]::IsNullOrWhiteSpace($scoopIssueUrl)) {
+              throw "Scoop issue #$($env:SCOOP_ISSUE) did not return a valid issue URL."
+          }
+          Write-Host "Using Scoop Extras issue: $scoopIssueUrl"
+          Write-Warning "Confirm that a Scoop maintainer approved the issue before dispatching; issue existence alone does not prove approval."
+
+          if ($env:RELEASE_VERSION -notmatch '^\d+(\.\d+){0,3}$') {
+              throw "Invalid Scoop release version: $env:RELEASE_VERSION"
+          }
+          if ($env:RELEASE_TAG -ne "v$($env:RELEASE_VERSION)") {
+              throw "Unexpected release tag '$env:RELEASE_TAG' for version '$env:RELEASE_VERSION'."
+          }
+          if ($env:RELEASE_SHA256 -notmatch '^[a-fA-F0-9]{64}$') {
+              throw "The release SHA-256 output is missing or invalid."
+          }
+
+          $bucketRoot = Join-Path $env:RUNNER_TEMP "scoop-extras"
+          $branch = "wmt-update-v$($env:RELEASE_VERSION)"
+          $manifestPath = Join-Path $bucketRoot "bucket\windows-maintenance-tool.json"
+          $installerUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:RELEASE_TAG/WindowsMaintenanceTool.exe"
+
+          # Base the proposal on the official Extras master, and push only to
+          # Chaython's fork. This opens a normal upstream PR; it never writes
+          # directly to ScoopInstaller/Extras.
+          git clone --depth 1 "https://x-access-token:$($env:SCOOP_TOKEN)@github.com/Chaython/Extras.git" $bucketRoot
+          if ($LASTEXITCODE -ne 0) { throw "Could not clone Chaython/Extras. Check SCOOP_TOKEN access." }
+          git -C $bucketRoot remote add upstream https://github.com/ScoopInstaller/Extras.git
+          if ($LASTEXITCODE -ne 0) { throw "Could not configure the official Scoop Extras remote." }
+          git -C $bucketRoot fetch --depth 1 upstream master
+          if ($LASTEXITCODE -ne 0) { throw "Could not fetch official ScoopInstaller/Extras master." }
+          git -C $bucketRoot checkout -B $branch upstream/master
+          if ($LASTEXITCODE -ne 0) { throw "Could not create the Scoop update branch from official Extras master." }
+
+          $manifest = [ordered]@{
+              version = $env:RELEASE_VERSION
+              description = "All-in-one Windows maintenance, repair, cleanup, update, and tuning GUI."
+              homepage = "https://github.com/$env:GITHUB_REPOSITORY"
+              license = "MIT"
+              architecture = @{
+                  "64bit" = @{
+                      url = $installerUrl
+                      hash = $env:RELEASE_SHA256.ToLowerInvariant()
+                  }
+              }
+              bin = @(
+                  @("WindowsMaintenanceTool.exe", "wmt")
+              )
+              shortcuts = @(
+                  @("WindowsMaintenanceTool.exe", "Windows Maintenance Tool")
+              )
+              checkver = "github"
+              autoupdate = @{
+                  architecture = @{
+                      "64bit" = @{
+                          url = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/v`$version/WindowsMaintenanceTool.exe"
+                      }
+                  }
+              }
+          }
+
+          $json = $manifest | ConvertTo-Json -Depth 10
+          [IO.File]::WriteAllText($manifestPath, ($json + [Environment]::NewLine), [Text.UTF8Encoding]::new($false))
+
+          # Parse and validate the generated manifest before creating a branch.
+          $check = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($check.version -ne $env:RELEASE_VERSION -or
+              $check.architecture.'64bit'.url -ne $installerUrl -or
+              $check.architecture.'64bit'.hash -ne $env:RELEASE_SHA256.ToLowerInvariant()) {
+              throw "Generated Scoop manifest failed version, URL, or checksum validation."
+          }
+
+          git -C $bucketRoot diff --check
+          if ($LASTEXITCODE -ne 0) { throw "Scoop manifest contains whitespace errors." }
+          git -C $bucketRoot add bucket/windows-maintenance-tool.json
+          git -C $bucketRoot commit -m "windows-maintenance-tool: Add version $($env:RELEASE_VERSION)"
+          if ($LASTEXITCODE -ne 0) { throw "Could not commit the Scoop manifest." }
+
+          git -C $bucketRoot push --force origin "HEAD:refs/heads/$branch"
+          if ($LASTEXITCODE -ne 0) { throw "Could not push the Scoop update branch to Chaython/Extras. Check SCOOP_TOKEN permissions." }
+
+          # Scoop Extras requires the official title format for a new manifest.
+          $prTitle = "windows-maintenance-tool: Add version $($env:RELEASE_VERSION)"
+          $prBody = @"
+          <!-- Provide a general summary of your changes in the title above -->
+
+          <!--
+            By opening this PR you confirm that you have searched for similar issues/PRs here already.
+            Failing to do so will most likely result in closing of this PR without any explanation.
+            It is also mandatory to open a relevant issue (either Package Request or Bug Report) for
+            discussion with the maintainers, before creating any new PR.
+            Read the contributing guide first to save both your and our time.
+          -->
+
+          <!--
+          Relates to #$($env:SCOOP_ISSUE)
+          -->
+
+          - [x] Use conventional PR title: `<manifest-name[@version]|chore>: <general summary of the pull request>`
+          - [ ] I have read the [Contributing Guide](https://github.com/ScoopInstaller/.github/blob/main/.github/CONTRIBUTING.md) <!-- where the first check box is documented, in case you don't read. -->
+
+          **Manifest:** `bucket/windows-maintenance-tool.json`
+          **Version:** $($env:RELEASE_VERSION)
+          **Release:** https://github.com/$env:GITHUB_REPOSITORY/releases/tag/$env:RELEASE_TAG
+          **Related issue:** $scoopIssueUrl
+
+          This PR adds the Windows Maintenance Tool manifest to Scoop Extras. The manifest downloads the immutable GitHub release executable, pins this build's SHA-256 checksum, and configures GitHub release checkver/autoupdate.
+          "@
+
+          # Reuse an existing PR on reruns instead of creating duplicates.
+          $existingPr = gh pr list --repo ScoopInstaller/Extras --head "Chaython:$branch" --state open --json url --jq ".[0].url"
+          if ($LASTEXITCODE -ne 0) { throw "Could not check for an existing Scoop Extras pull request." }
+          if ([string]::IsNullOrWhiteSpace(($existingPr -join ""))) {
+              $createdPr = gh pr create --repo ScoopInstaller/Extras --head "Chaython:$branch" --base master --title $prTitle --body $prBody
+              if ($LASTEXITCODE -ne 0) { throw "Could not open the ScoopInstaller/Extras pull request." }
+              $prUrl = [string]($createdPr | Select-Object -Last 1)
+              if ($prUrl -notmatch '^https://github\.com/ScoopInstaller/Extras/pull/\d+$') {
+                  throw "Scoop PR creation returned an unexpected URL: $prUrl"
+              }
+
+              # Trigger the official Scoop manifest verifier as required by its guide.
+              gh pr comment $prUrl --repo ScoopInstaller/Extras --body "/verify"
+              if ($LASTEXITCODE -ne 0) { throw "PR was created, but /verify could not be posted: $prUrl" }
+              Write-Host "Created and requested verification for Scoop Extras PR: $prUrl"
+          }
+          else {
+              Write-Host "Scoop Extras pull request already exists: $existingPr"
+              $verifyComments = gh pr view $existingPr --repo ScoopInstaller/Extras --json comments --jq '[.comments[].body] | any(. == "/verify")'
+              if ($LASTEXITCODE -ne 0) { throw "Could not inspect comments on the existing Scoop PR." }
+              if (($verifyComments -join "").Trim() -ne "true") {
+                  gh pr comment $existingPr --repo ScoopInstaller/Extras --body "/verify"
+                  if ($LASTEXITCODE -ne 0) { throw "Could not post /verify on the existing Scoop PR: $existingPr" }
+              }
           }
