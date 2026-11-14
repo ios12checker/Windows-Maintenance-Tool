@@ -15958,7 +15958,16 @@ return $selected.ToArray()
 
 function Show-WmtAdvancedCleanupSelectionWpf {
 $currentSettings = Get-WmtSettings
-$savedStates = $currentSettings.TempCleanup
+# TempCleanup is saved as JSON and loaded as PSCustomObject, which lacks ContainsKey.
+# Convert to a hashtable so the rest of the function works uniformly.
+$savedStates = @{}
+if ($currentSettings.TempCleanup) {
+    if ($currentSettings.TempCleanup -is [System.Collections.IDictionary]) {
+        foreach ($key in $currentSettings.TempCleanup.Keys) { $savedStates[$key] = $currentSettings.TempCleanup[$key] }
+    } else {
+        foreach ($prop in $currentSettings.TempCleanup.PSObject.Properties) { $savedStates[$prop.Name] = $prop.Value }
+    }
+}
 $isWinapp2Enabled = [bool]$currentSettings.LoadWinapp2
 $isCleanerMlEnabled = [bool]$currentSettings.LoadCleanerML
 $isCleanerMlPendingEnabled = [bool]$currentSettings.LoadCleanerMLPending
@@ -19416,7 +19425,16 @@ if ($CleanerRefreshWorker) {
 function Show-RegScanSelection {
 # 1. LOAD SETTINGS
 $currentSettings = Get-WmtSettings
-$savedStates = $currentSettings.RegistryScan
+# RegistryScan is saved as JSON and loaded as PSCustomObject, which lacks ContainsKey.
+# Convert to a hashtable so the rest of the function works uniformly.
+$savedStates = @{}
+if ($currentSettings.RegistryScan) {
+    if ($currentSettings.RegistryScan -is [System.Collections.IDictionary]) {
+        foreach ($key in $currentSettings.RegistryScan.Keys) { $savedStates[$key] = $currentSettings.RegistryScan[$key] }
+    } else {
+        foreach ($prop in $currentSettings.RegistryScan.PSObject.Properties) { $savedStates[$prop.Name] = $prop.Value }
+    }
+}
 
 # --- Define Categories ---
 $categories = [ordered]@{
