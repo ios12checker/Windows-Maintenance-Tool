@@ -3278,7 +3278,170 @@ return $result.ToArray()
 }
 '@
 
+# Shared winget table parsing helpers. winget renders fixed-width tables whose
+# columns are separated by padding rather than tabs. When stdout is redirected,
+# a column can be padded with just one space (or a long Name pushes every later
+# column right), so splitting a line on runs of whitespace merges real values:
+# for example "XP99J3KP4XZ4VV Unknown" or "7.2.1 (48556)". Parse from the header
+# offsets instead, allowing for a constant shift caused by an overflowing Name.
+$script:WmtWingetCommonHelpers = @'
+function Get-WmtWingetTableColumns {
+    param([string]$Line)
+
+    if ([string]::IsNullOrWhiteSpace($Line)) { return $null }
+    $text = ([string]$Line).TrimStart([char]0xFEFF)
+    $tokens = @([regex]::Matches($text, '\S+'))
+    if ($tokens.Count -lt 3) { return $null }
+    if ($tokens[0].Value.ToLowerInvariant() -notin @('name', 'nom')) { return $null }
+
+    $columns = [ordered]@{}
+    foreach ($token in $tokens) {
+        $columnName = ""
+        $value = $token.Value.ToLowerInvariant()
+        if ($value -in @('name', 'nom')) { $columnName = 'Name' }
+        elseif ($value -in @('id', 'identifiant')) { $columnName = 'Id' }
+        elseif ($value -eq 'version') { $columnName = 'Version' }
+        elseif ($value -in @('available', 'disponible', 'latest')) { $columnName = 'Available' }
+        elseif ($value -in @('match', 'correspondance')) { $columnName = 'Match' }
+        elseif ($value -eq 'source') { $columnName = 'Source' }
+        if ($columnName -and -not $columns.Contains($columnName)) { $columns[$columnName] = [int]$token.Index }
+    }
+
+    if (-not $columns.Contains('Name') -or -not $columns.Contains('Id') -or -not $columns.Contains('Version')) { return $null }
+
+    # Column headers always appear left-to-right; reject data rows that happen to
+    # contain the same words in a different order.
+    $lastIndex = -1
+    foreach ($key in @('Name', 'Id', 'Version', 'Available', 'Match', 'Source')) {
+        if (-not $columns.Contains($key)) { continue }
+        $index = [int]$columns[$key]
+        if ($index -le $lastIndex) { return $null }
+        $lastIndex = $index
+    }
+
+    return $columns
+}
+
+function ConvertFrom-WmtWingetTableRow {
+    param(
+        [string]$Line,
+        $Columns,
+        [string]$DefaultSource = "winget",
+        [switch]$RequireAvailable,
+        [switch]$RequireSource
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Line) -or $null -eq $Columns) { return $null }
+    if (-not $Columns.Contains('Id') -or -not $Columns.Contains('Version')) { return $null }
+
+    $text = [string]$Line
+    $tokens = @([regex]::Matches($text, '\S+'))
+    if ($tokens.Count -lt 3) { return $null }
+
+    $idStart = [int]$Columns['Id']
+    $versionStart = [int]$Columns['Version']
+    $availableStart = if ($Columns.Contains('Available')) { [int]$Columns['Available'] } else { -1 }
+    $matchStart = if ($Columns.Contains('Match')) { [int]$Columns['Match'] } else { -1 }
+    $sourceStart = if ($Columns.Contains('Source')) { [int]$Columns['Source'] } else { -1 }
+
+    $bestStart = -1
+    $bestRow = $null
+    for ($t = 1; $t -lt $tokens.Count; $t++) {
+        $idTokenStart = [int]$tokens[$t].Index
+        $shift = $idTokenStart - $idStart
+        if ($shift -lt 0) { continue }
+
+        $expectedVersion = $versionStart + $shift
+        if ($expectedVersion -le $idTokenStart -or $expectedVersion -ge $text.Length) { continue }
+
+        # The version cell must start exactly at its (shifted) header offset.
+        $versionTokenFound = $false
+        for ($j = $t + 1; $j -lt $tokens.Count; $j++) {
+            if ([int]$tokens[$j].Index -eq $expectedVersion) { $versionTokenFound = $true; break }
+            if ([int]$tokens[$j].Index -gt $expectedVersion) { break }
+        }
+        if (-not $versionTokenFound) { continue }
+
+        $expectedAvailable = -1
+        $availableTokenFound = $false
+        if ($availableStart -ge 0) {
+            $expectedAvailable = $availableStart + $shift
+            if ($expectedAvailable -le $expectedVersion) { continue }
+            for ($j = $t + 1; $j -lt $tokens.Count; $j++) {
+                if ([int]$tokens[$j].Index -eq $expectedAvailable) { $availableTokenFound = $true; break }
+                if ([int]$tokens[$j].Index -gt $expectedAvailable) { break }
+            }
+            if (-not $availableTokenFound -and $RequireAvailable) { continue }
+        }
+
+        $expectedMatch = -1
+        if ($matchStart -ge 0) {
+            $expectedMatch = $matchStart + $shift
+            if ($expectedMatch -le $expectedVersion) { continue }
+        }
+
+        $expectedSource = -1
+        $sourceTokenFound = $false
+        if ($sourceStart -ge 0) {
+            $expectedSource = $sourceStart + $shift
+            if ($expectedSource -le $expectedVersion) { continue }
+            for ($j = $t + 1; $j -lt $tokens.Count; $j++) {
+                if ([int]$tokens[$j].Index -eq $expectedSource) { $sourceTokenFound = $true; break }
+                if ([int]$tokens[$j].Index -gt $expectedSource) { break }
+            }
+            # Search tables always fill the Source cell. Requiring it rejects
+            # tokens after the real Id that only align by coincidence.
+            if (-not $sourceTokenFound -and $RequireSource) { continue }
+        }
+
+        $name = $text.Substring(0, $idTokenStart).Trim()
+        $id = $text.Substring($idTokenStart, $expectedVersion - $idTokenStart).Trim()
+        if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($id)) { continue }
+
+        $versionEnd = $text.Length
+        if ($expectedAvailable -gt $expectedVersion) { $versionEnd = [Math]::Min($versionEnd, $expectedAvailable) }
+        if ($expectedMatch -gt $expectedVersion) { $versionEnd = [Math]::Min($versionEnd, $expectedMatch) }
+        if ($expectedSource -gt $expectedVersion) { $versionEnd = [Math]::Min($versionEnd, $expectedSource) }
+        if ($versionEnd -le $expectedVersion) { $versionEnd = $text.Length }
+        $version = $text.Substring($expectedVersion, $versionEnd - $expectedVersion).Trim()
+        if ([string]::IsNullOrWhiteSpace($version)) { continue }
+
+        $available = ""
+        if ($expectedAvailable -ge 0 -and $availableTokenFound) {
+            $availableEnd = $text.Length
+            if ($expectedMatch -gt $expectedAvailable) { $availableEnd = [Math]::Min($availableEnd, $expectedMatch) }
+            if ($expectedSource -gt $expectedAvailable) { $availableEnd = [Math]::Min($availableEnd, $expectedSource) }
+            if ($availableEnd -gt $expectedAvailable) {
+                $available = $text.Substring($expectedAvailable, $availableEnd - $expectedAvailable).Trim()
+            }
+        }
+
+        $source = $DefaultSource
+        if ($sourceTokenFound) {
+            $source = $text.Substring($expectedSource).Trim()
+        }
+
+        # Some rows can offer more than one token that aligns with the shifted
+        # Version column (for example a Name that is much wider than its header).
+        # The real Id is the right-most candidate.
+        if ($idTokenStart -gt $bestStart) {
+            $bestStart = $idTokenStart
+            $bestRow = [PSCustomObject]@{
+                Name      = $name
+                Id        = $id
+                Version   = $version
+                Available = $available
+                Source    = $source
+            }
+        }
+    }
+
+    return $bestRow
+}
+'@
+
 Invoke-Expression $script:WmtSteamCommonHelpers
+Invoke-Expression $script:WmtWingetCommonHelpers
 
 # ============================================================================
 # Shared runspace pools
@@ -3292,7 +3455,7 @@ $iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefau
 # the first line-level closing brace inside nested try/catch/foreach blocks,
 # truncating helpers such as Get-WmtSteamInstallRoots. The registration errors
 # were then swallowed, so pooled workers started without the Steam helpers.
-foreach ($helperBlock in @($script:MyDeviceCommonHelpers, $script:WmtSteamCommonHelpers)) {
+foreach ($helperBlock in @($script:MyDeviceCommonHelpers, $script:WmtSteamCommonHelpers, $script:WmtWingetCommonHelpers)) {
     if ([string]::IsNullOrWhiteSpace([string]$helperBlock)) { continue }
     try {
         $tokens = $null
@@ -53243,12 +53406,26 @@ $btnWingetScan.Add_Click({
 
                     if (-not [string]::IsNullOrWhiteSpace($out)) {
                         $lines = $out -split "`r`n"
+                        $wingetColumns = $null
                         foreach ($line in $lines) {
                             $line = $line.Trim()
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+                            # winget prints the table header once. Parse rows from its
+                            # column offsets: values can contain spaces ("7.2.1 (48556)")
+                            # and a long Name shifts every following column right.
+                            $parsedColumns = Get-WmtWingetTableColumns -Line $line
+                            if ($parsedColumns) { $wingetColumns = $parsedColumns; continue }
                             if (Test-WingetScanNoticeLine $line) { continue }
 
-                            $row = ConvertFrom-WmtWingetUpgradeLine -Line $line -SourceName $SourceName
+                            if ($wingetColumns) {
+                                $row = ConvertFrom-WmtWingetTableRow -Line $line -Columns $wingetColumns -DefaultSource $SourceName -RequireAvailable
+                            }
+                            else {
+                                $row = ConvertFrom-WmtWingetUpgradeLine -Line $line -SourceName $SourceName
+                            }
                             if (-not $row -or (Test-Ignored $row.Name $row.Id)) { continue }
+                            if ($row.Version -match "^(?i)(unknown|inconnu)$") { $row.Version = "?" }
                             $row
                         }
                     }
@@ -56090,12 +56267,28 @@ $script:InvokeWingetSearch = {
                 switch ($providerKey) {
                     "winget" {
                         $r = Invoke-WmtPackageSearchProcess -FileName "winget" -Arguments "list --accept-source-agreements --disable-interactivity" -Utf8Output -TimeoutSeconds 45
-                        foreach ($line in @(([string]$r.Output) -split '\r?\n')) {
+                        $wingetLines = @(([string]$r.Output) -split '\r?\n')
+                        $wingetColumns = $null
+                        foreach ($line in $wingetLines) {
                             $trimmed = ([string]$line).Trim()
-                            if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -match '^-+$' -or $trimmed -match '^(?i)Name\s+Id') { continue }
-                            $parts = @($trimmed -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-                            if ($parts.Count -ge 3) {
-                                Add-WmtSearchInstalledEntry -Map $map -Id ([string]$parts[1]) -Version ([string]$parts[2])
+                            if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -match '^-+$') { continue }
+                            $parsedColumns = Get-WmtWingetTableColumns -Line $trimmed
+                            if ($parsedColumns) { $wingetColumns = $parsedColumns; continue }
+                            if (-not $wingetColumns) { continue }
+                            $wingetRow = ConvertFrom-WmtWingetTableRow -Line $trimmed -Columns $wingetColumns -DefaultSource "winget"
+                            if (-not $wingetRow) { continue }
+                            Add-WmtSearchInstalledEntry -Map $map -Id ([string]$wingetRow.Id) -Version ([string]$wingetRow.Version)
+                        }
+                        if (-not $wingetColumns) {
+                            # Unrecognized header (winget UI language): keep the legacy
+                            # whitespace split as a best-effort fallback.
+                            foreach ($line in $wingetLines) {
+                                $trimmed = ([string]$line).Trim()
+                                if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed -match '^-+$') { continue }
+                                $parts = @($trimmed -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+                                if ($parts.Count -ge 3) {
+                                    Add-WmtSearchInstalledEntry -Map $map -Id ([string]$parts[1]) -Version ([string]$parts[2])
+                                }
                             }
                         }
                     }
@@ -56319,64 +56512,69 @@ $script:InvokeWingetSearch = {
 
                 if (-not [string]::IsNullOrWhiteSpace($out)) {
                     $lines = $out -split "`r`n"
+                    $wingetColumns = $null
 
                     foreach ($line in $lines) {
                         $line = $line.Trim()
 
-                        # Skip dividers, headers, and empty lines
+                        # Skip dividers, notices, and empty lines
                         if ([string]::IsNullOrWhiteSpace($line)) { continue }
-                        if ($line -match "^-+$" -or $line -match "^Name\s+Id" -or $line -match "^-{3,}") { continue } 
+                        if ($line -match "^-+$" -or $line -match "^-{3,}") { continue }
                         if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
                         if ($line -eq "-") { continue }
 
-                        # Split by 2 OR MORE spaces (\s{2,}). 
-                        # This perfectly separates columns without breaking names that have 1 space!
-                        $parts = @($line -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
-                        $headerTokens = @("name", "id", "version", "match", "source")
-                        $nonDividerParts = @($parts | Where-Object { $_ -notmatch "^-+$" })
-                        if ($nonDividerParts.Count -eq 0) { continue }
-                        if (@($nonDividerParts | Where-Object { $headerTokens -notcontains $_.ToLowerInvariant() }).Count -eq 0) { continue }
+                        # winget prints the table header once. Use its column offsets
+                        # instead of splitting on whitespace: real values can contain
+                        # single spaces ("7.2.5 (51704)") and winget may separate
+                        # columns with only one space when a cell fills its width.
+                        $parsedColumns = Get-WmtWingetTableColumns -Line $line
+                        if ($parsedColumns) { $wingetColumns = $parsedColumns; continue }
+                        if (-not $wingetColumns) { continue }
 
-                        $len = $parts.Count
+                        $row = ConvertFrom-WmtWingetTableRow -Line $line -Columns $wingetColumns -DefaultSource $defaultSource -RequireSource
+                        if (-not $row) { continue }
 
-                        $n = $null; $i = $null; $v = $null; $s = $defaultSource
+                        $n = ([string]$row.Name).Trim()
+                        $i = ([string]$row.Id).Trim()
+                        $v = ([string]$row.Version).Trim()
+                        $s = ([string]$row.Source).Trim().ToLowerInvariant()
+                        if ([string]::IsNullOrWhiteSpace($n) -or [string]::IsNullOrWhiteSpace($i) -or $i.Length -le 2) { continue }
+                        if ($n -eq "-" -or $i -eq "-" -or $v -eq "-") { continue }
 
-                        if ($len -ge 5) {
-                            # Layout: Name | Id | Version | Match | Source
-                            $n = $parts[0].Trim()
-                            $i = $parts[1].Trim()
-                            $v = $parts[2].Trim()
-                            $s = $parts[4].Trim()
-                        }
-                        elseif ($len -eq 4) {
-                            # Layout: Name | Id | Version | Source (Match column is empty)
-                            $n = $parts[0].Trim()
-                            $i = $parts[1].Trim()
-                            $v = $parts[2].Trim()
-                            $s = $parts[3].Trim()
-                        }
-                        elseif ($len -eq 3) {
-                            # Layout: Name | Id | Version (Source is hidden)
-                            $n = $parts[0].Trim()
-                            $i = $parts[1].Trim()
-                            $v = $parts[2].Trim()
-                        }
+                        if ($s -ne "msstore") { $s = "winget" }
+                        if ($v -match "^(?i)(unknown|inconnu)$") { $v = "?" }
 
-                        if ($n -and $i -and $i.Length -gt 2) {
-                            # Final header checks just in case
-                            $nText = ([string]$n).Trim()
-                            $iText = ([string]$i).Trim()
-                            $vText = ([string]$v).Trim()
-                            if ($nText -eq "-" -or $nText.ToLowerInvariant() -eq "name") { continue }
-                            if ($iText -eq "-" -or $headerTokens -contains $iText.ToLowerInvariant()) { continue }
-                            if ($vText -eq "-" -or $headerTokens -contains $vText.ToLowerInvariant()) { continue }
-
-                            if ($s -eq "msstore") { $s = "msstore" } else { $s = "winget" }
-                            if ($v -eq "Unknown") { $v = "?" }
-
-                            # Available is hardcoded to "-" since searches don't show updates
-                            New-WmtPackageSearchResult -Source $s -Name $n -Id $i -RemoteVersion $v
+                        New-WmtPackageSearchResult -Source $s -Name $n -Id $i -RemoteVersion $v
                         $script:provCount++
+                    }
+
+                    if (-not $wingetColumns) {
+                        # Unrecognized header (winget UI language): keep the legacy
+                        # whitespace split as a best-effort fallback.
+                        foreach ($line in $lines) {
+                            $line = ([string]$line).Trim()
+                            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+                            if ($line -match "^-+$" -or $line -match "^-{3,}") { continue }
+                            if ($line -match "Windows Package Manager" -or $line -match "Copyright" -or $line -match "usage:" -or $line -match "No package found") { continue }
+
+                            $parts = @($line -split '\s{2,}' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
+                            if ($parts.Count -lt 3) { continue }
+
+                            $n = ([string]$parts[0]).Trim()
+                            $i = ([string]$parts[1]).Trim()
+                            $v = ([string]$parts[2]).Trim()
+                            $s = $defaultSource
+                            if ($parts.Count -ge 5) { $s = ([string]$parts[4]).Trim() }
+                            elseif ($parts.Count -eq 4) { $s = ([string]$parts[3]).Trim() }
+
+                            if ([string]::IsNullOrWhiteSpace($n) -or [string]::IsNullOrWhiteSpace($i) -or $i.Length -le 2) { continue }
+                            if ($n -eq "-" -or $i -eq "-" -or $v -eq "-") { continue }
+
+                            if ($s -ne "msstore") { $s = "winget" }
+                            if ($v -match "^(?i)(unknown|inconnu)$") { $v = "?" }
+
+                            New-WmtPackageSearchResult -Source $s -Name $n -Id $i -RemoteVersion $v
+                            $script:provCount++
                         }
                     }
                 }
